@@ -24,7 +24,7 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
@@ -79,7 +79,7 @@ jobs:
       CXXFLAGS: "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
@@ -105,7 +105,7 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
@@ -122,7 +122,7 @@ jobs:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
