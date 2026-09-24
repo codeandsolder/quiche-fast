@@ -9,7 +9,7 @@ publish = false
 test_resets = []
 
 [dependencies]
-env_logger = "0.10"
+env_logger = "0.11"
 log = "0.4"
 mio = { version = "0.8", features = ["net", "os-poll"] }
 quiche = { path = "../../quiche" }
