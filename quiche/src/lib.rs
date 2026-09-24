@@ -1951,37 +1951,6 @@ const QLOG_METRICS: EventType =
 const QLOG_CONNECTION_CLOSED: EventType =
     EventType::QuicEventType(QuicEventType::ConnectionClosed);
 
-/// Timestamp shared by QUIC work performed during one outer event-loop iteration.
-///
-/// Reusing one timestamp avoids repeated clock reads when an application drains
-/// a receive batch and then emits a send burst in the same loop turn.
-#[derive(Clone, Copy, Debug)]
-pub struct EventLoopIteration {
-    start: Instant,
-}
-
-impl EventLoopIteration {
-    /// Captures the start time of a new event-loop iteration.
-    #[inline]
-    pub fn new() -> Self {
-        Self {
-            start: Instant::now(),
-        }
-    }
-
-    /// Returns the timestamp shared by this iteration.
-    #[inline]
-    pub fn start(&self) -> Instant {
-        self.start
-    }
-}
-
-impl Default for EventLoopIteration {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(feature = "qlog")]
 struct QlogInfo {
     streamer: Option<qlog::streamer::QlogStreamer>,
@@ -2861,15 +2830,6 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn recv(&mut self, buf: &mut [u8], info: RecvInfo) -> Result<usize> {
-        let iteration = EventLoopIteration::new();
-        self.recv_with_iteration(&iteration, buf, info)
-    }
-
-    /// Processes QUIC packets using a timestamp shared with other work in the
-    /// caller's current event-loop iteration.
-    pub fn recv_with_iteration(
-        &mut self, iteration: &EventLoopIteration, buf: &mut [u8], info: RecvInfo,
-    ) -> Result<usize> {
         let len = buf.len();
 
         if len == 0 {
@@ -2913,7 +2873,6 @@ impl<F: BufFactory> Connection<F> {
         // Process coalesced packets.
         while left > 0 {
             let read = match self.recv_single(
-                iteration.start(),
                 &mut buf[len - left..len],
                 &info,
                 recv_pid,
@@ -2947,14 +2906,12 @@ impl<F: BufFactory> Connection<F> {
         // Even though the packet was previously "accepted", it
         // should be safe to forward the error, as it also comes
         // from the `recv()` method.
-        self.process_undecrypted_0rtt_packets(iteration)?;
+        self.process_undecrypted_0rtt_packets()?;
 
         Ok(done)
     }
 
-    fn process_undecrypted_0rtt_packets(
-        &mut self, iteration: &EventLoopIteration,
-    ) -> Result<()> {
+    fn process_undecrypted_0rtt_packets(&mut self) -> Result<()> {
         // Process previously undecryptable 0-RTT packets if the decryption key
         // is now available.
         if self.crypto_ctx[packet::Epoch::Application]
@@ -2963,7 +2920,7 @@ impl<F: BufFactory> Connection<F> {
         {
             while let Some((mut pkt, info)) = self.undecryptable_pkts.pop_front()
             {
-                if let Err(e) = self.recv_with_iteration(iteration, &mut pkt, info) {
+                if let Err(e) = self.recv(&mut pkt, info) {
                     self.undecryptable_pkts.clear();
 
                     return Err(e);
@@ -3013,9 +2970,10 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     fn recv_single(
-        &mut self, now: Instant, buf: &mut [u8], info: &RecvInfo,
-        recv_pid: Option<usize>,
+        &mut self, buf: &mut [u8], info: &RecvInfo, recv_pid: Option<usize>,
     ) -> Result<usize> {
+        let now = Instant::now();
+
         if buf.is_empty() {
             return Err(Error::Done);
         }
@@ -3931,16 +3889,7 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn send(&mut self, out: &mut [u8]) -> Result<(usize, SendInfo)> {
-        let iteration = EventLoopIteration::new();
-        self.send_with_iteration(&iteration, out)
-    }
-
-    /// Writes a QUIC packet using a timestamp shared with other work in the
-    /// caller's current event-loop iteration.
-    pub fn send_with_iteration(
-        &mut self, iteration: &EventLoopIteration, out: &mut [u8],
-    ) -> Result<(usize, SendInfo)> {
-        self.send_on_path_with_iteration(iteration, out, None, None)
+        self.send_on_path(out, None, None)
     }
 
     /// Writes a single QUIC packet to be sent to the peer from the specified
@@ -4030,16 +3979,6 @@ impl<F: BufFactory> Connection<F> {
         &mut self, out: &mut [u8], from: Option<SocketAddr>,
         to: Option<SocketAddr>,
     ) -> Result<(usize, SendInfo)> {
-        let iteration = EventLoopIteration::new();
-        self.send_on_path_with_iteration(&iteration, out, from, to)
-    }
-
-    /// Writes a QUIC packet on a path using a timestamp shared with other work
-    /// in the caller's current event-loop iteration.
-    pub fn send_on_path_with_iteration(
-        &mut self, iteration: &EventLoopIteration, out: &mut [u8],
-        from: Option<SocketAddr>, to: Option<SocketAddr>,
-    ) -> Result<(usize, SendInfo)> {
         if out.is_empty() {
             return Err(Error::BufferTooShort);
         }
@@ -4048,7 +3987,7 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::Done);
         }
 
-        let now = iteration.start();
+        let now = Instant::now();
 
         if self.local_error.is_none() {
             self.do_handshake(now)?;
@@ -4060,7 +3999,7 @@ impl<F: BufFactory> Connection<F> {
         //
         // We simply fall-through to sending packets, which should
         // take care of terminating the connection as needed.
-        let _ = self.process_undecrypted_0rtt_packets(iteration);
+        let _ = self.process_undecrypted_0rtt_packets();
 
         // There's no point in trying to send a packet if the Initial secrets
         // have not been derived yet, so return early.
@@ -7180,14 +7119,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If no timeout has occurred it does nothing.
     pub fn on_timeout(&mut self) {
-        let iteration = EventLoopIteration::new();
-        self.on_timeout_with_iteration(&iteration);
-    }
-
-    /// Processes a timeout using a timestamp shared with other work in the
-    /// caller's current event-loop iteration.
-    pub fn on_timeout_with_iteration(&mut self, iteration: &EventLoopIteration) {
-        let now = iteration.start();
+        let now = Instant::now();
 
         if let Some(draining_timer) = self.draining_timer {
             if draining_timer <= now {
