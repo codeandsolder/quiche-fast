@@ -228,7 +228,7 @@ jobs:
           echo >> $GITHUB_ENV "CMAKE_GENERATOR=MinGW Makefiles"
 
       - name: Install dependencies
-        uses: crazy-max/ghaction-chocolatey@v3
+        uses: crazy-max/ghaction-chocolatey@v4
         with:
           args: install nasm
 
