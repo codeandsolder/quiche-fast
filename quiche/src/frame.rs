@@ -191,7 +191,12 @@ impl Frame {
         b: &mut octets::Octets, pkt: packet::Type,
     ) -> Result<Frame> {
         let frame_type = b.get_varint()?;
+        Self::from_bytes_with_type(frame_type, b, pkt)
+    }
 
+    pub(crate) fn from_bytes_with_type(
+        frame_type: u64, b: &mut octets::Octets, pkt: packet::Type,
+    ) -> Result<Frame> {
         let frame = match frame_type {
             0x00 => {
                 let mut len = 1;
@@ -1395,7 +1400,9 @@ fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
     Ok(Frame::Stream { stream_id, data })
 }
 
-fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
+pub(crate) fn parse_datagram_payload<'a>(
+    ty: u64, b: &mut octets::Octets<'a>,
+) -> Result<octets::Octets<'a>> {
     let first = ty as u8;
 
     let len = if first & 0x01 != 0 {
@@ -1404,7 +1411,11 @@ fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
         b.cap()
     };
 
-    let data = b.get_bytes(len)?;
+    Ok(b.get_bytes(len)?)
+}
+
+fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
+    let data = parse_datagram_payload(ty, b)?;
 
     Ok(Frame::Datagram {
         data: Vec::from(data.buf()),
