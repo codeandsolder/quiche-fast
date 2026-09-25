@@ -2830,6 +2830,32 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn recv(&mut self, buf: &mut [u8], info: RecvInfo) -> Result<usize> {
+        self.recv_inner::<fn(&[u8]) -> bool>(buf, info, None)
+    }
+
+    /// Processes received QUIC packets while allowing DATAGRAM payloads to be
+    /// consumed synchronously before they are copied into the receive queue.
+    ///
+    /// The handler returns true when it consumed the DATAGRAM. Returning false
+    /// preserves normal behavior and queues an owned copy for dgram_recv_buf().
+    /// To preserve FIFO delivery, the handler is not called while an older
+    /// DATAGRAM remains in the receive queue.
+    pub fn recv_with_dgram_handler<H>(
+        &mut self, buf: &mut [u8], info: RecvInfo, handler: &mut H,
+    ) -> Result<usize>
+    where
+        H: FnMut(&[u8]) -> bool,
+    {
+        self.recv_inner(buf, info, Some(handler))
+    }
+
+    fn recv_inner<H>(
+        &mut self, buf: &mut [u8], info: RecvInfo,
+        mut dgram_handler: Option<&mut H>,
+    ) -> Result<usize>
+    where
+        H: FnMut(&[u8]) -> bool,
+    {
         let len = buf.len();
 
         if len == 0 {
@@ -2872,11 +2898,23 @@ impl<F: BufFactory> Connection<F> {
 
         // Process coalesced packets.
         while left > 0 {
-            let read = match self.recv_single(
-                &mut buf[len - left..len],
-                &info,
-                recv_pid,
-            ) {
+            let recv_result = match dgram_handler.as_mut() {
+                Some(handler) => self.recv_single(
+                    &mut buf[len - left..len],
+                    &info,
+                    recv_pid,
+                    Some(&mut **handler),
+                ),
+
+                None => self.recv_single::<H>(
+                    &mut buf[len - left..len],
+                    &info,
+                    recv_pid,
+                    None,
+                ),
+            };
+
+            let read = match recv_result {
                 Ok(v) => v,
 
                 Err(Error::Done) => {
@@ -2969,9 +3007,13 @@ impl<F: BufFactory> Connection<F> {
     /// On error, an error other than [`Done`] is returned.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
-    fn recv_single(
+    fn recv_single<H>(
         &mut self, buf: &mut [u8], info: &RecvInfo, recv_pid: Option<usize>,
-    ) -> Result<usize> {
+        mut dgram_handler: Option<&mut H>,
+    ) -> Result<usize>
+    where
+        H: FnMut(&[u8]) -> bool,
+    {
         let now = Instant::now();
 
         if buf.is_empty() {
@@ -3454,7 +3496,53 @@ impl<F: BufFactory> Connection<F> {
 
         // Process packet payload.
         while payload.cap() > 0 {
-            let frame = frame::Frame::from_bytes(&mut payload, hdr.ty)?;
+            let frame = if let Some(handler) = dgram_handler.as_mut() {
+                // Decode the frame type only once. DATAGRAM payloads can then
+                // be consumed in place before the receive buffer is reused,
+                // while every other frame follows the normal parser path.
+                let frame_type = payload.get_varint()?;
+
+                if matches!(frame_type, 0x30 | 0x31) {
+                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT packets.
+                    if hdr.ty != Type::Short && hdr.ty != Type::ZeroRTT {
+                        return Err(Error::InvalidPacket);
+                    }
+
+                    let data =
+                        frame::parse_datagram_payload(frame_type, &mut payload)?;
+
+                    qlog_with_type!(QLOG_PACKET_RX, self.qlog, _q, {
+                        qlog_frames.push(
+                            frame::Frame::DatagramHeader {
+                                length: data.buf().len(),
+                            }
+                            .to_qlog(),
+                        );
+                    });
+
+                    ack_elicited = true;
+                    probing = false;
+
+                    if let Err(e) = self.process_direct_datagram(
+                        data.buf(),
+                        recv_pid,
+                        &mut **handler,
+                    ) {
+                        frame_processing_err = Some(e);
+                        break;
+                    }
+
+                    continue;
+                }
+
+                frame::Frame::from_bytes_with_type(
+                    frame_type,
+                    &mut payload,
+                    hdr.ty,
+                )?
+            } else {
+                frame::Frame::from_bytes(&mut payload, hdr.ty)?
+            };
 
             qlog_with_type!(QLOG_PACKET_RX, self.qlog, _q, {
                 qlog_frames.push(frame.to_qlog());
@@ -8337,6 +8425,43 @@ impl<F: BufFactory> Connection<F> {
             local,
             self.is_server,
         )
+    }
+
+    /// Processes a DATAGRAM payload parsed directly from the decrypted
+    /// packet buffer.
+    fn process_direct_datagram<H>(
+        &mut self, data: &[u8], recv_path_id: usize, handler: &mut H,
+    ) -> Result<()>
+    where
+        H: FnMut(&[u8]) -> bool,
+    {
+        trace!("{} rx frm DATAGRAM len={}", self.trace_id, data.len());
+
+        if !self.dgram_enabled() {
+            return Err(Error::InvalidState);
+        }
+
+        // Preserve FIFO delivery with any DATAGRAMs already queued. Once a
+        // payload falls back to the queue, newer payloads stay queued until the
+        // application drains it instead of bypassing older data.
+        let consumed = self.dgram_recv_queue.is_empty() && handler(data);
+
+        if !consumed {
+            // Preserve regular queue behavior if the caller cannot consume the
+            // DATAGRAM synchronously.
+            if self.dgram_recv_queue.is_full() {
+                self.dgram_recv_queue.pop();
+            }
+
+            self.dgram_recv_queue.push(Vec::from(data).into())?;
+        }
+
+        self.dgram_recv_count = self.dgram_recv_count.saturating_add(1);
+
+        let path = self.paths.get_mut(recv_path_id)?;
+        path.dgram_recv_count = path.dgram_recv_count.saturating_add(1);
+
+        Ok(())
     }
 
     /// Processes an incoming frame.

@@ -8678,6 +8678,126 @@ fn dgram_single_datagram(
 }
 
 #[rstest]
+fn dgram_direct_handler(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(true, false)] consume: bool,
+) {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+    config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+    config.enable_dgram(true, 10, 10);
+    config.verify_peer(false);
+
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    let expected = b"hello, direct datagram";
+    assert_eq!(pipe.client.dgram_send(expected), Ok(()));
+
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    let mut received = Vec::new();
+    let mut calls = 0;
+
+    for (mut pkt, si) in flight {
+        let info = RecvInfo {
+            to: si.to,
+            from: si.from,
+        };
+        let mut handler = |data: &[u8]| {
+            calls += 1;
+            received.extend_from_slice(data);
+            consume
+        };
+
+        pipe.server
+            .recv_with_dgram_handler(&mut pkt, info, &mut handler)
+            .unwrap();
+    }
+
+    assert_eq!(calls, 1);
+    assert_eq!(received, expected);
+
+    let mut out = [0u8; 64];
+    if consume {
+        assert_eq!(pipe.server.dgram_recv(&mut out), Err(Error::Done));
+    } else {
+        assert_eq!(pipe.server.dgram_recv(&mut out), Ok(expected.len()));
+        assert_eq!(&out[..expected.len()], expected);
+        assert_eq!(pipe.server.dgram_recv(&mut out), Err(Error::Done));
+    }
+}
+
+#[rstest]
+fn dgram_direct_handler_fallback_preserves_fifo(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+    config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+    config.enable_dgram(true, 10, 10);
+    config.verify_peer(false);
+
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+
+    let first = b"first";
+    let second = b"second";
+    let third = b"third";
+    assert_eq!(pipe.client.dgram_send(first), Ok(()));
+    assert_eq!(pipe.client.dgram_send(second), Ok(()));
+    assert_eq!(pipe.client.dgram_send(third), Ok(()));
+
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    let mut seen = Vec::new();
+    let mut calls = 0usize;
+
+    for (mut pkt, si) in flight {
+        let info = RecvInfo {
+            to: si.to,
+            from: si.from,
+        };
+        let mut handler = |data: &[u8]| {
+            calls += 1;
+            seen.push(data.to_vec());
+
+            // Consume the first DATAGRAM directly, but force the second into
+            // the queue. The third must then stay queued behind the second.
+            calls == 1
+        };
+
+        pipe.server
+            .recv_with_dgram_handler(&mut pkt, info, &mut handler)
+            .unwrap();
+    }
+
+    assert_eq!(calls, 2);
+    assert_eq!(seen, vec![first.to_vec(), second.to_vec()]);
+
+    let mut out = [0u8; 64];
+    assert_eq!(pipe.server.dgram_recv(&mut out), Ok(second.len()));
+    assert_eq!(&out[..second.len()], second);
+    assert_eq!(pipe.server.dgram_recv(&mut out), Ok(third.len()));
+    assert_eq!(&out[..third.len()], third);
+    assert_eq!(pipe.server.dgram_recv(&mut out), Err(Error::Done));
+}
+
+#[rstest]
 fn dgram_multiple_datagrams(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
