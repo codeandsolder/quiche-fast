@@ -11,7 +11,7 @@ env:
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
   RUSTFLAGS: "-D warnings"
-  RUSTTOOLCHAIN: "stable"
+  RUSTTOOLCHAIN: "1.98.1"
 
 concurrency:
   group: ${{ github.ref }}-stable
