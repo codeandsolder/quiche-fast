@@ -5229,18 +5229,22 @@ impl<F: BufFactory> Connection<F> {
                                 // Advance the packet buffer's offset.
                                 b.skip(hdr_len + len)?;
 
-                                let frame =
-                                    frame::Frame::DatagramHeader { length: len };
-
-                                if push_frame_to_pkt!(b, frames, frame, left) {
-                                    ack_eliciting = true;
-                                    in_flight = true;
-                                    dgram_emitted = true;
-                                    self.dgram_sent_count =
-                                        self.dgram_sent_count.saturating_add(1);
-                                    path.dgram_sent_count =
-                                        path.dgram_sent_count.saturating_add(1);
-                                }
+                                // The DATAGRAM header and payload were already
+                                // encoded directly above. Avoid routing the
+                                // metadata-only DatagramHeader through
+                                // push_frame_to_pkt!(), which redundantly calls
+                                // wire_len() twice and to_bytes() once.
+                                left -= hdr_len + len;
+                                frames.push(frame::Frame::DatagramHeader {
+                                    length: len,
+                                });
+                                ack_eliciting = true;
+                                in_flight = true;
+                                dgram_emitted = true;
+                                self.dgram_sent_count =
+                                    self.dgram_sent_count.saturating_add(1);
+                                path.dgram_sent_count =
+                                    path.dgram_sent_count.saturating_add(1);
                             },
 
                             None => continue,
