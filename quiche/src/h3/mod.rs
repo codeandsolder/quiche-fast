@@ -894,7 +894,7 @@ impl TryFrom<&[u8]> for Priority {
     ///
     /// [Extensible Priorities]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        let dict = match sfv::Parser::parse_dictionary(value) {
+        let dict: sfv::Dictionary = match sfv::Parser::new(value).parse_dictionary() {
             Ok(v) => v,
 
             Err(_) => return Err(Error::Done),
@@ -906,8 +906,10 @@ impl TryFrom<&[u8]> for Priority {
             // (0 through 7), that's an error so set it to the upper
             // bound (lowest priority) to avoid interference with
             // other streams.
-            Some(sfv::ListEntry::Item(item)) => match item.bare_item.as_int() {
+            Some(sfv::ListEntry::Item(item)) => match item.bare_item.as_integer() {
                 Some(v) => {
+                    let v: i64 = v.into();
+
                     if !(PRIORITY_URGENCY_LOWER_BOUND as i64..=
                         PRIORITY_URGENCY_UPPER_BOUND as i64)
                         .contains(&v)
@@ -929,7 +931,7 @@ impl TryFrom<&[u8]> for Priority {
 
         let incremental = match dict.get("i") {
             Some(sfv::ListEntry::Item(item)) =>
-                item.bare_item.as_bool().ok_or(Error::Done)?,
+                item.bare_item.as_boolean().ok_or(Error::Done)?,
 
             // Omitted so use default value.
             _ => false,
