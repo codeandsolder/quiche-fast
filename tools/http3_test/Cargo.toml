@@ -16,4 +16,4 @@ quiche = { path = "../../quiche" }
 ring = "0.17"
 serde_json = "1.0"
 serde = { version = "1.0", features = ["derive"] }
-url = "1"
+url = "2"
