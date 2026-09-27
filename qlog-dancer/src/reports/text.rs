@@ -30,7 +30,7 @@ use qlog::events::quic::QuicFrame;
 use tabled::settings::location::ByColumnName;
 use tabled::settings::object::Segment;
 use tabled::settings::Alignment;
-use tabled::settings::Disable;
+use tabled::settings::Remove;
 use tabled::settings::Modify;
 use tabled::settings::Style;
 use tabled::Table;
@@ -50,23 +50,23 @@ pub fn request_timing_table(
 
     if config.report_omit_upload {
         table
-            .with(Disable::column(ByColumnName::new(CLIENT_CONTENT_LENGTH)))
-            .with(Disable::column(ByColumnName::new(CLIENT_TRANSFERRED)))
-            .with(Disable::column(ByColumnName::new(UPLOAD_TIME)))
-            .with(Disable::column(ByColumnName::new(UPLOAD_RATE)));
+            .with(Remove::column(ByColumnName::new(CLIENT_CONTENT_LENGTH)))
+            .with(Remove::column(ByColumnName::new(CLIENT_TRANSFERRED)))
+            .with(Remove::column(ByColumnName::new(UPLOAD_TIME)))
+            .with(Remove::column(ByColumnName::new(UPLOAD_RATE)));
     }
 
     match lf.datastore.vantage_point {
         crate::datastore::VantagePoint::Client => {
             table
-                .with(Disable::column(ByColumnName::new(SERVER_RX_HDR_TX_HDR)))
-                .with(Disable::column(ByColumnName::new(
+                .with(Remove::column(ByColumnName::new(SERVER_RX_HDR_TX_HDR)))
+                .with(Remove::column(ByColumnName::new(
                     SERVER_TX_HDR_TX_FIRST_HDR,
                 )))
-                .with(Disable::column(ByColumnName::new(
+                .with(Remove::column(ByColumnName::new(
                     SERVER_TX_HDR_TX_LAST_HDR,
                 )))
-                .with(Disable::column(ByColumnName::new(
+                .with(Remove::column(ByColumnName::new(
                     SERVER_TX_FIRST_DATA_TX_LAST_DATA,
                 )));
         },
@@ -78,8 +78,8 @@ pub fn request_timing_table(
 
     if config.report_omit_priorities {
         table
-            .with(Disable::column(ByColumnName::new(CLIENT_PRI)))
-            .with(Disable::column(ByColumnName::new(SERVER_PRI)));
+            .with(Remove::column(ByColumnName::new(CLIENT_PRI)))
+            .with(Remove::column(ByColumnName::new(SERVER_PRI)));
     }
 
     if config.report_text_csv {
