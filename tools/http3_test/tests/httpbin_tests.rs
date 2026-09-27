@@ -65,7 +65,10 @@ mod httpbin_tests {
             None => endpoint(None),
         };
 
-        url.to_socket_addrs().unwrap().next().unwrap()
+        let host = url.host_str().unwrap();
+        let port = url.port_or_known_default().unwrap();
+
+        (host, port).to_socket_addrs().unwrap().next().unwrap()
     }
 
     fn verify_peer() -> bool {
