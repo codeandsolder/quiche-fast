@@ -342,8 +342,8 @@ pub trait DatagramSocketRecv: Send {
     ///   is the number of datagrams read. If an error occurs after at least one
     ///   datagram was read, the successful count is returned and the error is
     ///   left for a subsequent call.
-    /// * `Poll::Ready(Err(e))` if an error is encountered before any datagram is
-    ///   read.
+    /// * `Poll::Ready(Err(e))` if an error is encountered before any datagram
+    ///   is read.
     ///
     /// # Errors
     ///
