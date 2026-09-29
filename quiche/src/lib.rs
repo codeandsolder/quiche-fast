@@ -3503,7 +3503,8 @@ impl<F: BufFactory> Connection<F> {
                 let frame_type = payload.get_varint()?;
 
                 if matches!(frame_type, 0x30 | 0x31) {
-                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT packets.
+                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT
+                    // packets.
                     if hdr.ty != Type::Short && hdr.ty != Type::ZeroRTT {
                         return Err(Error::InvalidPacket);
                     }
@@ -9191,8 +9192,7 @@ impl<F: BufFactory> Connection<F> {
                 ids.find_scid_seq(dcid).ok_or(Error::InvalidState)?;
             let incoming_cid_entry = ids.get_scid(in_scid_seq)?;
 
-            let prev_recv_pid =
-                incoming_cid_entry.path_id.unwrap_or(recv_pid);
+            let prev_recv_pid = incoming_cid_entry.path_id.unwrap_or(recv_pid);
 
             if prev_recv_pid != recv_pid {
                 trace!(
