@@ -4209,33 +4209,9 @@ impl<F: BufFactory> Connection<F> {
         Ok((done, info))
     }
 
-    fn send_single(
-        &mut self, out: &mut [u8], send_pid: usize, has_initial: bool,
-        now: Instant,
-    ) -> Result<(Type, usize)> {
-        if out.is_empty() {
-            return Err(Error::BufferTooShort);
-        }
-
-        if self.is_draining() {
-            return Err(Error::Done);
-        }
-
-        let is_closing = self.local_error.is_some();
-
-        let out_len = out.len();
-
-        let mut b = octets::OctetsMut::with_slice(out);
-
-        let pkt_type = self.write_pkt_type(send_pid)?;
-
-        let max_dgram_len = if !self.dgram_send_queue.is_empty() {
-            self.dgram_max_writable_len()
-        } else {
-            None
-        };
-
-        let epoch = pkt_type.to_epoch()?;
+    #[cold]
+    #[inline(never)]
+    fn process_lost_frames(&mut self, epoch: packet::Epoch) -> Result<()> {
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
 
@@ -4491,6 +4467,48 @@ impl<F: BufFactory> Connection<F> {
                     // types that can be safely ignored when lost.
                 }
             }
+        }
+
+        Ok(())
+    }
+
+    fn send_single(
+        &mut self, out: &mut [u8], send_pid: usize, has_initial: bool,
+        now: Instant,
+    ) -> Result<(Type, usize)> {
+        if out.is_empty() {
+            return Err(Error::BufferTooShort);
+        }
+
+        if self.is_draining() {
+            return Err(Error::Done);
+        }
+
+        let is_closing = self.local_error.is_some();
+
+        let out_len = out.len();
+
+        let mut b = octets::OctetsMut::with_slice(out);
+
+        let pkt_type = self.write_pkt_type(send_pid)?;
+
+        let max_dgram_len = if !self.dgram_send_queue.is_empty() {
+            self.dgram_max_writable_len()
+        } else {
+            None
+        };
+
+        let epoch = pkt_type.to_epoch()?;
+
+        // Lost-frame retransmission is rare on the steady-state DATAGRAM path.
+        // Keep only the cheap predicate here and move the large frame-dispatch
+        // machinery out of send_single's hot instruction footprint.
+        if self
+            .paths
+            .iter()
+            .any(|(_, p)| p.recovery.has_lost_frames(epoch))
+        {
+            self.process_lost_frames(epoch)?;
         }
 
         #[cfg(debug_assertions)]
