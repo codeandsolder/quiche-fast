@@ -1,4 +1,9 @@
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
 
 name: Stable
 
@@ -10,12 +15,12 @@ env:
   DEFAULT_OPTIONS: "--features=async,ffi,qlog,rpk --workspace"
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
-  RUSTFLAGS: "-D warnings"
-  RUSTTOOLCHAIN: "stable"
+  RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
+  RUSTTOOLCHAIN: "1.98.1"
 
 concurrency:
-  group: ${{ github.ref }}-stable
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  group: stable-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quiche:
@@ -23,13 +28,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        boring_version: ["latest", "4"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+        boring_version: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["latest","4"]' || '["latest"]') }}
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -89,18 +91,16 @@ jobs:
           make -C quiche/examples
 
   quiche_macos:
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
         target:
           - "macos-15-intel"     # Intel (x86_64)
           - "macos-latest" # Apple Silicon (M1)
     runs-on: ${{ matrix.target }}
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -116,18 +116,16 @@ jobs:
           make -C quiche/examples
 
   quiche_ios:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
     strategy:
       matrix:
         target: ["x86_64-apple-ios", "aarch64-apple-ios"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     env:
       IPHONEOS_DEPLOYMENT_TARGET: "10.0"
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -143,6 +141,7 @@ jobs:
         run: cargo build --target=${{ matrix.target }} --verbose
 
   quiche_windows:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-2022
     strategy:
       matrix:
@@ -164,12 +163,9 @@ jobs:
       CFLAGS: ${{ matrix.cflags }}
       CXXFLAGS: ${{ matrix.cxxflags }}
       BINDGEN_EXTRA_CLANG_ARGS: ${{ matrix.cflags }}
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -228,7 +224,7 @@ jobs:
           echo >> $GITHUB_ENV "CMAKE_GENERATOR=MinGW Makefiles"
 
       - name: Install dependencies
-        uses: crazy-max/ghaction-chocolatey@v3
+        uses: crazy-max/ghaction-chocolatey@v4
         with:
           args: install nasm
 
@@ -241,16 +237,14 @@ jobs:
         run: cargo test --target=${{ matrix.target }} --verbose --all-targets ${{ env.DEFAULT_OPTIONS }} --exclude qlog-dancer
 
   quiche_multiarch:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     strategy:
       matrix:
         target: ["aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf","i686-unknown-linux-gnu"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -267,13 +261,11 @@ jobs:
         run: cross test --target=${{ matrix.target }} --verbose --all-targets ${{ env.NO_BORING_OPTIONS }} --exclude qlog-dancer
 
   http3_test:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@master
@@ -288,18 +280,17 @@ jobs:
         run: cargo clippy --manifest-path=tools/http3_test/Cargo.toml -- -D warnings
 
   docker:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Build Docker images
         run: make docker-build
 
   android_ndk_lts:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:
       API_LEVEL: "21"
@@ -315,12 +306,9 @@ jobs:
             arch: "x86_64"
           - target: "i686-linux-android"
             arch: "x86"
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install stable toolchain for the target
         uses: dtolnay/rust-toolchain@master

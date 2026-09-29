@@ -1,4 +1,7 @@
-on: [push, pull_request]
+on:
+  push:
+    tags: ["*"]
+  workflow_dispatch:
 
 name: Nightly
 
@@ -10,26 +13,23 @@ env:
   FEATURES: "async,ffi,qlog,rpk"
   RUSTFLAGS: "-D warnings"
   RUSTDOCFLAGS: "--cfg docsrs"
-  RUSTTOOLCHAIN: "nightly"
+  RUSTUP_TOOLCHAIN: "nightly"
 
 concurrency:
-  group: ${{ github.ref }}-nightly
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quiche_nightly:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
       - name: Install qlog-dancer dependencies
         run: |
@@ -64,9 +64,6 @@ jobs:
 
   fuzz:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     # `quiche-fuzz` calls `RAND_reset_for_fuzzing`, which BoringSSL only
     # exports when built with `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`.
     # BoringSSL 5.x consolidated the older
@@ -79,12 +76,12 @@ jobs:
       CXXFLAGS: "-DFUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION"
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
@@ -100,34 +97,28 @@ jobs:
 
   http3_test_nightly:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
 
       - name: Run cargo test
         run: cargo test --no-run --verbose --manifest-path=tools/http3_test/Cargo.toml
 
   fmt:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ env.RUSTUP_TOOLCHAIN }}
           components: rustfmt
 
       - name: Run cargo fmt - quiche
