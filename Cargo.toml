@@ -27,6 +27,8 @@ categories = ["network-programming"]
 mem_forget = "deny"
 
 [workspace.lints.rust]
+missing_docs = "warn"
+unused_qualifications = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(capture_keylogs)',
   'cfg(test_invalid_len_compilation_fail)',

@@ -145,7 +145,7 @@ impl<T: Default + Reuse> Drop for Pooled<T> {
 macro_rules! array_impl_new_queues {
     {$n:expr, $t:ident $($ts:ident)*} => {
         impl<$t: Default + Reuse> Pool<{$n}, $t> {
-            #[allow(dead_code)]
+            #[expect(dead_code, reason = "Retained for API/test parity across build configurations")]
             pub const fn new(limit: usize, trim: usize, name: &'static str) -> Self {
                 let limit = limit / $n;
                 Pool {

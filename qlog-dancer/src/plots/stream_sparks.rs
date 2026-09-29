@@ -31,7 +31,10 @@
 
 // TODO: this seems to be required to overcome a transient error in nightly; see
 // https://github.com/rust-lang/rust/issues/147648#issuecomment-3482917926
-#![allow(unused_assignments)]
+#![expect(
+    unused_assignments,
+    reason = "Current control flow intentionally overwrites this value on some paths"
+)]
 
 use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
@@ -48,7 +51,10 @@ use crate::request_stub::HttpRequestStub;
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
 
-#[allow(unused_assignments)]
+#[expect(
+    unused_assignments,
+    reason = "Current control flow intentionally overwrites this value on some paths"
+)]
 pub enum TransmissionType {
     Upload,
     Download,
@@ -604,7 +610,10 @@ fn plot_legend<DB: DrawingBackend>(
     .unwrap();
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The signature mirrors protocol state and grouping would obscure call sites"
+)]
 pub fn plot_sparks(
     params: &SparkPlotsParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
     abs_dl_ty: &ChartOutputType, rel_dl_ty: &ChartOutputType,
@@ -1144,7 +1153,10 @@ fn draw_mesh<XT, YT, X, Y, DB: DrawingBackend>(
         .unwrap();
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The signature mirrors protocol state and grouping would obscure call sites"
+)]
 fn draw_captions<DB: DrawingBackend>(
     abs_dl_root: &DrawingArea<DB, plotters::coord::Shift>,
     rel_dl_root: &DrawingArea<DB, plotters::coord::Shift>,

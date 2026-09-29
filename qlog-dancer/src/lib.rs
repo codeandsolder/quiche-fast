@@ -24,7 +24,10 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#![allow(clippy::collapsible_match)]
+#![expect(
+    clippy::collapsible_match,
+    reason = "Keeping nested matches preserves protocol-state structure and readability"
+)]
 
 use std::collections::BTreeMap;
 use std::error::Error;

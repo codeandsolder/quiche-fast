@@ -52,63 +52,93 @@ const TLS1_3_VERSION: u16 = 0x0304;
 const TLS_ALERT_ERROR: u64 = 0x100;
 const INTERNAL_ERROR: u64 = 0x01;
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL_METHOD {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL_CTX {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL_CIPHER {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL_SESSION {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct X509_VERIFY_PARAM {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 #[cfg(windows)]
 struct X509_STORE {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct X509_STORE_CTX {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 #[cfg(windows)]
 struct X509 {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct STACK_OF {
     _unused: c_void,
@@ -116,8 +146,14 @@ struct STACK_OF {
 
 #[cfg(test)]
 #[repr(C)]
-#[allow(non_camel_case_types)]
-#[allow(dead_code)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
+#[expect(
+    dead_code,
+    reason = "Retained for API/test parity across build configurations"
+)]
 enum ssl_private_key_result_t {
     ssl_private_key_success,
     ssl_private_key_retry,
@@ -1255,7 +1291,10 @@ extern "C" {
     fn ERR_error_string_n(err: c_uint, buf: *mut c_char, len: usize);
 
     // OPENSSL
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     fn OPENSSL_free(ptr: *mut c_void);
 
 }

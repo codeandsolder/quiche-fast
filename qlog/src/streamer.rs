@@ -109,7 +109,10 @@ impl QlogStreamer {
     /// JSON-SEQ format.
     ///
     /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     pub fn new(
         title: Option<String>, description: Option<String>,
         start_time: std::time::Instant, trace: TraceSeq,
@@ -377,7 +380,10 @@ impl QlogStreamer {
     }
 
     /// Returns the writer.
-    #[allow(clippy::borrowed_box)]
+    #[expect(
+        clippy::borrowed_box,
+        reason = "The boxed writer representation is required by this API or test downcast"
+    )]
     pub fn writer(&self) -> &Box<dyn std::io::Write + Send + Sync> {
         &self.writer
     }
@@ -512,7 +518,10 @@ mod tests {
         assert!(matches!(s.finish_log(), Ok(())));
 
         let r = s.writer();
-        #[allow(clippy::borrowed_box)]
+        #[expect(
+            clippy::borrowed_box,
+            reason = "The boxed writer representation is required by this API or test downcast"
+        )]
         let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
 
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}
@@ -558,7 +567,10 @@ mod tests {
         assert!(matches!(s.finish_log(), Ok(())));
 
         let r = s.writer();
-        #[allow(clippy::borrowed_box)]
+        #[expect(
+            clippy::borrowed_box,
+            reason = "The boxed writer representation is required by this API or test downcast"
+        )]
         let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
 
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}
@@ -645,7 +657,10 @@ mod tests {
         assert!(matches!(s.finish_log(), Ok(())));
 
         let r = s.writer();
-        #[allow(clippy::borrowed_box)]
+        #[expect(
+            clippy::borrowed_box,
+            reason = "The boxed writer representation is required by this API or test downcast"
+        )]
         let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
 
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}

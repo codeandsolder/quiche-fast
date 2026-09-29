@@ -254,7 +254,10 @@ impl ServerHooks {
     }
 }
 
-#[allow(private_interfaces)]
+#[expect(
+    private_interfaces,
+    reason = "The public hook surface intentionally seals associated implementation types"
+)]
 impl DriverHooks for ServerHooks {
     type Command = ServerH3Command;
     type Event = ServerH3Event;

@@ -48,7 +48,10 @@ pub(crate) struct InboundHeaders {
 /// Wherever endpoint-specific logic is required, a hook should be created in
 /// this trait and this hook then called in the appropriate [H3Driver] code.
 /// The hook can store its own data inside the [H3Driver] struct.
-#[allow(private_interfaces, unused)]
+#[expect(
+    private_interfaces,
+    reason = "The public hook surface intentionally seals associated implementation types"
+)]
 pub trait DriverHooks: Sized + Send + 'static {
     /// The type of [`H3Event`]s emitted by an [H3Driver] using these hooks.
     /// The concrete type is expected to wrap [`H3Event`].

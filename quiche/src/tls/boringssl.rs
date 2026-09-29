@@ -2,14 +2,20 @@ use super::*;
 
 use libc::c_long;
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct CRYPTO_BUFFER {
     _unused: c_void,
 }
 
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 pub(super) struct SSL_QUIC_METHOD {
     set_read_secret: Option<
         unsafe extern "C" fn(
@@ -49,7 +55,10 @@ pub(super) struct SSL_QUIC_METHOD {
 
 #[cfg(test)]
 #[repr(C)]
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 struct SSL_PRIVATE_KEY_METHOD {
     sign: Option<
         unsafe extern "C" fn(
@@ -299,7 +308,10 @@ pub(super) fn get_session_bytes(session: *mut SSL_SESSION) -> Result<Vec<u8>> {
 }
 pub(super) const TLS_ERROR: c_int = 3;
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct ssl_early_data_reason_t(pub ::std::os::raw::c_uint);

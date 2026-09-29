@@ -104,7 +104,7 @@ impl DgramBuffer {
     /// Prepends `prefix` into the headroom region, sliding the read cursor
     /// backwards. Returns `Err(())` if the headroom is smaller than
     /// `prefix.len()`.
-    #[allow(
+    #[expect(
         clippy::result_unit_err,
         reason = "There is only a single error case, adding a custom error type doesn't make sense"
     )]

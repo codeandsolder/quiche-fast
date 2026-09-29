@@ -315,7 +315,13 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
 }
 
 // TODO(erittenhouse): use `dgram`'s SocketCapabilities when we migrate over
-#[cfg_attr(not(target_os = "linux"), expect(rustdoc::broken_intra_doc_links))]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(
+        rustdoc::broken_intra_doc_links,
+        reason = "Linux-only capability links are unavailable on non-Linux targets"
+    )
+)]
 /// Indicators of sockopts configured for a socket.
 ///
 /// On Linux, a socket can be configured using a [`SocketCapabilitiesBuilder`],
@@ -331,9 +337,16 @@ pub struct SocketCapabilities {
     pub(crate) has_gso: bool,
 
     /// Indicates if the socket has `SO_RXQ_OVFL` set.
-    // NOTE: RX-side sockopts are `expect(dead_code)` because we check for
-    // received cmsgs directly
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    // NOTE: RX-side sockopts are `expect(dead_code, reason = "Capability is
+    // Linux-only or consumed indirectly through ancillary-message handling")`
+    // because we check for received cmsgs directly
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) check_udp_drop: bool,
 
     /// Indicates if the socket was configured with `SO_TXTIME`.
@@ -342,40 +355,79 @@ pub struct SocketCapabilities {
     /// Indicates if the socket has `SO_TIMESTAMPNS` enabled.
     #[cfg_attr(
         not(all(target_os = "linux", feature = "perf-quic-listener-metrics")),
-        expect(dead_code)
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
     )]
     pub(crate) has_rxtime: bool,
 
     /// Indicates if the socket has `UDP_GRO` enabled.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_gro: bool,
 
     /// Indicates if the socket has `IP_PKTINFO` set.
     pub(crate) has_ippktinfo: bool,
 
     /// Indicates if the socket has `IP_RECVORIGDSTADDR` set.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_iprecvorigdstaddr: bool,
 
     /// Indicates if the socket has `IPV6_RECVPKTINFO` set.
     pub(crate) has_ipv6pktinfo: bool,
 
     /// Indicates if the socket has `IPV6_RECVORIGDSTADDR` set.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_ipv6recvorigdstaddr: bool,
 
     // Indicates if the socket has `IP_MTU_DISCOVER` set to `IP_PMTUDISC_PROBE`.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_ip_mtu_discover_probe: bool,
 
     // Indicates if the socket has `IPV6_MTU_DISCOVER` set to
     // `IPV6_PMTUDISC_PROBE`.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_ipv6_mtu_discover_probe: bool,
 
     /// Indicates if the socket is set to receive `SO_MARK` messages via
     /// `SO_RCVMARK`.
-    #[cfg_attr(not(target_os = "linux"), expect(dead_code))]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        expect(
+            dead_code,
+            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
+        )
+    )]
     pub(crate) has_mark: bool,
 }
 

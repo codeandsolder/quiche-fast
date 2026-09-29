@@ -149,7 +149,10 @@ pub struct SendTimeState {
     /// Total number of acked bytes at the time the packet was sent.
     pub total_bytes_acked: usize,
     /// Total number of lost bytes at the time the packet was sent.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     pub total_bytes_lost: usize,
     /// Total number of inflight bytes at the time the packet was sent.
     /// Includes the packet itself.
@@ -299,7 +302,10 @@ impl MaxAckHeightTracker {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     fn reset(&mut self, new_height: usize, new_time: usize) {
         self.max_ack_height_filter.reset(
             ExtraAckedEvent {
@@ -312,7 +318,10 @@ impl MaxAckHeightTracker {
         );
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn update(
         &mut self, bandwidth_estimate: Bandwidth, is_new_max_bandwidth: bool,
         round_trip_count: usize, last_sent_packet_number: u64,
@@ -516,7 +525,10 @@ impl BandwidthSampler {
         }
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     pub(crate) fn is_app_limited(&self) -> bool {
         self.is_app_limited
     }
@@ -842,7 +854,10 @@ impl BandwidthSampler {
         self.total_bytes_lost
     }
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     pub(crate) fn reset_max_ack_height_tracker(
         &mut self, new_height: usize, new_time: usize,
     ) {

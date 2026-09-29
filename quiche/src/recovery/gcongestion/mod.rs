@@ -89,7 +89,10 @@ pub(super) trait CongestionControl: Debug {
     /// flight prior to the congestion event. `acked_packets` and `lost_packets`
     /// are any packets considered acked or lost as a result of the
     /// congestion event.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn on_congestion_event(
         &mut self, rtt_updated: bool, prior_in_flight: usize,
         bytes_in_flight: usize, event_time: Instant, acked_packets: &[Acked],
@@ -102,7 +105,10 @@ pub(super) trait CongestionControl: Debug {
     fn on_retransmission_timeout(&mut self, packets_retransmitted: bool);
 
     /// Called when connection migrates and cwnd needs to be reset.
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     fn on_connection_migration(&mut self);
 
     /// Adjust the current cwnd to a new maximal size
@@ -110,7 +116,10 @@ pub(super) trait CongestionControl: Debug {
 
     fn is_in_recovery(&self) -> bool;
 
-    #[allow(dead_code)]
+    #[expect(
+        dead_code,
+        reason = "Retained for API/test parity across build configurations"
+    )]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool;
 
     fn pacing_rate(

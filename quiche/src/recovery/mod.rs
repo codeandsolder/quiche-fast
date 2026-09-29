@@ -163,7 +163,10 @@ impl RecoveryConfig {
 }
 
 #[enum_dispatch::enum_dispatch(RecoveryOps)]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Boxing the large variant would add unnecessary indirection"
+)]
 #[derive(Debug)]
 pub(crate) enum Recovery {
     Legacy(LegacyRecovery),
@@ -214,7 +217,10 @@ pub trait RecoveryOps {
     );
     fn get_packet_send_time(&self, now: Instant) -> Instant;
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn on_ack_received(
         &mut self, ranges: &RangeSet, ack_delay: u64, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, skip_pn: Option<u64>,

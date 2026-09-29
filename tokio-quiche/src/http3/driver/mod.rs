@@ -1401,7 +1401,10 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
 
         if let Some(ev) = H3Event::from_error(h3_err) {
             let _ = self.h3_event_sender.send(ev.into());
-            #[expect(clippy::needless_return)]
+            #[expect(
+                clippy::needless_return,
+                reason = "Explicit return prevents accidental fallthrough when this branch evolves"
+            )]
             return; // avoid accidental fallthrough in the future
         }
     }

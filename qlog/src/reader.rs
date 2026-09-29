@@ -34,7 +34,10 @@ use crate::SQLOG_GZ_EXT;
 use crate::SQLOG_ZST_EXT;
 
 /// Represents the format of the read event.
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Boxing the large variant would add unnecessary indirection"
+)]
 #[derive(Clone, Debug)]
 pub enum Event {
     /// A native qlog event type.

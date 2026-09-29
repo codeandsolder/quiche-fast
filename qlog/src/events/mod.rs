@@ -431,7 +431,10 @@ pub struct RawInfo {
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "name", content = "data")]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Boxing the large variant would add unnecessary indirection"
+)]
 pub enum EventData {
     // QUIC
     #[serde(rename = "quic:server_listening")]

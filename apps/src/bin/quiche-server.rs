@@ -358,7 +358,10 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                #[allow(unused_mut)]
+                #[expect(
+                    unused_mut,
+                    reason = "The binding is mutable on feature or platform-specific paths"
+                )]
                 let mut conn = quiche::accept(
                     &scid,
                     odcid.as_ref(),
@@ -451,7 +454,10 @@ fn main() {
                 // is not much anyone can do to recover.
                 let app_proto = client.conn.application_proto();
 
-                #[allow(clippy::box_default)]
+                #[expect(
+                    clippy::box_default,
+                    reason = "The explicit boxed type documents the selected HTTP/0.9 implementation"
+                )]
                 if alpns::HTTP_09.contains(&app_proto) {
                     client.http_conn = Some(Box::<Http09Conn>::default());
 

@@ -24,7 +24,10 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#![allow(clippy::collapsible_match)]
+#![expect(
+    clippy::collapsible_match,
+    reason = "Keeping nested matches preserves protocol-state structure and readability"
+)]
 
 //! Bridging the gap between [quiche] and [tokio].
 //!
@@ -202,7 +205,13 @@ where
     let quic_sockets: Vec<QuicListener> = sockets
         .into_iter()
         .map(|s| {
-            #[cfg_attr(not(target_os = "linux"), expect(unused_mut))]
+            #[cfg_attr(
+                not(target_os = "linux"),
+                expect(
+                    unused_mut,
+                    reason = "Linux mutates the socket to apply platform capabilities"
+                )
+            )]
             let mut socket = s.try_into()?;
             #[cfg(target_os = "linux")]
             socket.apply_max_capabilities();
