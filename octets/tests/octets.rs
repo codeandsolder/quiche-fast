@@ -28,7 +28,7 @@ use octets::Octets;
 use octets::OctetsMut;
 
 #[test]
-fn get_u() {
+fn get_u() -> octets::Result<()> {
     let d = [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
     ];
@@ -37,23 +37,23 @@ fn get_u() {
     assert_eq!(b.cap(), 18);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.get_u8().unwrap(), 1);
+    assert_eq!(b.get_u8()?, 1);
     assert_eq!(b.cap(), 17);
     assert_eq!(b.off(), 1);
 
-    assert_eq!(b.get_u16().unwrap(), 0x203);
+    assert_eq!(b.get_u16()?, 0x203);
     assert_eq!(b.cap(), 15);
     assert_eq!(b.off(), 3);
 
-    assert_eq!(b.get_u24().unwrap(), 0x40506);
+    assert_eq!(b.get_u24()?, 0x40506);
     assert_eq!(b.cap(), 12);
     assert_eq!(b.off(), 6);
 
-    assert_eq!(b.get_u32().unwrap(), 0x0708090a);
+    assert_eq!(b.get_u32()?, 0x0708_090a);
     assert_eq!(b.cap(), 8);
     assert_eq!(b.off(), 10);
 
-    assert_eq!(b.get_u64().unwrap(), 0x0b0c0d0e0f101112);
+    assert_eq!(b.get_u64()?, 0x0b0c_0d0e_0f10_1112);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 18);
 
@@ -62,10 +62,12 @@ fn get_u() {
     assert!(b.get_u24().is_err());
     assert!(b.get_u32().is_err());
     assert!(b.get_u64().is_err());
+
+    Ok(())
 }
 
 #[test]
-fn get_u_mut() {
+fn get_u_mut() -> octets::Result<()> {
     let mut d = [
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
     ];
@@ -74,23 +76,23 @@ fn get_u_mut() {
     assert_eq!(b.cap(), 18);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.get_u8().unwrap(), 1);
+    assert_eq!(b.get_u8()?, 1);
     assert_eq!(b.cap(), 17);
     assert_eq!(b.off(), 1);
 
-    assert_eq!(b.get_u16().unwrap(), 0x203);
+    assert_eq!(b.get_u16()?, 0x203);
     assert_eq!(b.cap(), 15);
     assert_eq!(b.off(), 3);
 
-    assert_eq!(b.get_u24().unwrap(), 0x40506);
+    assert_eq!(b.get_u24()?, 0x40506);
     assert_eq!(b.cap(), 12);
     assert_eq!(b.off(), 6);
 
-    assert_eq!(b.get_u32().unwrap(), 0x0708090a);
+    assert_eq!(b.get_u32()?, 0x0708_090a);
     assert_eq!(b.cap(), 8);
     assert_eq!(b.off(), 10);
 
-    assert_eq!(b.get_u64().unwrap(), 0x0b0c0d0e0f101112);
+    assert_eq!(b.get_u64()?, 0x0b0c_0d0e_0f10_1112);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 18);
 
@@ -99,62 +101,68 @@ fn get_u_mut() {
     assert!(b.get_u24().is_err());
     assert!(b.get_u32().is_err());
     assert!(b.get_u64().is_err());
+
+    Ok(())
 }
 
 #[test]
-fn peek_u() {
+fn peek_u() -> octets::Result<()> {
     let d = [1, 2];
 
     let mut b = Octets::with_slice(&d);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_u8().unwrap(), 1);
+    assert_eq!(b.peek_u8()?, 1);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_u8().unwrap(), 1);
+    assert_eq!(b.peek_u8()?, 1);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    b.get_u16().unwrap();
+    b.get_u16()?;
 
     assert!(b.peek_u8().is_err());
+
+    Ok(())
 }
 
 #[test]
-fn peek_u_mut() {
+fn peek_u_mut() -> octets::Result<()> {
     let mut d = [1, 2];
 
     let mut b = OctetsMut::with_slice(&mut d);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_u8().unwrap(), 1);
+    assert_eq!(b.peek_u8()?, 1);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_u8().unwrap(), 1);
+    assert_eq!(b.peek_u8()?, 1);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 0);
 
-    b.get_u16().unwrap();
+    b.get_u16()?;
 
     assert!(b.peek_u8().is_err());
+
+    Ok(())
 }
 
 #[test]
-fn get_bytes() {
+fn get_bytes() -> octets::Result<()> {
     let d = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let mut b = Octets::with_slice(&d);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.get_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.get_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 5);
     assert_eq!(b.off(), 5);
 
-    assert_eq!(b.get_bytes(3).unwrap().as_ref(), [6, 7, 8]);
+    assert_eq!(b.get_bytes(3)?.as_ref(), [6, 7, 8]);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 8);
 
@@ -162,25 +170,27 @@ fn get_bytes() {
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 8);
 
-    assert_eq!(b.get_bytes(2).unwrap().as_ref(), [9, 10]);
+    assert_eq!(b.get_bytes(2)?.as_ref(), [9, 10]);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 10);
 
     assert!(b.get_bytes(2).is_err());
+
+    Ok(())
 }
 
 #[test]
-fn get_bytes_mut() {
+fn get_bytes_mut() -> octets::Result<()> {
     let mut d = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let mut b = OctetsMut::with_slice(&mut d);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.get_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.get_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 5);
     assert_eq!(b.off(), 5);
 
-    assert_eq!(b.get_bytes(3).unwrap().as_ref(), [6, 7, 8]);
+    assert_eq!(b.get_bytes(3)?.as_ref(), [6, 7, 8]);
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 8);
 
@@ -188,113 +198,123 @@ fn get_bytes_mut() {
     assert_eq!(b.cap(), 2);
     assert_eq!(b.off(), 8);
 
-    assert_eq!(b.get_bytes(2).unwrap().as_ref(), [9, 10]);
+    assert_eq!(b.get_bytes(2)?.as_ref(), [9, 10]);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 10);
 
     assert!(b.get_bytes(2).is_err());
+
+    Ok(())
 }
 
 #[test]
-fn peek_bytes() {
+fn peek_bytes() -> octets::Result<()> {
     let d = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let mut b = Octets::with_slice(&d);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.peek_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.peek_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    b.get_bytes(5).unwrap();
+    b.get_bytes(5)?;
+
+    Ok(())
 }
 
 #[test]
-fn peek_bytes_mut() {
+fn peek_bytes_mut() -> octets::Result<()> {
     let mut d = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
     let mut b = OctetsMut::with_slice(&mut d);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.peek_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    assert_eq!(b.peek_bytes(5).unwrap().as_ref(), [1, 2, 3, 4, 5]);
+    assert_eq!(b.peek_bytes(5)?.as_ref(), [1, 2, 3, 4, 5]);
     assert_eq!(b.cap(), 10);
     assert_eq!(b.off(), 0);
 
-    b.get_bytes(5).unwrap();
+    b.get_bytes(5)?;
+
+    Ok(())
 }
 
 #[test]
-fn get_varint() {
+fn get_varint() -> octets::Result<()> {
     let d = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 151288809941952652);
+    assert_eq!(b.get_varint()?, 151_288_809_941_952_652);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 8);
 
     let d = [0x9d, 0x7f, 0x3e, 0x7d];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 494878333);
+    assert_eq!(b.get_varint()?, 494_878_333);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 4);
 
     let d = [0x7b, 0xbd];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 15293);
+    assert_eq!(b.get_varint()?, 15293);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 2);
 
     let d = [0x40, 0x25];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 37);
+    assert_eq!(b.get_varint()?, 37);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 2);
 
     let d = [0x25];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 37);
+    assert_eq!(b.get_varint()?, 37);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 1);
+
+    Ok(())
 }
 
 #[test]
-fn get_varint_mut() {
+fn get_varint_mut() -> octets::Result<()> {
     let mut d = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 151288809941952652);
+    assert_eq!(b.get_varint()?, 151_288_809_941_952_652);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 8);
 
     let mut d = [0x9d, 0x7f, 0x3e, 0x7d];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 494878333);
+    assert_eq!(b.get_varint()?, 494_878_333);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 4);
 
     let mut d = [0x7b, 0xbd];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 15293);
+    assert_eq!(b.get_varint()?, 15293);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 2);
 
     let mut d = [0x40, 0x25];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 37);
+    assert_eq!(b.get_varint()?, 37);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 2);
 
     let mut d = [0x25];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 37);
+    assert_eq!(b.get_varint()?, 37);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 1);
+
+    Ok(())
 }
 
 #[test]
@@ -302,7 +322,7 @@ fn put_varint() {
     let mut d = [0; 8];
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        assert!(b.put_varint(151288809941952652).is_ok());
+        assert!(b.put_varint(151_288_809_941_952_652).is_ok());
         assert_eq!(b.cap(), 0);
         assert_eq!(b.off(), 8);
     }
@@ -312,7 +332,7 @@ fn put_varint() {
     let mut d = [0; 4];
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        assert!(b.put_varint(494878333).is_ok());
+        assert!(b.put_varint(494_878_333).is_ok());
         assert_eq!(b.cap(), 0);
         assert_eq!(b.off(), 4);
     }
@@ -342,7 +362,7 @@ fn put_varint() {
     let mut d = [0; 3];
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        assert!(b.put_varint(151288809941952652).is_err());
+        assert!(b.put_varint(151_288_809_941_952_652).is_err());
         assert_eq!(b.cap(), 3);
         assert_eq!(b.off(), 0);
     }
@@ -351,11 +371,24 @@ fn put_varint() {
 }
 
 #[test]
-#[should_panic]
 fn varint_too_large() {
     let mut d = [0; 3];
     let mut b = OctetsMut::with_slice(&mut d);
     assert!(b.put_varint(u64::MAX).is_err());
+}
+
+#[test]
+fn put_varint_with_len_rejects_invalid_values() {
+    let mut storage = [0_u8; 8];
+    let mut b = OctetsMut::with_slice(&mut storage);
+
+    assert!(b.put_varint_with_len(64, 1).is_err());
+    assert!(b.put_varint_with_len(16_384, 2).is_err());
+    assert!(b.put_varint_with_len(1 << 30, 4).is_err());
+    assert!(b.put_varint_with_len(octets::MAX_VAR_INT + 1, 8).is_err());
+    assert!(b.put_varint_with_len(0, 0).is_err());
+    assert!(b.put_varint_with_len(0, 3).is_err());
+    assert_eq!(b.off(), 0);
 }
 
 #[test]
@@ -379,11 +412,11 @@ fn put_u() {
         assert_eq!(b.cap(), 12);
         assert_eq!(b.off(), 6);
 
-        assert!(b.put_u32(0x0708090a).is_ok());
+        assert!(b.put_u32(0x0708_090a).is_ok());
         assert_eq!(b.cap(), 8);
         assert_eq!(b.off(), 10);
 
-        assert!(b.put_u64(0x0b0c0d0e0f101112).is_ok());
+        assert!(b.put_u64(0x0b0c_0d0e_0f10_1112).is_ok());
         assert_eq!(b.cap(), 0);
         assert_eq!(b.off(), 18);
 
@@ -418,10 +451,10 @@ fn put_bytes() {
 }
 
 #[test]
-fn rewind() {
+fn rewind() -> octets::Result<()> {
     let d = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];
     let mut b = Octets::with_slice(&d);
-    assert_eq!(b.get_varint().unwrap(), 151288809941952652);
+    assert_eq!(b.get_varint()?, 151_288_809_941_952_652);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 8);
 
@@ -429,7 +462,7 @@ fn rewind() {
     assert_eq!(b.cap(), 4);
     assert_eq!(b.off(), 4);
 
-    assert_eq!(b.get_u8().unwrap(), 0xff);
+    assert_eq!(b.get_u8()?, 0xff);
     assert_eq!(b.cap(), 3);
     assert_eq!(b.off(), 5);
 
@@ -440,13 +473,15 @@ fn rewind() {
     assert_eq!(b.off(), 0);
 
     assert!(b.rewind(1).is_err());
+
+    Ok(())
 }
 
 #[test]
-fn rewind_mut() {
+fn rewind_mut() -> octets::Result<()> {
     let mut d = [0xc2, 0x19, 0x7c, 0x5e, 0xff, 0x14, 0xe8, 0x8c];
     let mut b = OctetsMut::with_slice(&mut d);
-    assert_eq!(b.get_varint().unwrap(), 151288809941952652);
+    assert_eq!(b.get_varint()?, 151_288_809_941_952_652);
     assert_eq!(b.cap(), 0);
     assert_eq!(b.off(), 8);
 
@@ -454,7 +489,7 @@ fn rewind_mut() {
     assert_eq!(b.cap(), 4);
     assert_eq!(b.off(), 4);
 
-    assert_eq!(b.get_u8().unwrap(), 0xff);
+    assert_eq!(b.get_u8()?, 0xff);
     assert_eq!(b.cap(), 3);
     assert_eq!(b.off(), 5);
 
@@ -465,10 +500,12 @@ fn rewind_mut() {
     assert_eq!(b.off(), 0);
 
     assert!(b.rewind(1).is_err());
+
+    Ok(())
 }
 
 #[test]
-fn split() {
+fn split() -> octets::Result<()> {
     let mut d = b"helloworld".to_vec();
 
     let mut b = OctetsMut::with_slice(&mut d);
@@ -483,7 +520,7 @@ fn split() {
 
     let off = b.off();
 
-    let (first, last) = b.split_at(off).unwrap();
+    let (first, last) = b.split_at(off)?;
     assert_eq!(first.cap(), 5);
     assert_eq!(first.off(), 0);
     assert_eq!(first.as_ref(), b"hello");
@@ -491,15 +528,17 @@ fn split() {
     assert_eq!(last.cap(), 5);
     assert_eq!(last.off(), 0);
     assert_eq!(last.as_ref(), b"world");
+
+    Ok(())
 }
 
 #[test]
-fn split_at() {
+fn split_at() -> octets::Result<()> {
     let mut d = b"helloworld".to_vec();
 
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        let (first, second) = b.split_at(5).unwrap();
+        let (first, second) = b.split_at(5)?;
 
         let mut exp1 = b"hello".to_vec();
         assert_eq!(first.as_ref(), &mut exp1[..]);
@@ -510,7 +549,7 @@ fn split_at() {
 
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        let (first, second) = b.split_at(10).unwrap();
+        let (first, second) = b.split_at(10)?;
 
         let mut exp1 = b"helloworld".to_vec();
         assert_eq!(first.as_ref(), &mut exp1[..]);
@@ -521,7 +560,7 @@ fn split_at() {
 
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        let (first, second) = b.split_at(9).unwrap();
+        let (first, second) = b.split_at(9)?;
 
         let mut exp1 = b"helloworl".to_vec();
         assert_eq!(first.as_ref(), &mut exp1[..]);
@@ -534,10 +573,12 @@ fn split_at() {
         let mut b = OctetsMut::with_slice(&mut d);
         assert!(b.split_at(11).is_err());
     }
+
+    Ok(())
 }
 
 #[test]
-fn slice() {
+fn slice() -> octets::Result<()> {
     let d = b"helloworld".to_vec();
 
     {
@@ -554,7 +595,7 @@ fn slice() {
 
     {
         let mut b = Octets::with_slice(&d);
-        b.get_bytes(5).unwrap();
+        b.get_bytes(5)?;
 
         let exp = b"world".to_vec();
         assert_eq!(b.slice(5), Ok(&exp[..]));
@@ -564,10 +605,12 @@ fn slice() {
         let b = Octets::with_slice(&d);
         assert!(b.slice(11).is_err());
     }
+
+    Ok(())
 }
 
 #[test]
-fn slice_mut() {
+fn slice_mut() -> octets::Result<()> {
     let mut d = b"helloworld".to_vec();
 
     {
@@ -584,7 +627,7 @@ fn slice_mut() {
 
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        b.get_bytes(5).unwrap();
+        b.get_bytes(5)?;
 
         let mut exp = b"world".to_vec();
         assert_eq!(b.slice(5), Ok(&mut exp[..]));
@@ -594,10 +637,12 @@ fn slice_mut() {
         let mut b = OctetsMut::with_slice(&mut d);
         assert!(b.slice(11).is_err());
     }
+
+    Ok(())
 }
 
 #[test]
-fn slice_last() {
+fn slice_last() -> octets::Result<()> {
     let d = b"helloworld".to_vec();
 
     {
@@ -608,7 +653,7 @@ fn slice_last() {
 
     {
         let mut b = Octets::with_slice(&d);
-        b.get_bytes(5).unwrap();
+        b.get_bytes(5)?;
         let exp = b"orld".to_vec();
         assert_eq!(b.slice_last(4), Ok(&exp[..]));
     }
@@ -635,10 +680,12 @@ fn slice_last() {
         let b = Octets::with_slice(&d);
         assert!(b.slice_last(11).is_err());
     }
+
+    Ok(())
 }
 
 #[test]
-fn slice_last_mut() {
+fn slice_last_mut() -> octets::Result<()> {
     let mut d = b"helloworld".to_vec();
 
     {
@@ -649,7 +696,7 @@ fn slice_last_mut() {
 
     {
         let mut b = OctetsMut::with_slice(&mut d);
-        b.get_bytes(5).unwrap();
+        b.get_bytes(5)?;
         let mut exp = b"orld".to_vec();
         assert_eq!(b.slice_last(4), Ok(&mut exp[..]));
     }
@@ -676,4 +723,6 @@ fn slice_last_mut() {
         let mut b = OctetsMut::with_slice(&mut d);
         assert!(b.slice_last(11).is_err());
     }
+
+    Ok(())
 }

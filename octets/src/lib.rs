@@ -24,7 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-/// Zero-copy abstraction for parsing and constructing network packets.
+#![expect(
+    clippy::missing_errors_doc,
+    reason = "all fallible buffer accessors use the crate's single documented BufferTooShortError"
+)]
+//! Zero-copy abstraction for parsing and constructing network packets.
 use std::mem;
 use std::ptr;
 
@@ -104,12 +108,15 @@ macro_rules! peek_u {
 
         static_assert!($len <= mem::size_of::<$ty>());
         let mut out: $ty = 0;
-        unsafe {
-            let dst = &mut out as *mut $ty as *mut u8;
-            let off = (mem::size_of::<$ty>() - len) as isize;
+        let dst = ptr::addr_of_mut!(out).cast::<u8>();
+        let off = mem::size_of::<$ty>() - len;
 
-            ptr::copy_nonoverlapping(src.as_ptr(), dst.offset(off), len);
-        };
+        // SAFETY: src contains at least len bytes, dst points to a live $ty
+        // object with off + len <= size_of::<$ty>(), and the source slice
+        // cannot overlap the stack-local destination.
+        unsafe {
+            ptr::copy_nonoverlapping(src.as_ptr(), dst.add(off), len);
+        }
 
         Ok(<$ty>::from_be(out))
     }};
@@ -138,11 +145,15 @@ macro_rules! put_u {
         let dst = &mut $b.buf[$b.off..($b.off + len)];
 
         static_assert!($len <= mem::size_of::<$ty>());
-        unsafe {
-            let src = &<$ty>::to_be(v) as *const $ty as *const u8;
-            let off = (mem::size_of::<$ty>() - len) as isize;
+        let value = <$ty>::to_be(v);
+        let src = ptr::addr_of!(value).cast::<u8>();
+        let off = mem::size_of::<$ty>() - len;
 
-            ptr::copy_nonoverlapping(src.offset(off), dst.as_mut_ptr(), len);
+        // SAFETY: src points to a live $ty object, off + len is bounded by
+        // size_of::<$ty>(), dst contains exactly len writable bytes, and the
+        // stack-local source cannot overlap the caller-provided destination.
+        unsafe {
+            ptr::copy_nonoverlapping(src.add(off), dst.as_mut_ptr(), len);
         }
 
         $b.off += $len;
@@ -172,7 +183,8 @@ impl<'a> Octets<'a> {
     ///
     /// Since the `Octets` is immutable, the input slice needs to be
     /// immutable.
-    pub fn with_slice(buf: &'a [u8]) -> Self {
+    #[must_use]
+    pub const fn with_slice(buf: &'a [u8]) -> Self {
         Octets { buf, off: 0 }
     }
 
@@ -184,7 +196,7 @@ impl<'a> Octets<'a> {
 
     /// Reads an unsigned 8-bit integer from the current offset without
     /// advancing the buffer.
-    pub fn peek_u8(&mut self) -> Result<u8> {
+    pub fn peek_u8(&self) -> Result<u8> {
         peek_u!(self, u8, 1)
     }
 
@@ -228,9 +240,9 @@ impl<'a> Octets<'a> {
 
             2 => u64::from(self.get_u16()? & 0x3fff),
 
-            4 => u64::from(self.get_u32()? & 0x3fffffff),
+            4 => u64::from(self.get_u32()? & 0x3fff_ffff),
 
-            8 => self.get_u64()? & 0x3fffffffffffffff,
+            8 => self.get_u64()? & 0x3fff_ffffffffffff,
 
             _ => unreachable!(),
         };
@@ -240,7 +252,7 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer.
-    pub fn get_bytes(&mut self, len: usize) -> Result<Octets<'a>> {
+    pub fn get_bytes(&mut self, len: usize) -> Result<Self> {
         if self.cap() < len {
             return Err(BufferTooShortError);
         }
@@ -257,7 +269,7 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 8-bit integer prefix.
-    pub fn get_bytes_with_u8_length(&mut self) -> Result<Octets<'a>> {
+    pub fn get_bytes_with_u8_length(&mut self) -> Result<Self> {
         let len = self.get_u8()?;
         self.get_bytes(len as usize)
     }
@@ -265,7 +277,7 @@ impl<'a> Octets<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 16-bit integer prefix in network
     /// byte-order.
-    pub fn get_bytes_with_u16_length(&mut self) -> Result<Octets<'a>> {
+    pub fn get_bytes_with_u16_length(&mut self) -> Result<Self> {
         let len = self.get_u16()?;
         self.get_bytes(len as usize)
     }
@@ -273,9 +285,10 @@ impl<'a> Octets<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned variable-length integer prefix
     /// in network byte-order.
-    pub fn get_bytes_with_varint_length(&mut self) -> Result<Octets<'a>> {
-        let len = self.get_varint()?;
-        self.get_bytes(len as usize)
+    pub fn get_bytes_with_varint_length(&mut self) -> Result<Self> {
+        let len = usize::try_from(self.get_varint()?)
+            .map_err(|_| BufferTooShortError)?;
+        self.get_bytes(len)
     }
 
     /// Decodes a Huffman-encoded value from the current offset.
@@ -339,7 +352,7 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and without
     /// advancing the buffer.
-    pub fn peek_bytes(&self, len: usize) -> Result<Octets<'a>> {
+    pub fn peek_bytes(&self, len: usize) -> Result<Self> {
         if self.cap() < len {
             return Err(BufferTooShortError);
         }
@@ -353,7 +366,7 @@ impl<'a> Octets<'a> {
     }
 
     /// Rewinds the buffer offset by `len` elements.
-    pub fn rewind(&mut self, len: usize) -> Result<()> {
+    pub const fn rewind(&mut self, len: usize) -> Result<()> {
         if self.off() < len {
             return Err(BufferTooShortError);
         }
@@ -383,7 +396,7 @@ impl<'a> Octets<'a> {
     }
 
     /// Advances the buffer's offset.
-    pub fn skip(&mut self, skip: usize) -> Result<()> {
+    pub const fn skip(&mut self, skip: usize) -> Result<()> {
         if skip > self.cap() {
             return Err(BufferTooShortError);
         }
@@ -394,31 +407,37 @@ impl<'a> Octets<'a> {
     }
 
     /// Returns the remaining capacity in the buffer.
-    pub fn cap(&self) -> usize {
+    #[must_use]
+    pub const fn cap(&self) -> usize {
         self.buf.len() - self.off
     }
 
     /// Returns the total length of the buffer.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Returns `true` if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.buf.len() == 0
     }
 
     /// Returns the current offset of the buffer.
-    pub fn off(&self) -> usize {
+    #[must_use]
+    pub const fn off(&self) -> usize {
         self.off
     }
 
     /// Returns a reference to the internal buffer.
-    pub fn buf(&self) -> &'a [u8] {
+    #[must_use]
+    pub const fn buf(&self) -> &'a [u8] {
         self.buf
     }
 
     /// Copies the buffer from the current offset into a new `Vec<u8>`.
+    #[must_use]
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_ref().to_vec()
     }
@@ -444,7 +463,7 @@ impl<'a> OctetsMut<'a> {
     ///
     /// Since there's no copy, the input slice needs to be mutable to allow
     /// modifications.
-    pub fn with_slice(buf: &'a mut [u8]) -> Self {
+    pub const fn with_slice(buf: &'a mut [u8]) -> Self {
         OctetsMut { buf, off: 0 }
     }
 
@@ -456,7 +475,7 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads an unsigned 8-bit integer from the current offset without
     /// advancing the buffer.
-    pub fn peek_u8(&mut self) -> Result<u8> {
+    pub fn peek_u8(&self) -> Result<u8> {
         peek_u!(self, u8, 1)
     }
 
@@ -530,9 +549,9 @@ impl<'a> OctetsMut<'a> {
 
             2 => u64::from(self.get_u16()? & 0x3fff),
 
-            4 => u64::from(self.get_u32()? & 0x3fffffff),
+            4 => u64::from(self.get_u32()? & 0x3fff_ffff),
 
-            8 => self.get_u64()? & 0x3fffffffffffffff,
+            8 => self.get_u64()? & 0x3fff_ffffffffffff,
 
             _ => unreachable!(),
         };
@@ -551,10 +570,22 @@ impl<'a> OctetsMut<'a> {
     pub fn put_varint_with_len(
         &mut self, v: u64, len: usize,
     ) -> Result<&mut [u8]> {
-        if self.cap() < len {
+        let max = match len {
+            1 => 0x3f,
+            2 => 0x3fff,
+            4 => 0x3fff_ffff,
+            8 => MAX_VAR_INT,
+            _ => return Err(BufferTooShortError),
+        };
+
+        if v > max || self.cap() < len {
             return Err(BufferTooShortError);
         }
 
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "v is range-checked against the selected QUIC varint width above"
+        )]
         let buf = match len {
             1 => self.put_u8(v as u8)?,
 
@@ -576,7 +607,7 @@ impl<'a> OctetsMut<'a> {
                 buf
             },
 
-            _ => panic!("value is too large for varint"),
+            _ => unreachable!("validated varint length"),
         };
 
         Ok(buf)
@@ -635,13 +666,14 @@ impl<'a> OctetsMut<'a> {
     /// the buffer, where `len` is an unsigned variable-length integer prefix
     /// in network byte-order.
     pub fn get_bytes_with_varint_length(&mut self) -> Result<Octets<'_>> {
-        let len = self.get_varint()?;
-        self.get_bytes(len as usize)
+        let len = usize::try_from(self.get_varint()?)
+            .map_err(|_| BufferTooShortError)?;
+        self.get_bytes(len)
     }
 
     /// Reads `len` bytes from the current offset without copying and without
     /// advancing the buffer.
-    pub fn peek_bytes(&mut self, len: usize) -> Result<Octets<'_>> {
+    pub fn peek_bytes(&self, len: usize) -> Result<Octets<'_>> {
         if self.cap() < len {
             return Err(BufferTooShortError);
         }
@@ -699,7 +731,7 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Rewinds the buffer offset by `len` elements.
-    pub fn rewind(&mut self, len: usize) -> Result<()> {
+    pub const fn rewind(&mut self, len: usize) -> Result<()> {
         if self.off() < len {
             return Err(BufferTooShortError);
         }
@@ -710,7 +742,7 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Splits the buffer in two at the given absolute offset.
-    pub fn split_at(
+    pub const fn split_at(
         &mut self, off: usize,
     ) -> Result<(OctetsMut<'_>, OctetsMut<'_>)> {
         if self.len() < off {
@@ -746,7 +778,7 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Advances the buffer's offset.
-    pub fn skip(&mut self, skip: usize) -> Result<()> {
+    pub const fn skip(&mut self, skip: usize) -> Result<()> {
         if skip > self.cap() {
             return Err(BufferTooShortError);
         }
@@ -757,31 +789,37 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Returns the remaining capacity in the buffer.
-    pub fn cap(&self) -> usize {
+    #[must_use]
+    pub const fn cap(&self) -> usize {
         self.buf.len() - self.off
     }
 
     /// Returns the total length of the buffer.
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Returns `true` if the buffer is empty.
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.buf.len() == 0
     }
 
     /// Returns the current offset of the buffer.
-    pub fn off(&self) -> usize {
+    #[must_use]
+    pub const fn off(&self) -> usize {
         self.off
     }
 
     /// Returns a reference to the internal buffer.
-    pub fn buf(&self) -> &[u8] {
+    #[must_use]
+    pub const fn buf(&self) -> &[u8] {
         self.buf
     }
 
     /// Copies the buffer from the current offset into a new `Vec<u8>`.
+    #[must_use]
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_ref().to_vec()
     }
@@ -807,23 +845,25 @@ impl OctetsWriter for OctetsMut<'_> {
     }
 }
 
-/// Returns how many bytes it would take to encode `v` as a variable-length
-/// integer.
+/// Returns the QUIC variable-length integer width class for `v`.
+///
+/// Values above [`MAX_VAR_INT`] also map to 8 bytes; encoding APIs reject
+/// those values rather than panicking.
+#[must_use]
 pub const fn varint_len(v: u64) -> usize {
     if v <= 63 {
         1
-    } else if v <= 16383 {
+    } else if v <= 16_383 {
         2
     } else if v <= 1_073_741_823 {
         4
-    } else if v <= MAX_VAR_INT {
-        8
     } else {
-        unreachable!()
+        8
     }
 }
 
 /// Returns how long the variable-length integer is, given its first byte.
+#[must_use]
 pub const fn varint_parse_len(first: u8) -> usize {
     match first >> 6 {
         0 => 1,
@@ -868,6 +908,10 @@ pub fn huffman_encoding_len<const LOWER_CASE: bool>(src: &[u8]) -> Result<usize>
 }
 
 #[cfg(feature = "huffman_hpack")]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "pending bit counts prove shifted values fit the emitted 32-bit and 8-bit chunks"
+)]
 fn huffman_encode_with<const LOWER_CASE: bool, F, E>(
     src: &[u8], mut write: F,
 ) -> std::result::Result<(), E>

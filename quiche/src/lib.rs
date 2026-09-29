@@ -376,6 +376,8 @@
 //! [boring]: https://crates.io/crates/boring
 //! [qlog]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema
 
+#![deny(missing_docs)]
+#![deny(unused_qualifications)]
 #![expect(
     clippy::upper_case_acronyms,
     reason = "Protocol and C API names intentionally use standardized acronyms"
