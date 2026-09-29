@@ -40,6 +40,16 @@ use crate::*;
 use crate::h3::NameValue;
 use crate::h3::Priority;
 
+const H3_FFI_ERR_INVALID_ARGUMENT: ssize_t = -21;
+
+fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
+    if len > ssize_t::MAX as usize {
+        Err(H3_FFI_ERR_INVALID_ARGUMENT)
+    } else {
+        Ok(())
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_new() -> *mut h3::Config {
     match h3::Config::new() {
@@ -190,7 +200,7 @@ pub extern "C" fn quiche_h3_event_for_each_header(
                 }
             },
 
-        _ => unreachable!(),
+        _ => return H3_FFI_ERR_INVALID_ARGUMENT as c_int,
     }
 
     0
@@ -203,7 +213,7 @@ pub extern "C" fn quiche_h3_event_headers_has_more_frames(
     match ev {
         h3::Event::Headers { more_frames, .. } => *more_frames,
 
-        _ => unreachable!(),
+        _ => false,
     }
 }
 
@@ -304,8 +314,8 @@ pub extern "C" fn quiche_h3_send_body(
     conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
     body: *const u8, body_len: size_t, fin: bool,
 ) -> ssize_t {
-    if body_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_h3_ssize_len(body_len) {
+        return e;
     }
 
     let body = unsafe { slice::from_raw_parts(body, body_len) };
@@ -322,8 +332,8 @@ pub extern "C" fn quiche_h3_recv_body(
     conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
     out: *mut u8, out_len: size_t,
 ) -> ssize_t {
-    if out_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_h3_ssize_len(out_len) {
+        return e;
     }
 
     let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
@@ -446,4 +456,39 @@ pub extern "C" fn quiche_h3_conn_stats(conn: &h3::Connection, out: &mut Stats) {
 
     out.qpack_encoder_stream_recv_bytes = stats.qpack_encoder_stream_recv_bytes;
     out.qpack_decoder_stream_recv_bytes = stats.qpack_decoder_stream_recv_bytes;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    extern "C" fn count_header(
+        _name: *const u8, _name_len: size_t, _value: *const u8,
+        _value_len: size_t, _argp: *mut c_void,
+    ) -> c_int {
+        0
+    }
+
+    #[test]
+    fn oversized_h3_ffi_length_returns_invalid_argument() {
+        assert_eq!(validate_h3_ssize_len(ssize_t::MAX as usize), Ok(()));
+
+        if usize::BITS > ssize_t::BITS as u32 {
+            assert_eq!(
+                validate_h3_ssize_len((ssize_t::MAX as usize) + 1),
+                Err(H3_FFI_ERR_INVALID_ARGUMENT)
+            );
+        }
+    }
+
+    #[test]
+    fn mismatched_h3_header_event_accessor_is_safe() {
+        let ev = h3::Event::Data;
+
+        assert_eq!(
+            quiche_h3_event_for_each_header(&ev, count_header, ptr::null_mut(),),
+            H3_FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+        assert!(!quiche_h3_event_headers_has_more_frames(&ev));
+    }
 }

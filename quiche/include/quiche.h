@@ -137,6 +137,9 @@ enum quiche_error {
 
     /// An invalid DCID was used when connecting to a remote peer.
     QUICHE_ERR_INVALID_DCID_INITIALIZATION = -23,
+
+    // An argument passed through the C API is invalid.
+    QUICHE_ERR_INVALID_ARGUMENT = -24,
 };
 
 // Returns a human readable string with the quiche version number.
@@ -1048,6 +1051,9 @@ enum quiche_h3_error {
     // The requested operation cannot be served over HTTP/3. Peer should retry
     // over HTTP/1.1.
     QUICHE_H3_ERR_VERSION_FALLBACK = -20,
+
+    // An argument passed through the HTTP/3 C API is invalid.
+    QUICHE_H3_ERR_INVALID_ARGUMENT = -21,
 
     // The following QUICHE_H3_TRANSPORT_ERR_* errors are propagated
     // from the QUIC transport layer.
