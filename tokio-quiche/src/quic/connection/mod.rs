@@ -49,6 +49,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::task::Poll;
 use std::time::Duration;
 use std::time::Instant;
@@ -84,6 +85,19 @@ pub struct QuicConnectionStats {
     pub path_stats: Option<quiche::PathStats>,
 }
 pub(crate) type QuicConnectionStatsShared = Arc<Mutex<QuicConnectionStats>>;
+
+fn shared_socket_stats(stats: &QuicConnectionStatsShared) -> SocketStats {
+    stats
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_socket_stats()
+}
+
+pub(crate) fn replace_shared_stats(
+    stats: &QuicConnectionStatsShared, value: QuicConnectionStats,
+) {
+    *stats.lock().unwrap_or_else(PoisonError::into_inner) = value;
+}
 
 impl QuicConnectionStats {
     pub(crate) fn from_conn(qconn: &QuicheConnection) -> Self {
@@ -554,7 +568,7 @@ impl AsSocketStats for QuicConnection {
         // It is important to note that those stats are only updated when
         // the connection stops, which is fine, since this is only used to
         // log after the connection is finished.
-        self.stats.lock().unwrap().as_socket_stats()
+        shared_socket_stats(&self.stats)
     }
 
     #[inline]
@@ -573,7 +587,7 @@ where
         // It is important to note that those stats are only updated when
         // the connection stops, which is fine, since this is only used to
         // log after the connection is finished.
-        self.stats.lock().unwrap().as_socket_stats()
+        shared_socket_stats(&self.stats)
     }
 
     #[inline]
@@ -842,4 +856,37 @@ pub struct ConnectionShutdownBehaviour {
     pub error_code: u64,
     /// The reason phrase to send to the peer.
     pub reason: Vec<u8>,
+}
+
+#[cfg(test)]
+mod stats_lock_tests {
+    use super::*;
+
+    #[test]
+    fn connection_stats_recover_after_lock_poisoning() {
+        let stats = Arc::new(Mutex::new(QuicConnectionStats {
+            stats: quiche::Stats::default(),
+            path_stats: None,
+        }));
+        let poisoner = Arc::clone(&stats);
+
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner
+                .lock()
+                .expect("fresh stats lock should not be poisoned");
+            panic!("poison connection stats lock");
+        })
+        .join();
+
+        assert_eq!(shared_socket_stats(&stats).packets_sent, 0);
+
+        let mut replacement = QuicConnectionStats {
+            stats: quiche::Stats::default(),
+            path_stats: None,
+        };
+        replacement.stats.sent = 7;
+        replace_shared_stats(&stats, replacement);
+
+        assert_eq!(shared_socket_stats(&stats).packets_sent, 7);
+    }
 }

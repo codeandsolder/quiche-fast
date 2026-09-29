@@ -41,6 +41,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::PoisonError;
 use std::task::Context;
 use std::task::Poll;
 use std::task::Wake;
@@ -80,7 +81,8 @@ impl Wake for InstrumentedWaker {
         // let's scope the guard's lifespan in case the inner waker is slow
         // this is still highly unlikely to be contended ever
         {
-            let mut guard = self.timer.lock().unwrap();
+            let mut guard =
+                self.timer.lock().unwrap_or_else(PoisonError::into_inner);
 
             if guard.is_none() {
                 *guard = Some(Instant::now())
@@ -117,7 +119,11 @@ impl<F: Future, M: Metrics> Future for Instrumented<F, M> {
         // deadlock us, so we won't do that.
         //
         // this is unlikely to be contended much otherwise.
-        let maybe_schedule_timer = self.timer.lock().unwrap().take();
+        let maybe_schedule_timer = self
+            .timer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take();
 
         // for various reasons related to how rust does lifetime things, we will
         // not acquire the lock in the if statement
@@ -197,5 +203,35 @@ where
         killswitch_spawn(Instrumented::new(name, metrics, ctx.apply(future)));
     } else {
         killswitch_spawn(ctx.apply(future));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn instrumented_waker_recovers_poisoned_timer() {
+        let timer = Arc::new(Mutex::new(None));
+        let poisoner = Arc::clone(&timer);
+
+        let _ = std::thread::spawn(move || {
+            let _guard =
+                poisoner.lock().expect("fresh lock should not be poisoned");
+            panic!("poison task timer");
+        })
+        .join();
+
+        let instrumented = Arc::new(InstrumentedWaker {
+            timer: Arc::clone(&timer),
+            waker: Waker::noop().clone(),
+        });
+
+        instrumented.wake_by_ref();
+
+        assert!(timer
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some());
     }
 }
