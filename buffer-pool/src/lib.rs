@@ -145,7 +145,13 @@ impl<T: Default + Reuse> Drop for Pooled<T> {
 macro_rules! array_impl_new_queues {
     {$n:expr, $t:ident $($ts:ident)*} => {
         impl<$t: Default + Reuse> Pool<{$n}, $t> {
-            #[expect(dead_code, reason = "Retained for API/test parity across build configurations")]
+            #[cfg_attr(
+                not(test),
+                expect(
+                    dead_code,
+                    reason = "Only the Pool constructor for the selected shard count is used in non-test builds"
+                )
+            )]
             pub const fn new(limit: usize, trim: usize, name: &'static str) -> Self {
                 let limit = limit / $n;
                 Pool {
