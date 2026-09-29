@@ -35,6 +35,10 @@ use crate::events::ExData;
 /// Times are always logged in units of whole milliseconds with optional
 /// precision, determining the number of decimal places output by the
 /// serializer.
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variant names are part of the established public qlog API"
+)]
 pub enum EventTimePrecision {
     /// Logging may contain 1 decimal place to ensure float serialization e.g.,
     /// 1.0, 2.0,
@@ -581,9 +585,9 @@ mod tests {
         };
 
         let event_data2 = EventData::QuicPacketSent(quic::PacketSent {
-            header: pkt_hdr,
+            header: pkt_hdr.clone(),
             frames: Some(vec![frame2]),
-            raw,
+            raw: raw.clone(),
             ..Default::default()
         });
 

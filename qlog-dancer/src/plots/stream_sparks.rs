@@ -29,13 +29,6 @@
 //! represents a single stream, so it is easier to see how they all compare
 //! at a glance.
 
-// TODO: this seems to be required to overcome a transient error in nightly; see
-// https://github.com/rust-lang/rust/issues/147648#issuecomment-3482917926
-#![expect(
-    unused_assignments,
-    reason = "Current control flow intentionally overwrites this value on some paths"
-)]
-
 use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
@@ -51,10 +44,6 @@ use crate::request_stub::HttpRequestStub;
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
 
-#[expect(
-    unused_assignments,
-    reason = "Current control flow intentionally overwrites this value on some paths"
-)]
 pub enum TransmissionType {
     Upload,
     Download,

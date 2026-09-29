@@ -84,7 +84,7 @@ pub struct Event {
 
     #[serde(flatten)]
     pub ex_data: Box<ExData>,
-    pub group_id: Option<Box<String>>,
+    pub group_id: Option<String>,
 
     pub time_format: Option<TimeFormat>,
 
@@ -115,7 +115,7 @@ impl From<EventWire> for Event {
             time: wire.time,
             data: wire.data,
             ex_data: wire.ex_data,
-            group_id: wire.group_id.map(Box::new),
+            group_id: wire.group_id,
             time_format: wire.time_format,
             ty,
         }
@@ -198,6 +198,10 @@ pub enum EventImportance {
 impl EventImportance {
     /// Returns true if this importance level is included by other.
     #[must_use]
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
+    )]
     pub const fn is_contained_in(&self, other: &Self) -> bool {
         matches!(
             (*other, *self),
@@ -644,6 +648,10 @@ pub enum ConnectionClosedEventError {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variant names are part of the established public qlog error API"
+)]
 pub enum ConnectionClosedFrameError {
     TransportError(TransportError),
     ApplicationError(ApplicationError),
