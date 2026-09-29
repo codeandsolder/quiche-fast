@@ -1,4 +1,9 @@
-on: [push, pull_request]
+on:
+  push:
+    branches: [master]
+    tags: ["*"]
+  pull_request:
+  workflow_dispatch:
 
 name: Stable
 
@@ -14,8 +19,8 @@ env:
   RUSTTOOLCHAIN: "1.98.1"
 
 concurrency:
-  group: ${{ github.ref }}-stable
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  group: stable-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   quiche:
@@ -24,9 +29,6 @@ jobs:
       fail-fast: false
       matrix:
         boring_version: ["latest", "4"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -89,15 +91,13 @@ jobs:
           make -C quiche/examples
 
   quiche_macos:
+    if: startsWith(github.ref, 'refs/tags/')
     strategy:
       matrix:
         target:
           - "macos-15-intel"     # Intel (x86_64)
           - "macos-latest" # Apple Silicon (M1)
     runs-on: ${{ matrix.target }}
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -116,13 +116,11 @@ jobs:
           make -C quiche/examples
 
   quiche_ios:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
     strategy:
       matrix:
         target: ["x86_64-apple-ios", "aarch64-apple-ios"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     env:
       IPHONEOS_DEPLOYMENT_TARGET: "10.0"
     steps:
@@ -143,6 +141,7 @@ jobs:
         run: cargo build --target=${{ matrix.target }} --verbose
 
   quiche_windows:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-2022
     strategy:
       matrix:
@@ -164,9 +163,6 @@ jobs:
       CFLAGS: ${{ matrix.cflags }}
       CXXFLAGS: ${{ matrix.cxxflags }}
       BINDGEN_EXTRA_CLANG_ARGS: ${{ matrix.cflags }}
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -245,9 +241,6 @@ jobs:
     strategy:
       matrix:
         target: ["aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf","i686-unknown-linux-gnu"]
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -268,9 +261,6 @@ jobs:
 
   http3_test:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -289,9 +279,6 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -315,9 +302,6 @@ jobs:
             arch: "x86_64"
           - target: "i686-linux-android"
             arch: "x86"
-    # Only run on "pull_request" event for external PRs. This is to avoid
-    # duplicate builds for PRs created from internal branches.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
