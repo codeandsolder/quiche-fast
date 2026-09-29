@@ -43,6 +43,7 @@ use super::utilization_estimator::BandwidthReporter;
 
 use crate::metrics::labels;
 use crate::metrics::Metrics;
+use crate::quic::connection::replace_shared_stats;
 use crate::quic::connection::ApplicationOverQuic;
 use crate::quic::connection::HandshakeError;
 use crate::quic::connection::Incoming;
@@ -1238,7 +1239,7 @@ where
             self.gather_data_from_quiche_conn(qconn, send_buf.as_mut(), false);
         self.flush_buffer_to_socket(send_buf.as_ref()).await;
 
-        *ctx.stats.lock().unwrap() = QuicConnectionStats::from_conn(qconn);
+        replace_shared_stats(&ctx.stats, QuicConnectionStats::from_conn(qconn));
 
         if let Some(err) = qconn.peer_error() {
             if err.is_app {
