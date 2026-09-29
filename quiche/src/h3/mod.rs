@@ -894,11 +894,12 @@ impl TryFrom<&[u8]> for Priority {
     ///
     /// [Extensible Priorities]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     fn try_from(value: &[u8]) -> std::result::Result<Self, Self::Error> {
-        let dict: sfv::Dictionary = match sfv::Parser::new(value).parse_dictionary() {
-            Ok(v) => v,
+        let dict: sfv::Dictionary =
+            match sfv::Parser::new(value).parse_dictionary() {
+                Ok(v) => v,
 
-            Err(_) => return Err(Error::Done),
-        };
+                Err(_) => return Err(Error::Done),
+            };
 
         let urgency = match dict.get("u") {
             // If there is a u parameter, try to read it as an Item of type
@@ -906,7 +907,8 @@ impl TryFrom<&[u8]> for Priority {
             // (0 through 7), that's an error so set it to the upper
             // bound (lowest priority) to avoid interference with
             // other streams.
-            Some(sfv::ListEntry::Item(item)) => match item.bare_item.as_integer() {
+            Some(sfv::ListEntry::Item(item)) => match item.bare_item.as_integer()
+            {
                 Some(v) => {
                     let v: i64 = v.into();
 
