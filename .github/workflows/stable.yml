@@ -31,10 +31,10 @@ jobs:
         boring_version: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["latest","4"]' || '["latest"]') }}
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           components: clippy
@@ -59,7 +59,7 @@ jobs:
           cargo update -p boring --precise 4.19.0
 
       - name: Unused dependency check
-        uses: bnjbvr/cargo-machete@main
+        uses: bnjbvr/cargo-machete@135555c9cd9f3b4723dee2766f0cacb99aac092b # main
 
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
@@ -100,10 +100,10 @@ jobs:
     runs-on: ${{ matrix.target }}
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
 
@@ -125,10 +125,10 @@ jobs:
       IPHONEOS_DEPLOYMENT_TARGET: "10.0"
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -165,10 +165,10 @@ jobs:
       BINDGEN_EXTRA_CLANG_ARGS: ${{ matrix.cflags }}
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           targets: ${{ matrix.target }}
@@ -224,7 +224,7 @@ jobs:
           echo >> $GITHUB_ENV "CMAKE_GENERATOR=MinGW Makefiles"
 
       - name: Install dependencies
-        uses: crazy-max/ghaction-chocolatey@v4
+        uses: crazy-max/ghaction-chocolatey@dfdcf5bba9c0a16358a21c13a06ec5c89024b3ac # v4
         with:
           args: install nasm
 
@@ -244,10 +244,10 @@ jobs:
         target: ["aarch64-unknown-linux-gnu","armv7-unknown-linux-gnueabihf","i686-unknown-linux-gnu"]
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
 
@@ -265,10 +265,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           components: clippy
@@ -284,7 +284,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Build Docker images
         run: make docker-build
@@ -308,10 +308,10 @@ jobs:
             arch: "x86"
     steps:
       - name: Checkout sources
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install stable toolchain for the target
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # master
         with:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           targets: ${{ matrix.target }}
