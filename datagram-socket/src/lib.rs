@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 mod buffer;
 mod datagram;
 mod shutdown;
@@ -47,6 +49,8 @@ pub use self::socket_stats::*;
 
 #[cfg(target_os = "linux")]
 pub fn is_nonblocking(fd: &impl AsRawFd) -> std::io::Result<bool> {
+    // SAFETY: F_GETFL only reads the descriptor's status flags and does not
+    // dereference any caller-provided pointer. Invalid descriptors return EBADF.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
 
     if flags == -1 {

@@ -339,8 +339,11 @@ pub trait DatagramSocketRecv: Send {
     ///
     /// * `Poll::Pending` if the socket is not ready to read
     /// * `Poll::Ready(Ok(n))` reads data `ReadBuf` if the socket is ready `n`
-    ///   is the number of datagrams read.
-    /// * `Poll::Ready(Err(e))` if an error is encountered.
+    ///   is the number of datagrams read. If an error occurs after at least one
+    ///   datagram was read, the successful count is returned and the error is
+    ///   left for a subsequent call.
+    /// * `Poll::Ready(Err(e))` if an error is encountered before any datagram is
+    ///   read.
     ///
     /// # Errors
     ///
@@ -354,7 +357,9 @@ pub trait DatagramSocketRecv: Send {
             match self.poll_recv(cx, buf) {
                 Poll::Ready(Ok(())) => read += 1,
 
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Ready(Err(e)) if read == 0 => return Poll::Ready(Err(e)),
+
+                Poll::Ready(Err(_)) => break,
 
                 // Only return `Poll::Ready` if at least one datagram was
                 // successfully read, otherwise block.
@@ -744,6 +749,9 @@ impl DatagramSocketRecv for Arc<UnixDatagram> {
 /// `From<OwnedFd>`.
 #[cfg(unix)]
 fn into_owned_fd<F: IntoRawFd>(into_fd: F) -> OwnedFd {
+    // SAFETY: into_raw_fd() transfers ownership of a live descriptor to this
+    // function, and from_raw_fd() immediately reconstructs exactly one owner
+    // for that same descriptor.
     unsafe { OwnedFd::from_raw_fd(into_fd.into_raw_fd()) }
 }
 
@@ -825,5 +833,61 @@ impl<T: DatagramSocketSend> DatagramSocketSend for MaybeConnectedSocket<T> {
     #[inline]
     fn peer_addr(&self) -> Option<SocketAddr> {
         self.peer
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct PartialThenError {
+        reads: usize,
+    }
+
+    impl DatagramSocketRecv for PartialThenError {
+        fn poll_recv(
+            &mut self, _cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.reads == 0 {
+                self.reads += 1;
+                buf.put_slice(&[0x42]);
+                return Poll::Ready(Ok(()));
+            }
+
+            Poll::Ready(Err(io::Error::other("test error")))
+        }
+    }
+
+    #[test]
+    fn poll_recv_many_preserves_partial_success_before_error() {
+        let mut socket = PartialThenError { reads: 0 };
+        let mut first = [0u8; 1];
+        let mut second = [0u8; 1];
+        let mut bufs = [ReadBuf::new(&mut first), ReadBuf::new(&mut second)];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        let Poll::Ready(Ok(read)) = socket.poll_recv_many(&mut cx, &mut bufs)
+        else {
+            panic!("partial receive should report successful datagrams");
+        };
+
+        assert_eq!(read, 1);
+        assert_eq!(bufs[0].filled(), &[0x42]);
+        assert!(bufs[1].filled().is_empty());
+    }
+
+    #[test]
+    fn poll_recv_many_preserves_initial_error() {
+        let mut socket = PartialThenError { reads: 1 };
+        let mut storage = [0u8; 1];
+        let mut bufs = [ReadBuf::new(&mut storage)];
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+
+        let Poll::Ready(Err(err)) = socket.poll_recv_many(&mut cx, &mut bufs)
+        else {
+            panic!("first receive error should be returned");
+        };
+
+        assert_eq!(err.kind(), io::ErrorKind::Other);
     }
 }
