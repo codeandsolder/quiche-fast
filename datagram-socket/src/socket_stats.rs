@@ -32,6 +32,7 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use std::sync::OnceLock;
+use std::sync::PoisonError;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::SystemTime;
@@ -209,7 +210,10 @@ impl QuicAuditStats {
 
     #[inline]
     pub fn set_transport_handshake_start(&self, start_time: SystemTime) {
-        *self.transport_handshake_start.write().unwrap() = Some(start_time);
+        *self
+            .transport_handshake_start
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(start_time);
     }
 
     #[inline]
@@ -228,12 +232,17 @@ impl QuicAuditStats {
     pub fn connection_close_reason(
         &self,
     ) -> impl Deref<Target = Option<BoxError>> + '_ {
-        self.connection_close_reason.read().unwrap()
+        self.connection_close_reason
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     #[inline]
     pub fn set_connection_close_reason(&self, error: BoxError) {
-        *self.connection_close_reason.write().unwrap() = Some(error);
+        *self
+            .connection_close_reason
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(error);
     }
 
     #[inline]
@@ -276,4 +285,52 @@ pub enum StreamClosureKind {
     None,
     Implicit,
     Explicit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audit_stats_recovers_poisoned_handshake_start() {
+        let stats = Arc::new(QuicAuditStats::new(Vec::new()));
+        let poisoner = Arc::clone(&stats);
+
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner
+                .transport_handshake_start
+                .write()
+                .expect("fresh lock should not be poisoned");
+            panic!("poison handshake-start lock");
+        })
+        .join();
+
+        let now = SystemTime::now();
+        stats.set_transport_handshake_start(now);
+
+        let start = stats.transport_handshake_start();
+        let guard = start.read().unwrap_or_else(PoisonError::into_inner);
+        assert_eq!(*guard, Some(now));
+    }
+
+    #[test]
+    fn audit_stats_recovers_poisoned_close_reason() {
+        let stats = Arc::new(QuicAuditStats::new(Vec::new()));
+        let poisoner = Arc::clone(&stats);
+
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoner
+                .connection_close_reason
+                .write()
+                .expect("fresh lock should not be poisoned");
+            panic!("poison close-reason lock");
+        })
+        .join();
+
+        stats.set_connection_close_reason(Box::new(std::io::Error::other(
+            "connection closed",
+        )));
+
+        assert!(stats.connection_close_reason().is_some());
+    }
 }
