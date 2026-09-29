@@ -50,7 +50,8 @@ pub use self::socket_stats::*;
 #[cfg(target_os = "linux")]
 pub fn is_nonblocking(fd: &impl AsRawFd) -> std::io::Result<bool> {
     // SAFETY: F_GETFL only reads the descriptor's status flags and does not
-    // dereference any caller-provided pointer. Invalid descriptors return EBADF.
+    // dereference any caller-provided pointer. Invalid descriptors return
+    // EBADF.
     let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFL) };
 
     if flags == -1 {
