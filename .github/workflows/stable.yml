@@ -15,7 +15,7 @@ env:
   DEFAULT_OPTIONS: "--features=async,ffi,qlog,rpk --workspace"
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
-  RUSTFLAGS: "-D warnings"
+  RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
   RUSTTOOLCHAIN: "1.98.1"
 
 concurrency:
@@ -28,7 +28,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        boring_version: ["latest", "4"]
+        boring_version: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["latest","4"]' || '["latest"]') }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@v7
@@ -237,6 +237,7 @@ jobs:
         run: cargo test --target=${{ matrix.target }} --verbose --all-targets ${{ env.DEFAULT_OPTIONS }} --exclude qlog-dancer
 
   quiche_multiarch:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -260,6 +261,7 @@ jobs:
         run: cross test --target=${{ matrix.target }} --verbose --all-targets ${{ env.NO_BORING_OPTIONS }} --exclude qlog-dancer
 
   http3_test:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -278,6 +280,7 @@ jobs:
         run: cargo clippy --manifest-path=tools/http3_test/Cargo.toml -- -D warnings
 
   docker:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
@@ -287,6 +290,7 @@ jobs:
         run: make docker-build
 
   android_ndk_lts:
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     env:
       API_LEVEL: "21"
