@@ -30,8 +30,8 @@ use qlog::events::quic::QuicFrame;
 use tabled::settings::location::ByColumnName;
 use tabled::settings::object::Segment;
 use tabled::settings::Alignment;
-use tabled::settings::Remove;
 use tabled::settings::Modify;
+use tabled::settings::Remove;
 use tabled::settings::Style;
 use tabled::Table;
 
