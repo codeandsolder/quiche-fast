@@ -24,10 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::io::IoSlice;
-use std::io::{
-    self,
-};
+use std::io;
 use std::os::fd::AsRawFd;
 use std::os::fd::BorrowedFd;
 
@@ -37,38 +34,48 @@ use tokio::io::ReadBuf;
 const MAX_MMSG: usize = 16;
 
 pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
+    if bufs.is_empty() {
+        return Ok(0);
+    }
+
     let mut msgvec: SmallVec<[libc::mmsghdr; MAX_MMSG]> = SmallVec::new();
-    let mut slices: SmallVec<[IoSlice; MAX_MMSG]> = SmallVec::new();
+    let mut iovecs: SmallVec<[libc::iovec; MAX_MMSG]> = SmallVec::new();
 
     let mut ret = 0;
 
     for bufs in bufs.chunks_mut(MAX_MMSG) {
         msgvec.clear();
-        slices.clear();
+        iovecs.clear();
 
         for buf in bufs.iter_mut() {
-            // Safety: will not read the maybe uninitialized bytes.
-            let b = unsafe {
-                &mut *(buf.unfilled_mut() as *mut [std::mem::MaybeUninit<u8>]
-                    as *mut [u8])
-            };
+            // SAFETY: we only write into the unfilled region and never
+            // de-initialize bytes that ReadBuf already considers initialized.
+            let unfilled = unsafe { buf.unfilled_mut() };
+            iovecs.push(libc::iovec {
+                iov_base: unfilled.as_mut_ptr().cast(),
+                iov_len: unfilled.len(),
+            });
+        }
 
-            slices.push(IoSlice::new(b));
-
+        for iovec in iovecs.iter_mut() {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),
                     msg_namelen: 0,
-                    msg_iov: slices.last_mut().unwrap() as *mut _ as *mut _,
+                    msg_iov: iovec,
                     msg_iovlen: 1,
                     msg_control: std::ptr::null_mut(),
                     msg_controllen: 0,
                     msg_flags: 0,
                 },
-                msg_len: buf.capacity().try_into().unwrap(),
+                msg_len: 0,
             });
         }
 
+        // SAFETY: each iovec points to a distinct unfilled region owned by a
+        // ReadBuf in `bufs`. Those regions and the message headers remain
+        // alive and unmoved for the duration of the syscall, and recvmmsg()
+        // does not retain any of the pointers.
         let result = unsafe {
             libc::recvmmsg(
                 fd.as_raw_fd(),
@@ -83,14 +90,21 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
             break;
         }
 
-        for i in 0..result as usize {
-            let filled = msgvec[i].msg_len as usize;
-            unsafe { bufs[i].assume_init(filled) };
-            bufs[i].advance(filled);
+        let received = result as usize;
+
+        for (buf, msg) in bufs.iter_mut().zip(msgvec.iter()).take(received) {
+            let filled = msg.msg_len as usize;
+            debug_assert!(filled <= buf.remaining());
+
+            // SAFETY: recvmmsg() reported `filled` bytes written into this
+            // buffer's iovec, whose length was exactly the buffer's unfilled
+            // region.
+            unsafe { buf.assume_init(filled) };
+            buf.advance(filled);
             ret += 1;
         }
 
-        if (result as usize) < MAX_MMSG {
+        if received < bufs.len() {
             break;
         }
     }
@@ -103,32 +117,45 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
 }
 
 pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
+    if bufs.is_empty() {
+        return Ok(0);
+    }
+
     let mut msgvec: SmallVec<[libc::mmsghdr; MAX_MMSG]> = SmallVec::new();
-    let mut slices: SmallVec<[IoSlice; MAX_MMSG]> = SmallVec::new();
+    let mut iovecs: SmallVec<[libc::iovec; MAX_MMSG]> = SmallVec::new();
 
     let mut ret = 0;
 
     for bufs in bufs.chunks(MAX_MMSG) {
         msgvec.clear();
-        slices.clear();
+        iovecs.clear();
 
         for buf in bufs.iter() {
-            slices.push(IoSlice::new(buf.filled()));
+            let filled = buf.filled();
+            iovecs.push(libc::iovec {
+                iov_base: filled.as_ptr().cast_mut().cast(),
+                iov_len: filled.len(),
+            });
+        }
 
+        for iovec in iovecs.iter_mut() {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),
                     msg_namelen: 0,
-                    msg_iov: slices.last_mut().unwrap() as *mut _ as *mut _,
+                    msg_iov: iovec,
                     msg_iovlen: 1,
                     msg_control: std::ptr::null_mut(),
                     msg_controllen: 0,
                     msg_flags: 0,
                 },
-                msg_len: buf.capacity().try_into().unwrap(),
+                msg_len: 0,
             });
         }
 
+        // SAFETY: each iovec points to initialized bytes owned by a ReadBuf in
+        // `bufs`. The buffers and message headers stay alive and unmoved for
+        // the syscall, and sendmmsg() only reads from and does not retain them.
         let result = unsafe {
             libc::sendmmsg(
                 fd.as_raw_fd(),
@@ -144,7 +171,7 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
 
         ret += result as usize;
 
-        if (result as usize) < MAX_MMSG {
+        if (result as usize) < bufs.len() {
             break;
         }
     }
@@ -159,17 +186,21 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
 #[macro_export]
 macro_rules! poll_recvmmsg {
     ($self: expr, $cx: ident, $bufs: ident) => {
-        loop {
-            match $self.poll_recv_ready($cx)? {
-                Poll::Ready(()) => {
-                    match $self.try_io(tokio::io::Interest::READABLE, || {
-                        $crate::mmsg::recvmmsg($self.as_fd(), $bufs)
-                    }) {
-                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}  // Have to poll for recv ready
-                        res => break Poll::Ready(res),
+        if $bufs.is_empty() {
+            Poll::Ready(Ok(0))
+        } else {
+            loop {
+                match $self.poll_recv_ready($cx)? {
+                    Poll::Ready(()) => {
+                        match $self.try_io(tokio::io::Interest::READABLE, || {
+                            $crate::mmsg::recvmmsg($self.as_fd(), $bufs)
+                        }) {
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {}  // Have to poll for recv ready
+                            res => break Poll::Ready(res),
+                        }
                     }
+                    Poll::Pending => break Poll::Pending,
                 }
-                Poll::Pending => break Poll::Pending,
             }
         }
     };
@@ -178,17 +209,21 @@ macro_rules! poll_recvmmsg {
 #[macro_export]
 macro_rules! poll_sendmmsg {
     ($self: expr, $cx: ident, $bufs: ident) => {
-        loop {
-            match $self.poll_send_ready($cx)? {
-                Poll::Ready(()) => {
-                    match $self.try_io(tokio::io::Interest::WRITABLE, || {
-                        $crate::mmsg::sendmmsg($self.as_fd(), $bufs)
-                    }) {
-                        Err(err) if err.kind() == io::ErrorKind::WouldBlock => {} // Have to poll for send ready
-                        res => break Poll::Ready(res),
+        if $bufs.is_empty() {
+            Poll::Ready(Ok(0))
+        } else {
+            loop {
+                match $self.poll_send_ready($cx)? {
+                    Poll::Ready(()) => {
+                        match $self.try_io(tokio::io::Interest::WRITABLE, || {
+                            $crate::mmsg::sendmmsg($self.as_fd(), $bufs)
+                        }) {
+                            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {} // Have to poll for send ready
+                            res => break Poll::Ready(res),
+                        }
                     }
+                    Poll::Pending => break Poll::Pending,
                 }
-                Poll::Pending => break Poll::Pending,
             }
         }
     };
@@ -198,11 +233,42 @@ macro_rules! poll_sendmmsg {
 mod tests {
     use std::io;
 
+    use std::os::fd::AsFd;
+    use std::os::unix::net::UnixDatagram as StdUnixDatagram;
     use tokio::io::ReadBuf;
     use tokio::net::UnixDatagram;
 
     use crate::DatagramSocketRecvExt;
     use crate::DatagramSocketSendExt;
+
+    #[test]
+    fn empty_batches_are_noop() -> io::Result<()> {
+        let (socket, _peer) = StdUnixDatagram::pair()?;
+        let mut recv_bufs = [];
+
+        assert_eq!(super::recvmmsg(socket.as_fd(), &mut recv_bufs)?, 0);
+        assert_eq!(super::sendmmsg(socket.as_fd(), &[])?, 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn empty_socket_recv_batch_is_immediately_ready() -> io::Result<()> {
+        let (_sender, mut receiver) = UnixDatagram::pair()?;
+        let mut bufs = [];
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+
+        assert!(matches!(
+            crate::DatagramSocketRecv::poll_recv_many(
+                &mut receiver,
+                &mut cx,
+                &mut bufs,
+            ),
+            std::task::Poll::Ready(Ok(0))
+        ));
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn recvmmsg() -> io::Result<()> {
