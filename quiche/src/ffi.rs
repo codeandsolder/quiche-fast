@@ -99,6 +99,35 @@ use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6_0;
 
 use crate::*;
 
+const FFI_ERR_INVALID_ARGUMENT: ssize_t = -24;
+
+fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
+    if len > ssize_t::MAX as usize {
+        Err(FFI_ERR_INVALID_ARGUMENT)
+    } else {
+        Ok(())
+    }
+}
+
+/// Converts a non-null NUL-terminated C string to owned UTF-8.
+///
+/// # Safety
+///
+/// `value` must point to a valid NUL-terminated C string for the duration of
+/// this call.
+unsafe fn c_str_to_string(
+    value: *const c_char,
+) -> std::result::Result<String, ()> {
+    if value.is_null() {
+        return Err(());
+    }
+
+    unsafe { ffi::CStr::from_ptr(value) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| ())
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_version() -> *const u8 {
     static VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "\0");
@@ -152,9 +181,11 @@ pub extern "C" fn quiche_config_new(version: u32) -> *mut Config {
 pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_cert_chain_from_pem_file(path) {
+    match config.load_cert_chain_from_pem_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -165,9 +196,11 @@ pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
 pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_priv_key_from_pem_file(path) {
+    match config.load_priv_key_from_pem_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -178,9 +211,11 @@ pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
 pub extern "C" fn quiche_config_load_verify_locations_from_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_verify_locations_from_file(path) {
+    match config.load_verify_locations_from_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -191,9 +226,11 @@ pub extern "C" fn quiche_config_load_verify_locations_from_file(
 pub extern "C" fn quiche_config_load_verify_locations_from_directory(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_verify_locations_from_directory(path) {
+    match config.load_verify_locations_from_directory(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -204,9 +241,11 @@ pub extern "C" fn quiche_config_load_verify_locations_from_directory(
 pub extern "C" fn quiche_config_set_curves_list(
     config: &mut Config, curves: *const c_char,
 ) -> c_int {
-    let curves = unsafe { ffi::CStr::from_ptr(curves).to_str().unwrap() };
+    let Ok(curves) = (unsafe { c_str_to_string(curves) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.set_curves_list(curves) {
+    match config.set_curves_list(&curves) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -346,8 +385,10 @@ pub extern "C" fn quiche_config_set_disable_active_migration(
 pub extern "C" fn quiche_config_set_cc_algorithm_name(
     config: &mut Config, name: *const c_char,
 ) -> c_int {
-    let name = unsafe { ffi::CStr::from_ptr(name).to_str().unwrap() };
-    match config.set_cc_algorithm_name(name) {
+    let Ok(name) = (unsafe { c_str_to_string(name) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    match config.set_cc_algorithm_name(&name) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -555,8 +596,12 @@ pub extern "C" fn quiche_accept(
         None
     };
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
 
     match accept(&scid, odcid.as_ref(), local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
@@ -574,16 +619,23 @@ pub extern "C" fn quiche_connect(
     let server_name = if server_name.is_null() {
         None
     } else {
-        Some(unsafe { ffi::CStr::from_ptr(server_name).to_str().unwrap() })
+        let Ok(server_name) = (unsafe { c_str_to_string(server_name) }) else {
+            return ptr::null_mut();
+        };
+        Some(server_name)
     };
 
     let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
     let scid = ConnectionId::from_ref(scid);
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
 
-    match connect(server_name, &scid, local, peer, config) {
+    match connect(server_name.as_deref(), &scid, local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
 
         Err(_) => ptr::null_mut(),
@@ -659,8 +711,12 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
             None
         };
 
-        let local = std_addr_from_c(local, local_len);
-        let peer = std_addr_from_c(peer, peer_len);
+        let Ok(local) = std_addr_from_c(local, local_len) else {
+            return ptr::null_mut();
+        };
+        let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+            return ptr::null_mut();
+        };
 
         let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
             Ok(v) => v,
@@ -720,8 +776,12 @@ pub extern "C" fn quiche_conn_new_with_tls(
         retry_source_cid: &scid,
     });
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
 
     let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
         Ok(v) => v,
@@ -742,12 +802,14 @@ pub extern "C" fn quiche_conn_new_with_tls(
 pub extern "C" fn quiche_conn_set_keylog_path(
     conn: &mut Connection, path: *const c_char,
 ) -> bool {
-    let filename = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+        return false;
+    };
 
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(filename);
+        .open(&filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -775,12 +837,20 @@ pub extern "C" fn quiche_conn_set_qlog_path(
     conn: &mut Connection, path: *const c_char, log_title: *const c_char,
     log_desc: *const c_char,
 ) -> bool {
-    let filename = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+        return false;
+    };
+    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+        return false;
+    };
+    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+        return false;
+    };
 
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(filename);
+        .open(&filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -788,12 +858,9 @@ pub extern "C" fn quiche_conn_set_qlog_path(
         Err(_) => return false,
     };
 
-    let title = unsafe { ffi::CStr::from_ptr(log_title).to_str().unwrap() };
-    let description = unsafe { ffi::CStr::from_ptr(log_desc).to_str().unwrap() };
-
     conn.set_qlog(
         Box::new(writer),
-        title.to_string(),
+        title,
         format!("{} id={}", description, conn.trace_id),
     );
 
@@ -806,15 +873,19 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
     conn: &mut Connection, fd: c_int, log_title: *const c_char,
     log_desc: *const c_char,
 ) {
+    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+        return;
+    };
+    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+        return;
+    };
+
     let f = unsafe { std::fs::File::from_raw_fd(fd) };
     let writer = std::io::BufWriter::new(f);
 
-    let title = unsafe { ffi::CStr::from_ptr(log_title).to_str().unwrap() };
-    let description = unsafe { ffi::CStr::from_ptr(log_desc).to_str().unwrap() };
-
     conn.set_qlog(
         Box::new(writer),
-        title.to_string(),
+        title,
         format!("{} id={}", description, conn.trace_id),
     );
 }
@@ -851,12 +922,14 @@ pub struct RecvInfo<'a> {
     to_len: socklen_t,
 }
 
-impl From<&RecvInfo<'_>> for crate::RecvInfo {
-    fn from(info: &RecvInfo) -> crate::RecvInfo {
-        crate::RecvInfo {
-            from: std_addr_from_c(info.from, info.from_len),
-            to: std_addr_from_c(info.to, info.to_len),
-        }
+impl TryFrom<&RecvInfo<'_>> for crate::RecvInfo {
+    type Error = ();
+
+    fn try_from(info: &RecvInfo) -> std::result::Result<Self, Self::Error> {
+        Ok(crate::RecvInfo {
+            from: std_addr_from_c(info.from, info.from_len)?,
+            to: std_addr_from_c(info.to, info.to_len)?,
+        })
     }
 }
 
@@ -864,13 +937,17 @@ impl From<&RecvInfo<'_>> for crate::RecvInfo {
 pub extern "C" fn quiche_conn_recv(
     conn: &mut Connection, buf: *mut u8, buf_len: size_t, info: &RecvInfo,
 ) -> ssize_t {
-    if buf_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(buf_len) {
+        return e;
     }
+
+    let Ok(info) = crate::RecvInfo::try_from(info) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
 
     let buf = unsafe { slice::from_raw_parts_mut(buf, buf_len) };
 
-    match conn.recv(buf, info.into()) {
+    match conn.recv(buf, info) {
         Ok(v) => v as ssize_t,
 
         Err(e) => e.to_c(),
@@ -891,8 +968,8 @@ pub struct SendInfo {
 pub extern "C" fn quiche_conn_send(
     conn: &mut Connection, out: *mut u8, out_len: size_t, out_info: &mut SendInfo,
 ) -> ssize_t {
-    if out_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(out_len) {
+        return e;
     }
 
     let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
@@ -917,12 +994,16 @@ pub extern "C" fn quiche_conn_send_on_path(
     from_len: socklen_t, to: *const sockaddr, to_len: socklen_t,
     out_info: &mut SendInfo,
 ) -> ssize_t {
-    if out_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(out_len) {
+        return e;
     }
 
-    let from = optional_std_addr_from_c(from, from_len);
-    let to = optional_std_addr_from_c(to, to_len);
+    let Ok(from) = optional_std_addr_from_c(from, from_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Ok(to) = optional_std_addr_from_c(to, to_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
     let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
 
     match conn.send_on_path(out, from, to) {
@@ -944,8 +1025,8 @@ pub extern "C" fn quiche_conn_stream_recv(
     conn: &mut Connection, stream_id: u64, out: *mut u8, out_len: size_t,
     fin: &mut bool, out_error_code: &mut u64,
 ) -> ssize_t {
-    if out_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(out_len) {
+        return e;
     }
 
     let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
@@ -973,12 +1054,14 @@ pub extern "C" fn quiche_conn_stream_send(
     conn: &mut Connection, stream_id: u64, buf: *const u8, buf_len: size_t,
     fin: bool, out_error_code: &mut u64,
 ) -> ssize_t {
-    if buf_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(buf_len) {
+        return e;
     }
 
     let buf = if buf.is_null() {
-        assert_eq!(buf_len, 0);
+        if buf_len != 0 {
+            return FFI_ERR_INVALID_ARGUMENT;
+        }
         &[]
     } else {
         unsafe { slice::from_raw_parts(buf, buf_len) }
@@ -1096,7 +1179,9 @@ pub extern "C" fn quiche_conn_close(
     reason_len: size_t,
 ) -> c_int {
     let reason = if reason.is_null() {
-        assert_eq!(reason_len, 0);
+        if reason_len != 0 {
+            return FFI_ERR_INVALID_ARGUMENT as c_int;
+        }
         &[]
     } else {
         unsafe { slice::from_raw_parts(reason, reason_len) }
@@ -1575,8 +1660,8 @@ pub extern "C" fn quiche_conn_dgram_send_queue_byte_size(
 pub extern "C" fn quiche_conn_dgram_send(
     conn: &mut Connection, buf: *const u8, buf_len: size_t,
 ) -> ssize_t {
-    if buf_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(buf_len) {
+        return e;
     }
 
     let buf = unsafe { slice::from_raw_parts(buf, buf_len) };
@@ -1592,8 +1677,8 @@ pub extern "C" fn quiche_conn_dgram_send(
 pub extern "C" fn quiche_conn_dgram_recv(
     conn: &mut Connection, out: *mut u8, out_len: size_t,
 ) -> ssize_t {
-    if out_len > <ssize_t>::MAX as usize {
-        panic!("The provided buffer is too large");
+    if let Err(e) = validate_ssize_len(out_len) {
+        return e;
     }
 
     let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
@@ -1648,8 +1733,12 @@ pub extern "C" fn quiche_conn_send_ack_eliciting_on_path(
     conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
     peer: &sockaddr, peer_len: socklen_t,
 ) -> ssize_t {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
     match conn.send_ack_eliciting_on_path(local, peer) {
         Ok(()) => 0,
         Err(e) => e.to_c(),
@@ -1748,8 +1837,12 @@ pub extern "C" fn quiche_conn_send_quantum_on_path(
     conn: &Connection, local: &sockaddr, local_len: socklen_t, peer: &sockaddr,
     peer_len: socklen_t,
 ) -> size_t {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return 0;
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return 0;
+    };
 
     conn.send_quantum_on_path(local, peer) as size_t
 }
@@ -1758,7 +1851,9 @@ pub extern "C" fn quiche_conn_send_quantum_on_path(
 pub extern "C" fn quiche_conn_paths_iter(
     conn: &Connection, from: &sockaddr, from_len: socklen_t,
 ) -> *mut SocketAddrIter {
-    let addr = std_addr_from_c(from, from_len);
+    let Ok(addr) = std_addr_from_c(from, from_len) else {
+        return ptr::null_mut();
+    };
 
     Box::into_raw(Box::new(conn.paths_iter(addr)))
 }
@@ -1788,8 +1883,12 @@ pub extern "C" fn quiche_conn_is_path_validated(
     conn: &Connection, from: &sockaddr, from_len: socklen_t, to: &sockaddr,
     to_len: socklen_t,
 ) -> c_int {
-    let from = std_addr_from_c(from, from_len);
-    let to = std_addr_from_c(to, to_len);
+    let Ok(from) = std_addr_from_c(from, from_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Ok(to) = std_addr_from_c(to, to_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
     match conn.is_path_validated(from, to) {
         Ok(v) => v as c_int,
         Err(e) => e.to_c() as c_int,
@@ -1801,8 +1900,12 @@ pub extern "C" fn quiche_conn_probe_path(
     conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
     peer: &sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
     match conn.probe_path(local, peer) {
         Ok(v) => {
             unsafe { *seq = v }
@@ -1816,7 +1919,9 @@ pub extern "C" fn quiche_conn_probe_path(
 pub extern "C" fn quiche_conn_migrate_source(
     conn: &mut Connection, local: &sockaddr, local_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
     match conn.migrate_source(local) {
         Ok(v) => {
             unsafe { *seq = v }
@@ -1831,8 +1936,12 @@ pub extern "C" fn quiche_conn_migrate(
     conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
     peer: &sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Ok(local) = std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
     match conn.migrate(local, peer) {
         Ok(v) => {
             unsafe { *seq = v }
@@ -1883,7 +1992,7 @@ pub extern "C" fn quiche_path_event_new(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1899,7 +2008,7 @@ pub extern "C" fn quiche_path_event_validated(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1915,7 +2024,7 @@ pub extern "C" fn quiche_path_event_failed_validation(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1931,7 +2040,7 @@ pub extern "C" fn quiche_path_event_closed(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1953,7 +2062,7 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
             *peer_addr_len = std_addr_to_c(&new.1, peer_addr)
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1969,7 +2078,7 @@ pub extern "C" fn quiche_path_event_peer_migrated(
             *peer_addr_len = std_addr_to_c(peer, peer_addr);
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -1990,7 +2099,7 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
             *pmtu = *value;
         },
 
-        _ => unreachable!(),
+        _ => return,
     }
 }
 
@@ -2039,18 +2148,22 @@ pub extern "C" fn quiche_get_varint(
 
 fn optional_std_addr_from_c(
     addr: *const sockaddr, addr_len: socklen_t,
-) -> Option<SocketAddr> {
+) -> std::result::Result<Option<SocketAddr>, ()> {
     if addr.is_null() || addr_len == 0 {
-        return None;
+        return Ok(None);
     }
 
-    Some(std_addr_from_c(unsafe { &*addr }, addr_len))
+    std_addr_from_c(unsafe { &*addr }, addr_len).map(Some)
 }
 
-fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
+fn std_addr_from_c(
+    addr: &sockaddr, addr_len: socklen_t,
+) -> std::result::Result<SocketAddr, ()> {
     match addr.sa_family as _ {
         AF_INET => {
-            assert!(addr_len as usize == size_of::<sockaddr_in>());
+            if addr_len as usize != size_of::<sockaddr_in>() {
+                return Err(());
+            }
 
             let in4 = unsafe { *(addr as *const _ as *const sockaddr_in) };
 
@@ -2072,11 +2185,13 @@ fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
 
             let out = SocketAddrV4::new(ip_addr, port);
 
-            out.into()
+            Ok(out.into())
         },
 
         AF_INET6 => {
-            assert!(addr_len as usize == size_of::<sockaddr_in6>());
+            if addr_len as usize != size_of::<sockaddr_in6>() {
+                return Err(());
+            }
 
             let in6 = unsafe { *(addr as *const _ as *const sockaddr_in6) };
 
@@ -2099,10 +2214,10 @@ fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
             let out =
                 SocketAddrV6::new(ip_addr, port, in6.sin6_flowinfo, scope_id);
 
-            out.into()
+            Ok(out.into())
         },
 
-        _ => unimplemented!("unsupported address type"),
+        _ => Err(()),
     }
 }
 
@@ -2222,6 +2337,68 @@ mod tests {
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
 
     #[test]
+    fn invalid_utf8_ffi_string_returns_invalid_argument() {
+        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+        let invalid = [0xff_u8, 0];
+
+        assert_eq!(
+            quiche_config_set_cc_algorithm_name(
+                &mut config,
+                invalid.as_ptr().cast(),
+            ),
+            FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+    }
+
+    #[test]
+    fn oversized_ffi_length_returns_invalid_argument() {
+        assert_eq!(validate_ssize_len(ssize_t::MAX as usize), Ok(()));
+        assert_eq!(
+            validate_ssize_len(ssize_t::MAX as usize + 1),
+            Err(FFI_ERR_INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
+    fn malformed_sockaddr_is_rejected() {
+        let mut addr: sockaddr = unsafe { std::mem::zeroed() };
+        addr.sa_family = AF_INET as sa_family_t;
+
+        assert_eq!(std_addr_from_c(&addr, 0), Err(()));
+
+        addr.sa_family = 0;
+        assert_eq!(
+            std_addr_from_c(&addr, size_of::<sockaddr_in>() as socklen_t,),
+            Err(())
+        );
+    }
+
+    #[test]
+    fn mismatched_path_event_accessor_is_noop() {
+        let local = "127.0.0.1:8080".parse().unwrap();
+        let peer = "127.0.0.2:443".parse().unwrap();
+        let event = PathEvent::New(local, peer);
+        let mut local_out: sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut peer_out: sockaddr_storage = unsafe { std::mem::zeroed() };
+        let mut local_len = 11;
+        let mut peer_len = 12;
+        let mut pmtu = 13;
+
+        quiche_path_event_pmtu_updated(
+            &event,
+            &mut local_out,
+            &mut local_len,
+            &mut peer_out,
+            &mut peer_len,
+            &mut pmtu,
+        );
+
+        assert_eq!(local_len, 11);
+        assert_eq!(peer_len, 12);
+        assert_eq!(pmtu, 13);
+    }
+
+    #[test]
     fn pmtu_updated_path_event() {
         let local = "127.0.0.1:8080".parse().unwrap();
         let peer = "127.0.0.2:443".parse().unwrap();
@@ -2255,7 +2432,7 @@ mod tests {
                     local_len,
                 )
             },
-            local
+            Ok(local)
         );
         assert_eq!(
             unsafe {
@@ -2264,7 +2441,7 @@ mod tests {
                     peer_len,
                 )
             },
-            peer
+            Ok(peer)
         );
     }
 
@@ -2306,7 +2483,7 @@ mod tests {
             )
         };
 
-        assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(addr, Ok("127.0.0.1:8080".parse().unwrap()));
     }
 
     #[test]
@@ -2352,9 +2529,9 @@ mod tests {
 
         assert_eq!(
             addr,
-            "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
+            Ok("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
                 .parse()
-                .unwrap()
+                .unwrap())
         );
     }
 
