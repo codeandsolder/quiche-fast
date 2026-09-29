@@ -105,6 +105,7 @@ impl foundations::settings::Settings for QlogCompression {}
 /// Return the qlog filename (not including the directory) for a
 /// stream whose identifier is `id`, with the suffix matching
 /// `compression`: `<id>.sqlog`, `<id>.sqlog.gz`, or `<id>.sqlog.zst`.
+#[must_use]
 pub fn qlog_file_name(id: &str, compression: QlogCompression) -> String {
     match compression {
         QlogCompression::None => format!("{id}{SQLOG_EXT}"),
@@ -126,6 +127,10 @@ pub fn qlog_file_name(id: &str, compression: QlogCompression) -> String {
 /// [`make_qlog_writer_from_path`].
 ///
 /// No buffering is added here.
+///
+/// # Errors
+/// Returns an I/O error if the selected compression backend cannot be
+/// initialized.
 pub fn make_qlog_writer<W>(
     inner: W, compression: QlogCompression,
 ) -> io::Result<QlogFileWriter>
@@ -159,6 +164,9 @@ where
 ///
 /// Equivalent to manually creating a File and passing it to
 /// [`make_qlog_writer`].
+///
+/// # Errors
+/// Returns an I/O error if file creation or compression initialization fails.
 pub fn make_qlog_writer_from_path<P: AsRef<Path>>(
     path: P, compression: QlogCompression,
 ) -> io::Result<QlogFileWriter> {
@@ -188,14 +196,14 @@ impl<W: Write> Write for ZstdFinishOnDrop<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.encoder
             .as_mut()
-            .expect("encoder present until drop")
+            .ok_or_else(|| io::Error::other("zstd encoder already finalized"))?
             .write(buf)
     }
 
     fn flush(&mut self) -> io::Result<()> {
         self.encoder
             .as_mut()
-            .expect("encoder present until drop")
+            .ok_or_else(|| io::Error::other("zstd encoder already finalized"))?
             .flush()
     }
 }

@@ -34,10 +34,6 @@ use crate::SQLOG_GZ_EXT;
 use crate::SQLOG_ZST_EXT;
 
 /// Represents the format of the read event.
-#[expect(
-    clippy::large_enum_variant,
-    reason = "Boxing the large variant would add unnecessary indirection"
-)]
 #[derive(Clone, Debug)]
 pub enum Event {
     /// A native qlog event type.
@@ -57,13 +53,18 @@ pub struct QlogSeqReader<'a> {
 }
 
 impl<'a> QlogSeqReader<'a> {
+    /// Creates a reader from buffered JSON-SEQ input.
+    ///
+    /// # Errors
+    /// Returns an error if input cannot be read or the header is missing or
+    /// malformed.
     pub fn new(
         mut reader: Box<dyn std::io::BufRead + Send + Sync + 'a>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        // "null record" skip it
-        Self::read_record(reader.as_mut());
+        // "null record" skip it.
+        let _ = Self::read_record(reader.as_mut())?;
 
-        let header = Self::read_record(reader.as_mut()).ok_or_else(|| {
+        let header = Self::read_record(reader.as_mut())?.ok_or_else(|| {
             std::io::Error::other("error reading file header bytes")
         })?;
 
@@ -96,6 +97,10 @@ impl<'a> QlogSeqReader<'a> {
     ///
     /// This is the intended single entry point for reading a qlog
     /// file regardless of compression.
+    ///
+    /// # Errors
+    /// Returns an error if opening, decompression, or qlog header parsing
+    /// fails.
     pub fn with_file(
         path: impl AsRef<Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -164,16 +169,16 @@ impl<'a> QlogSeqReader<'a> {
 
     fn read_record(
         reader: &mut (dyn std::io::BufRead + Send + Sync),
-    ) -> Option<Vec<u8>> {
+    ) -> std::io::Result<Option<Vec<u8>>> {
         let mut buf = Vec::<u8>::new();
-        let size = reader.read_until(b'', &mut buf).unwrap();
+        let size = reader.read_until(b'', &mut buf)?;
         if size <= 1 {
-            return None;
+            return Ok(None);
         }
 
         buf.truncate(buf.len() - 1);
 
-        Some(buf)
+        Ok(Some(buf))
     }
 }
 
@@ -184,7 +189,7 @@ impl Iterator for QlogSeqReader<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         // Attempt to deserialize events but skip them if that fails for any
         // reason, ensuring we always read all bytes in the reader.
-        while let Some(bytes) = Self::read_record(&mut self.reader) {
+        while let Ok(Some(bytes)) = Self::read_record(&mut self.reader) {
             let r: serde_json::Result<crate::events::Event> =
                 serde_json::from_slice(&bytes);
 

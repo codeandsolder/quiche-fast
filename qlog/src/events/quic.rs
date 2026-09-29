@@ -54,7 +54,7 @@ use crate::StatelessResetToken;
 ///
 /// *Note*, the draft-ietf-quic-qlog-quic-events-12 specifies that the
 /// range is a closed interval, i.e., `range.end` is part of the range.
-#[derive(Clone, PartialEq, Debug, Copy)]
+#[derive(Clone, PartialEq, Eq, Debug, Copy)]
 pub struct AckRange {
     /// The first packet number in the range (inclusive).
     pub start: u64,
@@ -64,11 +64,13 @@ pub struct AckRange {
 
 impl AckRange {
     /// Creates a new `AckRange` spanning `[start, end]` (both inclusive).
-    pub fn new(start: u64, end: u64) -> Self {
-        AckRange { start, end }
+    #[must_use]
+    pub const fn new(start: u64, end: u64) -> Self {
+        Self { start, end }
     }
 
-    pub fn as_range_inclusive(&self) -> RangeInclusive<u64> {
+    #[must_use]
+    pub const fn as_range_inclusive(&self) -> RangeInclusive<u64> {
         self.start..=self.end
     }
 }
@@ -97,8 +99,8 @@ impl<'de> Deserialize<'de> for AckRange {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let v = Vec::<u64>::deserialize(d)?;
         match v.as_slice() {
-            [x] => Ok(AckRange::new(*x, *x)),
-            [a, b] => Ok(AckRange::new(*a, *b)),
+            [x] => Ok(Self::new(*x, *x)),
+            [a, b] => Ok(Self::new(*a, *b)),
             _ => Err(de::Error::custom("ack range must have 1 or 2 elements")),
         }
     }
@@ -147,72 +149,59 @@ pub struct PacketHeader {
 }
 
 impl PacketHeader {
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The signature mirrors protocol state and grouping would obscure call sites"
-    )]
-    /// Creates a new PacketHeader.
+    /// Creates a new `PacketHeader`.
+    #[must_use]
     pub fn new(
         packet_type: PacketType, packet_number: Option<u64>,
         token: Option<Box<Token>>, length: Option<u16>, version: Option<u32>,
         scid: Option<&[u8]>, dcid: Option<&[u8]>,
     ) -> Self {
-        let (scil, scid) = match scid {
-            Some(cid) => (
-                Some(cid.len() as u8),
-                Some(format!("{}", HexSlice::new(&cid))),
-            ),
+        let (source_cid_len, source_cid) = scid.map_or((None, None), |cid| {
+            (
+                u8::try_from(cid.len()).ok(),
+                Some(format!("{}", HexSlice::new(cid))),
+            )
+        });
 
-            None => (None, None),
-        };
-
-        let (dcil, dcid) = match dcid {
-            Some(cid) => (
-                Some(cid.len() as u8),
-                Some(format!("{}", HexSlice::new(&cid))),
-            ),
-
-            None => (None, None),
-        };
+        let (destination_cid_len, destination_cid) =
+            dcid.map_or((None, None), |cid| {
+                (
+                    u8::try_from(cid.len()).ok(),
+                    Some(format!("{}", HexSlice::new(cid))),
+                )
+            });
 
         let version = version.map(|v| format!("{v:x?}"));
 
-        PacketHeader {
+        Self {
             packet_type,
             packet_number,
             token,
             length,
             version,
-            scil,
-            dcil,
-            scid,
-            dcid,
+            scil: source_cid_len,
+            dcil: destination_cid_len,
+            scid: source_cid,
+            dcid: destination_cid,
             ..Default::default()
         }
     }
 
-    /// Creates a new PacketHeader.
+    /// Creates a new `PacketHeader`.
     ///
     /// Once a QUIC connection has formed, version, dcid and scid are stable, so
     /// there are space benefits to not logging them in every packet, especially
-    /// PacketType::OneRtt.
+    /// `PacketType::OneRtt`.
+    #[must_use]
     pub fn with_type(
         ty: PacketType, packet_number: Option<u64>, version: Option<u32>,
         scid: Option<&[u8]>, dcid: Option<&[u8]>,
     ) -> Self {
         match ty {
             PacketType::OneRtt =>
-                PacketHeader::new(ty, packet_number, None, None, None, None, None),
+                Self::new(ty, packet_number, None, None, None, None, None),
 
-            _ => PacketHeader::new(
-                ty,
-                packet_number,
-                None,
-                None,
-                version,
-                scid,
-                dcid,
-            ),
+            _ => Self::new(ty, packet_number, None, None, version, scid, dcid),
         }
     }
 }
@@ -1103,7 +1092,7 @@ pub enum EcnState {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug, Default)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug, Default)]
 pub struct EcnStateUpdated {
     pub old: Option<EcnState>,
     pub new: EcnState,
