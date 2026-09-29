@@ -8,6 +8,10 @@ name: Deploy
 env:
   RUSTDOCFLAGS: "--cfg docsrs"
 
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   docs:
     runs-on: ubuntu-latest
