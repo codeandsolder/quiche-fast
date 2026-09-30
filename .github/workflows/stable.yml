@@ -111,7 +111,7 @@ jobs:
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
       # Cargo. H3 test credentials are embedded at compile time and materialized
       # to a runtime temp path, so canonical Rust paths are safe again.
-      # Final acceptance exercises bounded local-first ci-workflows main.
+      # Warm acceptance exercises the merged canonical L0 snapshot.
       ephemeral-cargo: false
       canonical-rust: true
 
