@@ -1992,7 +1992,7 @@ pub extern "C" fn quiche_path_event_new(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2008,7 +2008,7 @@ pub extern "C" fn quiche_path_event_validated(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2024,7 +2024,7 @@ pub extern "C" fn quiche_path_event_failed_validation(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2040,7 +2040,7 @@ pub extern "C" fn quiche_path_event_closed(
             *peer_addr_len = std_addr_to_c(peer, peer_addr)
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2062,7 +2062,7 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
             *peer_addr_len = std_addr_to_c(&new.1, peer_addr)
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2078,7 +2078,7 @@ pub extern "C" fn quiche_path_event_peer_migrated(
             *peer_addr_len = std_addr_to_c(peer, peer_addr);
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
@@ -2099,7 +2099,7 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
             *pmtu = *value;
         },
 
-        _ => return,
+        _ => {},
     }
 }
 
