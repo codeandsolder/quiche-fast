@@ -24,11 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#![expect(
-    clippy::collapsible_match,
-    reason = "Keeping nested matches preserves protocol-state structure and readability"
-)]
-
 //! Bridging the gap between [quiche] and [tokio].
 //!
 //! tokio-quiche connects [quiche::Connection]s and [quiche::h3::Connection]s to

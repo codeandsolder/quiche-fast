@@ -457,10 +457,6 @@ fn main() {
                 // is not much anyone can do to recover.
                 let app_proto = client.conn.application_proto();
 
-                #[expect(
-                    clippy::box_default,
-                    reason = "The explicit boxed type documents the selected HTTP/0.9 implementation"
-                )]
                 if alpns::HTTP_09.contains(&app_proto) {
                     client.http_conn = Some(Box::<Http09Conn>::default());
 
