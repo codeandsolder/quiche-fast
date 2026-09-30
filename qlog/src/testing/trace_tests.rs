@@ -34,8 +34,10 @@ use crate::Event;
 use crate::Trace;
 use crate::TraceSeq;
 
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
 #[test]
-fn trace_no_events() {
+fn trace_no_events() -> TestResult {
     let log_string = r#"{
   "title": "Quiche qlog trace",
   "description": "Quiche qlog trace description",
@@ -48,15 +50,17 @@ fn trace_no_events() {
 
     let trace = make_trace();
 
-    let serialized = serde_json::to_string_pretty(&trace).unwrap();
+    let serialized = serde_json::to_string_pretty(&trace)?;
     pretty_assertions::assert_eq!(serialized, log_string);
 
-    let deserialized: Trace = serde_json::from_str(&serialized).unwrap();
+    let deserialized: Trace = serde_json::from_str(&serialized)?;
     pretty_assertions::assert_eq!(deserialized, trace);
+
+    Ok(())
 }
 
 #[test]
-fn trace_seq_no_events() {
+fn trace_seq_no_events() -> TestResult {
     let log_string = r#"{
   "title": "Quiche qlog trace",
   "description": "Quiche qlog trace description",
@@ -68,15 +72,17 @@ fn trace_seq_no_events() {
 
     let trace = make_trace_seq();
 
-    let serialized = serde_json::to_string_pretty(&trace).unwrap();
+    let serialized = serde_json::to_string_pretty(&trace)?;
     pretty_assertions::assert_eq!(serialized, log_string);
 
-    let deserialized: TraceSeq = serde_json::from_str(&serialized).unwrap();
+    let deserialized: TraceSeq = serde_json::from_str(&serialized)?;
     pretty_assertions::assert_eq!(deserialized, trace);
+
+    Ok(())
 }
 
 #[test]
-fn trace_single_transport_event() {
+fn trace_single_transport_event() -> TestResult {
     let log_string = r#"{
   "title": "Quiche qlog trace",
   "description": "Quiche qlog trace description",
@@ -147,9 +153,11 @@ fn trace_single_transport_event() {
 
     trace.push_event(ev);
 
-    let serialized = serde_json::to_string_pretty(&trace).unwrap();
+    let serialized = serde_json::to_string_pretty(&trace)?;
     pretty_assertions::assert_eq!(serialized, log_string);
 
-    let deserialized: Trace = serde_json::from_str(&serialized).unwrap();
+    let deserialized: Trace = serde_json::from_str(&serialized)?;
     pretty_assertions::assert_eq!(deserialized, trace);
+
+    Ok(())
 }

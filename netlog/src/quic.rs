@@ -29,6 +29,10 @@ use serde::Serialize;
 
 use super::EventHeader;
 
+#[allow(
+    clippy::enum_variant_names,
+    reason = "Variants mirror Chrome netlog QUIC event names and are part of the public API"
+)]
 #[derive(Debug)]
 pub enum Event {
     QuicSession(QuicSessionEvent),
@@ -115,16 +119,16 @@ impl From<String> for TransportParameters {
     fn from(value: String) -> Self {
         if value.len() < 3 {
             // String is probably bogus, so just return defaults
-            return Default::default();
+            return Self::default();
         }
 
-        let mut tp = TransportParameters::default();
+        let mut tp = Self::default();
 
         // The format is quite gnarly, potentially this could be parsed using
         // regex but doing something very simple for now.
         let inner = &value[1..value.len() - 1];
         let last_version_pos = inner.rfind(']').unwrap_or_default();
-        tp.versions = inner[0..last_version_pos + 1].to_string();
+        tp.versions = inner[0..=last_version_pos].to_string();
         let rest = &inner[last_version_pos + 2..inner.len()];
 
         let mut split = rest.split(' ').peekable();
@@ -330,19 +334,24 @@ pub struct QuicSessionClosedEvent {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Explicit wire-event dispatch is easier to audit than splitting the protocol mapping across helpers"
+)]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {
     match event_hdr.ty_string.as_str() {
         "QUIC_SESSION" =>
             if event_hdr.phase_string == "PHASE_BEGIN" {
-                let ev: QuicSessionEvent = serde_json::from_slice(event).unwrap();
+                let ev: QuicSessionEvent = super::decode_event(event)?;
                 return Some(super::Event::Quic(Event::QuicSession(ev)));
             },
 
         "QUIC_SESSION_TRANSPORT_PARAMETERS_SENT" => {
             let ev: QuicSessionTransportParametersSentEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionTransportParametersSent(ev),
             ));
@@ -350,7 +359,7 @@ pub fn parse_event(
 
         "QUIC_SESSION_TRANSPORT_PARAMETERS_RECEIVED" => {
             let ev: QuicSessionTransportParametersReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionTransportParametersReceived(ev),
             ));
@@ -358,7 +367,7 @@ pub fn parse_event(
 
         "QUIC_SESSION_STREAM_FRAME_RECEIVED" => {
             let ev: QuicSessionStreamFrameReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionStreamFrameReceived(ev),
             ));
@@ -366,19 +375,15 @@ pub fn parse_event(
 
         "QUIC_SESSION_STOP_SENDING_FRAME_SENT" => {
             let ev: QuicSessionStopSendingFrameSentEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionStopSendingFrameSent(ev),
             ));
         },
 
-        "QUIC_SESSION_STOP_SENDING_FRAME_RECEIVED" => {
-            // TODO
-        },
-
         "QUIC_SESSION_RST_STREAM_FRAME_SENT" => {
             let ev: QuicSessionRstStreamFrameSentEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionRstStreamFrameSent(ev),
             ));
@@ -386,7 +391,7 @@ pub fn parse_event(
 
         "QUIC_SESSION_RST_STREAM_FRAME_RECEIVED" => {
             let ev: QuicSessionRstStreamFrameReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionRstStreamFrameReceived(ev),
             ));
@@ -394,7 +399,7 @@ pub fn parse_event(
 
         "QUIC_SESSION_UNAUTHENTICATED_PACKET_HEADER_RECEIVED" => {
             let ev: QuicSessionUnauthenticatedPacketHeaderReceived =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
 
             return Some(super::Event::Quic(
                 Event::QuicSessionUnauthenticatedPacketHeaderReceived(ev),
@@ -402,64 +407,52 @@ pub fn parse_event(
         },
 
         "QUIC_SESSION_PACKET_SENT" => {
-            let ev: QuicSessionPacketSent =
-                serde_json::from_slice(event).unwrap();
+            let ev: QuicSessionPacketSent = super::decode_event(event)?;
 
             return Some(super::Event::Quic(Event::QuicSessionPacketSent(ev)));
         },
 
-        "QUIC_SESSION_PACKET_RETRANSMITTED" => {
-            // TODO
-        },
-
         "QUIC_SESSION_ACK_FRAME_SENT" => {
-            let ev: QuicSessionAckFrameSent =
-                serde_json::from_slice(event).unwrap();
+            let ev: QuicSessionAckFrameSent = super::decode_event(event)?;
 
             return Some(super::Event::Quic(Event::QuicSessionAckFrameSent(ev)));
         },
 
         "QUIC_SESSION_ACK_FRAME_RECEIVED" => {
-            let ev: QuicSessionAckFrameReceived =
-                serde_json::from_slice(event).unwrap();
+            let ev: QuicSessionAckFrameReceived = super::decode_event(event)?;
 
             return Some(super::Event::Quic(Event::QuicSessionAckFrameReceived(
                 ev,
             )));
         },
 
-        "QUIC_SESSION_PACKET_LOST" => {
-            // TODO
-        },
-
         "QUIC_SESSION_CLOSED" => {
-            let ev: QuicSessionClosedEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: QuicSessionClosedEvent = super::decode_event(event)?;
 
             return Some(super::Event::Quic(Event::QuicSessionClosed(ev)));
         },
 
         "QUIC_SESSION_BLOCKED_FRAME_RECEIVED" => {
             let ev: QuicSessionBlockedFrameReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionBlockedFrameReceived(ev),
             ));
         },
 
-        "QUIC_SESSION_STREAMS_BLOCKED_FRAME_RECEIVED" => {
-            // TODO
-        },
-
         "QUIC_SESSION_WINDOW_UPDATE_FRAME_SENT" => {
             let ev: QuicSessionWindowUpdateFrameSentEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionWindowUpdateFrameSent(ev),
             ));
         },
 
-        // Other events observed in netlogs but not currently supported.
+        // Known events that are intentionally ignored for now.
+        "QUIC_SESSION_STOP_SENDING_FRAME_RECEIVED" |
+        "QUIC_SESSION_PACKET_RETRANSMITTED" |
+        "QUIC_SESSION_PACKET_LOST" |
+        "QUIC_SESSION_STREAMS_BLOCKED_FRAME_RECEIVED" |
         "QUIC_ACCEPT_CH_FRAME_RECEIVED" |
         "QUIC_CHROMIUM_CLIENT_STREAM_READ_EARLY_HINTS_RESPONSE_HEADERS" |
         "QUIC_CHROMIUM_CLIENT_STREAM_READ_RESPONSE_HEADERS" |
@@ -542,9 +535,7 @@ pub fn parse_event(
         "QUIC_SESSION_STREAM_FRAME_COALESCED" |
         "QUIC_SESSION_STREAM_FRAME_SENT" |
         "QUIC_SESSION_VERSION_NEGOTIATED" |
-        "QUIC_SESSION_VERSION_NEGOTIATION_PACKET_RECEIVED" => (),
-
-        // Most likely uninteresting events
+        "QUIC_SESSION_VERSION_NEGOTIATION_PACKET_RECEIVED" |
         "QUIC_SESSION_PACKET_RECEIVED" |
         "QUIC_CONNECTION_MIGRATION_MODE" |
         "QUIC_STREAM_FACTORY_JOB" |
@@ -554,9 +545,7 @@ pub fn parse_event(
         "QUIC_STREAM_FACTORY_JOB_STALE_HOST_NOT_USED_ON_CONNECTION" |
         "QUIC_STREAM_FACTORY_JOB_STALE_HOST_RESOLUTION_MATCHED" |
         "QUIC_STREAM_FACTORY_JOB_STALE_HOST_RESOLUTION_NO_MATCH" |
-        "QUIC_STREAM_FACTORY_JOB_STALE_HOST_TRIED_ON_CONNECTION" => (),
-
-        // Ignored since it contains no extra params
+        "QUIC_STREAM_FACTORY_JOB_STALE_HOST_TRIED_ON_CONNECTION" |
         "QUIC_SESSION_PACKET_AUTHENTICATED" => (),
 
         // The netlog format is continually evolving, log any unknown types

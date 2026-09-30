@@ -48,7 +48,10 @@ pub(crate) struct InboundHeaders {
 /// Wherever endpoint-specific logic is required, a hook should be created in
 /// this trait and this hook then called in the appropriate [H3Driver] code.
 /// The hook can store its own data inside the [H3Driver] struct.
-#[allow(private_interfaces, unused)]
+#[expect(
+    private_interfaces,
+    reason = "The public hook surface intentionally seals associated implementation types"
+)]
 pub trait DriverHooks: Sized + Send + 'static {
     /// The type of [`H3Event`]s emitted by an [H3Driver] using these hooks.
     /// The concrete type is expected to wrap [`H3Event`].
@@ -92,7 +95,7 @@ pub trait DriverHooks: Sized + Send + 'static {
     /// Determines whether the hook's `wait_for_action` future will be polled
     /// as part of `ApplicationOverQuic::wait_for_data`. Defaults to `false` and
     /// must be overridden if `wait_for_action` is overridden.
-    fn has_wait_action(driver: &mut H3Driver<Self>) -> bool {
+    fn has_wait_action(_driver: &mut H3Driver<Self>) -> bool {
         false
     }
 
@@ -101,7 +104,7 @@ pub trait DriverHooks: Sized + Send + 'static {
     /// sources for the [H3Driver]. Note that the future will be dropped
     /// before it resolves if another input is available first.
     fn wait_for_action(
-        &mut self, qconn: &mut QuicheConnection,
+        &mut self, _qconn: &mut QuicheConnection,
     ) -> impl Future<Output = H3ConnectionResult<()>> + Send {
         std::future::pending()
     }

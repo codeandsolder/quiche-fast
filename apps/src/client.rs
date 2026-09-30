@@ -458,8 +458,9 @@ pub fn connect(
 
                 quiche::PathEvent::PeerMigrated(..) => unreachable!(),
 
-                quiche::PathEvent::PmtuUpdated { local, peer, pmtu } =>
-                    info!("Path ({local}, {peer}) validated PMTU {pmtu}"),
+                quiche::PathEvent::PmtuUpdated { local, peer, pmtu } => {
+                    info!("Path ({local}, {peer}) validated PMTU {pmtu}")
+                },
 
                 _ => (),
             }

@@ -118,7 +118,10 @@ impl RttStats {
         self.smoothed_rtt
     }
 
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Read through the gcongestion recovery path when that optional congestion controller is enabled"
+    )]
     pub(crate) fn latest_rtt(&self) -> Duration {
         self.latest_rtt
     }

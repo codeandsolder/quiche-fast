@@ -376,9 +376,12 @@
 //! [boring]: https://crates.io/crates/boring
 //! [qlog]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema
 
-#![allow(clippy::upper_case_acronyms)]
-#![warn(missing_docs)]
-#![warn(unused_qualifications)]
+#![deny(missing_docs)]
+#![deny(unused_qualifications)]
+#![expect(
+    clippy::upper_case_acronyms,
+    reason = "Protocol and C API names intentionally use standardized acronyms"
+)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
@@ -1988,7 +1991,10 @@ impl<F: BufFactory> Connection<F> {
         )
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn with_tls(
         scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
         client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
@@ -5518,7 +5524,10 @@ impl<F: BufFactory> Connection<F> {
                 len: PAYLOAD_MIN_LEN - payload_len,
             };
 
-            #[allow(unused_assignments)]
+            #[expect(
+                unused_assignments,
+                reason = "Current control flow intentionally overwrites this value on some paths"
+            )]
             if push_frame_to_pkt!(b, frames, frame, left) {
                 in_flight = true;
             }

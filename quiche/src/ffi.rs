@@ -743,7 +743,10 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 
 #[no_mangle]
 #[cfg(not(feature = "custom-client-dcid"))]
-#[allow(unused_variables)]
+#[allow(
+    unused_variables,
+    reason = "Feature-disabled FFI stub preserves the public ABI while rejecting every call"
+)]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
     local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,

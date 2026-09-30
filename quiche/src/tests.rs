@@ -13468,7 +13468,10 @@ fn server_qlog() {
     pipe.server.qlog_streamer().unwrap().finish_log().unwrap();
 
     let raw = pipe.server.qlog_streamer().unwrap().writer();
-    #[allow(clippy::borrowed_box)]
+    #[expect(
+        clippy::borrowed_box,
+        reason = "The boxed writer representation is required by this API or test downcast"
+    )]
     let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(raw) };
     let bytes = w.get_ref().clone();
 

@@ -36,7 +36,6 @@ use tokio::time::timeout;
 use tokio_quiche::listen;
 use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::settings::Hooks;
-use tokio_quiche::settings::TlsCertificatePaths;
 use tokio_quiche::ConnectionParams;
 use tokio_quiche::InitialQuicConnection;
 
@@ -189,11 +188,7 @@ async fn test_ioworker_state_machine_pause() {
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", socket.local_addr().unwrap().port());
 
-    let tls_cert_settings = TlsCertificatePaths {
-        cert: TEST_CERT_FILE,
-        private_key: TEST_KEY_FILE,
-        kind: tokio_quiche::settings::CertificateKind::X509,
-    };
+    let tls_cert_settings = test_certificate_paths();
 
     let hooks = Hooks {
         connection_hook: Some(TestConnectionHook::new()),

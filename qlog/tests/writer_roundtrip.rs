@@ -37,8 +37,12 @@
 //! which is the reusable value of owning compression in the qlog
 //! crate.
 
+use std::io;
+use std::io::Read;
 use std::path::Path;
 use std::time::Instant;
+
+type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 use qlog::events::quic;
 use qlog::events::EventData;
@@ -78,15 +82,14 @@ fn make_event() -> EventData {
     })
 }
 
-/// Drive a `QlogStreamer` from start_log through one event to
-/// finish_log, through `make_qlog_writer_from_path(path,
+/// Drive a `QlogStreamer` from `start_log` through one event to
+/// `finish_log`, through `make_qlog_writer_from_path(path,
 /// compression)`, and return the path of the emitted file.
 fn emit_one_event(
     compression: QlogCompression, dir: &Path,
-) -> std::path::PathBuf {
+) -> TestResult<std::path::PathBuf> {
     let path = dir.join(qlog_file_name("test", compression));
-    let writer = make_qlog_writer_from_path(&path, compression)
-        .expect("make_qlog_writer_from_path");
+    let writer = make_qlog_writer_from_path(&path, compression)?;
 
     let mut streamer = QlogStreamer::new(
         Some("round-trip test".to_string()),
@@ -98,30 +101,28 @@ fn emit_one_event(
         writer,
     );
 
-    streamer.start_log().expect("start_log");
-    streamer
-        .add_event_data_now(make_event())
-        .expect("add_event_data_now");
-    streamer.finish_log().expect("finish_log");
+    streamer.start_log()?;
+    streamer.add_event_data_now(make_event())?;
+    streamer.finish_log()?;
 
     // Drop the streamer so the compressor's frame trailer is flushed
     // (in particular for the zstd variant, which relies on
     // `ZstdFinishOnDrop::drop` to write the trailer).
     drop(streamer);
 
-    path
+    Ok(path)
 }
 
 /// Open `path` via `QlogSeqReader::with_file` and assert the header
 /// plus at least one event are produced.
-fn assert_roundtrip(path: &Path) {
-    let mut reader =
-        QlogSeqReader::with_file(path).expect("QlogSeqReader::with_file");
+fn assert_roundtrip(path: &Path) -> TestResult {
+    let mut reader = QlogSeqReader::with_file(path)?;
     let header = reader.qlog.clone();
     let events: Vec<Event> = (&mut reader).collect();
 
     assert_eq!(header.serialization_format, "JSON-SEQ");
     assert!(!events.is_empty(), "expected at least one qlog event");
+    Ok(())
 }
 
 /// Read the leading bytes of `path` and assert they match the magic
@@ -131,13 +132,9 @@ fn assert_roundtrip(path: &Path) {
 /// this check the filename suffix would still match and
 /// [`assert_roundtrip`] would only fail later on the decoder side,
 /// far from the writer.
-fn assert_file_magic(path: &Path, compression: QlogCompression) {
-    use std::io::Read;
+fn assert_file_magic(path: &Path, compression: QlogCompression) -> TestResult {
     let mut bytes = [0u8; 4];
-    let n = std::fs::File::open(path)
-        .expect("open qlog file")
-        .read(&mut bytes)
-        .expect("read magic bytes");
+    let n = std::fs::File::open(path)?.read(&mut bytes)?;
     assert!(n >= 4, "qlog file too short to inspect magic: {n} bytes");
 
     match compression {
@@ -161,48 +158,53 @@ fn assert_file_magic(path: &Path, compression: QlogCompression) {
             "expected zstd magic, got {bytes:02x?}"
         ),
     }
+
+    Ok(())
 }
 
 #[test]
-fn roundtrip_none() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = emit_one_event(QlogCompression::None, dir.path());
+fn roundtrip_none() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = emit_one_event(QlogCompression::None, dir.path())?;
     assert!(
-        path.to_str().unwrap().ends_with(".sqlog"),
+        path.to_string_lossy().ends_with(".sqlog"),
         "expected .sqlog extension, got {path:?}"
     );
-    assert_file_magic(&path, QlogCompression::None);
-    assert_roundtrip(&path);
+    assert_file_magic(&path, QlogCompression::None)?;
+    assert_roundtrip(&path)?;
+    Ok(())
 }
 
 #[cfg(feature = "gzip")]
 #[test]
-fn roundtrip_gzip() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = emit_one_event(QlogCompression::Gzip, dir.path());
+fn roundtrip_gzip() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = emit_one_event(QlogCompression::Gzip, dir.path())?;
     assert!(
-        path.to_str().unwrap().ends_with(".sqlog.gz"),
+        path.to_string_lossy().ends_with(".sqlog.gz"),
         "expected .sqlog.gz extension, got {path:?}"
     );
-    assert_file_magic(&path, QlogCompression::Gzip);
-    assert_roundtrip(&path);
+    assert_file_magic(&path, QlogCompression::Gzip)?;
+    assert_roundtrip(&path)?;
+    Ok(())
 }
 
 #[cfg(feature = "zstd")]
 #[test]
-fn roundtrip_zstd() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = emit_one_event(QlogCompression::Zstd, dir.path());
+fn roundtrip_zstd() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = emit_one_event(QlogCompression::Zstd, dir.path())?;
     assert!(
-        path.to_str().unwrap().ends_with(".sqlog.zst"),
+        path.to_string_lossy().ends_with(".sqlog.zst"),
         "expected .sqlog.zst extension, got {path:?}"
     );
-    assert_file_magic(&path, QlogCompression::Zstd);
+    assert_file_magic(&path, QlogCompression::Zstd)?;
     // If `ZstdFinishOnDrop::drop` failed to write the trailer,
     // `QlogSeqReader::with_file` would observe a truncated frame and
     // either fail to parse the header or the iterator would stop
     // early.
-    assert_roundtrip(&path);
+    assert_roundtrip(&path)?;
+    Ok(())
 }
 
 /// Proves that both the `gzip` and `zstd` features can be enabled in
@@ -210,28 +212,33 @@ fn roundtrip_zstd() {
 /// decoder by extension for each.
 #[cfg(all(feature = "gzip", feature = "zstd"))]
 #[test]
-fn roundtrip_both_features_coexist() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let gz = emit_one_event(QlogCompression::Gzip, dir.path());
+fn roundtrip_both_features_coexist() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let gz = emit_one_event(QlogCompression::Gzip, dir.path())?;
     // Second file goes into a separate subdir so the two paths don't
     // collide (both use id = "test").
     let zst_dir = dir.path().join("zstd-subdir");
-    std::fs::create_dir(&zst_dir).expect("create subdir");
-    let zst = emit_one_event(QlogCompression::Zstd, &zst_dir);
+    std::fs::create_dir(&zst_dir)?;
+    let zst = emit_one_event(QlogCompression::Zstd, &zst_dir)?;
 
-    assert_file_magic(&gz, QlogCompression::Gzip);
-    assert_file_magic(&zst, QlogCompression::Zstd);
-    assert_roundtrip(&gz);
-    assert_roundtrip(&zst);
+    assert_file_magic(&gz, QlogCompression::Gzip)?;
+    assert_file_magic(&zst, QlogCompression::Zstd)?;
+    assert_roundtrip(&gz)?;
+    assert_roundtrip(&zst)?;
+    Ok(())
 }
 
 /// Run `QlogSeqReader::with_file(path)`, expect an error, and assert
 /// the error message contains `expected_substr`. Mirrors
 /// `Result::expect_err` but does not require `T: Debug`
 /// ([`QlogSeqReader`] does not implement [`std::fmt::Debug`]).
-fn assert_with_file_err(path: &Path, expected_substr: &str) {
+fn assert_with_file_err(path: &Path, expected_substr: &str) -> TestResult {
     match QlogSeqReader::with_file(path) {
-        Ok(_) => panic!("expected error, got Ok for {path:?}"),
+        Ok(_) => Err(io::Error::other(format!(
+            "expected error, got Ok for {}",
+            path.display()
+        ))
+        .into()),
         Err(err) => {
             let msg = err.to_string();
             assert!(
@@ -239,6 +246,7 @@ fn assert_with_file_err(path: &Path, expected_substr: &str) {
                 "expected error message containing {expected_substr:?}, \
                  got {msg:?}"
             );
+            Ok(())
         },
     }
 }
@@ -250,11 +258,12 @@ fn assert_with_file_err(path: &Path, expected_substr: &str) {
 /// `archive.tar.gz` as a gzip-compressed qlog.
 #[cfg(feature = "gzip")]
 #[test]
-fn rejects_non_qlog_gz_extension() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn rejects_non_qlog_gz_extension() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let path = dir.path().join("archive.tar.gz");
-    std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "does not match a known qlog extension");
+    std::fs::write(&path, b"not a qlog file")?;
+    assert_with_file_err(&path, "does not match a known qlog extension")?;
+    Ok(())
 }
 
 /// Regression test: a bare `.gz` extension (without `.sqlog`) is also
@@ -262,29 +271,32 @@ fn rejects_non_qlog_gz_extension() {
 /// accepted these.
 #[cfg(feature = "gzip")]
 #[test]
-fn rejects_bare_gz_extension() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn rejects_bare_gz_extension() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.gz");
-    std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "does not match a known qlog extension");
+    std::fs::write(&path, b"not a qlog file")?;
+    assert_with_file_err(&path, "does not match a known qlog extension")?;
+    Ok(())
 }
 
 /// Regression test: a bare `.zst` extension (without `.sqlog`) is
 /// rejected. Symmetric to [`rejects_bare_gz_extension`].
 #[cfg(feature = "zstd")]
 #[test]
-fn rejects_bare_zst_extension() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn rejects_bare_zst_extension() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.zst");
-    std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "does not match a known qlog extension");
+    std::fs::write(&path, b"not a qlog file")?;
+    assert_with_file_err(&path, "does not match a known qlog extension")?;
+    Ok(())
 }
 
 /// Regression test: unknown extensions surface a clear error message.
 #[test]
-fn rejects_unknown_extension() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn rejects_unknown_extension() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let path = dir.path().join("data.txt");
-    std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "does not match a known qlog extension");
+    std::fs::write(&path, b"not a qlog file")?;
+    assert_with_file_err(&path, "does not match a known qlog extension")?;
+    Ok(())
 }

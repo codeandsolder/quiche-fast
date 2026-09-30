@@ -82,7 +82,7 @@ struct QueueShard<T> {
 
 impl<T> QueueShard<T> {
     const fn new(trim: usize, max: usize, name: &'static str) -> Self {
-        QueueShard {
+        Self {
             queue: SegQueue::new(),
             elem_cnt: AtomicUsize::new(0),
             trim,
@@ -102,7 +102,7 @@ pub struct Pooled<T: Default + Reuse + 'static> {
 impl<T: Default + Reuse> Pooled<T> {
     fn new(inner: T, shard: &'static QueueShard<T>) -> Self {
         buffer_pool::pool_active_count(shard.name).inc();
-        Pooled { inner, pool: shard }
+        Self { inner, pool: shard }
     }
 
     pub fn into_inner(mut self) -> T {
@@ -145,7 +145,6 @@ impl<T: Default + Reuse> Drop for Pooled<T> {
 macro_rules! array_impl_new_queues {
     {$n:expr, $t:ident $($ts:ident)*} => {
         impl<$t: Default + Reuse> Pool<{$n}, $t> {
-            #[allow(dead_code)]
             pub const fn new(limit: usize, trim: usize, name: &'static str) -> Self {
                 let limit = limit / $n;
                 Pool {
@@ -168,16 +167,12 @@ impl<const S: usize, T: Default + Reuse> Pool<S, T> {
     pub fn get(&'static self) -> Pooled<T> {
         let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % S;
         let shard = &self.queues[shard];
-        let inner = match shard.queue.pop() {
-            Some(el) => {
-                shard.elem_cnt.fetch_sub(1, Ordering::Relaxed);
-                buffer_pool::pool_idle_count(shard.name).dec();
-                buffer_pool::pool_idle_bytes(shard.name)
-                    .dec_by(el.capacity() as u64);
-                el
-            },
-            None => Default::default(),
-        };
+        let inner = shard.queue.pop().map_or_else(T::default, |el| {
+            shard.elem_cnt.fetch_sub(1, Ordering::Relaxed);
+            buffer_pool::pool_idle_count(shard.name).dec();
+            buffer_pool::pool_idle_bytes(shard.name).dec_by(el.capacity() as u64);
+            el
+        });
 
         Pooled::new(inner, shard)
     }
@@ -199,6 +194,10 @@ impl<const S: usize, T: Default + Reuse> Pool<S, T> {
         pooled
     }
 
+    #[allow(
+        clippy::wrong_self_convention,
+        reason = "Preserve the established public Pool::from_owned API"
+    )]
     pub fn from_owned(&'static self, inner: T) -> Pooled<T> {
         let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % S;
         let shard = &self.queues[shard];
@@ -269,6 +268,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "One end-to-end test deliberately exercises the complete shard lifecycle in order"
+    )]
     fn test_sharding() {
         const SHARDS: usize = 3;
         const MAX_IN_SHARD: usize = 2;
@@ -282,7 +285,7 @@ mod tests {
 
         let bufs = (0..SHARDS * 4).map(|_| pool.get()).collect::<Vec<_>>();
 
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 0);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), 0);
@@ -296,13 +299,13 @@ mod tests {
             assert!(buf.is_empty());
             // Check the buffer is sharded properly.
             assert_eq!(
-                buf.pool as *const _,
-                &pool.queues[i % SHARDS] as *const _
+                std::ptr::from_ref(buf.pool),
+                std::ptr::from_ref(&pool.queues[i % SHARDS])
             );
         }
 
         // Shards are still empty.
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 0);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), 0);
@@ -326,8 +329,8 @@ mod tests {
         for (i, buf) in bufs.iter().enumerate() {
             // Check the buffer is sharded properly.
             assert_eq!(
-                buf.pool as *const _,
-                &pool.queues[i % SHARDS] as *const _
+                std::ptr::from_ref(buf.pool),
+                std::ptr::from_ref(&pool.queues[i % SHARDS])
             );
             // Check that the buffer was properly extended
             assert_eq!(&buf[..], &[0, 1]);
@@ -339,7 +342,7 @@ mod tests {
 
         drop(bufs);
 
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), MAX_IN_SHARD);
         }
         assert_eq!(
@@ -357,12 +360,12 @@ mod tests {
             assert!(buf.is_empty());
             // Check the buffer is sharded properly.
             assert_eq!(
-                buf.pool as *const _,
-                &pool.queues[i % SHARDS] as *const _
+                std::ptr::from_ref(buf.pool),
+                std::ptr::from_ref(&pool.queues[i % SHARDS])
             );
         }
 
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 1);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), SHARDS as u64);
@@ -374,7 +377,7 @@ mod tests {
 
         // Get more buffers from the pool.
         let bufs2 = (0..SHARDS).map(|_| pool.get()).collect::<Vec<_>>();
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 0);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), 0);
@@ -386,7 +389,7 @@ mod tests {
 
         // Get even more buffers.
         let bufs3 = (0..SHARDS).map(|_| pool.get()).collect::<Vec<_>>();
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 0);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), 0);
@@ -398,7 +401,7 @@ mod tests {
 
         // Now begin dropping.
         drop(bufs);
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), 1);
         }
         assert_eq!(buffer_pool::pool_idle_count(POOL_NAME).get(), SHARDS as u64);
@@ -409,7 +412,7 @@ mod tests {
         );
 
         drop(bufs2);
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), MAX_IN_SHARD);
         }
         assert_eq!(
@@ -423,7 +426,7 @@ mod tests {
         );
 
         drop(bufs3);
-        for shard in pool.queues.iter() {
+        for shard in &pool.queues {
             // Can't get over limit.
             assert_eq!(shard.elem_cnt.load(Ordering::Relaxed), MAX_IN_SHARD);
         }

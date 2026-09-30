@@ -192,7 +192,10 @@ impl Pacer {
         self.pacing_limited = self.sender.can_send(bytes_in_flight + bytes);
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     #[inline]
     pub fn on_congestion_event(
         &mut self, rtt_updated: bool, prior_in_flight: usize,

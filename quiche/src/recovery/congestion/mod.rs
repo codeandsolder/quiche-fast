@@ -192,7 +192,6 @@ impl Congestion {
         self.app_limited = v;
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn on_packet_sent(
         &mut self, bytes_in_flight: usize, sent_bytes: usize, now: Instant,
         pkt: &mut Sent, bytes_lost: u64, in_flight: bool,
