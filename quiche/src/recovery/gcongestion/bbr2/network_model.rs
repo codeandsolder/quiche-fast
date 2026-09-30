@@ -690,8 +690,9 @@ impl BBRv2NetworkModel {
         }
 
         self.rounds_with_queueing += 1;
-        #[allow(clippy::absurd_extreme_comparisons)]
-        if self.rounds_with_queueing >= params.max_startup_queue_rounds {
+        if params.max_startup_queue_rounds > 0 &&
+            self.rounds_with_queueing >= params.max_startup_queue_rounds
+        {
             self.full_bandwidth_reached = true;
         }
     }
@@ -855,7 +856,10 @@ mod tests {
     /// As `ack_with_rtt`, but with explicit cwnd and inflight inputs.
     // Test harness: the extra cwnd/inflight knobs push this one over the
     // argument-count lint, which is not worth a builder struct in tests.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn ack_with_rtt_util(
         model: &mut BBRv2NetworkModel, params: &Params, pkt_num: u64,
         base: Instant, sent_offset: Duration, rtt: Duration, prior_cwnd: usize,

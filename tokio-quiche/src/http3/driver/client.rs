@@ -296,7 +296,10 @@ impl ClientHooks {
     }
 }
 
-#[allow(private_interfaces)]
+#[expect(
+    private_interfaces,
+    reason = "The public hook surface intentionally seals associated implementation types"
+)]
 impl DriverHooks for ClientHooks {
     type Command = ClientH3Command;
     type Event = ClientH3Event;

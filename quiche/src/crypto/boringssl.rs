@@ -10,7 +10,10 @@ use libc::c_int;
 use libc::c_uint;
 use libc::c_void;
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct EVP_AEAD_CTX {
     _unused: c_void,
@@ -172,7 +175,10 @@ impl Drop for PacketKey {
 }
 
 #[derive(Clone)]
-#[allow(clippy::large_enum_variant)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Boxing the large variant would add unnecessary indirection"
+)]
 pub(crate) enum HeaderProtectionKey {
     Aes(AES_KEY),
 

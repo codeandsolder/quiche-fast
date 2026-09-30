@@ -1,0 +1,22 @@
+name: Strict Rust
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  strict-rust:
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@main
+    with:
+      # Stage strict Clippy package-by-package. Legacy packages migrate in
+      # #52/#54/#55; source-policy scanning still covers the whole repository.
+      cargo-args: "--all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch"
+      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"

@@ -109,8 +109,8 @@ jobs:
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
-      # Cargo. Canonical Rust stays enabled: sccache v7 preserves rustc-reported
-      # runtime-visible env deps such as CARGO_MANIFEST_DIR.
+      # Cargo. H3 test credentials are embedded at compile time and materialized
+      # to a runtime temp path, so canonical Rust paths are safe again.
       ephemeral-cargo: false
       canonical-rust: true
 

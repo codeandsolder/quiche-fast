@@ -176,36 +176,36 @@ impl ActiveTasks {
     fn add_task_if(
         &self, handle: AbortHandle, cond: impl FnOnce() -> bool,
     ) -> Result<(), AbortHandle> {
-        use dashmap::Entry::*;
+        use dashmap::Entry;
         let id = handle.id();
 
         match self.tasks.entry(id) {
-            Vacant(e) => {
+            Entry::Vacant(e) => {
                 if !cond() {
                     return Err(handle);
                 }
                 e.insert(TaskEntry::Handle(handle));
             },
-            Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {
+            Entry::Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {
                 // Task was removed before it was added. Clear the map entry and
                 // drop the handle.
                 e.remove();
             },
-            Occupied(_) => panic!("tokio task ID already in use: {id}"),
+            Entry::Occupied(_) => return Err(handle),
         }
 
         Ok(())
     }
 
     fn remove_task(&self, id: task::Id) {
-        use dashmap::Entry::*;
+        use dashmap::Entry;
         match self.tasks.entry(id) {
-            Vacant(e) => {
+            Entry::Vacant(e) => {
                 // Task was not added yet, set a tombstone instead.
                 e.insert(TaskEntry::Tombstone);
             },
-            Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {},
-            Occupied(e) => {
+            Entry::Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {},
+            Entry::Occupied(e) => {
                 e.remove();
             },
         }
@@ -229,8 +229,12 @@ pub fn spawn_with_killswitch(
 }
 
 #[deprecated = "activate() was unnecessarily declared async. Use activate_now() instead."]
+#[expect(
+    clippy::unused_async,
+    reason = "Preserve the deprecated async API for source compatibility while callers migrate to activate_now"
+)]
 pub async fn activate() {
-    TASK_KILLSWITCH.activate()
+    TASK_KILLSWITCH.activate();
 }
 
 /// Triggers the killswitch, thereby scheduling all registered tasks to be
@@ -273,7 +277,9 @@ mod tests {
 
     impl Drop for TaskAbortSignal {
         fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -302,12 +308,15 @@ mod tests {
 
         killswitch.activate();
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            future::join_all(abort_signals),
-        )
-        .await
-        .expect("tasks should be killed within given timeframe");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                future::join_all(abort_signals),
+            )
+            .await
+            .is_ok(),
+            "tasks should be killed within given timeframe"
+        );
     }
 
     #[tokio::test]
@@ -322,16 +331,22 @@ mod tests {
         assert!(!signal_handle.is_finished());
         killswitch.activate();
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            future::join_all(abort_signals),
-        )
-        .await
-        .expect("tasks should be killed within given timeframe");
-
-        tokio::time::timeout(Duration::from_secs(1), signal_handle)
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                future::join_all(abort_signals),
+            )
             .await
-            .expect("killed() signal should have resolved")
-            .expect("signal task should join successfully");
+            .is_ok(),
+            "tasks should be killed within given timeframe"
+        );
+
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(1), signal_handle).await,
+                Ok(Ok(()))
+            ),
+            "killed() signal should resolve and join successfully"
+        );
     }
 }

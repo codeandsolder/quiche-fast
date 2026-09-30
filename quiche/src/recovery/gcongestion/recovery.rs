@@ -113,7 +113,13 @@ struct RecoveryEpoch {
     lost_frames_pto: VecDeque<frame::Frame>,
 
     /// The largest packet number sent in the packet number space so far.
-    #[allow(dead_code)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )
+    )]
     test_largest_sent_pkt_num_on_path: Option<u64>,
 }
 

@@ -898,16 +898,38 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::time;
 
-    const TEST_CERT_FILE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/",
-        "../quiche/examples/cert.crt"
-    );
-    const TEST_KEY_FILE: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/",
-        "../quiche/examples/cert.key"
-    );
+    fn test_credentials() -> (&'static str, &'static str) {
+        static CREDENTIALS: std::sync::OnceLock<(String, String)> =
+            std::sync::OnceLock::new();
+
+        let (cert, key) = CREDENTIALS.get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "tokio-quiche-test-credentials-{}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+
+            let cert = dir.join("cert.crt");
+            let key = dir.join("cert.key");
+            std::fs::write(
+                &cert,
+                include_bytes!("../../../../quiche/examples/cert.crt"),
+            )
+            .unwrap();
+            std::fs::write(
+                &key,
+                include_bytes!("../../../../quiche/examples/cert.key"),
+            )
+            .unwrap();
+
+            (
+                cert.to_string_lossy().into_owned(),
+                key.to_string_lossy().into_owned(),
+            )
+        });
+
+        (cert.as_str(), key.as_str())
+    }
 
     fn test_connect(host_port: String) {
         let h3i_config = h3i::config::Config::new()
@@ -939,9 +961,10 @@ mod tests {
             ..Default::default()
         };
 
+        let (cert, private_key) = test_credentials();
         let tls_cert_settings = TlsCertificatePaths {
-            cert: TEST_CERT_FILE,
-            private_key: TEST_KEY_FILE,
+            cert,
+            private_key,
             kind: crate::settings::CertificateKind::X509,
         };
 
@@ -1047,9 +1070,10 @@ mod tests {
 
     #[test]
     fn test_poll_packet_always_ready() {
+        let (cert, private_key) = test_credentials();
         let tls_cert_settings = TlsCertificatePaths {
-            cert: TEST_CERT_FILE,
-            private_key: TEST_KEY_FILE,
+            cert,
+            private_key,
             kind: crate::settings::CertificateKind::X509,
         };
         let params = ConnectionParams::new_server(

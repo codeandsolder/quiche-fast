@@ -1,3 +1,8 @@
+#![expect(
+    clippy::unreadable_literal,
+    reason = "HPACK Huffman codes intentionally mirror the RFC table verbatim"
+)]
+
 // (num-bits, bits)
 pub static ENCODE_TABLE: [(usize, u64); 257] = [
     (13, 0x1ff8),

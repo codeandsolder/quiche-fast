@@ -61,13 +61,22 @@ impl Level {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Algorithm {
-    #[allow(non_camel_case_types)]
+    #[expect(
+        non_camel_case_types,
+        reason = "Name mirrors the external C/BoringSSL ABI"
+    )]
     AES128_GCM,
 
-    #[allow(non_camel_case_types)]
+    #[expect(
+        non_camel_case_types,
+        reason = "Name mirrors the external C/BoringSSL ABI"
+    )]
     AES256_GCM,
 
-    #[allow(non_camel_case_types)]
+    #[expect(
+        non_camel_case_types,
+        reason = "Name mirrors the external C/BoringSSL ABI"
+    )]
     ChaCha20_Poly1305,
 }
 
@@ -111,13 +120,19 @@ impl Algorithm {
     }
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 pub struct EVP_AEAD {
     _unused: c_void,
 }
 
-#[allow(non_camel_case_types)]
+#[expect(
+    non_camel_case_types,
+    reason = "Name mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct EVP_MD {
     _unused: c_void,

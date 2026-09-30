@@ -26,8 +26,9 @@
 
 use crate::Bytes;
 use crate::Token;
-use http3::*;
-use quic::*;
+use http3::Http3EventType;
+use quic::QuicEventType;
+use quic::TransportError;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -58,6 +59,7 @@ use crate::TimeFormat;
 
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(from = "EventWire")]
 pub struct Event {
     pub time: f64,
 
@@ -82,8 +84,7 @@ pub struct Event {
 
     #[serde(flatten)]
     pub ex_data: Box<ExData>,
-
-    pub group_id: Option<Box<String>>,
+    pub group_id: Option<String>,
 
     pub time_format: Option<TimeFormat>,
 
@@ -91,21 +92,54 @@ pub struct Event {
     ty: EventType,
 }
 
+#[derive(Deserialize)]
+struct EventWire {
+    time: f64,
+
+    #[serde(flatten)]
+    data: EventData,
+
+    #[serde(flatten)]
+    ex_data: Box<ExData>,
+
+    group_id: Option<String>,
+
+    time_format: Option<TimeFormat>,
+}
+
+impl From<EventWire> for Event {
+    fn from(wire: EventWire) -> Self {
+        let ty = EventType::from(&wire.data);
+
+        Self {
+            time: wire.time,
+            data: wire.data,
+            ex_data: wire.ex_data,
+            group_id: wire.group_id,
+            time_format: wire.time_format,
+            ty,
+        }
+    }
+}
+
 impl Event {
     /// Returns a new `Event` object with the provided time and data.
+    #[must_use]
     pub fn with_time(time: f64, data: EventData) -> Self {
-        Self::with_time_ex(time, data, Default::default())
+        Self::with_time_ex(time, data, ExData::new())
     }
 
-    /// Returns a new `Event` object with the provided time, data and ex_data.
+    /// Returns a new `Event` object with the provided time, data and `ex_data`.
+    #[must_use]
     pub fn with_time_ex(time: f64, data: EventData, ex_data: ExData) -> Self {
         let ty = EventType::from(&data);
-        Event {
+
+        Self {
             time,
             data,
             ex_data: Box::new(ex_data),
-            group_id: Default::default(),
-            time_format: Default::default(),
+            group_id: None,
+            time_format: None,
             ty,
         }
     }
@@ -123,7 +157,7 @@ impl Eventable for Event {
 
 impl PartialEq for Event {
     // custom comparison to skip over the `ty` field
-    fn eq(&self, other: &Event) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.time == other.time &&
             self.data == other.data &&
             self.ex_data == other.ex_data &&
@@ -153,7 +187,7 @@ impl Eventable for JsonEvent {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EventImportance {
     #[default]
     Core,
@@ -162,124 +196,91 @@ pub enum EventImportance {
 }
 
 impl EventImportance {
-    /// Returns true if this importance level is included by `other`.
-    pub fn is_contained_in(&self, other: &EventImportance) -> bool {
-        match (other, self) {
-            (EventImportance::Core, EventImportance::Core) => true,
-
-            (EventImportance::Base, EventImportance::Core) |
-            (EventImportance::Base, EventImportance::Base) => true,
-
-            (EventImportance::Extra, EventImportance::Core) |
-            (EventImportance::Extra, EventImportance::Base) |
-            (EventImportance::Extra, EventImportance::Extra) => true,
-
-            (..) => false,
-        }
+    /// Returns true if this importance level is included by other.
+    #[must_use]
+    #[allow(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
+    )]
+    pub const fn is_contained_in(&self, other: &Self) -> bool {
+        matches!(
+            (*other, *self),
+            (Self::Core, Self::Core) |
+                (Self::Base, Self::Core | Self::Base) |
+                (Self::Extra, _)
+        )
     }
 }
 
 impl From<EventType> for EventImportance {
     fn from(ty: EventType) -> Self {
         match ty {
-            EventType::QuicEventType(QuicEventType::ServerListening) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::ConnectionStarted) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::ConnectionClosed) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::ConnectionIdUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::SpinBitUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::ConnectionStateUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::TupleAssigned) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::MtuUpdated) =>
-                EventImportance::Extra,
-
-            EventType::QuicEventType(QuicEventType::VersionInformation) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::AlpnInformation) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::ParametersSet) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::ParametersRestored) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::PacketSent) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::PacketReceived) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::PacketDropped) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::PacketBuffered) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::PacketsAcked) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::UdpDatagramsSent) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::UdpDatagramsReceived) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::UdpDatagramDropped) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::StreamStateUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::FramesProcessed) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::StreamDataMoved) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::DatagramDataMoved) =>
-                EventImportance::Base,
             EventType::QuicEventType(
-                QuicEventType::ConnectionDataBlockedUpdated,
-            ) => EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::StreamDataBlockedUpdated) =>
-                EventImportance::Extra,
+                QuicEventType::VersionInformation |
+                QuicEventType::AlpnInformation |
+                QuicEventType::ParametersSet |
+                QuicEventType::PacketSent |
+                QuicEventType::PacketReceived |
+                QuicEventType::RecoveryMetricsUpdated |
+                QuicEventType::PacketLost,
+            ) |
+            EventType::Http3EventType(
+                Http3EventType::FrameCreated | Http3EventType::FrameParsed,
+            ) |
+            EventType::LogLevelEventType(LogLevelEventType::Error) |
+            EventType::None => Self::Core,
+
             EventType::QuicEventType(
-                QuicEventType::DatagramDataBlockedUpdated,
-            ) => EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::MigrationStateUpdated) =>
-                EventImportance::Base,
+                QuicEventType::ConnectionStarted |
+                QuicEventType::ConnectionClosed |
+                QuicEventType::ConnectionIdUpdated |
+                QuicEventType::SpinBitUpdated |
+                QuicEventType::ConnectionStateUpdated |
+                QuicEventType::ParametersRestored |
+                QuicEventType::PacketDropped |
+                QuicEventType::PacketBuffered |
+                QuicEventType::StreamStateUpdated |
+                QuicEventType::StreamDataMoved |
+                QuicEventType::DatagramDataMoved |
+                QuicEventType::MigrationStateUpdated |
+                QuicEventType::KeyUpdated |
+                QuicEventType::KeyDiscarded |
+                QuicEventType::RecoveryParametersSet |
+                QuicEventType::CongestionStateUpdated,
+            ) |
+            EventType::Http3EventType(
+                Http3EventType::ParametersSet |
+                Http3EventType::ParametersRestored |
+                Http3EventType::StreamTypeSet |
+                Http3EventType::PriorityUpdated |
+                Http3EventType::DatagramCreated |
+                Http3EventType::DatagramParsed,
+            ) |
+            EventType::LogLevelEventType(LogLevelEventType::Warning) =>
+                Self::Base,
 
-            EventType::QuicEventType(QuicEventType::KeyUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::KeyDiscarded) =>
-                EventImportance::Base,
-
-            EventType::QuicEventType(QuicEventType::RecoveryParametersSet) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::RecoveryMetricsUpdated) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::CongestionStateUpdated) =>
-                EventImportance::Base,
-            EventType::QuicEventType(QuicEventType::TimerUpdated) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::PacketLost) =>
-                EventImportance::Core,
-            EventType::QuicEventType(QuicEventType::MarkedForRetransmit) =>
-                EventImportance::Extra,
-            EventType::QuicEventType(QuicEventType::EcnStateUpdated) =>
-                EventImportance::Extra,
-
-            EventType::Http3EventType(Http3EventType::ParametersSet) =>
-                EventImportance::Base,
-            EventType::Http3EventType(Http3EventType::StreamTypeSet) =>
-                EventImportance::Base,
-            EventType::Http3EventType(Http3EventType::PriorityUpdated) =>
-                EventImportance::Base,
-            EventType::Http3EventType(Http3EventType::FrameCreated) =>
-                EventImportance::Core,
-            EventType::Http3EventType(Http3EventType::FrameParsed) =>
-                EventImportance::Core,
-            EventType::Http3EventType(Http3EventType::DatagramCreated) =>
-                EventImportance::Base,
-            EventType::Http3EventType(Http3EventType::DatagramParsed) =>
-                EventImportance::Base,
-            EventType::Http3EventType(Http3EventType::PushResolved) =>
-                EventImportance::Extra,
-
-            _ => unimplemented!(),
+            EventType::QuicEventType(
+                QuicEventType::ServerListening |
+                QuicEventType::TupleAssigned |
+                QuicEventType::MtuUpdated |
+                QuicEventType::PacketsAcked |
+                QuicEventType::UdpDatagramsSent |
+                QuicEventType::UdpDatagramsReceived |
+                QuicEventType::UdpDatagramDropped |
+                QuicEventType::FramesProcessed |
+                QuicEventType::ConnectionDataBlockedUpdated |
+                QuicEventType::StreamDataBlockedUpdated |
+                QuicEventType::DatagramDataBlockedUpdated |
+                QuicEventType::TimerUpdated |
+                QuicEventType::MarkedForRetransmit |
+                QuicEventType::EcnStateUpdated,
+            ) |
+            EventType::Http3EventType(Http3EventType::PushResolved) |
+            EventType::LogLevelEventType(
+                LogLevelEventType::Info |
+                LogLevelEventType::Debug |
+                LogLevelEventType::Verbose,
+            ) => Self::Extra,
         }
     }
 }
@@ -291,119 +292,119 @@ pub trait Eventable {
 }
 
 impl From<&EventData> for EventType {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keeping the exhaustive EventData mapping in one match makes new variants fail compilation instead of being missed across helper functions"
+    )]
     fn from(event_data: &EventData) -> Self {
         match event_data {
             EventData::QuicServerListening { .. } =>
-                EventType::QuicEventType(QuicEventType::ServerListening),
+                Self::QuicEventType(QuicEventType::ServerListening),
             EventData::QuicConnectionStarted { .. } =>
-                EventType::QuicEventType(QuicEventType::ConnectionStarted),
+                Self::QuicEventType(QuicEventType::ConnectionStarted),
             EventData::QuicConnectionClosed { .. } =>
-                EventType::QuicEventType(QuicEventType::ConnectionClosed),
+                Self::QuicEventType(QuicEventType::ConnectionClosed),
             EventData::QuicConnectionIdUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::ConnectionIdUpdated),
+                Self::QuicEventType(QuicEventType::ConnectionIdUpdated),
             EventData::QuicSpinBitUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::SpinBitUpdated),
+                Self::QuicEventType(QuicEventType::SpinBitUpdated),
             EventData::QuicConnectionStateUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::ConnectionStateUpdated),
+                Self::QuicEventType(QuicEventType::ConnectionStateUpdated),
             EventData::QuicTupleAssigned { .. } =>
-                EventType::QuicEventType(QuicEventType::TupleAssigned),
+                Self::QuicEventType(QuicEventType::TupleAssigned),
             EventData::QuicMtuUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::MtuUpdated),
+                Self::QuicEventType(QuicEventType::MtuUpdated),
 
             EventData::QuicVersionInformation { .. } =>
-                EventType::QuicEventType(QuicEventType::VersionInformation),
+                Self::QuicEventType(QuicEventType::VersionInformation),
             EventData::QuicAlpnInformation { .. } =>
-                EventType::QuicEventType(QuicEventType::AlpnInformation),
+                Self::QuicEventType(QuicEventType::AlpnInformation),
             EventData::QuicParametersSet { .. } =>
-                EventType::QuicEventType(QuicEventType::ParametersSet),
+                Self::QuicEventType(QuicEventType::ParametersSet),
             EventData::QuicParametersRestored { .. } =>
-                EventType::QuicEventType(QuicEventType::ParametersRestored),
+                Self::QuicEventType(QuicEventType::ParametersRestored),
             EventData::QuicPacketSent { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketSent),
+                Self::QuicEventType(QuicEventType::PacketSent),
             EventData::QuicPacketReceived { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketReceived),
+                Self::QuicEventType(QuicEventType::PacketReceived),
             EventData::QuicPacketDropped { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketDropped),
+                Self::QuicEventType(QuicEventType::PacketDropped),
             EventData::QuicPacketBuffered { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketBuffered),
+                Self::QuicEventType(QuicEventType::PacketBuffered),
             EventData::QuicPacketsAcked { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketsAcked),
+                Self::QuicEventType(QuicEventType::PacketsAcked),
             EventData::QuicUdpDatagramsSent { .. } =>
-                EventType::QuicEventType(QuicEventType::UdpDatagramsSent),
+                Self::QuicEventType(QuicEventType::UdpDatagramsSent),
             EventData::QuicUdpDatagramsReceived { .. } =>
-                EventType::QuicEventType(QuicEventType::UdpDatagramsReceived),
+                Self::QuicEventType(QuicEventType::UdpDatagramsReceived),
             EventData::QuicUdpDatagramDropped { .. } =>
-                EventType::QuicEventType(QuicEventType::UdpDatagramDropped),
+                Self::QuicEventType(QuicEventType::UdpDatagramDropped),
             EventData::QuicStreamStateUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::StreamStateUpdated),
+                Self::QuicEventType(QuicEventType::StreamStateUpdated),
             EventData::QuicFramesProcessed { .. } =>
-                EventType::QuicEventType(QuicEventType::FramesProcessed),
+                Self::QuicEventType(QuicEventType::FramesProcessed),
             EventData::QuicStreamDataMoved { .. } =>
-                EventType::QuicEventType(QuicEventType::StreamDataMoved),
+                Self::QuicEventType(QuicEventType::StreamDataMoved),
             EventData::QuicDatagramDataMoved { .. } =>
-                EventType::QuicEventType(QuicEventType::DatagramDataMoved),
+                Self::QuicEventType(QuicEventType::DatagramDataMoved),
             EventData::QuicConnectionDataBlockedUpdated { .. } =>
-                EventType::QuicEventType(
-                    QuicEventType::ConnectionDataBlockedUpdated,
-                ),
+                Self::QuicEventType(QuicEventType::ConnectionDataBlockedUpdated),
             EventData::QuicStreamDataBlockedUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::StreamDataBlockedUpdated),
+                Self::QuicEventType(QuicEventType::StreamDataBlockedUpdated),
             EventData::QuicDatagramDataBlockedUpdated { .. } =>
-                EventType::QuicEventType(
-                    QuicEventType::DatagramDataBlockedUpdated,
-                ),
+                Self::QuicEventType(QuicEventType::DatagramDataBlockedUpdated),
             EventData::QuicMigrationStateUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::MigrationStateUpdated),
+                Self::QuicEventType(QuicEventType::MigrationStateUpdated),
 
             EventData::QuicKeyUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::KeyUpdated),
+                Self::QuicEventType(QuicEventType::KeyUpdated),
             EventData::QuicKeyDiscarded { .. } =>
-                EventType::QuicEventType(QuicEventType::KeyDiscarded),
+                Self::QuicEventType(QuicEventType::KeyDiscarded),
 
             EventData::QuicRecoveryParametersSet { .. } =>
-                EventType::QuicEventType(QuicEventType::RecoveryParametersSet),
+                Self::QuicEventType(QuicEventType::RecoveryParametersSet),
             EventData::QuicMetricsUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::RecoveryMetricsUpdated),
+                Self::QuicEventType(QuicEventType::RecoveryMetricsUpdated),
             EventData::QuicCongestionStateUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::CongestionStateUpdated),
+                Self::QuicEventType(QuicEventType::CongestionStateUpdated),
             EventData::QuicTimerUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::TimerUpdated),
+                Self::QuicEventType(QuicEventType::TimerUpdated),
             EventData::QuicPacketLost { .. } =>
-                EventType::QuicEventType(QuicEventType::PacketLost),
+                Self::QuicEventType(QuicEventType::PacketLost),
             EventData::QuicMarkedForRetransmit { .. } =>
-                EventType::QuicEventType(QuicEventType::MarkedForRetransmit),
+                Self::QuicEventType(QuicEventType::MarkedForRetransmit),
             EventData::QuicEcnStateUpdated { .. } =>
-                EventType::QuicEventType(QuicEventType::EcnStateUpdated),
+                Self::QuicEventType(QuicEventType::EcnStateUpdated),
 
             EventData::Http3ParametersSet { .. } =>
-                EventType::Http3EventType(Http3EventType::ParametersSet),
+                Self::Http3EventType(Http3EventType::ParametersSet),
             EventData::Http3ParametersRestored { .. } =>
-                EventType::Http3EventType(Http3EventType::ParametersRestored),
+                Self::Http3EventType(Http3EventType::ParametersRestored),
             EventData::Http3StreamTypeSet { .. } =>
-                EventType::Http3EventType(Http3EventType::StreamTypeSet),
+                Self::Http3EventType(Http3EventType::StreamTypeSet),
             EventData::Http3PriorityUpdated { .. } =>
-                EventType::Http3EventType(Http3EventType::PriorityUpdated),
+                Self::Http3EventType(Http3EventType::PriorityUpdated),
             EventData::Http3FrameCreated { .. } =>
-                EventType::Http3EventType(Http3EventType::FrameCreated),
+                Self::Http3EventType(Http3EventType::FrameCreated),
             EventData::Http3FrameParsed { .. } =>
-                EventType::Http3EventType(Http3EventType::FrameParsed),
+                Self::Http3EventType(Http3EventType::FrameParsed),
             EventData::Http3DatagramCreated { .. } =>
-                EventType::Http3EventType(Http3EventType::DatagramCreated),
+                Self::Http3EventType(Http3EventType::DatagramCreated),
             EventData::Http3DatagramParsed { .. } =>
-                EventType::Http3EventType(Http3EventType::DatagramParsed),
+                Self::Http3EventType(Http3EventType::DatagramParsed),
             EventData::Http3PushResolved { .. } =>
-                EventType::Http3EventType(Http3EventType::PushResolved),
+                Self::Http3EventType(Http3EventType::PushResolved),
 
             EventData::LogLevelError { .. } =>
-                EventType::LogLevelEventType(LogLevelEventType::Error),
+                Self::LogLevelEventType(LogLevelEventType::Error),
             EventData::LogLevelWarning { .. } =>
-                EventType::LogLevelEventType(LogLevelEventType::Warning),
+                Self::LogLevelEventType(LogLevelEventType::Warning),
             EventData::LogLevelInfo { .. } =>
-                EventType::LogLevelEventType(LogLevelEventType::Info),
+                Self::LogLevelEventType(LogLevelEventType::Info),
             EventData::LogLevelDebug { .. } =>
-                EventType::LogLevelEventType(LogLevelEventType::Debug),
+                Self::LogLevelEventType(LogLevelEventType::Debug),
             EventData::LogLevelVerbose { .. } =>
-                EventType::LogLevelEventType(LogLevelEventType::Verbose),
+                Self::LogLevelEventType(LogLevelEventType::Verbose),
             //_ => EventType::None,
         }
     }
@@ -431,7 +432,6 @@ pub struct RawInfo {
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
 #[serde(tag = "name", content = "data")]
-#[allow(clippy::large_enum_variant)]
 pub enum EventData {
     // QUIC
     #[serde(rename = "quic:server_listening")]
@@ -607,21 +607,22 @@ pub enum EventData {
 
 impl EventData {
     /// Returns size of `EventData` array of `QuicFrame`s if it exists.
+    #[must_use]
     pub fn contains_quic_frames(&self) -> Option<usize> {
         // For some EventData variants, the frame array is optional
         // but for others it is mandatory.
         match self {
-            EventData::QuicPacketSent(pkt) =>
-                pkt.frames.as_ref().map(|f| f.len()),
+            Self::QuicPacketSent(pkt) =>
+                pkt.frames.as_ref().map(std::vec::Vec::len),
 
-            EventData::QuicPacketReceived(pkt) =>
-                pkt.frames.as_ref().map(|f| f.len()),
+            Self::QuicPacketReceived(pkt) =>
+                pkt.frames.as_ref().map(std::vec::Vec::len),
 
-            EventData::QuicPacketLost(pkt) =>
-                pkt.frames.as_ref().map(|f| f.len()),
+            Self::QuicPacketLost(pkt) =>
+                pkt.frames.as_ref().map(std::vec::Vec::len),
 
-            EventData::QuicMarkedForRetransmit(ev) => Some(ev.frames.len()),
-            EventData::QuicFramesProcessed(ev) => Some(ev.frames.len()),
+            Self::QuicMarkedForRetransmit(ev) => Some(ev.frames.len()),
+            Self::QuicFramesProcessed(ev) => Some(ev.frames.len()),
 
             _ => None,
         }
@@ -647,6 +648,10 @@ pub enum ConnectionClosedEventError {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "Variant names are part of the established public qlog error API"
+)]
 pub enum ConnectionClosedFrameError {
     TransportError(TransportError),
     ApplicationError(ApplicationError),
