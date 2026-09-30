@@ -173,15 +173,10 @@ pub fn plot_pending(
 
         // Clippy wants to remove the variable assignment that helps understand
         // WTF this stuff is doing, screw clippy.
-        #[expect(
-            clippy::let_and_return,
-            reason = "The named intermediate documents the plotted quantity"
-        )]
-        let in_flight_bar = Rectangle::new(
+        Rectangle::new(
             [(x0, 0), (x1, stack.in_flight)],
             colors::FOREST_GREEN.filled(),
-        );
-        in_flight_bar
+        )
     }))
     .unwrap()
     .label("In-flight requests")
@@ -200,15 +195,10 @@ pub fn plot_pending(
         // pending is stack on top of in-flight
         // Clippy wants to remove the variable assignment that helps understand
         // WTF this stuff is doing, screw clippy.
-        #[expect(
-            clippy::let_and_return,
-            reason = "The named intermediate documents the plotted quantity"
-        )]
-        let pending_bar = Rectangle::new(
+        Rectangle::new(
             [(x0, stack.in_flight), (x1, stack.in_flight + stack.pending)],
             colors::ORANGE.filled(),
-        );
-        pending_bar
+        )
     }))
     .unwrap()
     .label("Pending requests")

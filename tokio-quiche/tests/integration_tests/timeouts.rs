@@ -87,9 +87,7 @@ async fn test_handshake_duration_ioworker() {
                 .set_private_key_file(private_key, SslFiletype::PEM)
                 .unwrap();
 
-            ssl_ctx_builder
-                .set_certificate_chain_file(cert)
-                .unwrap();
+            ssl_ctx_builder.set_certificate_chain_file(cert).unwrap();
 
             Some(ssl_ctx_builder)
         }

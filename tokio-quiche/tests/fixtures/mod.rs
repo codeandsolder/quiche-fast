@@ -93,11 +93,8 @@ pub fn test_credentials() -> (&'static str, &'static str) {
             include_bytes!("../../../quiche/examples/cert.crt"),
         )
         .unwrap();
-        std::fs::write(
-            &key,
-            include_bytes!("../../../quiche/examples/cert.key"),
-        )
-        .unwrap();
+        std::fs::write(&key, include_bytes!("../../../quiche/examples/cert.key"))
+            .unwrap();
 
         (
             cert.to_string_lossy().into_owned(),

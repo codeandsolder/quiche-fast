@@ -122,7 +122,7 @@ struct ByteAtATimeSink<'a> {
 }
 
 impl<'a> ByteAtATimeSink<'a> {
-    fn new(buf: &'a mut [u8]) -> Self {
+    const fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, off: 0 }
     }
 }
