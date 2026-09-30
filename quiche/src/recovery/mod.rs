@@ -217,10 +217,6 @@ pub trait RecoveryOps {
     );
     fn get_packet_send_time(&self, now: Instant) -> Instant;
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The signature mirrors protocol state and grouping would obscure call sites"
-    )]
     fn on_ack_received(
         &mut self, ranges: &RangeSet, ack_delay: u64, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, skip_pn: Option<u64>,

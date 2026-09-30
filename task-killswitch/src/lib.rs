@@ -277,7 +277,9 @@ mod tests {
 
     impl Drop for TaskAbortSignal {
         fn drop(&mut self) {
-            let _ = self.0.take().unwrap().send(());
+            if let Some(tx) = self.0.take() {
+                let _ = tx.send(());
+            }
         }
     }
 
@@ -306,12 +308,15 @@ mod tests {
 
         killswitch.activate();
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            future::join_all(abort_signals),
-        )
-        .await
-        .expect("tasks should be killed within given timeframe");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                future::join_all(abort_signals),
+            )
+            .await
+            .is_ok(),
+            "tasks should be killed within given timeframe"
+        );
     }
 
     #[tokio::test]
@@ -326,16 +331,22 @@ mod tests {
         assert!(!signal_handle.is_finished());
         killswitch.activate();
 
-        tokio::time::timeout(
-            Duration::from_secs(1),
-            future::join_all(abort_signals),
-        )
-        .await
-        .expect("tasks should be killed within given timeframe");
-
-        tokio::time::timeout(Duration::from_secs(1), signal_handle)
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(1),
+                future::join_all(abort_signals),
+            )
             .await
-            .expect("killed() signal should have resolved")
-            .expect("signal task should join successfully");
+            .is_ok(),
+            "tasks should be killed within given timeframe"
+        );
+
+        assert!(
+            matches!(
+                tokio::time::timeout(Duration::from_secs(1), signal_handle).await,
+                Ok(Ok(()))
+            ),
+            "killed() signal should resolve and join successfully"
+        );
     }
 }
