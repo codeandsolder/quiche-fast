@@ -33,6 +33,12 @@ use tokio::io::ReadBuf;
 
 const MAX_MMSG: usize = 16;
 
+/// Receives as many datagrams as are immediately available into `bufs`.
+///
+/// # Errors
+///
+/// Returns the operating-system socket error if no datagram was received, or
+/// an `InvalidData` error if a syscall result cannot be represented safely.
 pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
     if bufs.is_empty() {
         return Ok(0);
@@ -57,7 +63,7 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
-        for iovec in iovecs.iter_mut() {
+        for iovec in &mut iovecs {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),
@@ -76,11 +82,19 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
         // ReadBuf in `bufs`. Those regions and the message headers remain
         // alive and unmoved for the duration of the syscall, and recvmmsg()
         // does not retain any of the pointers.
+        let vlen = u32::try_from(msgvec.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recvmmsg batch exceeds u32",
+            )
+        })?;
+        // SAFETY: vlen was checked against u32 and every iovec/header remains
+        // valid and unmoved for the duration of this non-retaining syscall.
         let result = unsafe {
             libc::recvmmsg(
                 fd.as_raw_fd(),
                 msgvec.as_mut_ptr(),
-                msgvec.len() as _,
+                vlen,
                 0,
                 std::ptr::null_mut(),
             )
@@ -90,7 +104,11 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
             break;
         }
 
-        let received = result as usize;
+        let received = usize::try_from(result).map_err(|_| {
+            io::Error::other(
+                "recvmmsg returned a negative count without reporting an error",
+            )
+        })?;
 
         for (buf, msg) in bufs.iter_mut().zip(msgvec.iter()).take(received) {
             let filled = msg.msg_len as usize;
@@ -116,6 +134,12 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
     Ok(ret)
 }
 
+/// Sends a batch of datagrams with sendmmsg(2).
+///
+/// # Errors
+///
+/// Returns the socket error if no datagram can be sent, or `InvalidInput` if
+/// the batch size cannot be represented by the platform sendmmsg ABI.
 pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
     if bufs.is_empty() {
         return Ok(0);
@@ -130,7 +154,7 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
         msgvec.clear();
         iovecs.clear();
 
-        for buf in bufs.iter() {
+        for buf in bufs {
             let filled = buf.filled();
             iovecs.push(libc::iovec {
                 iov_base: filled.as_ptr().cast_mut().cast(),
@@ -138,7 +162,7 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
-        for iovec in iovecs.iter_mut() {
+        for iovec in &mut iovecs {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),
@@ -153,25 +177,31 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
+        let vlen = u32::try_from(msgvec.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sendmmsg batch exceeds u32",
+            )
+        })?;
         // SAFETY: each iovec points to initialized bytes owned by a ReadBuf in
-        // `bufs`. The buffers and message headers stay alive and unmoved for
+        // bufs. The buffers and message headers stay alive and unmoved for
         // the syscall, and sendmmsg() only reads from and does not retain them.
         let result = unsafe {
-            libc::sendmmsg(
-                fd.as_raw_fd(),
-                msgvec.as_mut_ptr(),
-                msgvec.len() as _,
-                0,
-            )
+            libc::sendmmsg(fd.as_raw_fd(), msgvec.as_mut_ptr(), vlen, 0)
         };
 
         if result == -1 {
             break;
         }
 
-        ret += result as usize;
+        let sent = usize::try_from(result).map_err(|_| {
+            io::Error::other(
+                "sendmmsg returned a negative count without reporting an error",
+            )
+        })?;
+        ret += sent;
 
-        if (result as usize) < bufs.len() {
+        if sent < bufs.len() {
             break;
         }
     }
@@ -283,8 +313,8 @@ mod tests {
             bufs.iter_mut().map(|s| ReadBuf::new(&mut s[..])).collect();
         assert_eq!(r.recv_many(&mut rbufs).await?, 5);
 
-        for (i, buf) in rbufs[0..5].iter().enumerate() {
-            assert_eq!(buf.filled(), &[i as u8; 128]);
+        for (expected, buf) in (0_u8..5).zip(rbufs[0..5].iter()) {
+            assert_eq!(buf.filled(), &[expected; 128]);
         }
 
         for i in 0..92 {
@@ -295,8 +325,8 @@ mod tests {
             bufs.iter_mut().map(|s| ReadBuf::new(&mut s[..])).collect();
         assert_eq!(r.recv_many(&mut rbufs).await?, 92);
 
-        for (i, buf) in rbufs[0..92].iter().enumerate() {
-            assert_eq!(buf.filled(), &[i as u8; 128]);
+        for (expected, buf) in (0_u8..92).zip(rbufs[0..92].iter()) {
+            assert_eq!(buf.filled(), &[expected; 128]);
         }
 
         Ok(())
@@ -305,7 +335,10 @@ mod tests {
     #[tokio::test]
     async fn sendmmsg() -> io::Result<()> {
         let (s, r) = UnixDatagram::pair()?;
-        let mut bufs: [_; 128] = std::array::from_fn(|i| [i as u8; 128]);
+        let mut bufs = [[0_u8; 128]; 128];
+        for (value, buf) in (0_u8..5).zip(bufs.iter_mut()) {
+            buf.fill(value);
+        }
 
         let wbufs: Vec<_> = bufs
             .iter_mut()
@@ -320,9 +353,9 @@ mod tests {
 
         let mut rbuf = [0u8; 128];
 
-        for i in 0..5 {
+        for expected in 0_u8..5 {
             assert_eq!(r.recv(&mut rbuf).await?, 128);
-            assert_eq!(rbuf, [i as u8; 128]);
+            assert_eq!(rbuf, [expected; 128]);
         }
 
         Ok(())

@@ -358,7 +358,13 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                #[allow(unused_mut)]
+                #[cfg_attr(
+                    not(feature = "qlog"),
+                    expect(
+                        unused_mut,
+                        reason = "qlog-disabled builds do not mutate the connection before storage"
+                    )
+                )]
                 let mut conn = quiche::accept(
                     &scid,
                     odcid.as_ref(),
@@ -451,7 +457,6 @@ fn main() {
                 // is not much anyone can do to recover.
                 let app_proto = client.conn.application_proto();
 
-                #[allow(clippy::box_default)]
                 if alpns::HTTP_09.contains(&app_proto) {
                     client.http_conn = Some(Box::<Http09Conn>::default());
 

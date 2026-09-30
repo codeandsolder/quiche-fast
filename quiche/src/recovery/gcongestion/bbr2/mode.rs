@@ -133,7 +133,10 @@ pub(super) trait ModeImpl: Debug {
 
     fn is_probing_for_bandwidth(&self) -> bool;
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     fn on_congestion_event(
         self, prior_in_flight: usize, event_time: Instant,
         acked_packets: &[Acked], lost_packets: &[Lost],
@@ -185,7 +188,10 @@ impl Mode {
         Mode::ProbeRTT(ProbeRTT::new(model, cycle))
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The signature mirrors protocol state and grouping would obscure call sites"
+    )]
     pub(super) fn do_on_congestion_event(
         &mut self, prior_in_flight: usize, event_time: Instant,
         acked_packets: &[Acked], lost_packets: &[Lost],

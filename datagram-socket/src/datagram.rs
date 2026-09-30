@@ -100,7 +100,7 @@ pub trait RawPoolBufDatagramIo: Send {
 
 /// Describes an implementation of a connected datagram socket.
 ///
-/// Rather than using Socket for datagram-oriented sockets, the DatagramSocket
+/// Rather than using Socket for datagram-oriented sockets, the `DatagramSocket`
 /// trait purposely does not implement AsyncRead/AsyncWrite, which are traits
 /// with stream semantics. For example, the `AsyncReadExt::read_exact` method
 /// which issues as many reads as possible to fill the buffer provided.
@@ -258,21 +258,28 @@ pub trait DatagramSocketSendExt: DatagramSocketSend {
         poll_fn(move |cx| self.poll_send_many(cx, bufs))
     }
 
+    /// Attempts an immediate send without waiting for readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns the socket error, or `WouldBlock` if the operation is not ready
+    /// to complete immediately.
     fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
-        match unconstrained(poll_fn(|cx| self.poll_send(cx, buf))).now_or_never()
-        {
-            Some(result) => result,
-            None => Err(io::ErrorKind::WouldBlock.into()),
-        }
+        unconstrained(poll_fn(|cx| self.poll_send(cx, buf)))
+            .now_or_never()
+            .unwrap_or_else(|| Err(io::ErrorKind::WouldBlock.into()))
     }
 
+    /// Attempts to send multiple datagrams without waiting for readiness.
+    ///
+    /// # Errors
+    ///
+    /// Returns the socket error, or `WouldBlock` if the operation is not ready
+    /// to complete immediately.
     fn try_send_many(&self, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
-        match unconstrained(poll_fn(|cx| self.poll_send_many(cx, bufs)))
+        unconstrained(poll_fn(|cx| self.poll_send_many(cx, bufs)))
             .now_or_never()
-        {
-            Some(result) => result,
-            None => Err(io::ErrorKind::WouldBlock.into()),
-        }
+            .unwrap_or_else(|| Err(io::ErrorKind::WouldBlock.into()))
     }
 }
 
@@ -321,7 +328,7 @@ pub trait DatagramSocketRecv: Send {
     fn poll_recv_from(
         &mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<SocketAddr>> {
-        self.poll_recv(cx, buf).map_ok(|_| {
+        self.poll_recv(cx, buf).map_ok(|()| {
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 0))
         })
     }
@@ -358,13 +365,10 @@ pub trait DatagramSocketRecv: Send {
                 Poll::Ready(Ok(())) => read += 1,
 
                 Poll::Ready(Err(e)) if read == 0 => return Poll::Ready(Err(e)),
-
-                Poll::Ready(Err(_)) => break,
-
-                // Only return `Poll::Ready` if at least one datagram was
-                // successfully read, otherwise block.
+                // Only return Ready if at least one datagram was read; otherwise
+                // block.
                 Poll::Pending if read == 0 => return Poll::Pending,
-                Poll::Pending => break,
+                Poll::Ready(Err(_)) | Poll::Pending => break,
             }
         }
 
@@ -584,14 +588,14 @@ impl DatagramSocket for UdpSocket {
 impl DatagramSocketSend for UdpSocket {
     #[inline]
     fn poll_send(&self, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        UdpSocket::poll_send(self, cx, buf)
+        Self::poll_send(self, cx, buf)
     }
 
     #[inline]
     fn poll_send_to(
         &self, cx: &mut Context, buf: &[u8], addr: SocketAddr,
     ) -> Poll<io::Result<usize>> {
-        UdpSocket::poll_send_to(self, cx, buf, addr)
+        Self::poll_send_to(self, cx, buf, addr)
     }
 
     #[cfg(target_os = "linux")]
@@ -616,7 +620,7 @@ impl DatagramSocketRecv for UdpSocket {
     fn poll_recv(
         &mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        UdpSocket::poll_recv(self, cx, buf)
+        Self::poll_recv(self, cx, buf)
     }
 
     #[cfg(target_os = "linux")]
@@ -687,7 +691,7 @@ impl DatagramSocket for UnixDatagram {
 impl DatagramSocketSend for UnixDatagram {
     #[inline]
     fn poll_send(&self, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        UnixDatagram::poll_send(self, cx, buf)
+        Self::poll_send(self, cx, buf)
     }
 
     #[inline]
@@ -715,7 +719,7 @@ impl DatagramSocketRecv for UnixDatagram {
     fn poll_recv(
         &mut self, cx: &mut Context<'_>, buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        UnixDatagram::poll_recv(self, cx, buf)
+        Self::poll_recv(self, cx, buf)
     }
 
     #[cfg(target_os = "linux")]
@@ -768,7 +772,7 @@ fn into_owned_fd<F: IntoRawFd>(into_fd: F) -> OwnedFd {
 /// socket is created as connected, then later disconnected from its peer, its
 /// `send_to()` call will fail.
 ///
-/// For example, MacOS errors if `send_to` is used on a socket that's already
+/// For example, macOS errors if `send_to` is used on a socket that's already
 /// connected. Only `send` can be used. By using `MaybeConnectedSocket`, you can
 /// use the same `send` and `send_to` APIs in both client- and server-side code.
 /// Clients, usually with connected sockets, will then forward `send_to` to
@@ -790,7 +794,7 @@ impl<T: DatagramSocketSend> MaybeConnectedSocket<T> {
 
     /// Provides access to the wrapped socket, allowing the user to override
     /// `send_to()` behavior if required.
-    pub fn inner(&self) -> &T {
+    pub const fn inner(&self) -> &T {
         &self.inner
     }
 
@@ -866,14 +870,10 @@ mod tests {
         let mut bufs = [ReadBuf::new(&mut first), ReadBuf::new(&mut second)];
         let mut cx = Context::from_waker(std::task::Waker::noop());
 
-        let Poll::Ready(Ok(read)) = socket.poll_recv_many(&mut cx, &mut bufs)
-        else {
-            panic!("partial receive should report successful datagrams");
-        };
-
-        assert_eq!(read, 1);
+        let result = socket.poll_recv_many(&mut cx, &mut bufs);
+        assert!(matches!(result, Poll::Ready(Ok(1))));
         assert_eq!(bufs[0].filled(), &[0x42]);
-        assert!(bufs[1].filled().is_empty());
+        assert_eq!(bufs[1].filled(), []);
     }
 
     #[test]
@@ -883,11 +883,10 @@ mod tests {
         let mut bufs = [ReadBuf::new(&mut storage)];
         let mut cx = Context::from_waker(std::task::Waker::noop());
 
-        let Poll::Ready(Err(err)) = socket.poll_recv_many(&mut cx, &mut bufs)
-        else {
-            panic!("first receive error should be returned");
-        };
-
-        assert_eq!(err.kind(), io::ErrorKind::Other);
+        let result = socket.poll_recv_many(&mut cx, &mut bufs);
+        assert!(matches!(
+            result,
+            Poll::Ready(Err(ref err)) if err.kind() == io::ErrorKind::Other
+        ));
     }
 }

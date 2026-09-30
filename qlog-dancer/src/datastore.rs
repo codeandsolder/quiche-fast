@@ -1751,7 +1751,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
     constants: &netlog::constants::Constants,
 ) -> (Vec<LogFileData>, BTreeMap<i64, NetlogSession>) {
     // second line in a netlog is always `"events": [` so skip it
-    read_netlog_record(reader);
+    let _ = read_netlog_record(reader);
 
     let mut sessions: BTreeMap<i64, NetlogSession> = BTreeMap::new();
     let mut session_events: BTreeMap<
@@ -1857,7 +1857,10 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
 
                     // This will eventually deal with other events, and having
                     // to refactor back and forth is a waste.
-                    #[allow(clippy::single_match)]
+                    #[expect(
+                        clippy::single_match,
+                        reason = "This match is intentionally shaped for additional event variants"
+                    )]
                     match event {
                         Some(netlog::Event::Http(e)) => {
                             match e {

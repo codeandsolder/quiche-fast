@@ -79,11 +79,13 @@ impl Drop for ConsumeBuffer {
 }
 
 impl ConsumeBuffer {
+    #[must_use]
     pub fn from_vec(inner: Vec<u8>) -> Self {
         consume_buffer_total_bytes().inc_by(inner.capacity() as u64);
-        ConsumeBuffer { inner, head: 0 }
+        Self { inner, head: 0 }
     }
 
+    #[must_use]
     pub fn into_vec(mut self) -> Vec<u8> {
         // `ConsumeBuffer` implements Drop, so use `take` instead of moving the
         // vector out directly. Update metrics manually because this object no
@@ -94,6 +96,11 @@ impl ConsumeBuffer {
         inner
     }
 
+    /// Advances the consumed prefix by count bytes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if count would advance past the end of the buffer.
     pub fn pop_front(&mut self, count: usize) {
         assert!(self.head + count <= self.inner.len());
         self.head += count;
@@ -122,7 +129,7 @@ impl ConsumeBuffer {
         true
     }
 
-    fn update_metrics_after_resize(&mut self, old_capacity: usize) {
+    fn update_metrics_after_resize(&self, old_capacity: usize) {
         let new_capacity = self.inner.capacity();
         if new_capacity < old_capacity {
             consume_buffer_total_bytes()
@@ -169,13 +176,13 @@ mod tests {
             (buf_a.inner.capacity() + buf_b.inner.capacity()) as u64
         );
 
-        buf_a.expand(100000);
+        buf_a.expand(100_000);
         assert_eq!(
             consume_buffer_total_bytes().get(),
             (buf_a.inner.capacity() + buf_b.inner.capacity()) as u64
         );
 
-        buf_b.into_vec();
+        let _ = buf_b.into_vec();
         assert_eq!(
             consume_buffer_total_bytes().get(),
             buf_a.inner.capacity() as u64

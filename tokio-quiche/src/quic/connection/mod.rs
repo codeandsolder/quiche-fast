@@ -681,7 +681,10 @@ impl HandshakeInfo {
 /// timer expires, or [`ApplicationOverQuic::wait_for_data`] resolves.
 /// Implementors can interact with the underlying connection via the mutable
 /// reference passed to trait methods.
-#[allow(unused_variables)] // for default functions
+#[expect(
+    unused_variables,
+    reason = "Signature is shared across feature or platform configurations"
+)] // for default functions
 pub trait ApplicationOverQuic: Send + 'static {
     /// Callback to customize the [`ApplicationOverQuic`] after the QUIC
     /// handshake completed successfully.

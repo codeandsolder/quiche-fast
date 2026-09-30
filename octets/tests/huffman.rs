@@ -59,45 +59,44 @@ fn invalid_huffman() {
 }
 
 #[test]
-fn octets_writer_huffman_matches_rfc_vectors() {
+fn octets_writer_huffman_matches_rfc_vectors() -> Result<()> {
     assert_octets_writer_huffman_matches::<false>(
         b"www.example.com",
         b"\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff",
-    );
+    )?;
 
     assert_octets_writer_huffman_matches::<false>(
         b"no-cache",
         b"\xa8\xeb\x10\x64\x9c\xbf",
-    );
+    )?;
 
     assert_octets_writer_huffman_matches::<false>(
         b"custom-key",
         b"\x25\xa8\x49\xe9\x5b\xa9\x7d\x7f",
-    );
+    )?;
 
     assert_octets_writer_huffman_matches::<false>(
         b"custom-value",
         b"\x25\xa8\x49\xe9\x5b\xb8\xe8\xb4\xbf",
-    );
+    )?;
 
     assert_octets_writer_huffman_matches::<true>(
         b"WWW.EXAMPLE.COM",
         b"\xf1\xe3\xc2\xe5\xf2\x3a\x6b\xa0\xab\x90\xf4\xff",
-    );
+    )?;
+
+    Ok(())
 }
 
 fn assert_octets_writer_huffman_matches<const LOWER_CASE: bool>(
     input: &[u8], expected: &[u8],
-) {
-    assert_eq!(
-        huffman_encoding_len::<LOWER_CASE>(input).unwrap(),
-        expected.len()
-    );
+) -> Result<()> {
+    assert_eq!(huffman_encoding_len::<LOWER_CASE>(input)?, expected.len());
 
     let mut actual = [0u8; 64];
     let len = {
         let mut sink = ByteAtATimeSink::new(&mut actual);
-        sink.put_huffman_encoded::<LOWER_CASE>(input).unwrap();
+        sink.put_huffman_encoded::<LOWER_CASE>(input)?;
         sink.off
     };
 
@@ -107,12 +106,14 @@ fn assert_octets_writer_huffman_matches<const LOWER_CASE: bool>(
     let mut actual = [0u8; 64];
     let len = {
         let mut buf = OctetsMut::with_slice(&mut actual);
-        buf.put_huffman_encoded::<LOWER_CASE>(input).unwrap();
+        buf.put_huffman_encoded::<LOWER_CASE>(input)?;
         buf.off()
     };
 
     assert_eq!(len, expected.len());
     assert_eq!(&actual[..len], expected);
+
+    Ok(())
 }
 
 struct ByteAtATimeSink<'a> {
@@ -121,7 +122,7 @@ struct ByteAtATimeSink<'a> {
 }
 
 impl<'a> ByteAtATimeSink<'a> {
-    fn new(buf: &'a mut [u8]) -> Self {
+    const fn new(buf: &'a mut [u8]) -> Self {
         Self { buf, off: 0 }
     }
 }

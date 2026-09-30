@@ -35,8 +35,10 @@ use crate::events::ExData;
 use crate::events::RawInfo;
 use crate::Event;
 
+type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
 #[test]
-fn packet_sent_event_no_frames() {
+fn packet_sent_event_no_frames() -> TestResult {
     let log_string = r#"{
   "time": 0.0,
   "name": "quic:packet_sent",
@@ -70,14 +72,13 @@ fn packet_sent_event_no_frames() {
 
     let ev = Event::with_time(0.0, ev_data);
 
-    pretty_assertions::assert_eq!(
-        serde_json::to_string_pretty(&ev).unwrap(),
-        log_string
-    );
+    pretty_assertions::assert_eq!(serde_json::to_string_pretty(&ev)?, log_string);
+
+    Ok(())
 }
 
 #[test]
-fn packet_sent_event_some_frames() {
+fn packet_sent_event_some_frames() -> TestResult {
     let log_string = r#"{
   "time": 0.0,
   "name": "quic:packet_sent",
@@ -153,22 +154,21 @@ fn packet_sent_event_some_frames() {
     });
 
     let ev = Event::with_time(0.0, ev_data);
-    pretty_assertions::assert_eq!(
-        serde_json::to_string_pretty(&ev).unwrap(),
-        log_string
-    );
+    pretty_assertions::assert_eq!(serde_json::to_string_pretty(&ev)?, log_string);
+
+    Ok(())
 }
 
 // Test constants for MetricsUpdated tests
 const MIN_RTT: f32 = 10.0;
 const SMOOTHED_RTT: f32 = 15.0;
 const CONGESTION_WINDOW: u64 = 12000;
-const PACING_RATE: u64 = 500000;
-const DELIVERY_RATE: u64 = 1000000;
+const PACING_RATE: u64 = 500_000;
+const DELIVERY_RATE: u64 = 1_000_000;
 const COLLISION_VALUE: f32 = 999.0;
 
 #[test]
-fn packet_header() {
+fn packet_header() -> TestResult {
     let pkt_hdr = make_pkt_hdr(PacketType::Initial);
 
     let log_string = r#"{
@@ -181,11 +181,13 @@ fn packet_header() {
   "dcid": "36ce104eee50101c"
 }"#;
 
-    assert_eq!(serde_json::to_string_pretty(&pkt_hdr).unwrap(), log_string);
+    assert_eq!(serde_json::to_string_pretty(&pkt_hdr)?, log_string);
+
+    Ok(())
 }
 
 #[test]
-fn metrics_updated_with_ex_data() {
+fn metrics_updated_with_ex_data() -> TestResult {
     // Test that ex_data fields are flattened into the same object
     let ex_data = ExData::from([(
         "delivery_rate".to_string(),
@@ -199,7 +201,7 @@ fn metrics_updated_with_ex_data() {
         ..Default::default()
     };
 
-    let json = serde_json::to_value(&metrics).unwrap();
+    let json = serde_json::to_value(&metrics)?;
 
     // Verify standard fields are present
     assert_eq!(json["min_rtt"], MIN_RTT);
@@ -208,10 +210,12 @@ fn metrics_updated_with_ex_data() {
     // Verify ex_data field is flattened (not nested under "ex_data")
     assert_eq!(json["delivery_rate"], DELIVERY_RATE);
     assert!(json.get("ex_data").is_none(), "ex_data should be flattened");
+
+    Ok(())
 }
 
 #[test]
-fn metrics_updated_ex_data_collision() {
+fn metrics_updated_ex_data_collision() -> TestResult {
     // Test collision: same field set via struct AND ex_data.
     // With serde's preserve_order feature and ex_data at the top of the
     // struct, standard fields are serialized last and take precedence.
@@ -227,15 +231,17 @@ fn metrics_updated_ex_data_collision() {
         ..Default::default()
     };
 
-    let json = serde_json::to_value(&metrics).unwrap();
+    let json = serde_json::to_value(&metrics)?;
 
     // Standard field wins in collision - ex_data cannot overwrite standard
     // fields, which prevents accidental data corruption.
     assert_eq!(json["min_rtt"], MIN_RTT);
+
+    Ok(())
 }
 
 #[test]
-fn metrics_updated_round_trip() {
+fn metrics_updated_round_trip() -> TestResult {
     // Test serialization -> deserialization round-trip
     let ex_data = ExData::from([(
         "delivery_rate".to_string(),
@@ -251,9 +257,8 @@ fn metrics_updated_round_trip() {
         ..Default::default()
     };
 
-    let json_str = serde_json::to_string(&original).unwrap();
-    let deserialized: RecoveryMetricsUpdated =
-        serde_json::from_str(&json_str).unwrap();
+    let json_str = serde_json::to_string(&original)?;
+    let deserialized: RecoveryMetricsUpdated = serde_json::from_str(&json_str)?;
 
     // Standard fields round-trip correctly
     assert_eq!(deserialized.min_rtt, original.min_rtt);
@@ -266,10 +271,12 @@ fn metrics_updated_round_trip() {
         deserialized.ex_data.get("delivery_rate"),
         Some(&serde_json::json!(DELIVERY_RATE))
     );
+
+    Ok(())
 }
 
 #[test]
-fn metrics_updated_no_ex_data() {
+fn metrics_updated_no_ex_data() -> TestResult {
     // Test that ex_data is not present when not used
     let metrics = RecoveryMetricsUpdated {
         min_rtt: Some(MIN_RTT),
@@ -277,7 +284,7 @@ fn metrics_updated_no_ex_data() {
         ..Default::default()
     };
 
-    let json = serde_json::to_value(&metrics).unwrap();
+    let json = serde_json::to_value(&metrics)?;
 
     // Verify standard fields are present
     assert_eq!(json["min_rtt"], MIN_RTT);
@@ -288,6 +295,8 @@ fn metrics_updated_no_ex_data() {
         json.get("ex_data").is_none(),
         "ex_data should not be present"
     );
+
+    Ok(())
 }
 
 #[test]
@@ -306,32 +315,36 @@ fn ack_range_as_range_inclusive() {
 }
 
 #[test]
-fn ack_range_serialize() {
+fn ack_range_serialize() -> TestResult {
     assert_eq!(
-        serde_json::to_value(AckRange::new(5, 5)).unwrap(),
+        serde_json::to_value(AckRange::new(5, 5))?,
         serde_json::json!([5])
     );
     assert_eq!(
-        serde_json::to_value(AckRange::new(0, 9)).unwrap(),
+        serde_json::to_value(AckRange::new(0, 9))?,
         serde_json::json!([0, 9])
     );
+
+    Ok(())
 }
 
 #[test]
-fn ack_range_deserialize() {
+fn ack_range_deserialize() -> TestResult {
     assert_eq!(
-        serde_json::from_str::<AckRange>("[7]").unwrap(),
+        serde_json::from_str::<AckRange>("[7]")?,
         AckRange::new(7, 7)
     );
     assert_eq!(
-        serde_json::from_str::<AckRange>("[0, 9]").unwrap(),
+        serde_json::from_str::<AckRange>("[0, 9]")?,
         AckRange::new(0, 9)
     );
     assert!(serde_json::from_str::<AckRange>("[1, 2, 3]").is_err());
+
+    Ok(())
 }
 
 #[test]
-fn ack_frame_serialize_mixed_ranges() {
+fn ack_frame_serialize_mixed_ranges() -> TestResult {
     // AckRange(15,15) → [15], AckRange(0,9) → [0,9]
     let frame = QuicFrame::Ack {
         ack_delay: None,
@@ -341,12 +354,14 @@ fn ack_frame_serialize_mixed_ranges() {
         ce: None,
         raw: None,
     };
-    let json = serde_json::to_value(&frame).unwrap();
+    let json = serde_json::to_value(&frame)?;
     assert_eq!(json["acked_ranges"], serde_json::json!([[0, 9], [15]]));
+
+    Ok(())
 }
 
 #[test]
-fn ack_frame_serialize_unordered_ranges() {
+fn ack_frame_serialize_unordered_ranges() -> TestResult {
     // `draft-ietf-quic-qlog-quic-events-12` specified that ACK ranges can
     // appear in any order.
     let frame = QuicFrame::Ack {
@@ -361,15 +376,17 @@ fn ack_frame_serialize_unordered_ranges() {
         ce: None,
         raw: None,
     };
-    let json = serde_json::to_value(&frame).unwrap();
+    let json = serde_json::to_value(&frame)?;
     assert_eq!(
         json["acked_ranges"],
         serde_json::json!([[15, 19], [5], [22, 23]])
     );
+
+    Ok(())
 }
 
 #[test]
-fn ack_frame_roundtrip() {
+fn ack_frame_roundtrip() -> TestResult {
     let frame = QuicFrame::Ack {
         ack_delay: Some(1.5),
         acked_ranges: Some(vec![
@@ -382,13 +399,15 @@ fn ack_frame_roundtrip() {
         ce: None,
         raw: None,
     };
-    let json_str = serde_json::to_string(&frame).unwrap();
-    let decoded: QuicFrame = serde_json::from_str(&json_str).unwrap();
+    let json_str = serde_json::to_string(&frame)?;
+    let decoded: QuicFrame = serde_json::from_str(&json_str)?;
     assert_eq!(frame, decoded);
+
+    Ok(())
 }
 
 #[test]
-fn ack_frame_roundtrip_preserve_order() {
+fn ack_frame_roundtrip_preserve_order() -> TestResult {
     // `draft-ietf-quic-qlog-quic-events-12` specifies that ACK ranges may
     // appear in any order.
     let frame = QuicFrame::Ack {
@@ -404,20 +423,22 @@ fn ack_frame_roundtrip_preserve_order() {
         ce: None,
         raw: None,
     };
-    let json_str = serde_json::to_string(&frame).unwrap();
-    let decoded: QuicFrame = serde_json::from_str(&json_str).unwrap();
+    let json_str = serde_json::to_string(&frame)?;
+    let decoded: QuicFrame = serde_json::from_str(&json_str)?;
     assert_eq!(frame, decoded);
+
+    Ok(())
 }
 
 #[test]
-fn ack_frame_deserialize_mixed_input() {
+fn ack_frame_deserialize_mixed_input() -> TestResult {
     // Input uses both 1-element and 2-element arrays.
     // The ranges are also unsorted which the draft calls out as allowed
     let json = r#"{
         "frame_type": "ack",
         "acked_ranges": [[0, 9], [40], [30, 39]]
     }"#;
-    let frame: QuicFrame = serde_json::from_str(json).unwrap();
+    let frame: QuicFrame = serde_json::from_str(json)?;
     assert_eq!(frame, QuicFrame::Ack {
         ack_delay: None,
         acked_ranges: Some(vec![
@@ -430,4 +451,59 @@ fn ack_frame_deserialize_mixed_input() {
         ce: None,
         raw: None,
     });
+
+    Ok(())
+}
+
+#[test]
+fn deserialized_log_level_events_preserve_importance() -> TestResult {
+    use crate::events::EventImportance;
+    use crate::events::Eventable;
+
+    let cases = [
+        (
+            EventData::LogLevelError {
+                code: None,
+                message: None,
+            },
+            EventImportance::Core,
+        ),
+        (
+            EventData::LogLevelWarning {
+                code: None,
+                message: None,
+            },
+            EventImportance::Base,
+        ),
+        (
+            EventData::LogLevelInfo {
+                code: None,
+                message: None,
+            },
+            EventImportance::Extra,
+        ),
+        (
+            EventData::LogLevelDebug {
+                code: None,
+                message: None,
+            },
+            EventImportance::Extra,
+        ),
+        (
+            EventData::LogLevelVerbose {
+                code: None,
+                message: None,
+            },
+            EventImportance::Extra,
+        ),
+    ];
+
+    for (data, expected) in cases {
+        let original = Event::with_time(0.0, data);
+        let encoded = serde_json::to_string(&original)?;
+        let decoded: Event = serde_json::from_str(&encoded)?;
+        assert_eq!(decoded.importance(), expected);
+    }
+
+    Ok(())
 }

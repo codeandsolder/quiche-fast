@@ -264,7 +264,10 @@ pub fn connect_with_early_data(
     loop {
         let actual_sleep = match (wait_duration, conn.timeout()) {
             (Some(wait), Some(timeout)) => {
-                #[allow(clippy::comparison_chain)]
+                #[expect(
+                    clippy::comparison_chain,
+                    reason = "Explicit branch ordering keeps timeout handling readable"
+                )]
                 if timeout < wait {
                     // shave some off the wait time so it doesn't go longer
                     // than user really wanted.

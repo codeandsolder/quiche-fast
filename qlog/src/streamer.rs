@@ -35,6 +35,10 @@ use crate::events::ExData;
 /// Times are always logged in units of whole milliseconds with optional
 /// precision, determining the number of decimal places output by the
 /// serializer.
+#[allow(
+    clippy::enum_variant_names,
+    reason = "Variant names are part of the established public qlog API"
+)]
 pub enum EventTimePrecision {
     /// Logging may contain 1 decimal place to ensure float serialization e.g.,
     /// 1.0, 2.0,
@@ -47,6 +51,10 @@ pub enum EventTimePrecision {
 
 /// Converts a [`Duration`] to milliseconds as `f64` using the requested
 /// precision variant.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "qlog timestamps are f64, so converting integer duration units necessarily loses precision for extremely large durations"
+)]
 fn duration_to_millis(
     dur: std::time::Duration, precision: &EventTimePrecision,
 ) -> f64 {
@@ -71,17 +79,13 @@ fn elapsed_millis(
     duration_to_millis(dur, precision)
 }
 
-/// A helper object specialized for streaming JSON-serialized qlog to a
-/// [`Write`] trait.
-///
-/// The object is responsible for the `Qlog` object that contains the
-/// provided `Trace`.
-///
-/// Serialization is progressively driven by method calls; once log streaming
-/// is started, `event::Events` can be written using `add_event()`.
-///
-/// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-use super::*;
+use super::Error;
+use super::Event;
+use super::QlogSeq;
+use super::Result;
+use super::Serialize;
+use super::TraceSeq;
+use super::QLOGFILESEQ_URI;
 
 #[derive(PartialEq, Eq, Debug)]
 pub enum StreamerState {
@@ -90,6 +94,9 @@ pub enum StreamerState {
     Finished,
 }
 
+/// Streaming JSON-SEQ qlog writer.
+///
+/// Owns the qlog header and target writer and appends events after `start_log`.
 pub struct QlogStreamer {
     start_time: std::time::Instant,
     writer: Box<dyn std::io::Write + Send + Sync>,
@@ -100,16 +107,16 @@ pub struct QlogStreamer {
 }
 
 impl QlogStreamer {
-    /// Creates a [QlogStreamer] object.
+    /// Creates a [`QlogStreamer`] object.
     ///
-    /// It owns a [QlogSeq] object that contains the provided [TraceSeq]
+    /// It owns a [`QlogSeq`] object that contains the provided [`TraceSeq`]
     /// containing [Event]s.
     ///
     /// All serialization will be written to the provided [`Write`] using the
     /// JSON-SEQ format.
     ///
     /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-    #[allow(clippy::too_many_arguments)]
+    #[must_use]
     pub fn new(
         title: Option<String>, description: Option<String>,
         start_time: std::time::Instant, trace: TraceSeq,
@@ -124,7 +131,7 @@ impl QlogStreamer {
             trace,
         };
 
-        QlogStreamer {
+        Self {
             start_time,
             writer,
             qlog,
@@ -137,15 +144,19 @@ impl QlogStreamer {
     /// Starts qlog streaming serialization.
     ///
     /// This writes out the JSON-SEQ-serialized form of all initial qlog
-    /// information. [Event]s are separately appended using [add_event()],
-    /// [add_event_with_instant()], [add_event_now()],
-    /// [add_event_data_with_instant()], or [add_event_data_now()].
+    /// information. [Event]s are separately appended using [`add_event()`],
+    /// [`add_event_with_instant()`], [`add_event_now()`],
+    /// [`add_event_data_with_instant()`], or [`add_event_data_now()`].
     ///
     /// [add_event()]: #method.add_event
     /// [add_event_with_instant()]: #method.add_event_with_instant
     /// [add_event_now()]: #method.add_event_now
     /// [add_event_data_with_instant()]: #method.add_event_data_with_instant
     /// [add_event_data_now()]: #method.add_event_data_now
+    ///
+    /// # Errors
+    /// Returns an error if logging already started or header serialization or
+    /// I/O fails.
     pub fn start_log(&mut self) -> Result<()> {
         if self.state != StreamerState::Initial {
             return Err(Error::Done);
@@ -164,6 +175,9 @@ impl QlogStreamer {
     /// Finishes qlog streaming serialization.
     ///
     /// After this is called, no more serialization will occur.
+    ///
+    /// # Errors
+    /// Returns an error if logging is not active or flushing the writer fails.
     pub fn finish_log(&mut self) -> Result<()> {
         if self.state == StreamerState::Initial ||
             self.state == StreamerState::Finished
@@ -179,7 +193,11 @@ impl QlogStreamer {
     }
 
     /// Writes a serializable to a JSON-SEQ record using
-    /// [std::time::Instant::now()].
+    /// [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_now<E: Serialize + Eventable>(
         &mut self, event: E,
     ) -> Result<()> {
@@ -189,7 +207,11 @@ impl QlogStreamer {
     }
 
     /// Writes a serializable to a pretty-printed JSON-SEQ record using
-    /// [std::time::Instant::now()].
+    /// [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_now_pretty<E: Serialize + Eventable>(
         &mut self, event: E,
     ) -> Result<()> {
@@ -199,7 +221,11 @@ impl QlogStreamer {
     }
 
     /// Writes a serializable to a JSON-SEQ record using the provided
-    /// [std::time::Instant].
+    /// [`std::time::Instant`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_with_instant<E: Serialize + Eventable>(
         &mut self, event: E, now: std::time::Instant,
     ) -> Result<()> {
@@ -207,7 +233,11 @@ impl QlogStreamer {
     }
 
     /// Writes a serializable to a pretty-printed JSON-SEQ record using the
-    /// provided [std::time::Instant].
+    /// provided [`std::time::Instant`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_with_instant_pretty<E: Serialize + Eventable>(
         &mut self, event: E, now: std::time::Instant,
     ) -> Result<()> {
@@ -238,22 +268,35 @@ impl QlogStreamer {
         }
     }
 
-    /// Writes an [Event] based on the provided [EventData] to a JSON-SEQ record
-    /// at time [std::time::Instant::now()].
+    /// Writes an [Event] based on the provided [`EventData`] to a JSON-SEQ
+    /// record at time [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_now(&mut self, event_data: EventData) -> Result<()> {
-        self.add_event_data_ex_now(event_data, Default::default())
+        self.add_event_data_ex_now(event_data, ExData::new())
     }
 
-    /// Writes an [Event] based on the provided [EventData] to a pretty-printed
-    /// JSON-SEQ record at time [std::time::Instant::now()].
+    /// Writes an [Event] based on the provided [`EventData`] to a
+    /// pretty-printed JSON-SEQ record at time
+    /// [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_now_pretty(
         &mut self, event_data: EventData,
     ) -> Result<()> {
-        self.add_event_data_ex_now_pretty(event_data, Default::default())
+        self.add_event_data_ex_now_pretty(event_data, ExData::new())
     }
 
-    /// Writes an [Event] based on the provided [EventData] and [ExData] to a
-    /// JSON-SEQ record at time [std::time::Instant::now()].
+    /// Writes an [Event] based on the provided [`EventData`] and [`ExData`] to
+    /// a JSON-SEQ record at time [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_ex_now(
         &mut self, event_data: EventData, ex_data: ExData,
     ) -> Result<()> {
@@ -262,8 +305,13 @@ impl QlogStreamer {
         self.add_event_data_ex_with_instant(event_data, ex_data, now)
     }
 
-    /// Writes an [Event] based on the provided [EventData] and [ExData] to a
-    /// pretty-printed JSON-SEQ record at time [std::time::Instant::now()].
+    /// Writes an [Event] based on the provided [`EventData`] and [`ExData`] to
+    /// a pretty-printed JSON-SEQ record at time
+    /// [`std::time::Instant::now()`].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_ex_now_pretty(
         &mut self, event_data: EventData, ex_data: ExData,
     ) -> Result<()> {
@@ -272,28 +320,36 @@ impl QlogStreamer {
         self.add_event_data_ex_with_instant_pretty(event_data, ex_data, now)
     }
 
-    /// Writes an [Event] based on the provided [EventData] and
-    /// [std::time::Instant] to a JSON-SEQ record.
+    /// Writes an [Event] based on the provided [`EventData`] and
+    /// [`std::time::Instant`] to a JSON-SEQ record.
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_with_instant(
         &mut self, event_data: EventData, now: std::time::Instant,
     ) -> Result<()> {
-        self.add_event_data_ex_with_instant(event_data, Default::default(), now)
+        self.add_event_data_ex_with_instant(event_data, ExData::new(), now)
     }
 
-    /// Writes an [Event] based on the provided [EventData] and
-    /// [std::time::Instant] to a pretty-printed JSON-SEQ record.
+    /// Writes an [Event] based on the provided [`EventData`] and
+    /// [`std::time::Instant`] to a pretty-printed JSON-SEQ record.
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_with_instant_pretty(
         &mut self, event_data: EventData, now: std::time::Instant,
     ) -> Result<()> {
-        self.add_event_data_ex_with_instant_pretty(
-            event_data,
-            Default::default(),
-            now,
-        )
+        self.add_event_data_ex_with_instant_pretty(event_data, ExData::new(), now)
     }
 
-    /// Writes an [Event] based on the provided [EventData], [ExData], and
-    /// [std::time::Instant] to a JSON-SEQ record.
+    /// Writes an [Event] based on the provided [`EventData`], [`ExData`], and
+    /// [`std::time::Instant`] to a JSON-SEQ record.
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_ex_with_instant(
         &mut self, event_data: EventData, ex_data: ExData,
         now: std::time::Instant,
@@ -302,7 +358,11 @@ impl QlogStreamer {
     }
 
     // Writes an [Event] based on the provided [EventData], [ExData], and
-    /// [std::time::Instant] to a pretty-printed JSON-SEQ record.
+    /// [`std::time::Instant`] to a pretty-printed JSON-SEQ record.
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
     pub fn add_event_data_ex_with_instant_pretty(
         &mut self, event_data: EventData, ex_data: ExData,
         now: std::time::Instant,
@@ -337,23 +397,39 @@ impl QlogStreamer {
     }
 
     /// Writes a JSON-SEQ-serialized [Event] using the provided [Event].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Preserve the established public API that takes ownership of the event while serialization borrows it internally"
+    )]
     pub fn add_event<E: Serialize + Eventable>(
         &mut self, event: E,
     ) -> Result<()> {
-        self.write_event(event, false)
+        self.write_event(&event, false)
     }
 
     /// Writes a pretty-printed JSON-SEQ-serialized [Event] using the provided
     /// [Event].
+    ///
+    /// # Errors
+    /// Returns an error for invalid state, filtered events, serialization
+    /// failure, or I/O failure.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "Preserve the established public API that takes ownership of the event while serialization borrows it internally"
+    )]
     pub fn add_event_pretty<E: Serialize + Eventable>(
         &mut self, event: E,
     ) -> Result<()> {
-        self.write_event(event, true)
+        self.write_event(&event, true)
     }
 
     /// Writes a JSON-SEQ-serialized [Event] using the provided [Event].
     fn write_event<E: Serialize + Eventable>(
-        &mut self, event: E, pretty: bool,
+        &mut self, event: &E, pretty: bool,
     ) -> Result<()> {
         if self.state != StreamerState::Ready {
             return Err(Error::InvalidState);
@@ -365,10 +441,10 @@ impl QlogStreamer {
 
         self.writer.as_mut().write_all(b"")?;
         if pretty {
-            serde_json::to_writer_pretty(self.writer.as_mut(), &event)
+            serde_json::to_writer_pretty(self.writer.as_mut(), event)
                 .map_err(|_| Error::Done)?;
         } else {
-            serde_json::to_writer(self.writer.as_mut(), &event)
+            serde_json::to_writer(self.writer.as_mut(), event)
                 .map_err(|_| Error::Done)?;
         }
         self.writer.as_mut().write_all(b"\n")?;
@@ -377,12 +453,17 @@ impl QlogStreamer {
     }
 
     /// Returns the writer.
-    #[allow(clippy::borrowed_box)]
+    #[expect(
+        clippy::borrowed_box,
+        reason = "Preserve the established public writer accessor type during the strict-gate migration"
+    )]
+    #[must_use]
     pub fn writer(&self) -> &Box<dyn std::io::Write + Send + Sync> {
         &self.writer
     }
 
-    pub fn start_time(&self) -> std::time::Instant {
+    #[must_use]
+    pub const fn start_time(&self) -> std::time::Instant {
         self.start_time
     }
 }
@@ -396,20 +477,62 @@ impl Drop for QlogStreamer {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::io;
+    use std::sync::Arc;
+    use std::sync::Mutex;
 
     use super::*;
     use crate::events::quic;
     use crate::events::quic::QuicFrame;
     use crate::events::RawInfo;
-    use testing::*;
+    use crate::testing::*;
 
     use serde_json::json;
 
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
+
+    #[derive(Clone)]
+    struct CaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .map_err(|_| {
+                    io::Error::other("capture writer mutex was poisoned")
+                })?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_writer(
+    ) -> (Box<dyn std::io::Write + Send + Sync>, Arc<Mutex<Vec<u8>>>) {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let writer = CaptureWriter {
+            bytes: Arc::clone(&bytes),
+        };
+        (Box::new(writer), bytes)
+    }
+
+    fn captured_string(
+        bytes: &Arc<Mutex<Vec<u8>>>,
+    ) -> std::result::Result<String, Box<dyn std::error::Error>> {
+        let bytes = bytes
+            .lock()
+            .map_err(|_| io::Error::other("capture writer mutex was poisoned"))?;
+        Ok(std::str::from_utf8(&bytes)?.to_owned())
+    }
+
     #[test]
-    fn serialization_states() {
-        let v: Vec<u8> = Vec::new();
-        let buff = std::io::Cursor::new(v);
-        let writer = Box::new(buff);
+    fn serialization_states() -> TestResult {
+        let (writer, captured) = capture_writer();
 
         let trace = make_trace_seq();
         let pkt_hdr = make_pkt_hdr(quic::PacketType::Handshake);
@@ -480,7 +603,7 @@ mod tests {
 
         let ev3 = Event::with_time(0.0, event_data3);
 
-        let mut s = streamer::QlogStreamer::new(
+        let mut s = QlogStreamer::new(
             Some("title".to_string()),
             Some("description".to_string()),
             std::time::Instant::now(),
@@ -511,10 +634,6 @@ mod tests {
 
         assert!(matches!(s.finish_log(), Ok(())));
 
-        let r = s.writer();
-        #[allow(clippy::borrowed_box)]
-        let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
-
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}
 {"time":0.0,"name":"quic:packet_sent","data":{"header":{"packet_type":"handshake","packet_number":0,"version":"1","scil":8,"dcil":8,"scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"raw":{"length":1251,"payload_length":1224},"frames":[{"frame_type":"stream","stream_id":40,"offset":40,"fin":true,"raw":{"payload_length":400}}]}}
 {"time":0.0,"name":"quic:packet_sent","data":{"header":{"packet_type":"handshake","packet_number":0,"version":"1","scil":8,"dcil":8,"scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"raw":{"length":1251,"payload_length":1224},"frames":[{"frame_type":"stream","stream_id":0,"offset":0,"fin":true,"raw":{"payload_length":100}}]}}
@@ -522,28 +641,28 @@ mod tests {
 {"time":0.0,"name":"quic:packet_sent","data":{"header":{"packet_type":"handshake","packet_number":0,"version":"1","scil":8,"dcil":8,"scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"stateless_reset_token":"reset_token","raw":{"length":1251,"payload_length":1224},"frames":[{"frame_type":"stream","stream_id":0,"offset":0,"fin":true,"raw":{"payload_length":100}}]}}
 "#;
 
-        let written_string = std::str::from_utf8(w.as_ref().get_ref()).unwrap();
+        let written_string = captured_string(&captured)?;
 
         pretty_assertions::assert_eq!(log_string, written_string);
+
+        Ok(())
     }
 
     #[test]
-    fn stream_json_event() {
+    fn stream_json_event() -> TestResult {
         let data = json!({"foo": "Bar", "hello": 123});
-        let ev = events::JsonEvent {
+        let ev = crate::events::JsonEvent {
             time: 0.0,
-            importance: events::EventImportance::Core,
+            importance: EventImportance::Core,
             name: "jsonevent:sample".into(),
             data,
         };
 
-        let v: Vec<u8> = Vec::new();
-        let buff = std::io::Cursor::new(v);
-        let writer = Box::new(buff);
+        let (writer, captured) = capture_writer();
 
         let trace = make_trace_seq();
 
-        let mut s = streamer::QlogStreamer::new(
+        let mut s = QlogStreamer::new(
             Some("title".to_string()),
             Some("description".to_string()),
             std::time::Instant::now(),
@@ -557,24 +676,20 @@ mod tests {
         assert!(matches!(s.add_event(ev), Ok(())));
         assert!(matches!(s.finish_log(), Ok(())));
 
-        let r = s.writer();
-        #[allow(clippy::borrowed_box)]
-        let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
-
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}
 {"time":0.0,"name":"jsonevent:sample","data":{"foo":"Bar","hello":123}}
 "#;
 
-        let written_string = std::str::from_utf8(w.as_ref().get_ref()).unwrap();
+        let written_string = captured_string(&captured)?;
 
         pretty_assertions::assert_eq!(log_string, written_string);
+
+        Ok(())
     }
 
     #[test]
-    fn stream_data_ex() {
-        let v: Vec<u8> = Vec::new();
-        let buff = std::io::Cursor::new(v);
-        let writer = Box::new(buff);
+    fn stream_data_ex() -> TestResult {
+        let (writer, captured) = capture_writer();
 
         let trace = make_trace_seq();
         let pkt_hdr = make_pkt_hdr(quic::PacketType::Handshake);
@@ -621,15 +736,15 @@ mod tests {
         };
 
         let event_data2 = EventData::QuicPacketSent(quic::PacketSent {
-            header: pkt_hdr.clone(),
+            header: pkt_hdr,
             frames: Some(vec![frame2]),
-            raw: raw.clone(),
+            raw,
             ..Default::default()
         });
 
         let ev2 = Event::with_time(0.0, event_data2);
 
-        let mut s = streamer::QlogStreamer::new(
+        let mut s = QlogStreamer::new(
             Some("title".to_string()),
             Some("description".to_string()),
             std::time::Instant::now(),
@@ -644,34 +759,32 @@ mod tests {
         assert!(matches!(s.add_event(ev2), Ok(())));
         assert!(matches!(s.finish_log(), Ok(())));
 
-        let r = s.writer();
-        #[allow(clippy::borrowed_box)]
-        let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(r) };
-
         let log_string = r#"{"file_schema":"urn:ietf:params:qlog:file:sequential","serialization_format":"JSON-SEQ","title":"title","description":"description","trace":{"title":"Quiche qlog trace","description":"Quiche qlog trace description","vantage_point":{"type":"server"},"event_schemas":[]}}
 {"time":0.0,"name":"quic:packet_sent","data":{"header":{"packet_type":"handshake","packet_number":0,"version":"1","scil":8,"dcil":8,"scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"raw":{"length":1251,"payload_length":1224},"frames":[{"frame_type":"stream","stream_id":40,"offset":40,"fin":true,"raw":{"payload_length":400}}]},"first":{"foo":"Bar","hello":123},"second":{"baz":[1,2,3,4]}}
 {"time":0.0,"name":"quic:packet_sent","data":{"header":{"packet_type":"handshake","packet_number":0,"version":"1","scil":8,"dcil":8,"scid":"7e37e4dcc6682da8","dcid":"36ce104eee50101c"},"raw":{"length":1251,"payload_length":1224},"frames":[{"frame_type":"stream","stream_id":1,"offset":0,"fin":true,"raw":{"payload_length":100}}]}}
 "#;
 
-        let written_string = std::str::from_utf8(w.as_ref().get_ref()).unwrap();
+        let written_string = captured_string(&captured)?;
 
         pretty_assertions::assert_eq!(log_string, written_string);
+
+        Ok(())
     }
 
     #[test]
     fn elapsed_millis_precision() {
         let dur = std::time::Duration::from_nanos(1_234_567);
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MilliSeconds),
-            1.0
+            duration_to_millis(dur, &EventTimePrecision::MilliSeconds).to_bits(),
+            1.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MicroSeconds),
-            1.234000
+            duration_to_millis(dur, &EventTimePrecision::MicroSeconds).to_bits(),
+            1.234_000f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::NanoSeconds),
-            1.234567
+            duration_to_millis(dur, &EventTimePrecision::NanoSeconds).to_bits(),
+            1.234_567f64.to_bits()
         );
     }
 
@@ -679,16 +792,16 @@ mod tests {
     fn elapsed_millis_zero_duration_all_precisions() {
         let dur = std::time::Duration::from_secs(0);
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MilliSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::MilliSeconds).to_bits(),
+            0.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MicroSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::MicroSeconds).to_bits(),
+            0.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::NanoSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::NanoSeconds).to_bits(),
+            0.0f64.to_bits()
         );
     }
 }

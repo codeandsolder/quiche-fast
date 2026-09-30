@@ -218,7 +218,7 @@
 //! lines containing a record separator character, a serialized [`Event`], and a
 //! newline.
 //!
-//! ### Creating a TraceSeq
+//! ### Creating a `TraceSeq`
 //!
 //! ```
 //! let mut trace = qlog::TraceSeq::new(
@@ -403,6 +403,10 @@ use serde::Serialize;
 
 /// A quiche qlog error.
 #[derive(Debug)]
+#[allow(
+    clippy::enum_variant_names,
+    reason = "IoError is part of the established public qlog Error API"
+)]
 pub enum Error {
     /// There is no more work to do.
     Done,
@@ -432,7 +436,7 @@ impl std::error::Error for Error {
 
 impl std::convert::From<std::io::Error> for Error {
     fn from(err: std::io::Error) -> Self {
-        Error::IoError(err)
+        Self::IoError(err)
     }
 }
 
@@ -508,12 +512,13 @@ pub struct Trace {
 /// Helper functions for using a qlog [Trace].
 impl Trace {
     /// Creates a new qlog [Trace]
-    pub fn new(
+    #[must_use]
+    pub const fn new(
         title: Option<String>, description: Option<String>,
         common_fields: Option<CommonFields>, vantage_point: Option<VantagePoint>,
         event_schemas: Vec<String>,
     ) -> Self {
-        Trace {
+        Self {
             title,
             description,
             common_fields,
@@ -530,7 +535,7 @@ impl Trace {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TraceSeq {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -539,15 +544,16 @@ pub struct TraceSeq {
     pub event_schemas: Vec<String>,
 }
 
-/// Helper functions for using a qlog [TraceSeq].
+/// Helper functions for using a qlog [`TraceSeq`].
 impl TraceSeq {
-    /// Creates a new qlog [TraceSeq]
-    pub fn new(
+    /// Creates a new qlog [`TraceSeq`]
+    #[must_use]
+    pub const fn new(
         title: Option<String>, description: Option<String>,
         common_fields: Option<CommonFields>, vantage_point: Option<VantagePoint>,
         event_schemas: Vec<String>,
     ) -> Self {
-        TraceSeq {
+        Self {
             title,
             description,
             common_fields,
@@ -587,7 +593,7 @@ pub enum TimeFormat {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, Debug)]
 #[serde(rename_all = "snake_case")]
 pub struct ReferenceTime {
     pub clock_type: String,
@@ -600,10 +606,11 @@ impl ReferenceTime {
     ///
     /// If `wall_clock_time` is specified, it will be added as the optional
     /// `wall_clock_time` field of `ReferenceTime`.
+    #[must_use]
     pub fn new_monotonic(wall_clock_time: Option<SystemTime>) -> Self {
         let wall_clock_time =
             wall_clock_time.map(|t| humantime::format_rfc3339(t).to_string());
-        ReferenceTime {
+        Self {
             clock_type: "monotonic".to_string(),
             // per draft-ietf-quic-qlog-main-schema-13 epoch must be "unknown"
             // for monotonic clocks
@@ -614,7 +621,7 @@ impl ReferenceTime {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Debug)]
+#[derive(Serialize, Deserialize, Clone, Default, PartialEq, Eq, Debug)]
 pub struct CommonFields {
     pub tuple: Option<String>,
     pub group_id: Option<String>,
@@ -645,13 +652,19 @@ pub struct Token {
 pub struct HexSlice<'a>(&'a [u8]);
 
 impl<'a> HexSlice<'a> {
-    pub fn new<T>(data: &'a T) -> HexSlice<'a>
+    #[must_use]
+    pub fn new<T>(data: &'a T) -> Self
     where
         T: ?Sized + AsRef<[u8]> + 'a,
     {
         HexSlice(data.as_ref())
     }
 
+    #[must_use]
+    #[expect(
+        clippy::single_option_map,
+        reason = "Public convenience API centralizes optional byte-to-hex formatting across callers"
+    )]
     pub fn maybe_string<T>(data: Option<&'a T>) -> Option<String>
     where
         T: ?Sized + AsRef<[u8]> + 'a,
@@ -684,23 +697,32 @@ mod tests {
     use super::ReferenceTime;
 
     #[test]
-    fn reference_time_new_monotonic_serialization() {
+    #[expect(
+        clippy::duration_suboptimal_units,
+        reason = "The fixture is an explicit Unix timestamp in seconds; converting it to minutes would obscure the test value"
+    )]
+    fn reference_time_new_monotonic_serialization(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // 2024-01-15T10:30:00Z = 1705314600 seconds after UNIX epoch
         let t = UNIX_EPOCH + Duration::from_secs(1_705_314_600);
         let rt = ReferenceTime::new_monotonic(Some(t));
+        let encoded = serde_json::to_string(&rt)?;
         let map: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&serde_json::to_string(&rt).unwrap()).unwrap();
+            serde_json::from_str(&encoded)?;
 
         assert_eq!(map["clock_type"], "monotonic");
         assert_eq!(map["epoch"], "unknown");
         assert_eq!(map["wall_clock_time"], "2024-01-15T10:30:00Z");
 
         let rt = ReferenceTime::new_monotonic(None);
+        let encoded = serde_json::to_string(&rt)?;
         let map: serde_json::Map<String, serde_json::Value> =
-            serde_json::from_str(&serde_json::to_string(&rt).unwrap()).unwrap();
+            serde_json::from_str(&encoded)?;
 
         assert_eq!(map["clock_type"], "monotonic");
         assert_eq!(map["epoch"], "unknown");
         assert!(!map.contains_key("wall_clock_time"));
+
+        Ok(())
     }
 }
