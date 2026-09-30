@@ -131,6 +131,10 @@ pub fn qlog_file_name(id: &str, compression: QlogCompression) -> String {
 /// # Errors
 /// Returns an I/O error if the selected compression backend cannot be
 /// initialized.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "The zstd feature adds a fallible encoder initialization while default features have no fallible arm"
+)]
 pub fn make_qlog_writer<W>(
     inner: W, compression: QlogCompression,
 ) -> io::Result<QlogFileWriter>
