@@ -32,7 +32,7 @@ use super::SourceDependency;
 use regex::Regex;
 use std::convert::TryFrom;
 
-#[expect(
+#[allow(
     clippy::enum_variant_names,
     reason = "Variants mirror Chrome netlog HTTP/2 event names and are part of the public API"
 )]
@@ -315,7 +315,7 @@ pub struct Http2SessionCloseEvent {
     pub params: Http2SessionCloseParams,
 }
 
-#[expect(
+#[allow(
     clippy::struct_field_names,
     reason = "Field names mirror Chrome netlog JSON keys and are public"
 )]

@@ -29,7 +29,7 @@ use serde::Serialize;
 
 use super::EventHeader;
 
-#[expect(
+#[allow(
     clippy::enum_variant_names,
     reason = "Variants mirror Chrome netlog HTTP/3 event names and are part of the public API"
 )]

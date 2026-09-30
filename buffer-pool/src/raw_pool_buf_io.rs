@@ -37,6 +37,11 @@ pub type PooledBuf = Pooled<ConsumeBuffer>;
 pub trait RawPoolBufIo: Send {
     fn poll_send_reserve(&mut self, cx: &mut Context) -> Poll<io::Result<()>>;
 
+    /// Sends a pooled buffer, optionally marking the stream final.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying transport error when the buffer cannot be sent.
     fn send_buf(&mut self, buf: PooledBuf, fin: bool) -> io::Result<()>;
 
     fn poll_recv_buf(&mut self, cx: &mut Context) -> Poll<io::Result<PooledBuf>>;

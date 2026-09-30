@@ -736,9 +736,9 @@ mod tests {
         };
 
         let event_data2 = EventData::QuicPacketSent(quic::PacketSent {
-            header: pkt_hdr.clone(),
+            header: pkt_hdr,
             frames: Some(vec![frame2]),
-            raw: raw.clone(),
+            raw,
             ..Default::default()
         });
 
@@ -775,16 +775,16 @@ mod tests {
     fn elapsed_millis_precision() {
         let dur = std::time::Duration::from_nanos(1_234_567);
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MilliSeconds),
-            1.0
+            duration_to_millis(dur, &EventTimePrecision::MilliSeconds).to_bits(),
+            1.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MicroSeconds),
-            1.234_000
+            duration_to_millis(dur, &EventTimePrecision::MicroSeconds).to_bits(),
+            1.234_000f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::NanoSeconds),
-            1.234_567
+            duration_to_millis(dur, &EventTimePrecision::NanoSeconds).to_bits(),
+            1.234_567f64.to_bits()
         );
     }
 
@@ -792,16 +792,16 @@ mod tests {
     fn elapsed_millis_zero_duration_all_precisions() {
         let dur = std::time::Duration::from_secs(0);
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MilliSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::MilliSeconds).to_bits(),
+            0.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::MicroSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::MicroSeconds).to_bits(),
+            0.0f64.to_bits()
         );
         assert_eq!(
-            duration_to_millis(dur, &EventTimePrecision::NanoSeconds),
-            0.0
+            duration_to_millis(dur, &EventTimePrecision::NanoSeconds).to_bits(),
+            0.0f64.to_bits()
         );
     }
 }
