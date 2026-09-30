@@ -175,12 +175,22 @@ impl<'a> QlogSeqReader<'a> {
         reader: &mut (dyn std::io::BufRead + Send + Sync),
     ) -> std::io::Result<Option<Vec<u8>>> {
         let mut buf = Vec::<u8>::new();
-        let size = reader.read_until(b'', &mut buf)?;
+        let size = match reader.read_until(b'\u001e', &mut buf) {
+            Ok(size) => size,
+
+            // Compressed readers can report an integrity/trailer error after
+            // yielding the final complete record. Preserve that record when
+            // its separator was already read; otherwise treat the input as
+            // exhausted rather than exposing an Iterator panic surface.
+            Err(_) if buf.last() == Some(&b'\u001e') => buf.len(),
+            Err(_) => return Ok(None),
+        };
         if size <= 1 {
             return Ok(None);
         }
 
-        buf.truncate(buf.len() - 1);
+        debug_assert_eq!(buf.last(), Some(&b'\u001e'));
+        buf.pop();
 
         Ok(Some(buf))
     }
