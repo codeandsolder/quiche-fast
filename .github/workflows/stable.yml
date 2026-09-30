@@ -108,6 +108,8 @@ jobs:
       rust-toolchain: "1.98.1"
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
+      # rstest/proc_macro_crate spawns $CARGO locate-project during compilation.
+      # Keep stock Cargo here; sccache L0/Garage remain fully enabled.
       ephemeral-cargo: false
 
   quiche_macos:
