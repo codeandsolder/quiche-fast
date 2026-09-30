@@ -116,6 +116,10 @@ pub(super) trait CongestionControl: Debug {
 
     fn is_in_recovery(&self) -> bool;
 
+    #[allow(
+        dead_code,
+        reason = "Used by the BBRv2 pacer in qlog/test configurations but not the default Stable feature mix"
+    )]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool;
 
     fn pacing_rate(
