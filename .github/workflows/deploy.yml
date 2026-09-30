@@ -19,8 +19,10 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install stable toolchain
+      - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          toolchain: nightly
 
       - name: Install qlog-dancer dependencies
         run: |
@@ -41,6 +43,9 @@ jobs:
 
   docker:
     runs-on: ubuntu-latest
+    env:
+      DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+      DOCKER_TOKEN: ${{ secrets.DOCKER_TOKEN }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -49,10 +54,12 @@ jobs:
         run: make docker-build
 
       - name: Login to DockerHub
+        if: env.DOCKER_USERNAME != '' && env.DOCKER_TOKEN != ''
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
+          username: ${{ env.DOCKER_USERNAME }}
+          password: ${{ env.DOCKER_TOKEN }}
 
       - name: Publish Docker images
+        if: env.DOCKER_USERNAME != '' && env.DOCKER_TOKEN != ''
         run: make docker-publish
