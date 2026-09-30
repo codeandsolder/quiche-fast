@@ -109,11 +109,10 @@ jobs:
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
-      # Cargo. Quiche's H3 tests also resolve certificates through an embedded
-      # CARGO_MANIFEST_DIR at runtime, which is not compatible with canonical
-      # Rust sandbox paths yet. Keep L0/Garage enabled but use physical Rust paths.
+      # Cargo. H3 test credentials are embedded at compile time and materialized
+      # to a runtime temp path, so canonical Rust paths are safe again.
       ephemeral-cargo: false
-      canonical-rust: false
+      canonical-rust: true
 
   quiche_macos:
     if: startsWith(github.ref, 'refs/tags/')

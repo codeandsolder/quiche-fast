@@ -75,16 +75,47 @@ pub mod h3i_fixtures;
 
 use h3i_fixtures::stream_body;
 
-pub const TEST_CERT_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/",
-    "../quiche/examples/cert.crt"
-);
-pub const TEST_KEY_FILE: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/",
-    "../quiche/examples/cert.key"
-);
+pub fn test_credentials() -> (&'static str, &'static str) {
+    static CREDENTIALS: std::sync::OnceLock<(String, String)> =
+        std::sync::OnceLock::new();
+
+    let (cert, key) = CREDENTIALS.get_or_init(|| {
+        let dir = std::env::temp_dir().join(format!(
+            "tokio-quiche-integration-credentials-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let cert = dir.join("cert.crt");
+        let key = dir.join("cert.key");
+        std::fs::write(
+            &cert,
+            include_bytes!("../../../quiche/examples/cert.crt"),
+        )
+        .unwrap();
+        std::fs::write(
+            &key,
+            include_bytes!("../../../quiche/examples/cert.key"),
+        )
+        .unwrap();
+
+        (
+            cert.to_string_lossy().into_owned(),
+            key.to_string_lossy().into_owned(),
+        )
+    });
+
+    (cert.as_str(), key.as_str())
+}
+
+pub fn test_certificate_paths() -> TlsCertificatePaths<'static> {
+    let (cert, private_key) = test_credentials();
+    TlsCertificatePaths {
+        cert,
+        private_key,
+        kind: tokio_quiche::settings::CertificateKind::X509,
+    }
+}
 
 pub struct TestConnectionHook {
     was_called: Arc<AtomicBool>,
@@ -252,11 +283,7 @@ where
     let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     let url = format!("http://127.0.0.1:{}", socket.local_addr().unwrap().port());
 
-    let tls_cert_settings = TlsCertificatePaths {
-        cert: TEST_CERT_FILE,
-        private_key: TEST_KEY_FILE,
-        kind: tokio_quiche::settings::CertificateKind::X509,
-    };
+    let tls_cert_settings = test_certificate_paths();
 
     let hooks = Hooks {
         connection_hook: Some(hook),

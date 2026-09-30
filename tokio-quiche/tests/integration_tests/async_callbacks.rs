@@ -62,12 +62,13 @@ async fn test_hello_world_async_callbacks() {
                 }))
             });
 
+            let (cert, private_key) = test_credentials();
             ssl_ctx_builder
-                .set_private_key_file(TEST_KEY_FILE, SslFiletype::PEM)
+                .set_private_key_file(private_key, SslFiletype::PEM)
                 .unwrap();
 
             ssl_ctx_builder
-                .set_certificate_chain_file(TEST_CERT_FILE)
+                .set_certificate_chain_file(cert)
                 .unwrap();
 
             self.was_called.store(true, Ordering::SeqCst);
@@ -122,12 +123,13 @@ async fn test_async_callbacks_fail_after_initial_send() {
                 }))
             });
 
+            let (cert, private_key) = test_credentials();
             ssl_ctx_builder
-                .set_private_key_file(TEST_KEY_FILE, SslFiletype::PEM)
+                .set_private_key_file(private_key, SslFiletype::PEM)
                 .unwrap();
 
             ssl_ctx_builder
-                .set_certificate_chain_file(TEST_CERT_FILE)
+                .set_certificate_chain_file(cert)
                 .unwrap();
 
             Some(ssl_ctx_builder)
