@@ -4178,7 +4178,7 @@ impl<F: BufFactory> Connection<F> {
     #[cold]
     #[inline(never)]
     fn process_lost_frames(
-        &mut self, epoch: packet::Epoch, now: Instant,
+        &mut self, epoch: packet::Epoch, _now: Instant,
     ) -> Result<()> {
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
@@ -4228,7 +4228,7 @@ impl<F: BufFactory> Connection<F> {
                                         },
                                     );
 
-                                    q.add_event_data_with_instant(ev_data, now)
+                                    q.add_event_data_with_instant(ev_data, _now)
                                         .ok();
                                 });
 
