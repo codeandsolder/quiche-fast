@@ -577,9 +577,12 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Returns the number of separate buffers stored.
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )
     )]
     pub fn bufs_count(&self) -> usize {
         self.data.len()

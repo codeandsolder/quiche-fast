@@ -12,10 +12,6 @@ struct CRYPTO_BUFFER {
 }
 
 #[repr(C)]
-#[expect(
-    non_camel_case_types,
-    reason = "Name mirrors the external C/BoringSSL ABI"
-)]
 pub(super) struct SSL_QUIC_METHOD {
     set_read_secret: Option<
         unsafe extern "C" fn(
@@ -55,10 +51,6 @@ pub(super) struct SSL_QUIC_METHOD {
 
 #[cfg(test)]
 #[repr(C)]
-#[expect(
-    non_camel_case_types,
-    reason = "Name mirrors the external C/BoringSSL ABI"
-)]
 struct SSL_PRIVATE_KEY_METHOD {
     sign: Option<
         unsafe extern "C" fn(

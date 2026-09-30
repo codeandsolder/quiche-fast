@@ -149,9 +149,12 @@ pub struct SendTimeState {
     /// Total number of acked bytes at the time the packet was sent.
     pub total_bytes_acked: usize,
     /// Total number of lost bytes at the time the packet was sent.
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )
     )]
     pub total_bytes_lost: usize,
     /// Total number of inflight bytes at the time the packet was sent.
@@ -525,9 +528,12 @@ impl BandwidthSampler {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )
     )]
     pub(crate) fn is_app_limited(&self) -> bool {
         self.is_app_limited

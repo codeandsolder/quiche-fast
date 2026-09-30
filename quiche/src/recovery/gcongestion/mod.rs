@@ -116,10 +116,6 @@ pub(super) trait CongestionControl: Debug {
 
     fn is_in_recovery(&self) -> bool;
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool;
 
     fn pacing_rate(

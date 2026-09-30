@@ -118,10 +118,6 @@ impl RttStats {
         self.smoothed_rtt
     }
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
     pub(crate) fn latest_rtt(&self) -> Duration {
         self.latest_rtt
     }

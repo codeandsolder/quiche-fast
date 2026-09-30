@@ -114,19 +114,18 @@ impl Bandwidth {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
     pub const fn from_bytes_per_second(bytes_per_second: u64) -> Self {
         Bandwidth {
             bits_per_second: bytes_per_second.saturating_mul(8),
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )
     )]
     pub const fn to_bits_per_second(self) -> u64 {
         self.bits_per_second
@@ -142,10 +141,6 @@ impl Bandwidth {
         }
     }
 
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
     pub const fn from_mbits_per_second(m_bits_per_second: u64) -> Self {
         Bandwidth::from_kbits_per_second(m_bits_per_second.saturating_mul(1_000))
     }

@@ -70,10 +70,6 @@ struct SSL_CTX {
     _unused: c_void,
 }
 
-#[expect(
-    non_camel_case_types,
-    reason = "Name mirrors the external C/BoringSSL ABI"
-)]
 #[repr(transparent)]
 struct SSL {
     _unused: c_void,
@@ -1291,10 +1287,6 @@ extern "C" {
     fn ERR_error_string_n(err: c_uint, buf: *mut c_char, len: usize);
 
     // OPENSSL
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
     fn OPENSSL_free(ptr: *mut c_void);
 
 }
