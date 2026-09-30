@@ -19,5 +19,5 @@ jobs:
       # Keep strict Clippy on the cleaned workspace while tracked legacy
       # debt islands migrate separately: qlog-dancer #52, quiche core #54.
       # Source-policy scanning still covers the whole repository.
-      cargo-args: "--workspace --all-targets --exclude qlog-dancer --exclude quiche"
+      cargo-args: "--workspace --all-targets --exclude qlog-dancer --exclude quiche --no-deps"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
