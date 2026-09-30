@@ -1986,13 +1986,9 @@ pub extern "C" fn quiche_path_event_new(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::New(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => return,
+    if let PathEvent::New(local, peer) = ev {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
     }
 }
 
@@ -2002,13 +1998,9 @@ pub extern "C" fn quiche_path_event_validated(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::Validated(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => return,
+    if let PathEvent::Validated(local, peer) = ev {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
     }
 }
 
@@ -2018,13 +2010,9 @@ pub extern "C" fn quiche_path_event_failed_validation(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::FailedValidation(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => return,
+    if let PathEvent::FailedValidation(local, peer) = ev {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
     }
 }
 
@@ -2034,13 +2022,9 @@ pub extern "C" fn quiche_path_event_closed(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::Closed(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => return,
+    if let PathEvent::Closed(local, peer) = ev {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
     }
 }
 
@@ -2052,17 +2036,13 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
     local_addr: &mut sockaddr_storage, local_addr_len: &mut socklen_t,
     peer_addr: &mut sockaddr_storage, peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::ReusedSourceConnectionId(id, old, new) => {
-            *cid_sequence_number = *id;
-            *old_local_addr_len = std_addr_to_c(&old.0, old_local_addr);
-            *old_peer_addr_len = std_addr_to_c(&old.1, old_peer_addr);
+    if let PathEvent::ReusedSourceConnectionId(id, old, new) = ev {
+        *cid_sequence_number = *id;
+        *old_local_addr_len = std_addr_to_c(&old.0, old_local_addr);
+        *old_peer_addr_len = std_addr_to_c(&old.1, old_peer_addr);
 
-            *local_addr_len = std_addr_to_c(&new.0, local_addr);
-            *peer_addr_len = std_addr_to_c(&new.1, peer_addr)
-        },
-
-        _ => return,
+        *local_addr_len = std_addr_to_c(&new.0, local_addr);
+        *peer_addr_len = std_addr_to_c(&new.1, peer_addr);
     }
 }
 
@@ -2072,13 +2052,9 @@ pub extern "C" fn quiche_path_event_peer_migrated(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t,
 ) {
-    match ev {
-        PathEvent::PeerMigrated(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr);
-        },
-
-        _ => return,
+    if let PathEvent::PeerMigrated(local, peer) = ev {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
     }
 }
 
@@ -2088,18 +2064,15 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
     local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
     peer_addr_len: &mut socklen_t, pmtu: &mut size_t,
 ) {
-    match ev {
-        PathEvent::PmtuUpdated {
-            local,
-            peer,
-            pmtu: value,
-        } => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr);
-            *pmtu = *value;
-        },
-
-        _ => return,
+    if let PathEvent::PmtuUpdated {
+        local,
+        peer,
+        pmtu: value,
+    } = ev
+    {
+        *local_addr_len = std_addr_to_c(local, local_addr);
+        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        *pmtu = *value;
     }
 }
 
