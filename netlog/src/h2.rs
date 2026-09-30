@@ -32,6 +32,10 @@ use super::SourceDependency;
 use regex::Regex;
 use std::convert::TryFrom;
 
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variants mirror Chrome netlog HTTP/2 event names and are part of the public API"
+)]
 #[derive(Debug)]
 pub enum Event {
     Http2Session(Http2SessionEvent),
@@ -311,6 +315,10 @@ pub struct Http2SessionCloseEvent {
     pub params: Http2SessionCloseParams,
 }
 
+#[expect(
+    clippy::struct_field_names,
+    reason = "Field names mirror Chrome netlog JSON keys and are public"
+)]
 #[derive(Deserialize, Debug, Default)]
 pub struct Htt2SessionStalledMaxStreamsParams {
     pub max_concurrent_streams: u32,
@@ -351,7 +359,7 @@ pub struct Http2Settings {
 }
 
 impl Http2Settings {
-    pub fn set_from_wire(&mut self, id: u16, value: u32) {
+    pub const fn set_from_wire(&mut self, id: u16, value: u32) {
         match id {
             H2_HEADER_TABLE_SIZE => self.header_table_size = Some(value),
             H2_ENABLE_PUSH => self.enable_push = Some(value),
@@ -376,7 +384,8 @@ impl TryFrom<&[String]> for Http2Settings {
     type Error = String;
 
     fn try_from(settings: &[String]) -> Result<Self, Self::Error> {
-        let re = Regex::new(H2_SEND_SETTINGS_PATTERN).unwrap();
+        let re = Regex::new(H2_SEND_SETTINGS_PATTERN)
+            .map_err(|e| format!("invalid H2 settings regex: {e}"))?;
         let mut parsed = Self::default();
 
         for setting in settings {
@@ -393,21 +402,19 @@ impl TryFrom<&[String]> for Http2Settings {
 
                             _ =>
                                 return Err(format!(
-                                    "error: parsing H2 setting {}",
-                                    setting
+                                    "error: parsing H2 setting {setting}"
                                 )),
                         }
                     },
 
                     _ =>
                         return Err(format!(
-                            "error: parsing H2 setting {}",
-                            setting
+                            "error: parsing H2 setting {setting}"
                         )),
                 },
 
                 None =>
-                    return Err(format!("error: parsing H2 setting {}", setting)),
+                    return Err(format!("error: parsing H2 setting {setting}")),
             }
         }
 
@@ -416,38 +423,39 @@ impl TryFrom<&[String]> for Http2Settings {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
+#[must_use]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Explicit wire-event dispatch is easier to audit than splitting the protocol mapping across helpers"
+)]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {
     match event_hdr.ty_string.as_str() {
         "HTTP2_SESSION" =>
             if event_hdr.phase_string == "PHASE_BEGIN" {
-                let ev: Http2SessionEvent =
-                    serde_json::from_slice(event).unwrap();
+                let ev: Http2SessionEvent = super::decode_event(event)?;
                 return Some(super::Event::H2(Event::Http2Session(ev)));
             },
 
         "HTTP2_SESSION_INITIALIZED" => {
-            let ev: Http2SessionInitializedEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionInitializedEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionInitialized(ev)));
         },
 
         "HTTP2_SESSION_SEND_SETTINGS" => {
-            let ev: Http2SessionSendSettingsEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionSendSettingsEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionSendSettings(ev)));
         },
 
         "HTTP2_SESSION_RECV_SETTING" => {
-            let ev: Http2SessionRecvSettingEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionRecvSettingEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvSetting(ev)));
         },
 
         "HTTP2_SESSION_UPDATE_RECV_WINDOW" => {
             let ev: Http2SessionUpdateRecvWindowEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionUpdateRecvWindow(
                 ev,
             )));
@@ -455,7 +463,7 @@ pub fn parse_event(
 
         "HTTP2_SESSION_UPDATE_SEND_WINDOW" => {
             let ev: Http2SessionUpdateSendWindowEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionUpdateSendWindow(
                 ev,
             )));
@@ -463,7 +471,7 @@ pub fn parse_event(
 
         "HTTP2_SESSION_UPDATE_STREAMS_SEND_WINDOW_SIZE" => {
             let ev: Http2SessionUpdateStreamsSendWindowSizeEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(
                 Event::Http2SessionUpdateStreamsSendWindowSize(ev),
             ));
@@ -471,7 +479,7 @@ pub fn parse_event(
 
         "HTTP2_SESSION_SEND_WINDOW_UPDATE" => {
             let ev: Http2SessionSendWindowUpdateEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
 
             return Some(super::Event::H2(Event::Http2SessionSendWindowUpdate(
                 ev,
@@ -480,7 +488,7 @@ pub fn parse_event(
 
         "HTTP2_SESSION_RECV_WINDOW_UPDATE" => {
             let ev: Http2SessionRecvWindowUpdateEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvWindowUpdate(
                 ev,
             )));
@@ -488,7 +496,7 @@ pub fn parse_event(
 
         "HTTP2_STREAM_UPDATE_SEND_WINDOW" => {
             let ev: Http2StreamUpdateSendWindowEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2StreamUpdateSendWindow(
                 ev,
             )));
@@ -496,7 +504,7 @@ pub fn parse_event(
 
         "HTTP2_STREAM_UPDATE_RECV_WINDOW" => {
             let ev: Http2StreamUpdateRecvWindowEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2StreamUpdateRecvWindow(
                 ev,
             )));
@@ -504,70 +512,61 @@ pub fn parse_event(
 
         "HTTP2_SESSION_STREAM_STALLED_BY_STREAM_SEND_WINDOW" => {
             let ev: Http2StreamStalledByStreamSendWindowEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(
                 Event::Http2StreamStalledByStreamSendWindow(ev),
             ));
         },
 
         "HTTP2_SESSION_SEND_HEADERS" => {
-            let ev: Http2SessionSendHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionSendHeadersEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionSendHeaders(ev)));
         },
 
         "HTTP2_SESSION_SEND_DATA" => {
-            let ev: Http2SessionSendDataEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionSendDataEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionSendData(ev)));
         },
 
         "HTTP2_SESSION_RECV_HEADERS" => {
-            let ev: Http2SessionRecvHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionRecvHeadersEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvHeaders(ev)));
         },
 
         "HTTP2_SESSION_RECV_DATA" => {
-            let ev: Http2SessionRecvDataEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionRecvDataEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvData(ev)));
         },
 
         "HTTP2_SESSION_PING" => {
-            let ev: Http2SessionPingEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionPingEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionPing(ev)));
         },
 
         "HTTP2_SESSION_SEND_RST_STREAM" => {
-            let ev: Http2SessionSendRstStreamEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionSendRstStreamEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionSendRstStream(ev)));
         },
 
         "HTTP2_SESSION_RECV_RST_STREAM" => {
-            let ev: Http2SessionRecvRstStreamEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionRecvRstStreamEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvRstStream(ev)));
         },
 
         "HTTP2_SESSION_RECV_GOAWAY" => {
-            let ev: Http2SessionRecvGoawayEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionRecvGoawayEvent = super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionRecvGoaway(ev)));
         },
 
         "HTTP2_SESSION_CLOSE" => {
-            let ev: Http2SessionCloseEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http2SessionCloseEvent = super::decode_event(event)?;
 
             return Some(super::Event::H2(Event::Http2SessionClose(ev)));
         },
 
         "HTTP2_SESSION_STALLED_MAX_STREAMS" => {
             let ev: Htt2SessionStalledMaxStreamsEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::H2(Event::Http2SessionStalledMaxStreams(
                 ev,
             )));
@@ -603,8 +602,12 @@ pub fn parse_event(
 
         // The netlog format is continually evolving, log any unknown types in
         // case they are interesting.
-        _ =>
-            log::trace!("skipping unknown HTTP/2 type....{}", event_hdr.ty_string),
+        _ => {
+            log::trace!(
+                "skipping unknown HTTP/2 type....{}",
+                event_hdr.ty_string
+            );
+        },
     }
 
     None

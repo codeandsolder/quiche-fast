@@ -156,8 +156,9 @@ pub fn make_qlog_writer(
     match std::fs::File::create(&path) {
         Ok(f) => std::io::BufWriter::new(f),
 
-        Err(e) =>
-            panic!("Error creating qlog file attempted path was {path:?}: {e}"),
+        Err(e) => {
+            panic!("Error creating qlog file attempted path was {path:?}: {e}")
+        },
     }
 }
 

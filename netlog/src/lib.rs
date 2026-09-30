@@ -119,6 +119,7 @@
 //! (https://www.chromium.org/developers/design-documents/network-stack/netlog/)
 use std::io::BufRead;
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::constants::Constants;
@@ -176,7 +177,11 @@ pub enum Event {
     Quic(quic::Event),
 }
 
-/// Read the netlog constants from a netlog file accessed by a BufRead.
+/// Read the netlog constants from a netlog file accessed by a `BufRead`.
+///
+/// # Errors
+///
+/// Returns an error if the constants line cannot be read or decoded as JSON.
 pub fn read_netlog_constants<R: BufRead>(
     reader: &mut R,
 ) -> Result<Constants, serde_json::Error> {
@@ -184,8 +189,14 @@ pub fn read_netlog_constants<R: BufRead>(
 
     // Read the constants line and replace the trailing comma (,) with a brace
     // (}) to close the object and make it parseable.
-    let len = reader.read_until(b'\n', &mut buf).unwrap();
-    buf[len - 2] = b'}';
+    reader
+        .read_until(b'\n', &mut buf)
+        .map_err(serde_json::Error::io)?;
+
+    if buf.ends_with(b",\n") {
+        let closing = buf.len() - 2;
+        buf[closing] = b'}';
+    }
 
     let res: Result<ConstantsLine, serde_json::Error> =
         serde_json::from_slice(&buf);
@@ -198,44 +209,66 @@ pub fn read_netlog_constants<R: BufRead>(
         },
 
         Err(e) => {
-            log::error!("Error deserializing constants: {}", e);
+            log::error!("Error deserializing constants: {e}");
 
             Err(e)
         },
     }
 }
 
-/// Reads a single record from a netlog file accessed by a BufRead.
+/// Reads a single record from a netlog file accessed by a `BufRead`.
+///
+/// Returns `None` at end of input, for non-event lines, or if the underlying
+/// reader reports an I/O error.
+#[must_use]
 pub fn read_netlog_record<R: BufRead>(reader: &mut R) -> Option<Vec<u8>> {
     let mut buf = Vec::<u8>::new();
-    let size = reader.read_until(b'\n', &mut buf).unwrap();
+    let size = match reader.read_until(b'\n', &mut buf) {
+        Ok(size) => size,
+        Err(e) => {
+            log::error!("Error reading netlog record: {e}");
+            return None;
+        },
+    };
 
     if size <= 1 {
         return None;
     }
 
-    // After netlog events, line holds polledData struct. Ignore it and return
-    if buf[0] != b'{' {
+    // After netlog events, line holds polledData struct. Ignore it and return.
+    if buf.first() != Some(&b'{') {
         return None;
     }
 
-    // Remove trailing comma and newline
-    buf.truncate(buf.len() - 2);
-
-    // Last line of events closes array. Lets ignore it.
-    if buf[buf.len() - 1] == b']' {
-        buf.truncate(buf.len() - 1);
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    if buf.last() == Some(&b',') {
+        buf.pop();
     }
 
-    log::trace!(
-        "read record={}",
-        String::from_utf8(buf.clone()).expect("from_utf8 failed")
-    );
+    // Last line of events closes the array. Ignore the bracket.
+    if buf.last() == Some(&b']') {
+        buf.pop();
+    }
+
+    log::trace!("read record={}", String::from_utf8_lossy(&buf));
 
     Some(buf)
 }
 
+fn decode_event<T: DeserializeOwned>(event: &[u8]) -> Option<T> {
+    match serde_json::from_slice(event) {
+        Ok(value) => Some(value),
+        Err(e) => {
+            log::debug!("Skipping malformed netlog event: {e}");
+            None
+        },
+    }
+}
+
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
+#[must_use]
 pub fn parse_event(event_hdr: &EventHeader, event: &[u8]) -> Option<Event> {
     if event_hdr.ty_string.starts_with("HTTP_") {
         return http::parse_event(event_hdr, event);

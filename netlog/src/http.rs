@@ -119,6 +119,7 @@ pub struct HttpStreamRequestBoundToQuicSessionParams {
     pub source_dependency: SourceDependency,
 }
 
+#[must_use]
 pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
     let mut ret = BTreeMap::new();
 
@@ -133,7 +134,7 @@ pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
             },
 
             (Some(k), None) => {
-                ret.insert(k.to_string(), "".to_string());
+                ret.insert(k.to_string(), String::new());
             },
 
             _ => (),
@@ -144,13 +145,14 @@ pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
+#[must_use]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {
     match event_hdr.ty_string.as_str() {
         "HTTP_TRANSACTION_HTTP2_SEND_REQUEST_HEADERS" => {
             let ev: HttpTransactionHttp2SendRequestHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(
                 Event::HttpTransactionHttp2SendRequestHeaders(ev),
             ));
@@ -158,7 +160,7 @@ pub fn parse_event(
 
         "HTTP_TRANSACTION_QUIC_SEND_REQUEST_HEADERS" => {
             let ev: HttpTransactionQuicSendRequestHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(
                 Event::HttpTransactionQuicSendRequestHeaders(ev),
             ));
@@ -166,7 +168,7 @@ pub fn parse_event(
 
         "HTTP_TRANSACTION_SEND_REQUEST_HEADERS" => {
             let ev: HttpTransactionSendRequestHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(
                 Event::HttpTransactionSendRequestHeaders(ev),
             ));
@@ -174,7 +176,7 @@ pub fn parse_event(
 
         "HTTP_TRANSACTION_READ_RESPONSE_HEADERS" => {
             let ev: HttpTransactionReadResponseHeadersEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(
                 Event::HttpTransactionReadResponseHeaders(ev),
             ));
@@ -182,7 +184,7 @@ pub fn parse_event(
 
         "HTTP_STREAM_REQUEST_BOUND_TO_JOB" => {
             let ev: HttpStreamRequestBoundToJobEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(Event::HttpStreamRequestBoundToJob(
                 ev,
             )));
@@ -190,7 +192,7 @@ pub fn parse_event(
 
         "HTTP_STREAM_JOB_BOUND_TO_REQUEST" => {
             let ev: HttpStreamJobBoundToRequestEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(Event::HttpStreamJobBoundToRequest(
                 ev,
             )));
@@ -198,13 +200,13 @@ pub fn parse_event(
 
         "HTTP_STREAM_REQUEST_BOUND_TO_QUIC_SESSION" => {
             let ev: HttpStreamRequestBoundToQuicSessionEvent =
-                serde_json::from_slice(event).unwrap();
+                super::decode_event(event)?;
             return Some(super::Event::Http(
                 Event::HttpStreamRequestBoundToQuicSession(ev),
             ));
         },
 
-        // ignore these for now
+        // Known events that are intentionally ignored for now.
         "HTTP_TRANSACTION_READ_EARLY_HINTS_RESPONSE_HEADERS" |
         "HTTP_TRANSACTION_READ_TUNNEL_RESPONSE_HEADERS" |
         "HTTP_TRANSACTION_RESTART_AFTER_ERROR" |
@@ -212,9 +214,7 @@ pub fn parse_event(
         "HTTP_TRANSACTION_SEND_REQUEST_BODY" |
         "HTTP_TRANSACTION_SEND_TUNNEL_HEADERS" |
         "HTTP_TRANSACTION_TUNNEL_READ_HEADERS" |
-        "HTTP_TRANSACTION_TUNNEL_SEND_REQUEST" => (),
-
-        // ignore these ones since they contain no extra params
+        "HTTP_TRANSACTION_TUNNEL_SEND_REQUEST" |
         "HTTP_TRANSACTION_SEND_REQUEST" |
         "HTTP_TRANSACTION_READ_HEADERS" |
         "HTTP_TRANSACTION_READ_BODY" => (),

@@ -176,36 +176,36 @@ impl ActiveTasks {
     fn add_task_if(
         &self, handle: AbortHandle, cond: impl FnOnce() -> bool,
     ) -> Result<(), AbortHandle> {
-        use dashmap::Entry::*;
+        use dashmap::Entry;
         let id = handle.id();
 
         match self.tasks.entry(id) {
-            Vacant(e) => {
+            Entry::Vacant(e) => {
                 if !cond() {
                     return Err(handle);
                 }
                 e.insert(TaskEntry::Handle(handle));
             },
-            Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {
+            Entry::Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {
                 // Task was removed before it was added. Clear the map entry and
                 // drop the handle.
                 e.remove();
             },
-            Occupied(_) => panic!("tokio task ID already in use: {id}"),
+            Entry::Occupied(_) => return Err(handle),
         }
 
         Ok(())
     }
 
     fn remove_task(&self, id: task::Id) {
-        use dashmap::Entry::*;
+        use dashmap::Entry;
         match self.tasks.entry(id) {
-            Vacant(e) => {
+            Entry::Vacant(e) => {
                 // Task was not added yet, set a tombstone instead.
                 e.insert(TaskEntry::Tombstone);
             },
-            Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {},
-            Occupied(e) => {
+            Entry::Occupied(e) if matches!(e.get(), TaskEntry::Tombstone) => {},
+            Entry::Occupied(e) => {
                 e.remove();
             },
         }
@@ -229,8 +229,12 @@ pub fn spawn_with_killswitch(
 }
 
 #[deprecated = "activate() was unnecessarily declared async. Use activate_now() instead."]
+#[expect(
+    clippy::unused_async,
+    reason = "Preserve the deprecated async API for source compatibility while callers migrate to activate_now"
+)]
 pub async fn activate() {
-    TASK_KILLSWITCH.activate()
+    TASK_KILLSWITCH.activate();
 }
 
 /// Triggers the killswitch, thereby scheduling all registered tasks to be

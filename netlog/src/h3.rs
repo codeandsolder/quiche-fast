@@ -29,6 +29,10 @@ use serde::Serialize;
 
 use super::EventHeader;
 
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variants mirror Chrome netlog HTTP/3 event names and are part of the public API"
+)]
 #[derive(Debug)]
 pub enum Event {
     Http3PriorityUpdateSent(Http3PriorityUpdateSentEvent),
@@ -115,42 +119,38 @@ pub struct Http3DataFrameReceivedEvent {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
+#[must_use]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {
     match event_hdr.ty_string.as_str() {
         "HTTP3_HEADERS_SENT" => {
-            let ev: Http3HeadersSentEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http3HeadersSentEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersSent(ev)));
         },
 
         "HTTP3_DATA_SENT" => {
-            let ev: Http3DataSentEvent = serde_json::from_slice(event).unwrap();
+            let ev: Http3DataSentEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3DataSent(ev)));
         },
 
         "HTTP3_HEADERS_RECEIVED" => {
-            let ev: Http3HeadersReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http3HeadersReceivedEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersReceived(ev)));
         },
 
         "HTTP3_HEADERS_DECODED" => {
-            let ev: Http3HeadersDecodedEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http3HeadersDecodedEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersDecoded(ev)));
         },
 
         "HTTP3_DATA_FRAME_RECEIVED" => {
-            let ev: Http3DataFrameReceivedEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http3DataFrameReceivedEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3DataFrameReceived(ev)));
         },
 
         "HTTP3_PRIORITY_UPDATE_SENT" => {
-            let ev: Http3PriorityUpdateSentEvent =
-                serde_json::from_slice(event).unwrap();
+            let ev: Http3PriorityUpdateSentEvent = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3PriorityUpdateSent(ev)));
         },
 
@@ -172,8 +172,12 @@ pub fn parse_event(
 
         // The netlog format is continually evolving, log any unknown types
         // in case they are interesting.
-        _ =>
-            log::trace!("skipping unknown HTTP/3 type....{}", event_hdr.ty_string),
+        _ => {
+            log::trace!(
+                "skipping unknown HTTP/3 type....{}",
+                event_hdr.ty_string
+            );
+        },
     }
 
     None
