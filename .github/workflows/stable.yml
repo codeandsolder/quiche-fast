@@ -109,10 +109,11 @@ jobs:
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
-      # Cargo. Canonical Rust stays enabled: sccache v7 preserves rustc-reported
-      # runtime-visible env deps such as CARGO_MANIFEST_DIR.
+      # Cargo. Quiche's H3 tests also resolve certificates through an embedded
+      # CARGO_MANIFEST_DIR at runtime, which is not compatible with canonical
+      # Rust sandbox paths yet. Keep L0/Garage enabled but use physical Rust paths.
       ephemeral-cargo: false
-      canonical-rust: true
+      canonical-rust: false
 
   quiche_macos:
     if: startsWith(github.ref, 'refs/tags/')
