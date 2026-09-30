@@ -313,8 +313,8 @@ mod tests {
             bufs.iter_mut().map(|s| ReadBuf::new(&mut s[..])).collect();
         assert_eq!(r.recv_many(&mut rbufs).await?, 5);
 
-        for (i, buf) in rbufs[0..5].iter().enumerate() {
-            assert_eq!(buf.filled(), &[i as u8; 128]);
+        for (expected, buf) in (0_u8..5).zip(rbufs[0..5].iter()) {
+            assert_eq!(buf.filled(), &[expected; 128]);
         }
 
         for i in 0..92 {
@@ -325,8 +325,8 @@ mod tests {
             bufs.iter_mut().map(|s| ReadBuf::new(&mut s[..])).collect();
         assert_eq!(r.recv_many(&mut rbufs).await?, 92);
 
-        for (i, buf) in rbufs[0..92].iter().enumerate() {
-            assert_eq!(buf.filled(), &[i as u8; 128]);
+        for (expected, buf) in (0_u8..92).zip(rbufs[0..92].iter()) {
+            assert_eq!(buf.filled(), &[expected; 128]);
         }
 
         Ok(())
@@ -335,7 +335,10 @@ mod tests {
     #[tokio::test]
     async fn sendmmsg() -> io::Result<()> {
         let (s, r) = UnixDatagram::pair()?;
-        let mut bufs: [_; 128] = std::array::from_fn(|i| [i as u8; 128]);
+        let mut bufs = [[0_u8; 128]; 128];
+        for (value, buf) in (0_u8..5).zip(bufs.iter_mut()) {
+            buf.fill(value);
+        }
 
         let wbufs: Vec<_> = bufs
             .iter_mut()
@@ -350,9 +353,9 @@ mod tests {
 
         let mut rbuf = [0u8; 128];
 
-        for i in 0..5 {
+        for expected in 0_u8..5 {
             assert_eq!(r.recv(&mut rbuf).await?, 128);
-            assert_eq!(rbuf, [i as u8; 128]);
+            assert_eq!(rbuf, [expected; 128]);
         }
 
         Ok(())

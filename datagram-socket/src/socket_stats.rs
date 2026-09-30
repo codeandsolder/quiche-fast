@@ -297,14 +297,13 @@ mod tests {
         let stats = Arc::new(QuicAuditStats::new(Vec::new()));
         let poisoner = Arc::clone(&stats);
 
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner
-                .transport_handshake_start
-                .write()
-                .expect("fresh lock should not be poisoned");
-            panic!("poison handshake-start lock");
+        let poison_result = std::thread::spawn(move || {
+            if let Ok(_guard) = poisoner.transport_handshake_start.write() {
+                std::panic::resume_unwind(Box::new(()));
+            }
         })
         .join();
+        assert!(poison_result.is_err(), "poisoner should unwind");
 
         let now = SystemTime::now();
         stats.set_transport_handshake_start(now);
@@ -319,14 +318,13 @@ mod tests {
         let stats = Arc::new(QuicAuditStats::new(Vec::new()));
         let poisoner = Arc::clone(&stats);
 
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner
-                .connection_close_reason
-                .write()
-                .expect("fresh lock should not be poisoned");
-            panic!("poison close-reason lock");
+        let poison_result = std::thread::spawn(move || {
+            if let Ok(_guard) = poisoner.connection_close_reason.write() {
+                std::panic::resume_unwind(Box::new(()));
+            }
         })
         .join();
+        assert!(poison_result.is_err(), "poisoner should unwind");
 
         stats.set_connection_close_reason(Box::new(std::io::Error::other(
             "connection closed",
