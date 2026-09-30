@@ -3408,22 +3408,41 @@ pub mod testing {
         }
 
         pub fn default_configs() -> Result<(crate::Config, Config)> {
-            fn path_relative_to_manifest_dir(path: &str) -> String {
-                std::fs::canonicalize(
-                    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
-                )
-                .unwrap()
-                .to_string_lossy()
-                .into_owned()
+            fn test_credentials() -> &'static (String, String) {
+                static CREDENTIALS: std::sync::OnceLock<(String, String)> =
+                    std::sync::OnceLock::new();
+
+                CREDENTIALS.get_or_init(|| {
+                    let dir = std::env::temp_dir().join(format!(
+                        "quiche-h3-test-credentials-{}",
+                        std::process::id()
+                    ));
+                    std::fs::create_dir_all(&dir).unwrap();
+
+                    let cert = dir.join("cert.crt");
+                    let key = dir.join("cert.key");
+                    std::fs::write(
+                        &cert,
+                        include_bytes!("../../examples/cert.crt"),
+                    )
+                    .unwrap();
+                    std::fs::write(
+                        &key,
+                        include_bytes!("../../examples/cert.key"),
+                    )
+                    .unwrap();
+
+                    (
+                        cert.to_string_lossy().into_owned(),
+                        key.to_string_lossy().into_owned(),
+                    )
+                })
             }
 
+            let (cert, key) = test_credentials();
             let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
-            config.load_cert_chain_from_pem_file(
-                &path_relative_to_manifest_dir("examples/cert.crt"),
-            )?;
-            config.load_priv_key_from_pem_file(
-                &path_relative_to_manifest_dir("examples/cert.key"),
-            )?;
+            config.load_cert_chain_from_pem_file(cert)?;
+            config.load_priv_key_from_pem_file(key)?;
             config.set_application_protos(&[b"h3"])?;
             config.set_initial_max_data(1500);
             config.set_initial_max_stream_data_bidi_local(150);
