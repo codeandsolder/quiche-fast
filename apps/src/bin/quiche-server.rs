@@ -358,9 +358,12 @@ fn main() {
 
                 debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
 
-                #[expect(
-                    unused_mut,
-                    reason = "The binding is mutable on feature or platform-specific paths"
+                #[cfg_attr(
+                    not(feature = "qlog"),
+                    expect(
+                        unused_mut,
+                        reason = "qlog-disabled builds do not mutate the connection before storage"
+                    )
                 )]
                 let mut conn = quiche::accept(
                     &scid,

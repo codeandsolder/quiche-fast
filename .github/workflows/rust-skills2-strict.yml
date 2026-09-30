@@ -17,3 +17,4 @@ jobs:
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@main
     with:
       cargo-args: "--workspace --all-targets"
+      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"

@@ -166,14 +166,13 @@ where
             let send_buf = &send_buf[..written];
             let to = incoming.peer_addr;
 
-            #[expect(
-                unused_variables,
-                reason = "Signature is shared across feature or platform configurations"
-            )]
             let Some(udp) = socket.as_udp_socket() else {
                 let _ = socket.send_to(send_buf, to).await;
                 return;
             };
+
+            #[cfg(not(target_os = "linux"))]
+            let _ = udp;
 
             #[cfg(target_os = "linux")]
             {
