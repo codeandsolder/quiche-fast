@@ -16,7 +16,8 @@ jobs:
   strict-rust:
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@main
     with:
-      # Keep the strict rollout aligned with Stable CI. qlog-dancer is an
-      # existing legacy exclusion tracked for separate hardening in #52.
-      cargo-args: "--workspace --all-targets --exclude qlog-dancer"
+      # Keep strict Clippy on the cleaned workspace while tracked legacy
+      # debt islands migrate separately: qlog-dancer #52, quiche core #54.
+      # Source-policy scanning still covers the whole repository.
+      cargo-args: "--workspace --all-targets --exclude qlog-dancer --exclude quiche"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
