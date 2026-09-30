@@ -33,6 +33,12 @@ use tokio::io::ReadBuf;
 
 const MAX_MMSG: usize = 16;
 
+/// Receives as many datagrams as are immediately available into `bufs`.
+///
+/// # Errors
+///
+/// Returns the operating-system socket error if no datagram was received, or
+/// an `InvalidData` error if a syscall result cannot be represented safely.
 pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
     if bufs.is_empty() {
         return Ok(0);
@@ -57,7 +63,7 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
-        for iovec in iovecs.iter_mut() {
+        for iovec in &mut iovecs {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),
@@ -76,11 +82,17 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
         // ReadBuf in `bufs`. Those regions and the message headers remain
         // alive and unmoved for the duration of the syscall, and recvmmsg()
         // does not retain any of the pointers.
+        let vlen = u32::try_from(msgvec.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "recvmmsg batch exceeds u32",
+            )
+        })?;
         let result = unsafe {
             libc::recvmmsg(
                 fd.as_raw_fd(),
                 msgvec.as_mut_ptr(),
-                msgvec.len() as _,
+                vlen,
                 0,
                 std::ptr::null_mut(),
             )
@@ -130,7 +142,7 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
         msgvec.clear();
         iovecs.clear();
 
-        for buf in bufs.iter() {
+        for buf in bufs {
             let filled = buf.filled();
             iovecs.push(libc::iovec {
                 iov_base: filled.as_ptr().cast_mut().cast(),
@@ -138,7 +150,7 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
-        for iovec in iovecs.iter_mut() {
+        for iovec in &mut iovecs {
             msgvec.push(libc::mmsghdr {
                 msg_hdr: libc::msghdr {
                     msg_name: std::ptr::null_mut(),

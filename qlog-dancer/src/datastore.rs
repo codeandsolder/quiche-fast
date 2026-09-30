@@ -1751,7 +1751,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
     constants: &netlog::constants::Constants,
 ) -> (Vec<LogFileData>, BTreeMap<i64, NetlogSession>) {
     // second line in a netlog is always `"events": [` so skip it
-    read_netlog_record(reader);
+    let _ = read_netlog_record(reader);
 
     let mut sessions: BTreeMap<i64, NetlogSession> = BTreeMap::new();
     let mut session_events: BTreeMap<

@@ -71,7 +71,7 @@ pub struct SocketStats {
 }
 
 /// Statistics from when a CCA first exited the startup phase.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartupExit {
     pub cwnd: usize,
     pub bandwidth: Option<u64>,
@@ -79,7 +79,7 @@ pub struct StartupExit {
 }
 
 /// The reason a CCA exited the startup phase.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupExitReason {
     /// Exit slow start or BBR startup due to excessive loss
     Loss,
@@ -90,7 +90,7 @@ pub enum StartupExitReason {
     /// Exit BBR startup due to persistent queue.
     PersistentQueue,
 
-    /// Exit HyStart++ conservative slow start after the max rounds allowed.
+    /// Exit `HyStart`++ conservative slow start after the max rounds allowed.
     ConservativeSlowStartRounds,
 }
 
@@ -130,6 +130,7 @@ pub struct QuicAuditStats {
 
 impl QuicAuditStats {
     #[inline]
+    #[must_use]
     pub fn new(quic_connection_id: Vec<u8>) -> Self {
         Self {
             recvd_conn_close_transport_error_code: AtomicI64::new(-1),
@@ -176,7 +177,7 @@ impl QuicAuditStats {
         &self, recvd_conn_close_transport_error_code: i64,
     ) {
         self.recvd_conn_close_transport_error_code
-            .store(recvd_conn_close_transport_error_code, Ordering::SeqCst)
+            .store(recvd_conn_close_transport_error_code, Ordering::SeqCst);
     }
 
     #[inline]
@@ -184,7 +185,7 @@ impl QuicAuditStats {
         &self, sent_conn_close_transport_error_code: i64,
     ) {
         self.sent_conn_close_transport_error_code
-            .store(sent_conn_close_transport_error_code, Ordering::SeqCst)
+            .store(sent_conn_close_transport_error_code, Ordering::SeqCst);
     }
 
     #[inline]
@@ -192,7 +193,7 @@ impl QuicAuditStats {
         &self, recvd_conn_close_application_error_code: i64,
     ) {
         self.recvd_conn_close_application_error_code
-            .store(recvd_conn_close_application_error_code, Ordering::SeqCst)
+            .store(recvd_conn_close_application_error_code, Ordering::SeqCst);
     }
 
     #[inline]
@@ -200,7 +201,7 @@ impl QuicAuditStats {
         &self, sent_conn_close_application_error_code: i64,
     ) {
         self.sent_conn_close_application_error_code
-            .store(sent_conn_close_application_error_code, Ordering::SeqCst)
+            .store(sent_conn_close_application_error_code, Ordering::SeqCst);
     }
 
     #[inline]
@@ -247,7 +248,7 @@ impl QuicAuditStats {
 
     #[inline]
     pub fn set_max_bandwidth(&self, max_bandwidth: u64) {
-        self.max_bandwidth.store(max_bandwidth, Ordering::Release)
+        self.max_bandwidth.store(max_bandwidth, Ordering::Release);
     }
 
     #[inline]
@@ -257,7 +258,7 @@ impl QuicAuditStats {
 
     #[inline]
     pub fn set_max_loss_pct(&self, max_loss_pct: u8) {
-        self.max_loss_pct.store(max_loss_pct, Ordering::Release)
+        self.max_loss_pct.store(max_loss_pct, Ordering::Release);
     }
 
     #[inline]
