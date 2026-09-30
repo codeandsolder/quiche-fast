@@ -97,7 +97,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@fix/local-first-skip-remote-probe
     with:
       command: |
         sudo apt-get update -qq
