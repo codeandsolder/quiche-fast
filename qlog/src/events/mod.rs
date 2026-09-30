@@ -199,9 +199,9 @@ impl EventImportance {
     /// Returns true if this importance level is included by other.
     #[must_use]
     #[allow(
-    clippy::trivially_copy_pass_by_ref,
-    reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
-)]
+        clippy::trivially_copy_pass_by_ref,
+        reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
+    )]
     pub const fn is_contained_in(&self, other: &Self) -> bool {
         matches!(
             (*other, *self),
