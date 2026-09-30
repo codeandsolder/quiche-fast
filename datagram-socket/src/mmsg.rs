@@ -138,7 +138,7 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
 ///
 /// # Errors
 ///
-/// Returns the socket error if no datagram can be sent, or InvalidInput if
+/// Returns the socket error if no datagram can be sent, or `InvalidInput` if
 /// the batch size cannot be represented by the platform sendmmsg ABI.
 pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
     if bufs.is_empty() {
