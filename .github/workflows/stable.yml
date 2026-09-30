@@ -93,7 +93,7 @@ jobs:
 
   shared-sccache:
     name: Linux workspace (shared sccache)
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/fix/canonical-runtime-fixtures'
     permissions:
       contents: read
       id-token: write
