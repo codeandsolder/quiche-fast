@@ -90,6 +90,25 @@ jobs:
           sudo apt-get install libev-dev uthash-dev
           make -C quiche/examples
 
+
+  shared-sccache:
+    name: Linux workspace (shared sccache)
+    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    permissions:
+      contents: read
+      id-token: write
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
+    with:
+      command: |
+        sudo apt-get update -qq
+        sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
+        cargo +1.98.1 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
+        cargo +1.98.1 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
+        cargo +1.98.1 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
+      rust-toolchain: "1.98.1"
+      rust-components: "clippy"
+      rustflags: "-D warnings -C target-cpu=x86-64-v2"
+
   quiche_macos:
     if: startsWith(github.ref, 'refs/tags/')
     strategy:
