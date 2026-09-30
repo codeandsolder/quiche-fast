@@ -4211,7 +4211,9 @@ impl<F: BufFactory> Connection<F> {
 
     #[cold]
     #[inline(never)]
-    fn process_lost_frames(&mut self, epoch: packet::Epoch) -> Result<()> {
+    fn process_lost_frames(
+        &mut self, epoch: packet::Epoch, now: Instant,
+    ) -> Result<()> {
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
 
@@ -4508,7 +4510,7 @@ impl<F: BufFactory> Connection<F> {
             .iter()
             .any(|(_, p)| p.recovery.has_lost_frames(epoch))
         {
-            self.process_lost_frames(epoch)?;
+            self.process_lost_frames(epoch, now)?;
         }
 
         #[cfg(debug_assertions)]
