@@ -403,12 +403,9 @@ use serde::Serialize;
 
 /// A quiche qlog error.
 #[derive(Debug)]
-#[cfg_attr(
-    clippy,
-    expect(
-        clippy::enum_variant_names,
-        reason = "IoError is part of the established public qlog Error API"
-    )
+#[allow(
+    clippy::enum_variant_names,
+    reason = "IoError is part of the established public qlog Error API"
 )]
 pub enum Error {
     /// There is no more work to do.

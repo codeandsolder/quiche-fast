@@ -35,12 +35,9 @@ use crate::events::ExData;
 /// Times are always logged in units of whole milliseconds with optional
 /// precision, determining the number of decimal places output by the
 /// serializer.
-#[cfg_attr(
-    clippy,
-    expect(
-        clippy::enum_variant_names,
-        reason = "Variant names are part of the established public qlog API"
-    )
+#[allow(
+    clippy::enum_variant_names,
+    reason = "Variant names are part of the established public qlog API"
 )]
 pub enum EventTimePrecision {
     /// Logging may contain 1 decimal place to ensure float serialization e.g.,
