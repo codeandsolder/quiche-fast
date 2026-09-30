@@ -198,9 +198,12 @@ pub enum EventImportance {
 impl EventImportance {
     /// Returns true if this importance level is included by other.
     #[must_use]
-    #[expect(
-        clippy::trivially_copy_pass_by_ref,
-        reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
+    #[cfg_attr(
+        clippy,
+        expect(
+            clippy::trivially_copy_pass_by_ref,
+            reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
+        )
     )]
     pub const fn is_contained_in(&self, other: &Self) -> bool {
         matches!(
@@ -648,9 +651,12 @@ pub enum ConnectionClosedEventError {
 
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 #[serde(untagged)]
-#[expect(
-    clippy::enum_variant_names,
-    reason = "Variant names are part of the established public qlog error API"
+#[cfg_attr(
+    clippy,
+    expect(
+        clippy::enum_variant_names,
+        reason = "Variant names are part of the established public qlog error API"
+    )
 )]
 pub enum ConnectionClosedFrameError {
     TransportError(TransportError),

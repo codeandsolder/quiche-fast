@@ -88,6 +88,8 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
                 "recvmmsg batch exceeds u32",
             )
         })?;
+        // SAFETY: vlen was checked against u32 and every iovec/header remains
+        // valid and unmoved for the duration of this non-retaining syscall.
         let result = unsafe {
             libc::recvmmsg(
                 fd.as_raw_fd(),
@@ -102,7 +104,11 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
             break;
         }
 
-        let received = result as usize;
+        let received = usize::try_from(result).map_err(|_| {
+            io::Error::other(
+                "recvmmsg returned a negative count without reporting an error",
+            )
+        })?;
 
         for (buf, msg) in bufs.iter_mut().zip(msgvec.iter()).take(received) {
             let filled = msg.msg_len as usize;
@@ -128,6 +134,12 @@ pub fn recvmmsg(fd: BorrowedFd, bufs: &mut [ReadBuf<'_>]) -> io::Result<usize> {
     Ok(ret)
 }
 
+/// Sends a batch of datagrams with sendmmsg(2).
+///
+/// # Errors
+///
+/// Returns the socket error if no datagram can be sent, or InvalidInput if
+/// the batch size cannot be represented by the platform sendmmsg ABI.
 pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
     if bufs.is_empty() {
         return Ok(0);
@@ -165,25 +177,31 @@ pub fn sendmmsg(fd: BorrowedFd, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
             });
         }
 
+        let vlen = u32::try_from(msgvec.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "sendmmsg batch exceeds u32",
+            )
+        })?;
         // SAFETY: each iovec points to initialized bytes owned by a ReadBuf in
-        // `bufs`. The buffers and message headers stay alive and unmoved for
+        // bufs. The buffers and message headers stay alive and unmoved for
         // the syscall, and sendmmsg() only reads from and does not retain them.
         let result = unsafe {
-            libc::sendmmsg(
-                fd.as_raw_fd(),
-                msgvec.as_mut_ptr(),
-                msgvec.len() as _,
-                0,
-            )
+            libc::sendmmsg(fd.as_raw_fd(), msgvec.as_mut_ptr(), vlen, 0)
         };
 
         if result == -1 {
             break;
         }
 
-        ret += result as usize;
+        let sent = usize::try_from(result).map_err(|_| {
+            io::Error::other(
+                "sendmmsg returned a negative count without reporting an error",
+            )
+        })?;
+        ret += sent;
 
-        if (result as usize) < bufs.len() {
+        if sent < bufs.len() {
             break;
         }
     }

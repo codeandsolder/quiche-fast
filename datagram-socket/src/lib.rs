@@ -48,6 +48,12 @@ pub use self::shutdown::*;
 pub use self::socket_stats::*;
 
 #[cfg(target_os = "linux")]
+/// Reports whether the descriptor has O_NONBLOCK set.
+///
+/// # Errors
+///
+/// Returns the error from fcntl(F_GETFL) when the descriptor flags cannot be
+/// queried.
 pub fn is_nonblocking(fd: &impl AsRawFd) -> std::io::Result<bool> {
     // SAFETY: F_GETFL only reads the descriptor's status flags and does not
     // dereference any caller-provided pointer. Invalid descriptors return
@@ -66,6 +72,11 @@ pub fn is_nonblocking(fd: &impl AsRawFd) -> std::io::Result<bool> {
 }
 
 #[cfg(all(unix, not(target_os = "linux")))]
+/// Reports whether the descriptor is nonblocking on supported non-Linux Unix.
+///
+/// # Errors
+///
+/// This implementation is infallible and currently always reports true.
 pub fn is_nonblocking(_fd: &impl AsRawFd) -> std::io::Result<bool> {
     Ok(true)
 }

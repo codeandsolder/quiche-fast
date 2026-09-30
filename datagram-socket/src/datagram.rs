@@ -267,10 +267,7 @@ pub trait DatagramSocketSendExt: DatagramSocketSend {
     fn try_send(&self, buf: &[u8]) -> io::Result<usize> {
         unconstrained(poll_fn(|cx| self.poll_send(cx, buf)))
             .now_or_never()
-            .map_or_else(
-                || Err(io::ErrorKind::WouldBlock.into()),
-                |result| result,
-            )
+            .unwrap_or_else(|| Err(io::ErrorKind::WouldBlock.into()))
     }
 
     /// Attempts to send multiple datagrams without waiting for readiness.
@@ -282,10 +279,7 @@ pub trait DatagramSocketSendExt: DatagramSocketSend {
     fn try_send_many(&self, bufs: &[ReadBuf<'_>]) -> io::Result<usize> {
         unconstrained(poll_fn(|cx| self.poll_send_many(cx, bufs)))
             .now_or_never()
-            .map_or_else(
-                || Err(io::ErrorKind::WouldBlock.into()),
-                |result| result,
-            )
+            .unwrap_or_else(|| Err(io::ErrorKind::WouldBlock.into()))
     }
 }
 
@@ -371,13 +365,10 @@ pub trait DatagramSocketRecv: Send {
                 Poll::Ready(Ok(())) => read += 1,
 
                 Poll::Ready(Err(e)) if read == 0 => return Poll::Ready(Err(e)),
-
-                Poll::Ready(Err(_)) => break,
-
-                // Only return `Poll::Ready` if at least one datagram was
-                // successfully read, otherwise block.
+                // Only return Ready if at least one datagram was read; otherwise
+                // block.
                 Poll::Pending if read == 0 => return Poll::Pending,
-                Poll::Pending => break,
+                Poll::Ready(Err(_)) | Poll::Pending => break,
             }
         }
 
