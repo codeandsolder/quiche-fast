@@ -1,6 +1,6 @@
 on:
   push:
-    branches: [master]
+    branches: [master, fix/canonical-runtime-fixtures]
     tags: ["*"]
   pull_request:
   workflow_dispatch:
