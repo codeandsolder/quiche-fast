@@ -97,7 +97,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@c9b9acce7a9cf87c47e9bc7eef387e1d60228eb5
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
     with:
       command: |
         sudo apt-get update -qq
