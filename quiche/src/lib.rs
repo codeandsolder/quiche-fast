@@ -9192,13 +9192,17 @@ impl<F: BufFactory> Connection<F> {
             // common lookup only compares integer sequence numbers rather than
             // searching local SCIDs by CID bytes on every short-header packet.
             // The SCID store is still a VecDeque, so get_scid() itself is a
-            // short linear scan.
+            // short linear scan. Only return early when the CID entry is still
+            // linked to this path; reused CIDs must fall through so the
+            // original relink semantics are preserved.
             let recv_path = self.paths.get_mut(recv_pid)?;
 
             let cid_entry =
                 recv_path.active_scid_seq.and_then(|v| ids.get_scid(v).ok());
 
-            if cid_entry.map(|e| &e.cid) == Some(dcid) {
+            if cid_entry
+                .is_some_and(|e| &e.cid == dcid && e.path_id == Some(recv_pid))
+            {
                 return Ok(recv_pid);
             }
 

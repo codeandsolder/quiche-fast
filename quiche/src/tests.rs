@@ -12478,6 +12478,92 @@ fn resilience_against_migration_attack(
 }
 
 #[rstest]
+fn reused_scid_existing_path_relinks_owner(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+    config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+    config.verify_peer(false);
+    config.set_active_connection_id_limit(3);
+
+    let mut pipe = pipe_with_exchanged_cids(&mut config, 16, 16, 1);
+    let server_addr = test_utils::Pipe::server_addr();
+    let client_addr = test_utils::Pipe::client_addr();
+    let reused_addr = "127.0.0.1:6666".parse().unwrap();
+
+    let original_pid = pipe
+        .server
+        .paths
+        .path_id_from_addrs(&(server_addr, client_addr))
+        .unwrap();
+    assert_eq!(
+        pipe.server.ids.get_scid(0).unwrap().path_id,
+        Some(original_pid)
+    );
+
+    let mut buf = [0u8; 1500];
+
+    // The first packet creates a second path that reuses SCID 0. As before the
+    // fast path existed, creation reports the reuse but leaves the SCID linked
+    // to the original path until a packet arrives on the now-known 4-tuple.
+    let written = test_utils::encode_pkt(
+        &mut pipe.client,
+        Type::Short,
+        &[frame::Frame::Ping { mtu_probe: None }],
+        &mut buf,
+    )
+    .unwrap();
+    pipe.server
+        .recv(&mut buf[..written], RecvInfo {
+            to: server_addr,
+            from: reused_addr,
+        })
+        .unwrap();
+
+    let reused_pid = pipe
+        .server
+        .paths
+        .path_id_from_addrs(&(server_addr, reused_addr))
+        .unwrap();
+    assert_ne!(reused_pid, original_pid);
+    assert_eq!(
+        pipe.server.ids.get_scid(0).unwrap().path_id,
+        Some(original_pid)
+    );
+
+    // On the existing reused path, preserve the original slow-path behavior:
+    // relink the SCID entry to the path that just received it. The common-path
+    // shortcut may return early only when this association already matches.
+    let written = test_utils::encode_pkt(
+        &mut pipe.client,
+        Type::Short,
+        &[frame::Frame::Ping { mtu_probe: None }],
+        &mut buf,
+    )
+    .unwrap();
+    pipe.server
+        .recv(&mut buf[..written], RecvInfo {
+            to: server_addr,
+            from: reused_addr,
+        })
+        .unwrap();
+
+    assert_eq!(
+        pipe.server.ids.get_scid(0).unwrap().path_id,
+        Some(reused_pid)
+    );
+}
+
+#[rstest]
 fn path_event_queue_bounded_on_port_rotation(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
