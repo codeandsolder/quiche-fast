@@ -247,7 +247,7 @@ fn sendmmsg_impl(
     Ok(ret)
 }
 
-fn iovec(buf: &[u8]) -> libc::iovec {
+const fn iovec(buf: &[u8]) -> libc::iovec {
     libc::iovec {
         // `sendmmsg(2)` only reads this memory; the C ABI nevertheless uses
         // a mutable pointer type for iov_base.
@@ -413,7 +413,7 @@ mod tests {
         let (s, r) = UnixDatagram::pair()?;
         let suffix = b"-suffix";
         let mut payloads: Vec<Vec<u8>> =
-            (0..MAX_MMSG + 4).map(|i| vec![i as u8; i]).collect();
+            (0..MAX_MMSG + 4).map(|i| vec![b'x'; i]).collect();
         let bufs: Vec<_> = payloads
             .iter_mut()
             .map(|payload| {
