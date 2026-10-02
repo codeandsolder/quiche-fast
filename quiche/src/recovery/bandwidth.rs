@@ -210,11 +210,13 @@ impl Bandwidth {
             }
         }
 
-        // If the final result must exceed u64::MAX, saturate before multiplying.
+        // If the final result must exceed u64::MAX, saturate before
+        // multiplying.
         //
         // floor((bps * nanos) / BITS_NANOS_PER_BYTE) > u64::MAX
         // iff bps * nanos >= (u64::MAX + 1) * BITS_NANOS_PER_BYTE
-        let saturation_threshold = ((u64::MAX as u128) + 1) * BITS_NANOS_PER_BYTE_U128;
+        let saturation_threshold =
+            ((u64::MAX as u128) + 1) * BITS_NANOS_PER_BYTE_U128;
 
         if (bps as u128) > (saturation_threshold - 1) / nanos {
             return u64::MAX;
