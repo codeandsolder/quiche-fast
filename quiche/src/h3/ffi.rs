@@ -42,6 +42,29 @@ use crate::h3::Priority;
 
 const H3_FFI_ERR_INVALID_ARGUMENT: ssize_t = -21;
 
+macro_rules! ffi_ref {
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime requirements as the public C API.
+        match unsafe { $ptr.as_ref() } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
+macro_rules! ffi_mut {
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime/exclusivity requirements as the public
+        // C API.
+        match unsafe { $ptr.as_mut() } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
 fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
         Err(H3_FFI_ERR_INVALID_ARGUMENT)
@@ -61,36 +84,46 @@ pub extern "C" fn quiche_h3_config_new() -> *mut h3::Config {
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_set_max_field_section_size(
-    config: &mut h3::Config, v: u64,
+    config: *mut h3::Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_field_section_size(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_set_qpack_max_table_capacity(
-    config: &mut h3::Config, v: u64,
+    config: *mut h3::Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_qpack_max_table_capacity(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_set_qpack_blocked_streams(
-    config: &mut h3::Config, v: u64,
+    config: *mut h3::Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_qpack_blocked_streams(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_enable_extended_connect(
-    config: &mut h3::Config, enabled: bool,
+    config: *mut h3::Config, enabled: bool,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.enable_extended_connect(enabled);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_set_max_priority_update_size(
-    config: &mut h3::Config, v: u64,
+    config: *mut h3::Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_priority_update_size(v);
 }
 
@@ -103,8 +136,11 @@ pub extern "C" fn quiche_h3_config_free(config: *mut h3::Config) {
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_conn_new_with_transport(
-    quic_conn: &mut Connection, config: &mut h3::Config,
+    quic_conn: *mut Connection, config: *mut h3::Config,
 ) -> *mut h3::Connection {
+    let quic_conn = ffi_mut!(quic_conn, ptr::null_mut());
+    let config = ffi_mut!(config, ptr::null_mut());
+
     match h3::Connection::with_transport(quic_conn, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
 
@@ -114,10 +150,12 @@ pub extern "C" fn quiche_h3_conn_new_with_transport(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_for_each_setting(
-    conn: &h3::Connection,
+    conn: *const h3::Connection,
     cb: extern "C" fn(identifier: u64, value: u64, argp: *mut c_void) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
+    let conn = ffi_ref!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.peer_settings_raw() {
         Some(raw) => {
             for setting in raw {
@@ -137,9 +175,12 @@ pub extern "C" fn quiche_h3_for_each_setting(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_conn_poll(
-    conn: &mut h3::Connection, quic_conn: &mut Connection,
+    conn: *mut h3::Connection, quic_conn: *mut Connection,
     ev: *mut *const h3::Event,
 ) -> i64 {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+
     match conn.poll(quic_conn) {
         Ok((id, v)) => {
             unsafe {
@@ -154,7 +195,9 @@ pub extern "C" fn quiche_h3_conn_poll(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_h3_event_type(ev: &h3::Event) -> u32 {
+pub extern "C" fn quiche_h3_event_type(ev: *const h3::Event) -> u32 {
+    let ev = ffi_ref!(ev, u32::MAX);
+
     match ev {
         h3::Event::Headers { .. } => 0,
 
@@ -172,7 +215,7 @@ pub extern "C" fn quiche_h3_event_type(ev: &h3::Event) -> u32 {
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_event_for_each_header(
-    ev: &h3::Event,
+    ev: *const h3::Event,
     cb: extern "C" fn(
         name: *const u8,
         name_len: size_t,
@@ -184,6 +227,8 @@ pub extern "C" fn quiche_h3_event_for_each_header(
     ) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
+    let ev = ffi_ref!(ev, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match ev {
         h3::Event::Headers { list, .. } =>
             for h in list {
@@ -208,8 +253,10 @@ pub extern "C" fn quiche_h3_event_for_each_header(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_event_headers_has_more_frames(
-    ev: &h3::Event,
+    ev: *const h3::Event,
 ) -> bool {
+    let ev = ffi_ref!(ev, false);
+
     match ev {
         h3::Event::Headers { more_frames, .. } => *more_frames,
 
@@ -219,8 +266,10 @@ pub extern "C" fn quiche_h3_event_headers_has_more_frames(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_extended_connect_enabled_by_peer(
-    conn: &h3::Connection,
+    conn: *const h3::Connection,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.extended_connect_enabled_by_peer()
 }
 
@@ -242,9 +291,12 @@ pub struct Header {
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_request(
-    conn: &mut h3::Connection, quic_conn: &mut Connection,
+    conn: *mut h3::Connection, quic_conn: *mut Connection,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> i64 {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+
     let req_headers = headers_from_ptr(headers, headers_len);
 
     match conn.send_request(quic_conn, &req_headers, fin) {
@@ -256,9 +308,12 @@ pub extern "C" fn quiche_h3_send_request(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_response(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let resp_headers = headers_from_ptr(headers, headers_len);
 
     match conn.send_response(quic_conn, stream_id, &resp_headers, fin) {
@@ -270,9 +325,14 @@ pub extern "C" fn quiche_h3_send_response(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_response_with_priority(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
-    headers: *const Header, headers_len: size_t, priority: &Priority, fin: bool,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
+    headers: *const Header, headers_len: size_t, priority: *const Priority,
+    fin: bool,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let priority = ffi_ref!(priority, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let resp_headers = headers_from_ptr(headers, headers_len);
 
     match conn.send_response_with_priority(
@@ -290,10 +350,13 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_additional_headers(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     headers: *const Header, headers_len: size_t, is_trailer_section: bool,
     fin: bool,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let headers = headers_from_ptr(headers, headers_len);
 
     match conn.send_additional_headers(
@@ -311,9 +374,12 @@ pub extern "C" fn quiche_h3_send_additional_headers(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_body(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     body: *const u8, body_len: size_t, fin: bool,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     if let Err(e) = validate_h3_ssize_len(body_len) {
         return e;
     }
@@ -329,9 +395,12 @@ pub extern "C" fn quiche_h3_send_body(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_recv_body(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     out: *mut u8, out_len: size_t,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     if let Err(e) = validate_h3_ssize_len(out_len) {
         return e;
     }
@@ -347,8 +416,11 @@ pub extern "C" fn quiche_h3_recv_body(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_goaway(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, id: u64,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, id: u64,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.send_goaway(quic_conn, id) {
         Ok(()) => 0,
 
@@ -359,8 +431,10 @@ pub extern "C" fn quiche_h3_send_goaway(
 #[no_mangle]
 #[cfg(feature = "sfv")]
 pub extern "C" fn quiche_h3_parse_extensible_priority(
-    priority: *const u8, priority_len: size_t, parsed: &mut Priority,
+    priority: *const u8, priority_len: size_t, parsed: *mut Priority,
 ) -> c_int {
+    let parsed = ffi_mut!(parsed, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let priority = unsafe { slice::from_raw_parts(priority, priority_len) };
 
     match Priority::try_from(priority) {
@@ -376,9 +450,13 @@ pub extern "C" fn quiche_h3_parse_extensible_priority(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_priority_update_for_request(
-    conn: &mut h3::Connection, quic_conn: &mut Connection, stream_id: u64,
-    priority: &Priority,
+    conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
+    priority: *const Priority,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let priority = ffi_ref!(priority, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.send_priority_update_for_request(quic_conn, stream_id, priority) {
         Ok(()) => 0,
 
@@ -388,7 +466,7 @@ pub extern "C" fn quiche_h3_send_priority_update_for_request(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_take_last_priority_update(
-    conn: &mut h3::Connection, prioritized_element_id: u64,
+    conn: *mut h3::Connection, prioritized_element_id: u64,
     cb: extern "C" fn(
         priority_field_value: *const u8,
         priority_field_value_len: size_t,
@@ -396,6 +474,8 @@ pub extern "C" fn quiche_h3_take_last_priority_update(
     ) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
+    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.take_last_priority_update(prioritized_element_id) {
         Ok(priority) => {
             let rc = cb(priority.as_ptr(), priority.len(), argp);
@@ -413,8 +493,11 @@ pub extern "C" fn quiche_h3_take_last_priority_update(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_dgram_enabled_by_peer(
-    conn: &h3::Connection, quic_conn: &Connection,
+    conn: *const h3::Connection, quic_conn: *const Connection,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+    let quic_conn = ffi_ref!(quic_conn, false);
+
     conn.dgram_enabled_by_peer(quic_conn)
 }
 
@@ -451,7 +534,12 @@ pub struct Stats {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_h3_conn_stats(conn: &h3::Connection, out: &mut Stats) {
+pub extern "C" fn quiche_h3_conn_stats(
+    conn: *const h3::Connection, out: *mut Stats,
+) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+
     let stats = conn.stats();
 
     out.qpack_encoder_stream_recv_bytes = stats.qpack_encoder_stream_recv_bytes;
@@ -490,5 +578,50 @@ mod tests {
             H3_FFI_ERR_INVALID_ARGUMENT as c_int
         );
         assert!(!quiche_h3_event_headers_has_more_frames(&ev));
+    }
+
+    #[test]
+    fn null_reference_parameters_are_rejected_at_h3_ffi_boundary() {
+        // Void setters become safe no-ops.
+        quiche_h3_config_set_max_field_section_size(ptr::null_mut(), 0);
+
+        // Pointer-returning APIs return NULL.
+        assert!(quiche_h3_conn_new_with_transport(
+            ptr::null_mut(),
+            ptr::null_mut()
+        )
+        .is_null());
+
+        // APIs with an explicit error channel return the H3 invalid-argument
+        // code without touching caller-owned outputs.
+        let mut ev: *const h3::Event = ptr::null();
+        assert_eq!(
+            quiche_h3_conn_poll(ptr::null_mut(), ptr::null_mut(), &mut ev),
+            H3_FFI_ERR_INVALID_ARGUMENT as i64
+        );
+        assert!(ev.is_null());
+        assert_eq!(
+            quiche_h3_event_for_each_header(
+                ptr::null(),
+                count_header,
+                ptr::null_mut(),
+            ),
+            H3_FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+        assert_eq!(
+            quiche_h3_send_body(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                0,
+                false,
+            ),
+            H3_FFI_ERR_INVALID_ARGUMENT as ssize_t
+        );
+
+        // APIs without an error channel use neutral sentinels.
+        assert!(!quiche_h3_extended_connect_enabled_by_peer(ptr::null()));
+        assert_eq!(quiche_h3_event_type(ptr::null()), u32::MAX);
     }
 }
