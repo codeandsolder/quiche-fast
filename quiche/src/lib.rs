@@ -2846,6 +2846,13 @@ impl<F: BufFactory> Connection<F> {
     /// preserves normal behavior and queues an owned copy for dgram_recv_buf().
     /// To preserve FIFO delivery, the handler is not called while an older
     /// DATAGRAM remains in the receive queue.
+    ///
+    /// Delivery through the handler is intentionally non-transactional at the
+    /// packet level: the handler can be called for an earlier DATAGRAM before a
+    /// later frame in the same authenticated packet makes this method return an
+    /// error. This matches the normal receive path, which can queue earlier
+    /// frames before a later-frame error. Callers that require transactional
+    /// side effects should stage handler output until this method returns.
     pub fn recv_with_dgram_handler<H>(
         &mut self, buf: &mut [u8], info: RecvInfo, handler: &mut H,
     ) -> Result<usize>
@@ -9180,8 +9187,11 @@ impl<F: BufFactory> Connection<F> {
 
         if let Some(recv_pid) = recv_pid {
             // The overwhelmingly common case is that this path keeps using the
-            // same SCID. Check the path's cached active SCID first so we don't
-            // search all local SCIDs on every received short-header packet.
+            // same SCID. Use the path's cached sequence number first so the
+            // common lookup only compares integer sequence numbers rather than
+            // searching local SCIDs by CID bytes on every short-header packet.
+            // The SCID store is still a VecDeque, so get_scid() itself is a
+            // short linear scan.
             let recv_path = self.paths.get_mut(recv_pid)?;
 
             let cid_entry =
