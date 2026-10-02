@@ -5237,18 +5237,22 @@ impl<F: BufFactory> Connection<F> {
                                 // Advance the packet buffer's offset.
                                 b.skip(hdr_len + len)?;
 
-                                let frame =
-                                    frame::Frame::DatagramHeader { length: len };
-
-                                if push_frame_to_pkt!(b, frames, frame, left) {
-                                    ack_eliciting = true;
-                                    in_flight = true;
-                                    dgram_emitted = true;
-                                    self.dgram_sent_count =
-                                        self.dgram_sent_count.saturating_add(1);
-                                    path.dgram_sent_count =
-                                        path.dgram_sent_count.saturating_add(1);
-                                }
+                                // The DATAGRAM header and payload were already
+                                // encoded directly above. Avoid routing the
+                                // metadata-only DatagramHeader through
+                                // push_frame_to_pkt!(), which redundantly calls
+                                // wire_len() twice and to_bytes() once.
+                                left -= hdr_len + len;
+                                frames.push(frame::Frame::DatagramHeader {
+                                    length: len,
+                                });
+                                ack_eliciting = true;
+                                in_flight = true;
+                                dgram_emitted = true;
+                                self.dgram_sent_count =
+                                    self.dgram_sent_count.saturating_add(1);
+                                path.dgram_sent_count =
+                                    path.dgram_sent_count.saturating_add(1);
                             },
 
                             None => continue,
@@ -9182,47 +9186,61 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<usize> {
         let ids = &mut self.ids;
 
-        let (in_scid_seq, mut in_scid_pid) =
-            ids.find_scid_seq(dcid).ok_or(Error::InvalidState)?;
-
         if let Some(recv_pid) = recv_pid {
-            // If the path observes a change of SCID used, note it.
+            // The overwhelmingly common case is that this path keeps using the
+            // same SCID. Use the path's cached sequence number first so the
+            // common lookup only compares integer sequence numbers rather than
+            // searching local SCIDs by CID bytes on every short-header packet.
+            // The SCID store is still a VecDeque, so get_scid() itself is a
+            // short linear scan. Only return early when the CID entry is still
+            // linked to this path; reused CIDs must fall through so the
+            // original relink semantics are preserved.
             let recv_path = self.paths.get_mut(recv_pid)?;
 
             let cid_entry =
                 recv_path.active_scid_seq.and_then(|v| ids.get_scid(v).ok());
 
-            if cid_entry.map(|e| &e.cid) != Some(dcid) {
-                let incoming_cid_entry = ids.get_scid(in_scid_seq)?;
+            if cid_entry
+                .is_some_and(|e| &e.cid == dcid && e.path_id == Some(recv_pid))
+            {
+                return Ok(recv_pid);
+            }
 
-                let prev_recv_pid =
-                    incoming_cid_entry.path_id.unwrap_or(recv_pid);
+            // The CID changed on an existing 4-tuple. Resolve the incoming CID
+            // only on this uncommon path, then update the path association.
+            let (in_scid_seq, _) =
+                ids.find_scid_seq(dcid).ok_or(Error::InvalidState)?;
+            let incoming_cid_entry = ids.get_scid(in_scid_seq)?;
 
-                if prev_recv_pid != recv_pid {
-                    trace!(
-                        "{} peer reused CID {:?} from path {} on path {}",
-                        self.trace_id,
-                        dcid,
-                        prev_recv_pid,
-                        recv_pid
-                    );
+            let prev_recv_pid = incoming_cid_entry.path_id.unwrap_or(recv_pid);
 
-                    // TODO: reset congestion control.
-                }
-
+            if prev_recv_pid != recv_pid {
                 trace!(
-                    "{} path ID {} now see SCID with seq num {}",
+                    "{} peer reused CID {:?} from path {} on path {}",
                     self.trace_id,
-                    recv_pid,
-                    in_scid_seq
+                    dcid,
+                    prev_recv_pid,
+                    recv_pid
                 );
 
-                recv_path.active_scid_seq = Some(in_scid_seq);
-                ids.link_scid_to_path_id(in_scid_seq, recv_pid)?;
+                // TODO: reset congestion control.
             }
+
+            trace!(
+                "{} path ID {} now see SCID with seq num {}",
+                self.trace_id,
+                recv_pid,
+                in_scid_seq
+            );
+
+            recv_path.active_scid_seq = Some(in_scid_seq);
+            ids.link_scid_to_path_id(in_scid_seq, recv_pid)?;
 
             return Ok(recv_pid);
         }
+
+        let (in_scid_seq, mut in_scid_pid) =
+            ids.find_scid_seq(dcid).ok_or(Error::InvalidState)?;
 
         // This is a new 4-tuple. See if the CID has not been assigned on
         // another path.
