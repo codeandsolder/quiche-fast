@@ -37,6 +37,7 @@ use qlog::writer::qlog_file_name;
 use qlog::writer::QlogCompression;
 use quiche::ConnectionId;
 use quiche::Header;
+use quiche::MIN_CLIENT_INITIAL_LEN;
 use quiche::RetryConnectionIds;
 use quiche::Type as PacketType;
 use task_killswitch::spawn_with_killswitch;
@@ -233,6 +234,18 @@ where
             Err(labels::QuicInvalidInitialPacketError::WrongType(hdr.ty))?;
         }
 
+        // Clients must expand datagrams carrying Initial packets to at least
+        // 1200 bytes (RFC 9000 Section 14.1). Drop shorter datagrams before
+        // any stateless reply so spoofed-source traffic cannot amplify.
+        let dgram_len = match incoming.gro {
+            Some(gro) => incoming.buf.len().min(gro as usize),
+            None => incoming.buf.len(),
+        };
+
+        if dgram_len < MIN_CLIENT_INITIAL_LEN {
+            Err(labels::QuicInvalidInitialPacketError::DatagramTooShort)?;
+        }
+
         if !quiche::version_is_supported(hdr.version) {
             return self.handshake_reply(incoming, |buf| {
                 quiche::negotiate_version(&hdr.scid, &hdr.dcid, buf).into_io()
@@ -336,5 +349,138 @@ mod tests {
         for dscp in [34, 0] {
             check_stateless_reply_inherits_socket_dscp("[::1]:0", dscp).await;
         }
+    }
+}
+
+
+#[cfg(test)]
+mod initial_size_tests {
+    use super::*;
+
+    use crate::metrics::labels::QuicInvalidInitialPacketError;
+    use crate::metrics::DefaultMetrics;
+    use crate::quic::connection::SimpleConnectionIdGenerator;
+    use crate::quic::router::initial_packet_error_type;
+
+    use quiche::MAX_CONN_ID_LEN;
+    use std::net::SocketAddr;
+    use std::time::Duration;
+    use tokio::net::UdpSocket;
+    use tokio::time::timeout;
+
+    /// Build a datagram carrying a client Initial with an 8-byte DCID, empty
+    /// SCID and empty token, zero-padded to `len` bytes.
+    fn initial_dgram(len: usize) -> Vec<u8> {
+        let mut dgram = vec![0u8; len];
+
+        dgram[0] = 0xc0;
+        dgram[1..5].copy_from_slice(&quiche::PROTOCOL_VERSION.to_be_bytes());
+        dgram[5] = 8;
+        dgram[6..14].copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+
+        dgram
+    }
+
+    async fn acceptor(
+    ) -> (ConnectionAcceptor<UdpSocket, DefaultMetrics>, SocketAddr) {
+        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let local_addr = socket.local_addr().unwrap();
+
+        let acceptor = ConnectionAcceptor::new(
+            ConnectionAcceptorConfig {
+                disable_client_ip_validation: false,
+                enable_per_connection_dscp: false,
+                qlog_dir: None,
+                qlog_compression: QlogCompression::None,
+                keylog_file: None,
+                #[cfg(target_os = "linux")]
+                with_pktinfo: false,
+            },
+            Arc::new(socket),
+            AddrValidationTokenManager::default(),
+            Arc::new(SimpleConnectionIdGenerator),
+            DefaultMetrics,
+        );
+
+        (acceptor, local_addr)
+    }
+
+    fn incoming(
+        mut buf: Vec<u8>,
+        peer_addr: SocketAddr,
+        local_addr: SocketAddr,
+    ) -> (Incoming, Header<'static>) {
+        let hdr = Header::from_slice(&mut buf, MAX_CONN_ID_LEN).unwrap();
+
+        let incoming = Incoming {
+            peer_addr,
+            local_addr,
+            rx_time: None,
+            buf,
+            gro: None,
+            #[cfg(target_os = "linux")]
+            so_mark_data: None,
+        };
+
+        (incoming, hdr)
+    }
+
+    #[tokio::test]
+    async fn short_initial_dgram_is_dropped_without_reply() {
+        let (mut acceptor, local_addr) = acceptor().await;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+
+        let (incoming, hdr) = incoming(
+            initial_dgram(MIN_CLIENT_INITIAL_LEN - 1),
+            peer.local_addr().unwrap(),
+            local_addr,
+        );
+
+        let err = match acceptor.handle_initials(incoming, hdr, &mut config) {
+            Err(e) => e,
+            Ok(_) => panic!("short Initial datagram was not rejected"),
+        };
+
+        assert_eq!(
+            initial_packet_error_type(&err),
+            QuicInvalidInitialPacketError::DatagramTooShort
+        );
+
+        let mut out = [0u8; MAX_DATAGRAM_SIZE];
+        assert!(
+            timeout(Duration::from_millis(200), peer.recv_from(&mut out))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn full_size_initial_dgram_gets_retry() {
+        let (mut acceptor, local_addr) = acceptor().await;
+        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+
+        let (incoming, hdr) = incoming(
+            initial_dgram(MIN_CLIENT_INITIAL_LEN),
+            peer.local_addr().unwrap(),
+            local_addr,
+        );
+
+        assert!(
+            acceptor
+                .handle_initials(incoming, hdr, &mut config)
+                .unwrap()
+                .is_none()
+        );
+
+        let mut out = [0u8; MAX_DATAGRAM_SIZE];
+        let (len, _) = timeout(Duration::from_secs(1), peer.recv_from(&mut out))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let hdr = Header::from_slice(&mut out[..len], MAX_CONN_ID_LEN).unwrap();
+        assert_eq!(hdr.ty, PacketType::Retry);
     }
 }
