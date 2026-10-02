@@ -3516,7 +3516,8 @@ impl<F: BufFactory> Connection<F> {
                 let frame_type = payload.get_varint()?;
 
                 if matches!(frame_type, 0x30 | 0x31) {
-                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT packets.
+                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT
+                    // packets.
                     if hdr.ty != Type::Short && hdr.ty != Type::ZeroRTT {
                         return Err(Error::InvalidPacket);
                     }
