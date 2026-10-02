@@ -8454,7 +8454,6 @@ impl<F: BufFactory> Connection<F> {
 
         Ok(())
     }
-    }
 
     /// Processes an incoming frame.
     fn process_frame(
