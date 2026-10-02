@@ -31,7 +31,7 @@ use std::os::fd::BorrowedFd;
 use smallvec::SmallVec;
 use tokio::io::ReadBuf;
 
-pub const MAX_MMSG: usize = 16;
+const MAX_MMSG: usize = 16;
 
 /// Receives as many datagrams as are immediately available into `bufs`.
 ///
