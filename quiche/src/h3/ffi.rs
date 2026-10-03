@@ -43,6 +43,14 @@ use crate::h3::Priority;
 const H3_FFI_ERR_INVALID_ARGUMENT: ssize_t = -21;
 
 macro_rules! ffi_ref {
+    ($ptr:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime requirements as the public C API.
+        match unsafe { $ptr.as_ref() } {
+            Some(value) => value,
+            None => return,
+        }
+    }};
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
@@ -54,6 +62,15 @@ macro_rules! ffi_ref {
 }
 
 macro_rules! ffi_mut {
+    ($ptr:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime/exclusivity requirements as the public C
+        // API.
+        match unsafe { $ptr.as_mut() } {
+            Some(value) => value,
+            None => return,
+        }
+    }};
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public
@@ -86,7 +103,7 @@ pub extern "C" fn quiche_h3_config_new() -> *mut h3::Config {
 pub extern "C" fn quiche_h3_config_set_max_field_section_size(
     config: *mut h3::Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut!(config);
 
     config.set_max_field_section_size(v);
 }
@@ -95,7 +112,7 @@ pub extern "C" fn quiche_h3_config_set_max_field_section_size(
 pub extern "C" fn quiche_h3_config_set_qpack_max_table_capacity(
     config: *mut h3::Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut!(config);
 
     config.set_qpack_max_table_capacity(v);
 }
@@ -104,7 +121,7 @@ pub extern "C" fn quiche_h3_config_set_qpack_max_table_capacity(
 pub extern "C" fn quiche_h3_config_set_qpack_blocked_streams(
     config: *mut h3::Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut!(config);
 
     config.set_qpack_blocked_streams(v);
 }
@@ -113,7 +130,7 @@ pub extern "C" fn quiche_h3_config_set_qpack_blocked_streams(
 pub extern "C" fn quiche_h3_config_enable_extended_connect(
     config: *mut h3::Config, enabled: bool,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut!(config);
 
     config.enable_extended_connect(enabled);
 }
@@ -122,7 +139,7 @@ pub extern "C" fn quiche_h3_config_enable_extended_connect(
 pub extern "C" fn quiche_h3_config_set_max_priority_update_size(
     config: *mut h3::Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut!(config);
 
     config.set_max_priority_update_size(v);
 }
@@ -537,8 +554,8 @@ pub struct Stats {
 pub extern "C" fn quiche_h3_conn_stats(
     conn: *const h3::Connection, out: *mut Stats,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
+    let conn = ffi_ref!(conn);
+    let out = ffi_mut!(out);
 
     let stats = conn.stats();
 
