@@ -5362,11 +5362,14 @@ impl<F: BufFactory> Connection<F> {
             while let Some(priority_key) = self.streams.peek_flushable() {
                 let stream_id = priority_key.id;
                 let stream = match self.streams.get_mut(stream_id) {
-                    // Avoid sending frames for streams that were already stopped.
-                    //
-                    // This might happen if stream data was buffered but not yet
-                    // flushed on the wire when a STOP_SENDING frame is received.
-                    Some(v) if !v.send.is_stopped() => v,
+                    // Revalidate the intrusive queue entry before emission.
+                    // ACK processing can remove retransmit data while leaving a
+                    // stale flushable node queued. Empty FIN is the one valid
+                    // zero-payload case and must remain eligible.
+                    Some(v)
+                        if !v.send.is_stopped() &&
+                            (v.is_flushable() || v.send.empty_fin_next()) =>
+                        v,
                     _ => {
                         self.streams.remove_flushable(&priority_key);
                         continue;
