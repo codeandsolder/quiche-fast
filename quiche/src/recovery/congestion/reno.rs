@@ -92,7 +92,9 @@ fn on_packet_acked(
         if r.hystart.in_css() {
             r.congestion_window += r.hystart.css_cwnd_inc(r.max_datagram_size);
         } else {
-            r.congestion_window += r.max_datagram_size;
+            // RFC 9002, Section 7.3.1: while a sender is in slow start, the
+            // congestion window increases by the number of bytes acknowledged.
+            r.congestion_window += packet.size;
         }
 
         if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
@@ -206,6 +208,25 @@ mod tests {
 
         // Check if cwnd increased by packet size (slow start).
         assert_eq!(sender.congestion_window, cwnd_prev + size);
+    }
+
+    #[test]
+    fn reno_slow_start_smaller_than_mss() {
+        let mut sender = test_sender();
+        let size = sender.max_datagram_size;
+
+        for _ in 0..sender.initial_congestion_window_packets {
+            sender.send_packet(size);
+        }
+
+        let partial = size / 4;
+        sender.send_packet(partial);
+        sender.ack_n_packets(sender.initial_congestion_window_packets, size);
+
+        let cwnd_prev = sender.congestion_window;
+        sender.ack_n_packets(1, partial);
+
+        assert_eq!(sender.congestion_window, cwnd_prev + partial);
     }
 
     #[test]

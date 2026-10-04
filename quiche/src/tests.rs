@@ -14679,3 +14679,66 @@ fn rejected_zero_rtt_replays_http3_request(
         )),
     );
 }
+
+
+/// PADDING is not ack-eliciting, but RFC 9002 Section 2 still counts packets
+/// containing PADDING toward bytes in flight.
+#[test]
+fn padding_only_packet_counts_toward_bytes_in_flight() {
+    let mut buf = [0; 65535];
+
+    let mut config = test_utils::config_no_pq(PROTOCOL_VERSION).unwrap();
+    config
+        .load_cert_chain_from_pem_file("examples/cert.crt")
+        .unwrap();
+    config
+        .load_priv_key_from_pem_file("examples/cert.key")
+        .unwrap();
+    config
+        .set_application_protos(&[b"proto1", b"proto2"])
+        .unwrap();
+    config.set_initial_max_data(30000);
+    config.set_initial_max_stream_data_bidi_local(15000);
+    config.set_initial_max_stream_data_bidi_remote(15000);
+    config.set_initial_max_streams_bidi(3);
+    config.enable_early_data();
+    config.verify_peer(false);
+
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let session = pipe.client.session().unwrap();
+
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.client.set_session(session), Ok(()));
+
+    let (len, _) = pipe.client.send(&mut buf).unwrap();
+    let mut initial = buf[..len].to_vec();
+    assert!(pipe.client.is_in_early_data());
+
+    assert_eq!(pipe.client.stream_send(4, b"hello, world", true), Ok(12));
+    let (len, _) = pipe.client.send(&mut buf).unwrap();
+    let mut zrtt = buf[..len].to_vec();
+
+    assert_eq!(pipe.server_recv(&mut initial), Ok(initial.len()));
+    assert_eq!(pipe.server_recv(&mut zrtt), Ok(zrtt.len()));
+
+    let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
+    test_utils::process_flight(&mut pipe.client, flight).unwrap();
+
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    let sent: usize = flight.iter().map(|(b, _)| b.len()).sum();
+
+    let bytes_in_flight = pipe
+        .client
+        .paths
+        .get_active()
+        .unwrap()
+        .recovery
+        .bytes_in_flight();
+
+    assert!(
+        bytes_in_flight >= sent * 3 / 4,
+        "padded packets should be accounted for: sent {sent} bytes, \
+         {bytes_in_flight} in flight"
+    );
+}
