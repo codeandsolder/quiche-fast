@@ -1376,27 +1376,36 @@ pub extern "C" fn quiche_conn_trace_id(
 }
 
 /// An iterator over connection ids.
+///
+/// The C API can keep an iterator independently of the connection that
+/// created it, so the iterator must own every ID it exposes.
 #[derive(Default)]
-pub struct ConnectionIdIter<'a> {
-    cids: Vec<ConnectionId<'a>>,
+pub struct ConnectionIdIter {
+    cids: Vec<ConnectionId<'static>>,
     index: usize,
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_source_ids(
-    conn: &Connection,
-) -> *mut ConnectionIdIter<'_> {
-    let vec = conn.source_ids().cloned().collect();
-    Box::into_raw(Box::new(ConnectionIdIter {
-        cids: vec,
-        index: 0,
-    }))
+    conn: *const Connection,
+) -> *mut ConnectionIdIter {
+    let conn = ffi_ref!(conn, ptr::null_mut());
+
+    let cids = conn
+        .source_ids()
+        .map(|cid| cid.clone().into_owned())
+        .collect();
+    Box::into_raw(Box::new(ConnectionIdIter { cids, index: 0 }))
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_connection_id_iter_next(
-    iter: &mut ConnectionIdIter, out: &mut *const u8, out_len: &mut size_t,
+    iter: *mut ConnectionIdIter, out: *mut *const u8, out_len: *mut size_t,
 ) -> bool {
+    let iter = ffi_mut!(iter, false);
+    let out = ffi_mut!(out, false);
+    let out_len = ffi_mut!(out_len, false);
+
     if let Some(conn_id) = iter.cids.get(iter.index) {
         let id = conn_id.as_ref();
         *out = id.as_ptr();
@@ -2026,11 +2035,13 @@ pub extern "C" fn quiche_conn_retired_scids(conn: *const Connection) -> size_t {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_retired_scid_iter(
-    conn: &mut Connection,
-) -> *mut ConnectionIdIter<'_> {
+    conn: *mut Connection,
+) -> *mut ConnectionIdIter {
+    let conn = ffi_mut!(conn, ptr::null_mut());
+
     let mut cids = Vec::with_capacity(conn.retired_scids());
     while let Some(cid) = conn.retired_scid_next() {
-        cids.push(cid);
+        cids.push(cid.into_owned());
     }
     Box::into_raw(Box::new(ConnectionIdIter { cids, index: 0 }))
 }
@@ -2777,6 +2788,49 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn connection_id_iter_owns_ids_and_rejects_null_metadata() {
+        assert!(quiche_conn_source_ids(ptr::null()).is_null());
+        assert!(quiche_conn_retired_scid_iter(ptr::null_mut()).is_null());
+
+        let mut out: *const u8 = ptr::null();
+        let mut out_len: size_t = 0;
+        assert!(!quiche_connection_id_iter_next(
+            ptr::null_mut(),
+            &mut out,
+            &mut out_len
+        ));
+
+        let mut backing = vec![7, 8, 9];
+        let owned = ConnectionId::from_ref(&backing).into_owned();
+        backing.fill(0);
+
+        let mut iter = ConnectionIdIter {
+            cids: vec![owned],
+            index: 0,
+        };
+
+        assert!(!quiche_connection_id_iter_next(
+            &mut iter,
+            ptr::null_mut(),
+            &mut out_len
+        ));
+        assert!(!quiche_connection_id_iter_next(
+            &mut iter,
+            &mut out,
+            ptr::null_mut()
+        ));
+        assert!(quiche_connection_id_iter_next(
+            &mut iter,
+            &mut out,
+            &mut out_len
+        ));
+        assert_eq!(out_len, 3);
+        // SAFETY: `out` was produced by the live iterator above and remains
+        // valid until that iterator is mutated or dropped.
+        assert_eq!(unsafe { slice::from_raw_parts(out, out_len) }, &[7, 8, 9]);
     }
 
     #[test]
