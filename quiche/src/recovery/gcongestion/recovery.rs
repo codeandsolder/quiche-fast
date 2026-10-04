@@ -969,9 +969,34 @@ impl RecoveryOps for GRecovery {
 
         self.pto_count += 1;
 
+        let probe_count = MAX_PTO_PROBES_COUNT.min(self.pto_count as usize);
+
+        // RFC 9002 Section 6.2.4 recommends probing every other eligible
+        // packet-number space that still has data in flight as well.
+        for other in [
+            packet::Epoch::Initial,
+            packet::Epoch::Handshake,
+            packet::Epoch::Application,
+        ] {
+            if other == epoch || self.epochs[other].pkts_in_flight == 0 {
+                continue;
+            }
+
+            // Match pto_time_and_space(): Application data is not an eligible
+            // PTO space until the handshake is complete.
+            if other == packet::Epoch::Application &&
+                !handshake_status.completed
+            {
+                continue;
+            }
+
+            self.epochs[other].loss_probes =
+                self.epochs[other].loss_probes.max(probe_count);
+        }
+
         let epoch = &mut self.epochs[epoch];
 
-        epoch.loss_probes = MAX_PTO_PROBES_COUNT.min(self.pto_count as usize);
+        epoch.loss_probes = probe_count;
 
         let sent_packets_iter_limit = if !epoch.lost_frames_pto.is_empty() {
             // Skip the search for frames to add to PTO probes if frames
