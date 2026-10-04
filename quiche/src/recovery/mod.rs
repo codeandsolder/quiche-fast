@@ -2559,7 +2559,9 @@ mod tests {
         assert_eq!(r.sent_packets_len(epoch), 0);
         assert_eq!(r.bytes_in_flight(), 0);
 
-        assert_eq!(r.get_largest_acked_on_epoch(epoch).unwrap(), 3);
+        // largest_acked is the connection-global ACK high-water mark, even
+        // when this path only sent packets through PN 3.
+        assert_eq!(r.get_largest_acked_on_epoch(epoch).unwrap(), 9);
         assert_eq!(r.largest_sent_pkt_num_on_path(epoch).unwrap(), 3);
     }
 
