@@ -7627,7 +7627,7 @@ fn validate_peer_sent_ack_range_for_multi_path(
     );
     assert_eq!(
         p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 5, b5: 6)
+        by_boring!(b4: 6, b5: 7)
     );
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 
@@ -7675,7 +7675,7 @@ fn validate_peer_sent_ack_range_for_multi_path(
     );
     assert_eq!(
         p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 5, b5: 6)
+        by_boring!(b4: 7, b5: 8)
     );
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 

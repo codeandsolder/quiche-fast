@@ -215,6 +215,9 @@ pub trait RecoveryOps {
         &mut self, pkt: Sent, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, trace_id: &str,
     );
+    /// Records a connection-global packet number intentionally skipped by the
+    /// sender for optimistic-ACK detection.
+    fn on_packet_number_skipped(&mut self, pkt_num: u64);
     fn get_packet_send_time(&self, now: Instant) -> Instant;
 
     #[allow(
@@ -846,6 +849,7 @@ pub enum StartupExitReason {
 mod tests {
     use super::*;
     use crate::packet;
+    use crate::frame;
     use crate::range_buf::RangeBuf;
     use crate::test_utils;
     use crate::CongestionControlAlgorithm;
@@ -869,6 +873,7 @@ mod tests {
         let hs = HandshakeStatus::default();
 
         // PN 2 is deliberately skipped.
+        r.on_packet_number_skipped(2);
         for pkt_num in [0, 1, 3] {
             r.on_packet_sent(
                 test_utils::helper_packet_sent(pkt_num, now, 1000),
@@ -2972,6 +2977,51 @@ mod tests {
 
         assert!(r.loss_probes(packet::Epoch::Initial) > 0);
         assert!(r.loss_probes(packet::Epoch::Handshake) > 0);
+    }
+
+    /// ACKs for packets sent on a different path still advance the global
+    /// packet threshold. Control-only frames on the old path must therefore
+    /// become lost and eligible for retransmission even with no local ACK.
+    #[rstest]
+    fn cross_path_ack_marks_control_frame_lost(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let now = Instant::now();
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        let hs = HandshakeStatus::default();
+
+        let mut sent = test_utils::helper_packet_sent(0, now, 1000);
+        sent.has_data = false;
+        sent.frames = smallvec![frame::Frame::ResetStream {
+            stream_id: 0,
+            error_code: 42,
+            final_size: 0,
+        }];
+        r.on_packet_sent(sent, epoch, hs, now, "");
+
+        // PN 3 was sent on another path. Its ACK is connection-valid but does
+        // not newly acknowledge anything in this path-local recovery object.
+        let mut acked = RangeSet::default();
+        acked.insert(3..4);
+        let outcome = r
+            .on_ack_received(&acked, 0, epoch, hs, now, None, "")
+            .unwrap();
+
+        assert_eq!(outcome.acked_bytes, 0);
+        assert_eq!(outcome.lost_packets, 1);
+        assert_eq!(r.lost_frames_count(epoch), 1);
+        assert!(matches!(
+            r.next_lost_frame(epoch),
+            Some(frame::Frame::ResetStream {
+                stream_id: 0,
+                error_code: 42,
+                final_size: 0,
+            })
+        ));
     }
 
     #[rstest]

@@ -84,6 +84,9 @@ struct RecoveryEpoch {
     /// about them.
     sent_packets: VecDeque<Sent>,
 
+    /// Sender-created packet-number gaps that can still affect loss distance.
+    skipped_packet_numbers: Vec<u64>,
+
     loss_probes: usize,
     in_flight_count: usize,
 
@@ -173,8 +176,17 @@ impl RecoveryEpoch {
                 } else if unacked.time_lost.is_some() {
                     // An acked packet was already declared lost.
                     spurious_losses += 1;
-                    spurious_pkt_thresh
-                        .get_or_insert(largest_acked - unacked.pkt_num + 1);
+                    let skipped_between = self
+                        .skipped_packet_numbers
+                        .iter()
+                        .filter(|&&pn| pn > unacked.pkt_num && pn <= largest_acked)
+                        .count() as u64;
+                    spurious_pkt_thresh.get_or_insert(
+                        largest_acked
+                            .saturating_sub(unacked.pkt_num)
+                            .saturating_sub(skipped_between) +
+                            1,
+                    );
                     unacked.time_acked = Some(now);
 
                     if unacked.in_flight {
@@ -210,6 +222,12 @@ impl RecoveryEpoch {
             }
         }
 
+        if let Some(largest_ack_received) = peer_sent_ack_ranges.last() {
+            self.skipped_packet_numbers.retain(|&pn| {
+                largest_ack_received < pn.saturating_add(MAX_PACKET_THRESHOLD)
+            });
+        }
+
         self.drain_acked_and_lost_packets(now - rtt_stats.rtt());
 
         Ok(AckedDetectionResult {
@@ -240,31 +258,24 @@ impl RecoveryEpoch {
 
         let mut largest_lost_pkt = None;
 
-        // RFC 9002's packet-number subtraction assumes the sender created no
-        // gaps. quiche deliberately skips packet numbers to detect optimistic
-        // ACKs, so use the ordered sent-packet records instead: a packet crosses
-        // the packet threshold only after pkt_thresh packets were actually sent
-        // after it and at or below largest_acked.
-        let sent_through_largest = self
-            .sent_packets
-            .iter()
-            .take_while(|p| p.pkt_num <= largest_acked)
-            .count();
+        let skipped_packet_numbers = &self.skipped_packet_numbers;
 
-        let unacked_iter = self
-            .sent_packets
+        let unacked_iter = self.sent_packets
             .iter_mut()
-            .enumerate()
-            .take(sent_through_largest)
-            // Skip packets that have already been acked or lost.
-            .filter(|(_, p)| p.time_acked.is_none() && p.time_lost.is_none());
+            .take_while(|p| p.pkt_num <= largest_acked)
+            .filter(|p| p.time_acked.is_none() && p.time_lost.is_none());
 
-        for (sent_idx, unacked) in unacked_iter {
-            let newer_sent = sent_through_largest - sent_idx - 1;
+        for unacked in unacked_iter {
+            let skipped_between = skipped_packet_numbers
+                .iter()
+                .filter(|&&pn| pn > unacked.pkt_num && pn <= largest_acked)
+                .count() as u64;
+            let packet_distance = largest_acked
+                .saturating_sub(unacked.pkt_num)
+                .saturating_sub(skipped_between);
 
-            // Mark packet as lost, or set time when it should be marked.
             if unacked.time_sent <= lost_send_time ||
-                newer_sent >= pkt_thresh as usize
+                packet_distance >= pkt_thresh
             {
                 self.lost_frames_ack.extend(unacked.frames.drain(..));
 
@@ -679,11 +690,15 @@ impl RecoveryOps for LegacyRecovery {
         trace!("{trace_id} {self:?}");
     }
 
+    fn on_packet_number_skipped(&mut self, pkt_num: u64) {
+        self.epochs[Epoch::Application].skipped_packet_numbers.push(pkt_num);
+    }
+
     fn get_packet_send_time(&self, now: Instant) -> Instant {
         now
     }
 
-    // `peer_sent_ack_ranges` should not be used without validation.
+    // peer_sent_ack_ranges has been validated before use.
     fn on_ack_received(
         &mut self, peer_sent_ack_ranges: &RangeSet, ack_delay: u64, epoch: Epoch,
         handshake_status: HandshakeStatus, now: Instant, skip_pn: Option<u64>,
@@ -711,60 +726,50 @@ impl RecoveryOps for LegacyRecovery {
             self.time_thresh = PACKET_REORDER_TIME_THRESHOLD;
         }
 
-        // Undo congestion window update.
         if has_in_flight_spurious_loss {
             (self.congestion.cc_ops.rollback)(&mut self.congestion);
         }
 
-        if self.newly_acked.is_empty() {
-            return Ok(OnAckReceivedOutcome::default());
-        }
-
-        let largest_newly_acked = self.newly_acked.last().unwrap();
-
-        // Update `largest_acked_packet` based on the validated `newly_acked`
-        // value.
+        let largest_ack_received = peer_sent_ack_ranges
+            .last()
+            .expect("ACK frames should always have at least one ack range");
         let largest_acked_pkt_num = self.epochs[epoch]
             .largest_acked_packet
             .unwrap_or(0)
-            .max(largest_newly_acked.pkt_num);
+            .max(largest_ack_received);
         self.epochs[epoch].largest_acked_packet = Some(largest_acked_pkt_num);
 
-        // Check if largest packet is newly acked.
-        if largest_newly_acked.pkt_num == largest_acked_pkt_num &&
-            has_ack_eliciting
-        {
-            let latest_rtt = now - largest_newly_acked.time_sent;
-            self.rtt_stats.update_rtt(
-                latest_rtt,
-                Duration::from_micros(ack_delay),
-                now,
-                handshake_status.completed,
-            );
+        if let Some(largest_newly_acked) = self.newly_acked.last() {
+            if largest_newly_acked.pkt_num == largest_acked_pkt_num &&
+                has_ack_eliciting
+            {
+                let latest_rtt = now - largest_newly_acked.time_sent;
+                self.rtt_stats.update_rtt(
+                    latest_rtt,
+                    Duration::from_micros(ack_delay),
+                    now,
+                    handshake_status.completed,
+                );
+            }
         }
 
-        // Detect and mark lost packets without removing them from the sent
-        // packets list.
         let (lost_packets, lost_bytes) =
             self.detect_lost_packets(epoch, now, trace_id);
 
-        self.congestion.on_packets_acked(
-            self.bytes_in_flight.get(),
-            &mut self.newly_acked,
-            &self.rtt_stats,
-            now,
-        );
-
-        self.bytes_in_flight.saturating_subtract(acked_bytes, now);
-
-        // RFC 9002, Section 6.2.1: a client that is not yet certain
-        // the server finished validating its address keeps the PTO backoff.
-        if handshake_status.peer_verified_address {
-            self.pto_count = 0;
+        if !self.newly_acked.is_empty() {
+            self.congestion.on_packets_acked(
+                self.bytes_in_flight.get(),
+                &mut self.newly_acked,
+                &self.rtt_stats,
+                now,
+            );
+            self.bytes_in_flight.saturating_subtract(acked_bytes, now);
+            if handshake_status.peer_verified_address {
+                self.pto_count = 0;
+            }
         }
 
         self.set_loss_detection_timer(handshake_status, now);
-
         self.epochs[epoch]
             .drain_acked_and_lost_packets(now - self.rtt_stats.rtt());
 

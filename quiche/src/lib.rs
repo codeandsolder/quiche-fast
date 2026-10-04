@@ -4535,11 +4535,23 @@ impl<F: BufFactory> Connection<F> {
 
         let is_app_limited = self.delivery_rate_check_if_app_limited();
         let n_paths = self.paths.len();
+
+        if self
+            .pkt_num_manager
+            .should_skip_pn(self.handshake_completed)
+        {
+            let skipped_pn = self.next_pkt_num;
+            self.pkt_num_manager.set_skip_pn(Some(skipped_pn));
+            for (_, path) in self.paths.iter_mut() {
+                path.recovery.on_packet_number_skipped(skipped_pn);
+            }
+            self.next_pkt_num += 1;
+        }
+
         let path = self.paths.get_mut(send_pid)?;
         let flow_control = &mut self.flow_control;
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
-        let pkt_num_manager = &mut self.pkt_num_manager;
 
         let mut left = if let Some(pmtud) = path.pmtud.as_mut() {
             // Limit output buffer size by estimated path MTU.
@@ -4548,10 +4560,6 @@ impl<F: BufFactory> Connection<F> {
             b.cap()
         };
 
-        if pkt_num_manager.should_skip_pn(self.handshake_completed) {
-            pkt_num_manager.set_skip_pn(Some(self.next_pkt_num));
-            self.next_pkt_num += 1;
-        };
         let pn = self.next_pkt_num;
 
         let largest_acked_pkt =
