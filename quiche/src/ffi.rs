@@ -1375,8 +1375,12 @@ pub extern "C" fn quiche_conn_on_timeout(conn: &mut Connection) {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_trace_id(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     let trace_id = conn.trace_id();
 
     *out = trace_id.as_ptr();
@@ -1434,8 +1438,12 @@ pub extern "C" fn quiche_connection_id_iter_free(iter: *mut ConnectionIdIter) {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_source_id(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     let conn_id = conn.source_id();
     let id = conn_id.as_ref();
     *out = id.as_ptr();
@@ -1444,8 +1452,12 @@ pub extern "C" fn quiche_conn_source_id(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_destination_id(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     let conn_id = conn.destination_id();
     let id = conn_id.as_ref();
 
@@ -1455,8 +1467,12 @@ pub extern "C" fn quiche_conn_destination_id(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_application_proto(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     let proto = conn.application_proto();
 
     *out = proto.as_ptr();
@@ -1465,8 +1481,12 @@ pub extern "C" fn quiche_conn_application_proto(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_peer_cert(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     match conn.peer_cert() {
         Some(peer_cert) => {
             *out = peer_cert.as_ptr();
@@ -1479,8 +1499,12 @@ pub extern "C" fn quiche_conn_peer_cert(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_session(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     match conn.session() {
         Some(session) => {
             *out = session.as_ptr();
@@ -1493,8 +1517,12 @@ pub extern "C" fn quiche_conn_session(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_server_name(
-    conn: &Connection, out: &mut *const u8, out_len: &mut size_t,
+    conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
+    let out_len = ffi_mut!(out_len, ());
+
     match conn.server_name() {
         Some(server_name) => {
             *out = server_name.as_ptr();
@@ -2799,6 +2827,37 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn borrowed_byte_outputs_reject_null_metadata() {
+        type ByteOutputFn =
+            extern "C" fn(*const Connection, *mut *const u8, *mut size_t);
+
+        let pipe = crate::test_utils::Pipe::new("cubic").unwrap();
+        let conn: *const Connection = &pipe.client;
+        let functions: [ByteOutputFn; 7] = [
+            quiche_conn_trace_id,
+            quiche_conn_source_id,
+            quiche_conn_destination_id,
+            quiche_conn_application_proto,
+            quiche_conn_peer_cert,
+            quiche_conn_session,
+            quiche_conn_server_name,
+        ];
+
+        let mut out: *const u8 = ptr::null();
+        let mut out_len: size_t = usize::MAX;
+
+        for function in functions {
+            function(ptr::null(), &mut out, &mut out_len);
+            function(conn, ptr::null_mut(), &mut out_len);
+            function(conn, &mut out, ptr::null_mut());
+        }
+
+        quiche_conn_trace_id(conn, &mut out, &mut out_len);
+        assert!(!out.is_null());
+        assert!(out_len > 0);
     }
 
     #[test]
