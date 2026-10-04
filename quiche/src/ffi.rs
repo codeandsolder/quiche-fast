@@ -101,6 +101,17 @@ use crate::*;
 
 const FFI_ERR_INVALID_ARGUMENT: ssize_t = -24;
 
+macro_rules! ffi_ref {
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime requirements as the public C API.
+        match unsafe { $ptr.as_ref() } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
 macro_rules! ffi_mut {
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
@@ -1243,8 +1254,10 @@ pub extern "C" fn quiche_conn_stream_capacity(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_readable(
-    conn: &Connection, stream_id: u64,
+    conn: *const Connection, stream_id: u64,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.stream_readable(stream_id)
 }
 
@@ -1273,8 +1286,10 @@ pub extern "C" fn quiche_conn_stream_writable_next(conn: &mut Connection) -> i64
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_finished(
-    conn: &Connection, stream_id: u64,
+    conn: *const Connection, stream_id: u64,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.stream_finished(stream_id)
 }
 
@@ -1290,13 +1305,17 @@ pub extern "C" fn quiche_conn_writable(conn: &Connection) -> *mut StreamIter {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_max_send_udp_payload_size(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> usize {
+    let conn = ffi_ref!(conn, 0);
+
     conn.max_send_udp_payload_size()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_readable(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_readable(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_readable()
 }
 
@@ -1320,7 +1339,9 @@ pub extern "C" fn quiche_conn_close(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_timeout_as_nanos(conn: &Connection) -> u64 {
+pub extern "C" fn quiche_conn_timeout_as_nanos(conn: *const Connection) -> u64 {
+    let conn = ffi_ref!(conn, 0);
+
     match conn.timeout() {
         Some(timeout) => timeout.as_nanos() as u64,
 
@@ -1329,7 +1350,9 @@ pub extern "C" fn quiche_conn_timeout_as_nanos(conn: &Connection) -> u64 {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_timeout_as_millis(conn: &Connection) -> u64 {
+pub extern "C" fn quiche_conn_timeout_as_millis(conn: *const Connection) -> u64 {
+    let conn = ffi_ref!(conn, 0);
+
     match conn.timeout() {
         Some(timeout) => timeout.as_millis() as u64,
 
@@ -1466,32 +1489,44 @@ pub extern "C" fn quiche_conn_server_name(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_established(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_established(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_established()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_resumed(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_resumed(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_resumed()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_in_early_data(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_in_early_data(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_in_early_data()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_draining(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_draining(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_draining()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_closed(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_closed(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_closed()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_timed_out(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_timed_out(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_timed_out()
 }
 
@@ -1733,14 +1768,18 @@ pub extern "C" fn quiche_conn_path_stats(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_is_server(conn: &Connection) -> bool {
+pub extern "C" fn quiche_conn_is_server(conn: *const Connection) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_server()
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_max_writable_len(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     match conn.dgram_max_writable_len() {
         None => Error::Done.to_c(),
 
@@ -1749,7 +1788,11 @@ pub extern "C" fn quiche_conn_dgram_max_writable_len(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_dgram_recv_front_len(conn: &Connection) -> ssize_t {
+pub extern "C" fn quiche_conn_dgram_recv_front_len(
+    conn: *const Connection,
+) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     match conn.dgram_recv_front_len() {
         None => Error::Done.to_c(),
 
@@ -1758,26 +1801,38 @@ pub extern "C" fn quiche_conn_dgram_recv_front_len(conn: &Connection) -> ssize_t
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_dgram_recv_queue_len(conn: &Connection) -> ssize_t {
+pub extern "C" fn quiche_conn_dgram_recv_queue_len(
+    conn: *const Connection,
+) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     conn.dgram_recv_queue_len() as ssize_t
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_recv_queue_byte_size(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     conn.dgram_recv_queue_byte_size() as ssize_t
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_dgram_send_queue_len(conn: &Connection) -> ssize_t {
+pub extern "C" fn quiche_conn_dgram_send_queue_len(
+    conn: *const Connection,
+) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     conn.dgram_send_queue_len() as ssize_t
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_send_queue_byte_size(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> ssize_t {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as ssize_t);
+
     conn.dgram_send_queue_byte_size() as ssize_t
 }
 
@@ -1836,15 +1891,19 @@ pub extern "C" fn quiche_conn_dgram_purge_outgoing(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_is_dgram_send_queue_full(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_dgram_send_queue_full()
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_is_dgram_recv_queue_full(
-    conn: &Connection,
+    conn: *const Connection,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+
     conn.is_dgram_recv_queue_full()
 }
 
@@ -1879,27 +1938,41 @@ pub extern "C" fn quiche_conn_free(conn: *mut Connection) {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_peer_streams_left_bidi(conn: &Connection) -> u64 {
+pub extern "C" fn quiche_conn_peer_streams_left_bidi(
+    conn: *const Connection,
+) -> u64 {
+    let conn = ffi_ref!(conn, 0);
+
     conn.peer_streams_left_bidi()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_peer_streams_left_uni(conn: &Connection) -> u64 {
+pub extern "C" fn quiche_conn_peer_streams_left_uni(
+    conn: *const Connection,
+) -> u64 {
+    let conn = ffi_ref!(conn, 0);
+
     conn.peer_streams_left_uni()
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_send_quantum(conn: &Connection) -> size_t {
+pub extern "C" fn quiche_conn_send_quantum(conn: *const Connection) -> size_t {
+    let conn = ffi_ref!(conn, 0);
+
     conn.send_quantum() as size_t
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_active_scids(conn: &Connection) -> size_t {
+pub extern "C" fn quiche_conn_active_scids(conn: *const Connection) -> size_t {
+    let conn = ffi_ref!(conn, 0);
+
     conn.active_scids() as size_t
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_scids_left(conn: &Connection) -> size_t {
+pub extern "C" fn quiche_conn_scids_left(conn: *const Connection) -> size_t {
+    let conn = ffi_ref!(conn, 0);
+
     conn.scids_left() as size_t
 }
 
@@ -1938,12 +2011,16 @@ pub extern "C" fn quiche_conn_retire_dcid(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_available_dcids(conn: &Connection) -> size_t {
+pub extern "C" fn quiche_conn_available_dcids(conn: *const Connection) -> size_t {
+    let conn = ffi_ref!(conn, 0);
+
     conn.available_dcids() as size_t
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_retired_scids(conn: &Connection) -> size_t {
+pub extern "C" fn quiche_conn_retired_scids(conn: *const Connection) -> size_t {
+    let conn = ffi_ref!(conn, 0);
+
     conn.retired_scids() as size_t
 }
 
@@ -2457,6 +2534,61 @@ mod tests {
             quiche_config_set_ticket_key(ptr::null_mut(), ptr::null(), 0),
             FFI_ERR_INVALID_ARGUMENT as c_int
         );
+    }
+
+    #[test]
+    fn null_connection_scalar_queries_return_safe_defaults() {
+        let conn = ptr::null();
+
+        assert!(!quiche_conn_stream_readable(conn, 0));
+        assert!(!quiche_conn_stream_finished(conn, 0));
+        assert_eq!(quiche_conn_max_send_udp_payload_size(conn), 0);
+        assert!(!quiche_conn_is_readable(conn));
+        assert_eq!(quiche_conn_timeout_as_nanos(conn), 0);
+        assert_eq!(quiche_conn_timeout_as_millis(conn), 0);
+
+        assert!(!quiche_conn_is_established(conn));
+        assert!(!quiche_conn_is_resumed(conn));
+        assert!(!quiche_conn_is_in_early_data(conn));
+        assert!(!quiche_conn_is_draining(conn));
+        assert!(!quiche_conn_is_closed(conn));
+        assert!(!quiche_conn_is_timed_out(conn));
+        assert!(!quiche_conn_is_server(conn));
+
+        assert_eq!(
+            quiche_conn_dgram_max_writable_len(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_conn_dgram_recv_front_len(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_conn_dgram_recv_queue_len(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_conn_dgram_recv_queue_byte_size(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_conn_dgram_send_queue_len(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_conn_dgram_send_queue_byte_size(conn),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert!(!quiche_conn_is_dgram_send_queue_full(conn));
+        assert!(!quiche_conn_is_dgram_recv_queue_full(conn));
+
+        assert_eq!(quiche_conn_peer_streams_left_bidi(conn), 0);
+        assert_eq!(quiche_conn_peer_streams_left_uni(conn), 0);
+        assert_eq!(quiche_conn_send_quantum(conn), 0);
+        assert_eq!(quiche_conn_active_scids(conn), 0);
+        assert_eq!(quiche_conn_scids_left(conn), 0);
+        assert_eq!(quiche_conn_available_dcids(conn), 0);
+        assert_eq!(quiche_conn_retired_scids(conn), 0);
     }
 
     #[test]
