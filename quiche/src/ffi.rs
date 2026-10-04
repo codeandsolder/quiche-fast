@@ -1294,12 +1294,20 @@ pub extern "C" fn quiche_conn_stream_finished(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_readable(conn: &Connection) -> *mut StreamIter {
+pub extern "C" fn quiche_conn_readable(
+    conn: *const Connection,
+) -> *mut StreamIter {
+    let conn = ffi_ref!(conn, ptr::null_mut());
+
     Box::into_raw(Box::new(conn.readable()))
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_writable(conn: &Connection) -> *mut StreamIter {
+pub extern "C" fn quiche_conn_writable(
+    conn: *const Connection,
+) -> *mut StreamIter {
+    let conn = ffi_ref!(conn, ptr::null_mut());
+
     Box::into_raw(Box::new(conn.writable()))
 }
 
@@ -1579,10 +1587,13 @@ pub extern "C" fn quiche_conn_local_error(
 
 #[no_mangle]
 pub extern "C" fn quiche_stream_iter_next(
-    iter: &mut StreamIter, stream_id: *mut u64,
+    iter: *mut StreamIter, stream_id: *mut u64,
 ) -> bool {
+    let iter = ffi_mut!(iter, false);
+    let stream_id = ffi_mut!(stream_id, false);
+
     if let Some(v) = iter.next() {
-        unsafe { *stream_id = v };
+        *stream_id = v;
         return true;
     }
 
@@ -2788,6 +2799,19 @@ mod tests {
                 .parse()
                 .unwrap()
         );
+    }
+
+    #[test]
+    fn stream_iter_rejects_null_metadata() {
+        assert!(quiche_conn_readable(ptr::null()).is_null());
+        assert!(quiche_conn_writable(ptr::null()).is_null());
+
+        let mut stream_id = 0;
+        assert!(!quiche_stream_iter_next(ptr::null_mut(), &mut stream_id));
+
+        let mut iter = StreamIter::default();
+        assert!(!quiche_stream_iter_next(&mut iter, ptr::null_mut()));
+        assert!(!quiche_stream_iter_next(&mut iter, &mut stream_id));
     }
 
     #[test]
