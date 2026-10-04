@@ -1577,11 +1577,17 @@ pub extern "C" fn quiche_conn_is_timed_out(conn: *const Connection) -> bool {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_peer_error(
-    conn: &Connection, is_app: *mut bool, error_code: *mut u64,
-    reason: &mut *const u8, reason_len: &mut size_t,
+    conn: *const Connection, is_app: *mut bool, error_code: *mut u64,
+    reason: *mut *const u8, reason_len: *mut size_t,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+    let is_app = ffi_mut!(is_app, false);
+    let error_code = ffi_mut!(error_code, false);
+    let reason = ffi_mut!(reason, false);
+    let reason_len = ffi_mut!(reason_len, false);
+
     match &conn.peer_error {
-        Some(conn_err) => unsafe {
+        Some(conn_err) => {
             *is_app = conn_err.is_app;
             *error_code = conn_err.error_code;
             *reason = conn_err.reason.as_ptr();
@@ -1596,11 +1602,17 @@ pub extern "C" fn quiche_conn_peer_error(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_local_error(
-    conn: &Connection, is_app: *mut bool, error_code: *mut u64,
-    reason: &mut *const u8, reason_len: &mut size_t,
+    conn: *const Connection, is_app: *mut bool, error_code: *mut u64,
+    reason: *mut *const u8, reason_len: *mut size_t,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+    let is_app = ffi_mut!(is_app, false);
+    let error_code = ffi_mut!(error_code, false);
+    let reason = ffi_mut!(reason, false);
+    let reason_len = ffi_mut!(reason_len, false);
+
     match &conn.local_error {
-        Some(conn_err) => unsafe {
+        Some(conn_err) => {
             *is_app = conn_err.is_app;
             *error_code = conn_err.error_code;
             *reason = conn_err.reason.as_ptr();
@@ -2830,11 +2842,72 @@ mod tests {
     }
 
     #[test]
+    fn connection_error_outputs_validate_every_pointer() {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        pipe.handshake().unwrap();
+        pipe.client.close(true, 42, b"ffi error").unwrap();
+        let conn: *const Connection = &pipe.client;
+
+        let mut is_app = false;
+        let mut error_code = 0;
+        let mut reason: *const u8 = ptr::null();
+        let mut reason_len = 0;
+
+        assert!(quiche_conn_local_error(
+            conn,
+            &mut is_app,
+            &mut error_code,
+            &mut reason,
+            &mut reason_len
+        ));
+        assert!(is_app);
+        assert_eq!(error_code, 42);
+        assert_eq!(reason_len, b"ffi error".len());
+
+        assert!(!quiche_conn_local_error(
+            conn,
+            ptr::null_mut(),
+            &mut error_code,
+            &mut reason,
+            &mut reason_len
+        ));
+        assert!(!quiche_conn_local_error(
+            conn,
+            &mut is_app,
+            ptr::null_mut(),
+            &mut reason,
+            &mut reason_len
+        ));
+        assert!(!quiche_conn_local_error(
+            conn,
+            &mut is_app,
+            &mut error_code,
+            ptr::null_mut(),
+            &mut reason_len
+        ));
+        assert!(!quiche_conn_local_error(
+            conn,
+            &mut is_app,
+            &mut error_code,
+            &mut reason,
+            ptr::null_mut()
+        ));
+
+        assert!(!quiche_conn_peer_error(
+            ptr::null(),
+            &mut is_app,
+            &mut error_code,
+            &mut reason,
+            &mut reason_len
+        ));
+    }
+
+    #[test]
     fn borrowed_byte_outputs_reject_null_metadata() {
         type ByteOutputFn =
             extern "C" fn(*const Connection, *mut *const u8, *mut size_t);
 
-        let pipe = crate::test_utils::Pipe::new("cubic").unwrap();
+        let pipe = test_utils::Pipe::new("cubic").unwrap();
         let conn: *const Connection = &pipe.client;
         let functions: [ByteOutputFn; 7] = [
             quiche_conn_trace_id,
