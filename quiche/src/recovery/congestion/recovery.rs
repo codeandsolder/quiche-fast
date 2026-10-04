@@ -240,18 +240,31 @@ impl RecoveryEpoch {
 
         let mut largest_lost_pkt = None;
 
+        // RFC 9002's packet-number subtraction assumes the sender created no
+        // gaps. quiche deliberately skips packet numbers to detect optimistic
+        // ACKs, so use the ordered sent-packet records instead: a packet crosses
+        // the packet threshold only after pkt_thresh packets were actually sent
+        // after it and at or below largest_acked.
+        let sent_through_largest = self
+            .sent_packets
+            .iter()
+            .take_while(|p| p.pkt_num <= largest_acked)
+            .count();
+
         let unacked_iter = self
             .sent_packets
             .iter_mut()
-            // Skip packets that follow the largest acked packet.
-            .take_while(|p| p.pkt_num <= largest_acked)
+            .enumerate()
+            .take(sent_through_largest)
             // Skip packets that have already been acked or lost.
-            .filter(|p| p.time_acked.is_none() && p.time_lost.is_none());
+            .filter(|(_, p)| p.time_acked.is_none() && p.time_lost.is_none());
 
-        for unacked in unacked_iter {
+        for (sent_idx, unacked) in unacked_iter {
+            let newer_sent = sent_through_largest - sent_idx - 1;
+
             // Mark packet as lost, or set time when it should be marked.
             if unacked.time_sent <= lost_send_time ||
-                largest_acked >= unacked.pkt_num + pkt_thresh
+                newer_sent >= pkt_thresh as usize
             {
                 self.lost_frames_ack.extend(unacked.frames.drain(..));
 

@@ -854,6 +854,98 @@ mod tests {
     use smallvec::smallvec;
     use std::str::FromStr;
 
+    /// Sender-induced packet-number gaps are not reordering. The gap must
+    /// remain excluded from packet-threshold distance even after a higher ACK
+    /// has validated it and the optimistic-ACK marker itself is cleared.
+    #[rstest]
+    fn sender_gap_does_not_shorten_packet_threshold(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let now = Instant::now();
+        let mut r = Recovery::new(&cfg);
+        let hs = HandshakeStatus::default();
+
+        // PN 2 is deliberately skipped.
+        for pkt_num in [0, 1, 3] {
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pkt_num, now, 1000),
+                packet::Epoch::Application,
+                hs,
+                now,
+                "",
+            );
+        }
+
+        let mut acked = RangeSet::default();
+        acked.insert(3..4);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                Some(2),
+                "",
+            )
+            .unwrap();
+        assert_eq!(outcome.lost_packets, 0);
+
+        // In the real connection layer ACK 3 now validates skipped PN 2 and
+        // clears the marker. ACK 4 therefore arrives with skip_pn=None.
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(4, now, 1000),
+            packet::Epoch::Application,
+            hs,
+            now,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(3..5);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                None,
+                "",
+            )
+            .unwrap();
+
+        // Three packets (1,3,4) were actually sent after PN 0, but only two
+        // (3,4) after PN 1. Only PN 0 has crossed the threshold.
+        assert_eq!(outcome.lost_packets, 1);
+
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(5, now, 1000),
+            packet::Epoch::Application,
+            hs,
+            now,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(3..6);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                None,
+                "",
+            )
+            .unwrap();
+
+        // PN 1 now has three actually-sent packets after it: 3, 4 and 5.
+        assert_eq!(outcome.lost_packets, 1);
+    }
+
     fn recovery_for_alg(algo: CongestionControlAlgorithm) -> Recovery {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
         cfg.set_cc_algorithm(algo);

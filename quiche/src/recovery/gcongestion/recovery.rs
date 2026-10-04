@@ -285,17 +285,27 @@ impl RecoveryEpoch {
         let mut pmtud_lost_bytes = 0;
         let mut pmtud_lost_packets = SmallVec::new();
 
-        for SentPacket { pkt_num, status } in &mut self.sent_packets {
-            if *pkt_num > largest_acked {
-                break;
-            }
+        // RFC 9002's packet-number subtraction assumes no sender-induced
+        // gaps. Count records for packets that were actually sent instead, so
+        // quiche's optimistic-ACK packet-number skips cannot shorten the
+        // reordering threshold.
+        let sent_through_largest = self
+            .sent_packets
+            .iter()
+            .take_while(|p| p.pkt_num <= largest_acked)
+            .count();
 
+        for (sent_idx, SentPacket { pkt_num: _, status }) in self
+            .sent_packets
+            .iter_mut()
+            .enumerate()
+            .take(sent_through_largest)
+        {
             if let SentStatus::Sent { time_sent, .. } = status {
                 let loss_by_time = *time_sent <= lost_send_time;
-                let loss_by_pkt = match pkt_thresh {
-                    Some(pkt_thresh) => largest_acked >= *pkt_num + pkt_thresh,
-                    None => false,
-                };
+                let newer_sent = sent_through_largest - sent_idx - 1;
+                let loss_by_pkt = pkt_thresh
+                    .is_some_and(|pkt_thresh| newer_sent >= pkt_thresh as usize);
 
                 if loss_by_time || loss_by_pkt {
                     if let SentStatus::Sent {
