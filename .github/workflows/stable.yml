@@ -97,7 +97,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@57216c70e71428e87eafafc721b7ee5a39caf29c # main
     with:
       command: |
         sudo apt-get update -qq
@@ -216,7 +216,7 @@ jobs:
       # picks up the wrong `gcc`). Mirrors `boring`'s CI workflow.
       - name: Set up MinGW for 32 bit
         if: matrix.target == 'i686-pc-windows-gnu'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
         id: msys2
         with:
           msystem: MINGW32
