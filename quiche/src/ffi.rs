@@ -101,6 +101,18 @@ use crate::*;
 
 const FFI_ERR_INVALID_ARGUMENT: ssize_t = -24;
 
+macro_rules! ffi_mut {
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: C callers may pass null. Non-null pointers retain the same
+        // validity/alignment/lifetime/exclusivity requirements as the public
+        // C API.
+        match unsafe { $ptr.as_mut() } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
 fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
         Err(FFI_ERR_INVALID_ARGUMENT)
@@ -225,8 +237,10 @@ pub extern "C" fn quiche_config_new(version: u32) -> *mut Config {
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
-    config: &mut Config, path: *const c_char,
+    config: *mut Config, path: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(path) = (unsafe { c_str_to_string(path) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -240,8 +254,10 @@ pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
-    config: &mut Config, path: *const c_char,
+    config: *mut Config, path: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(path) = (unsafe { c_str_to_string(path) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -255,8 +271,10 @@ pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_verify_locations_from_file(
-    config: &mut Config, path: *const c_char,
+    config: *mut Config, path: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(path) = (unsafe { c_str_to_string(path) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -270,8 +288,10 @@ pub extern "C" fn quiche_config_load_verify_locations_from_file(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_verify_locations_from_directory(
-    config: &mut Config, path: *const c_char,
+    config: *mut Config, path: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(path) = (unsafe { c_str_to_string(path) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -285,8 +305,10 @@ pub extern "C" fn quiche_config_load_verify_locations_from_directory(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_curves_list(
-    config: &mut Config, curves: *const c_char,
+    config: *mut Config, curves: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(curves) = (unsafe { c_str_to_string(curves) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -299,34 +321,46 @@ pub extern "C" fn quiche_config_set_curves_list(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_verify_peer(config: &mut Config, v: bool) {
+pub extern "C" fn quiche_config_verify_peer(config: *mut Config, v: bool) {
+    let config = ffi_mut!(config, ());
+
     config.verify_peer(v);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_grease(config: &mut Config, v: bool) {
+pub extern "C" fn quiche_config_grease(config: *mut Config, v: bool) {
+    let config = ffi_mut!(config, ());
+
     config.grease(v);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_discover_pmtu(config: &mut Config, v: bool) {
+pub extern "C" fn quiche_config_discover_pmtu(config: *mut Config, v: bool) {
+    let config = ffi_mut!(config, ());
+
     config.discover_pmtu(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_pmtud_max_probes(
-    config: &mut Config, max_probes: u8,
+    config: *mut Config, max_probes: u8,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_pmtud_max_probes(max_probes);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_log_keys(config: &mut Config) {
+pub extern "C" fn quiche_config_log_keys(config: *mut Config) {
+    let config = ffi_mut!(config, ());
+
     config.log_keys();
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_enable_early_data(config: &mut Config) {
+pub extern "C" fn quiche_config_enable_early_data(config: *mut Config) {
+    let config = ffi_mut!(config, ());
+
     config.enable_early_data();
 }
 
@@ -334,8 +368,10 @@ pub extern "C" fn quiche_config_enable_early_data(config: &mut Config) {
 /// Corresponds to the `Config::set_application_protos_wire_format` Rust
 /// function.
 pub extern "C" fn quiche_config_set_application_protos(
-    config: &mut Config, protos: *const u8, protos_len: size_t,
+    config: *mut Config, protos: *const u8, protos_len: size_t,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Some(protos) = (unsafe { ffi_slice_from_raw_parts(protos, protos_len) })
     else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
@@ -350,90 +386,116 @@ pub extern "C" fn quiche_config_set_application_protos(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_amplification_factor(
-    config: &mut Config, v: usize,
+    config: *mut Config, v: usize,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_amplification_factor(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_idle_timeout(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_idle_timeout(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_recv_udp_payload_size(
-    config: &mut Config, v: size_t,
+    config: *mut Config, v: size_t,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_recv_udp_payload_size(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_data(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_data(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_local(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_stream_data_bidi_local(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_remote(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_stream_data_bidi_remote(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_stream_data_uni(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_stream_data_uni(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_streams_bidi(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_streams_bidi(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_max_streams_uni(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_max_streams_uni(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_ack_delay_exponent(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_ack_delay_exponent(v);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_set_max_ack_delay(config: &mut Config, v: u64) {
+pub extern "C" fn quiche_config_set_max_ack_delay(config: *mut Config, v: u64) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_ack_delay(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_disable_active_migration(
-    config: &mut Config, v: bool,
+    config: *mut Config, v: bool,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_disable_active_migration(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_cc_algorithm_name(
-    config: &mut Config, name: *const c_char,
+    config: *mut Config, name: *const c_char,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Ok(name) = (unsafe { c_str_to_string(name) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -446,87 +508,112 @@ pub extern "C" fn quiche_config_set_cc_algorithm_name(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_cc_algorithm(
-    config: &mut Config, algo: CongestionControlAlgorithm,
+    config: *mut Config, algo: CongestionControlAlgorithm,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_cc_algorithm(algo);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_initial_congestion_window_packets(
-    config: &mut Config, packets: size_t,
+    config: *mut Config, packets: size_t,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_initial_congestion_window_packets(packets);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_enable_hystart(config: &mut Config, v: bool) {
+pub extern "C" fn quiche_config_enable_hystart(config: *mut Config, v: bool) {
+    let config = ffi_mut!(config, ());
+
     config.enable_hystart(v);
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_enable_pacing(config: &mut Config, v: bool) {
+pub extern "C" fn quiche_config_enable_pacing(config: *mut Config, v: bool) {
+    let config = ffi_mut!(config, ());
+
     config.enable_pacing(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
-    config: &mut Config, v: bool,
+    config: *mut Config, v: bool,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_enable_cubic_idle_restart_fix(v);
 }
 
 /// Deprecated: this is now always enabled and this function is a no-op.
 #[no_mangle]
 pub extern "C" fn quiche_config_set_use_initial_max_data_as_flow_control_win(
-    _config: &mut Config, _v: bool,
+    _config: *mut Config, _v: bool,
 ) {
+    let _config = ffi_mut!(_config, ());
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_set_max_pacing_rate(config: &mut Config, v: u64) {
+pub extern "C" fn quiche_config_set_max_pacing_rate(config: *mut Config, v: u64) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_pacing_rate(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_enable_dgram(
-    config: &mut Config, enabled: bool, recv_queue_len: size_t,
+    config: *mut Config, enabled: bool, recv_queue_len: size_t,
     send_queue_len: size_t,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.enable_dgram(enabled, recv_queue_len, send_queue_len);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_send_udp_payload_size(
-    config: &mut Config, v: size_t,
+    config: *mut Config, v: size_t,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_send_udp_payload_size(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_connection_window(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_connection_window(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_stream_window(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_max_stream_window(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_active_connection_id_limit(
-    config: &mut Config, v: u64,
+    config: *mut Config, v: u64,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_active_connection_id_limit(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_stateless_reset_token(
-    config: &mut Config, v: *const u8,
+    config: *mut Config, v: *const u8,
 ) {
+    let config = ffi_mut!(config, ());
+
     let Some(reset_token) = (unsafe { ffi_slice_from_raw_parts(v, 16) }) else {
         return;
     };
@@ -540,15 +627,19 @@ pub extern "C" fn quiche_config_set_stateless_reset_token(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_disable_dcid_reuse(
-    config: &mut Config, v: bool,
+    config: *mut Config, v: bool,
 ) {
+    let config = ffi_mut!(config, ());
+
     config.set_disable_dcid_reuse(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_ticket_key(
-    config: &mut Config, key: *const u8, key_len: size_t,
+    config: *mut Config, key: *const u8, key_len: size_t,
 ) -> c_int {
+    let config = ffi_mut!(config, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let Some(key) = (unsafe { ffi_slice_from_raw_parts(key, key_len) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -2349,6 +2440,24 @@ mod tests {
     use libc::c_void;
     #[cfg(windows)]
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
+
+    #[test]
+    fn null_config_parameters_are_rejected_at_ffi_boundary() {
+        // Void setters become safe no-ops instead of constructing an invalid
+        // Rust reference before entering the function body.
+        quiche_config_grease(ptr::null_mut(), true);
+        quiche_config_verify_peer(ptr::null_mut(), true);
+
+        // Functions with an explicit C error channel use INVALID_ARGUMENT.
+        assert_eq!(
+            quiche_config_set_application_protos(ptr::null_mut(), ptr::null(), 0,),
+            FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+        assert_eq!(
+            quiche_config_set_ticket_key(ptr::null_mut(), ptr::null(), 0),
+            FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+    }
 
     #[test]
     fn ffi_c_string_validation() {
