@@ -1368,6 +1368,8 @@ where
     /// TLS handshake state.
     handshake: tls::Handshake,
 
+    early_data_rejection_handled: bool,
+
     /// Serialized TLS session buffer.
     ///
     /// This field is populated when a new session ticket is processed on the
@@ -2098,6 +2100,8 @@ impl<F: BufFactory> Connection<F> {
             local_transport_params: config.local_transport_params.clone(),
 
             handshake: tls,
+
+            early_data_rejection_handled: false,
 
             session: None,
 
@@ -7940,6 +7944,15 @@ impl<F: BufFactory> Connection<F> {
         self.handshake.early_data_reason()
     }
 
+    /// Returns whether the server rejected this client's 0-RTT data.
+    ///
+    /// Applications must recreate state bound to early streams and replay
+    /// requests after the handshake completes.
+    #[inline]
+    pub fn early_data_rejected(&self) -> bool {
+        self.handshake.early_data_rejected()
+    }
+
     /// Returns whether there is stream or DATAGRAM data available to read.
     #[inline]
     pub fn is_readable(&self) -> bool {
@@ -8281,6 +8294,34 @@ impl<F: BufFactory> Connection<F> {
 
                 self.local_transport_params = ex_data.local_transport_params;
             }
+        }
+
+        if self.handshake.early_data_rejected() &&
+            !self.early_data_rejection_handled
+        {
+            // Rejected 0-RTT shares the Application packet-number space with
+            // 1-RTT, so discard recovery state without rewinding packet
+            // numbers. No 1-RTT application packets can have been sent yet.
+            let status = self.handshake_status();
+            for (_, path) in self.paths.iter_mut() {
+                path.recovery.on_pkt_num_space_discarded(
+                    packet::Epoch::Application,
+                    status,
+                    now,
+                );
+            }
+
+            // State created using remembered transport/application parameters
+            // must not leak into the negotiated 1-RTT connection.
+            self.streams.reset_for_early_data_rejection();
+            self.tx_data = 0;
+            self.last_tx_data = 0;
+            self.blocked_limit = None;
+            self.streams_blocked_bidi_state = StreamsBlockedState::default();
+            self.streams_blocked_uni_state = StreamsBlockedState::default();
+            self.dgram_send_queue.purge(|_| true);
+            self.update_tx_cap();
+            self.early_data_rejection_handled = true;
         }
 
         if handshake_needs_retry {
