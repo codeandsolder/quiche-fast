@@ -109,6 +109,25 @@ fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     }
 }
 
+/// Converts a non-null NUL-terminated C string to owned UTF-8.
+///
+/// # Safety
+///
+/// value must point to a valid NUL-terminated C string for the duration of
+/// this call.
+unsafe fn c_str_to_string(
+    value: *const c_char,
+) -> std::result::Result<String, ()> {
+    if value.is_null() {
+        return Err(());
+    }
+
+    unsafe { ffi::CStr::from_ptr(value) }
+        .to_str()
+        .map(str::to_owned)
+        .map_err(|_| ())
+}
+
 fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
     if len == 0 {
         return true;
@@ -208,9 +227,11 @@ pub extern "C" fn quiche_config_new(version: u32) -> *mut Config {
 pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_cert_chain_from_pem_file(path) {
+    match config.load_cert_chain_from_pem_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -221,9 +242,11 @@ pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
 pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_priv_key_from_pem_file(path) {
+    match config.load_priv_key_from_pem_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -234,9 +257,11 @@ pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
 pub extern "C" fn quiche_config_load_verify_locations_from_file(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_verify_locations_from_file(path) {
+    match config.load_verify_locations_from_file(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -247,9 +272,11 @@ pub extern "C" fn quiche_config_load_verify_locations_from_file(
 pub extern "C" fn quiche_config_load_verify_locations_from_directory(
     config: &mut Config, path: *const c_char,
 ) -> c_int {
-    let path = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.load_verify_locations_from_directory(path) {
+    match config.load_verify_locations_from_directory(&path) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -260,9 +287,11 @@ pub extern "C" fn quiche_config_load_verify_locations_from_directory(
 pub extern "C" fn quiche_config_set_curves_list(
     config: &mut Config, curves: *const c_char,
 ) -> c_int {
-    let curves = unsafe { ffi::CStr::from_ptr(curves).to_str().unwrap() };
+    let Ok(curves) = (unsafe { c_str_to_string(curves) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
 
-    match config.set_curves_list(curves) {
+    match config.set_curves_list(&curves) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -405,8 +434,10 @@ pub extern "C" fn quiche_config_set_disable_active_migration(
 pub extern "C" fn quiche_config_set_cc_algorithm_name(
     config: &mut Config, name: *const c_char,
 ) -> c_int {
-    let name = unsafe { ffi::CStr::from_ptr(name).to_str().unwrap() };
-    match config.set_cc_algorithm_name(name) {
+    let Ok(name) = (unsafe { c_str_to_string(name) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    match config.set_cc_algorithm_name(&name) {
         Ok(_) => 0,
 
         Err(e) => e.to_c() as c_int,
@@ -637,7 +668,10 @@ pub extern "C" fn quiche_connect(
     let server_name = if server_name.is_null() {
         None
     } else {
-        Some(unsafe { ffi::CStr::from_ptr(server_name).to_str().unwrap() })
+        let Ok(server_name) = (unsafe { c_str_to_string(server_name) }) else {
+            return ptr::null_mut();
+        };
+        Some(server_name)
     };
 
     let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
@@ -646,7 +680,7 @@ pub extern "C" fn quiche_connect(
     let local = std_addr_from_c(local, local_len);
     let peer = std_addr_from_c(peer, peer_len);
 
-    match connect(server_name, &scid, local, peer, config) {
+    match connect(server_name.as_deref(), &scid, local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
 
         Err(_) => ptr::null_mut(),
@@ -805,12 +839,14 @@ pub extern "C" fn quiche_conn_new_with_tls(
 pub extern "C" fn quiche_conn_set_keylog_path(
     conn: &mut Connection, path: *const c_char,
 ) -> bool {
-    let filename = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+        return false;
+    };
 
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(filename);
+        .open(&filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -838,12 +874,20 @@ pub extern "C" fn quiche_conn_set_qlog_path(
     conn: &mut Connection, path: *const c_char, log_title: *const c_char,
     log_desc: *const c_char,
 ) -> bool {
-    let filename = unsafe { ffi::CStr::from_ptr(path).to_str().unwrap() };
+    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+        return false;
+    };
+    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+        return false;
+    };
+    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+        return false;
+    };
 
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(filename);
+        .open(&filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -851,12 +895,9 @@ pub extern "C" fn quiche_conn_set_qlog_path(
         Err(_) => return false,
     };
 
-    let title = unsafe { ffi::CStr::from_ptr(log_title).to_str().unwrap() };
-    let description = unsafe { ffi::CStr::from_ptr(log_desc).to_str().unwrap() };
-
     conn.set_qlog(
         Box::new(writer),
-        title.to_string(),
+        title,
         format!("{} id={}", description, conn.trace_id),
     );
 
@@ -869,15 +910,19 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
     conn: &mut Connection, fd: c_int, log_title: *const c_char,
     log_desc: *const c_char,
 ) {
+    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+        return;
+    };
+    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+        return;
+    };
+
     let f = unsafe { std::fs::File::from_raw_fd(fd) };
     let writer = std::io::BufWriter::new(f);
 
-    let title = unsafe { ffi::CStr::from_ptr(log_title).to_str().unwrap() };
-    let description = unsafe { ffi::CStr::from_ptr(log_desc).to_str().unwrap() };
-
     conn.set_qlog(
         Box::new(writer),
-        title.to_string(),
+        title,
         format!("{} id={}", description, conn.trace_id),
     );
 }
@@ -2304,6 +2349,20 @@ mod tests {
     use libc::c_void;
     #[cfg(windows)]
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
+
+    #[test]
+    fn ffi_c_string_validation() {
+        assert!(unsafe { c_str_to_string(ptr::null()) }.is_err());
+
+        let invalid_utf8 = [0xffu8, 0];
+        assert!(unsafe { c_str_to_string(invalid_utf8.as_ptr().cast()) }.is_err());
+
+        let valid = b"quiche\0";
+        assert_eq!(
+            unsafe { c_str_to_string(valid.as_ptr().cast()) }.as_deref(),
+            Ok("quiche")
+        );
+    }
 
     #[test]
     fn ffi_slice_metadata_validation() {
