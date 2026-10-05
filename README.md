@@ -456,6 +456,11 @@ API. They are not intended to be used in production environments; no
 performance, security or reliability guarantees are provided.
 
 
+Downstream performance validation
+---------------------------------
+
+Performance-sensitive changes in this fork are also validated in the full `usque-rs-fast -> quiche-fast -> tun-rs-fast` CONNECT-IP path. See [Downstream performance validation with usque](docs/usque-performance-validation.md) for the measurement boundary, pinned-stack A/B rules, profiler workflow, calibrated sample duration, and the quiche hot-path results that motivated those rules.
+
 Copyright
 ---------
 
