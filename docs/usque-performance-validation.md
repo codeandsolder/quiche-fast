@@ -7,8 +7,9 @@ For that reason, the September–October 2026 optimization campaign used the ful
 The canonical methodology and campaign history live in:
 
 - https://github.com/codeandsolder/usque-rs-fast/blob/main/docs/BENCHMARKING.md
+- https://github.com/codeandsolder/usque-rs-fast/blob/main/docs/REJECTED_OPTIMIZATIONS.md — grep-friendly ledger of rejected, neutral, superseded, and deferred candidates across all three layers.
 
-This page records the quiche-specific lessons so they are visible to someone working in this repository.
+This page records the quiche-specific lessons so they are visible to someone working in this repository. Before starting an apparently obvious hot-path optimization, search the rejected-optimization ledger first; many attractive profiler-driven ideas were already isolated and native-tested.
 
 ## What counts as a quiche performance win
 
@@ -89,6 +90,47 @@ Whole-host accounting rejected it:
 - kernel accounting moved in the wrong direction.
 
 Do not resurrect this idea from a userspace profile without explaining why the kernel-side regression would now be different.
+
+## Closed quiche candidates
+
+The canonical cross-repository ledger has the full history. These are the quiche-local dead ends most likely to look attractive again during a first-pass profile review.
+
+### Batch timestamp reuse — rejected
+
+Reusing one timestamp across a `recvmmsg` receive burst / UDP-GSO send burst looked plausible because clock acquisition was visible in profiles. The current-stack RX100 native campaign was unambiguous: five quality-clean pairs had idle-adjusted host CPU/Gbit deltas of `+3.93%, +4.36%, +8.50%, +1.53%, +12.87%`, median **+4.36%**, with **0/5 wins**. Do not revive the `*_at` API/timestamp branch without an architectural change that invalidates that result.
+
+### Lost-frame / receive-path outlining — rejected
+
+The current lost-frame outline campaign had five quality-clean RX100 pairs with a **+5.20% median host regression** and only 1/5 wins. An earlier receive-path outline also demonstrated the process-vs-host trap: process CPU/Gbit improved by about 1.96% while raw host CPU/Gbit regressed by about 5.21%.
+
+Large `send_single`/receive functions and frontend counters are not, by themselves, a reason to retry outlining.
+
+### Post-handshake idle fast paths — real work reduction, no whole-process win
+
+Moving the established/no-post-handshake-data check before ExData construction and `TransportParams` cloning removed real work: roughly 5% fewer userspace instructions/user CPU in the relevant micro/paired measurements. The small-packet workload was about 80% system CPU, however, and same-path total process CPU stayed neutral/slightly worse. A cold/`inline(never)` slow-helper variant was also neutral and increased branch misses by about 8%.
+
+Keep this as a useful userspace reference, not a performance change to re-propose by default.
+
+The adjacent empty-0-RTT-queue fast path was only about 0.4% self in the profile and the later native review closed this family as too small to matter. Revisit only if a new profile makes it materially hotter.
+
+### Cross-packet GSO send batching v1 — rejected
+
+`send_gso_burst()` hoisted timestamp/path/handshake/PMTU work across an equal-segment burst. Stable pairs showed only ~0.79% median apparent process-CPU improvement while hardware counters got worse: about +4.6% instructions, +4.9% branches, and +4.7% branch misses. The apparent CPU win was not real executed-work reduction.
+
+### DATAGRAM scatter-seal / Short packet fast path — rejected
+
+- BoringSSL DATAGRAM scatter-seal / `extra_in`: wire-correct, about **2.6% worse CPU/bit**.
+- DATAGRAM-only `write_pkt_type()` early Short fast path: about **+0.5% / noise**.
+
+The separately tested direct DATAGRAM frame-accounting cleanup did survive its gate; do not conflate that accepted bookkeeping win with the rejected crypto/header shortcuts.
+
+### Broader path/CID cache surgery — not justified
+
+The SCID receive shortcut was a real small win and was retained. Broader active-path caching did not justify its extra state/invalidation complexity, and inline `ConnectionId` / short-header allocation removal was effectively noise (about -0.12% median across eight clean pairs). Start from the accepted SCID shortcut, not from broader cache surgery.
+
+### `Vec<Acked>::drain(..)` rewrite — rationale invalid
+
+An older hot-path stack rewrote `drain(..)` to slice iteration plus `clear()` under an allocation-churn rationale. Review established that `drain(..)` retains vector capacity and `Acked` has no drop glue; there was no independent benchmark supporting the churn. The rewrite was deliberately removed from the refreshed hot-path stack.
 
 ## Profiling workflow
 
