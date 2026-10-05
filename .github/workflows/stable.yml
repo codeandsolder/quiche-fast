@@ -16,7 +16,7 @@ env:
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
   RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
-  RUSTTOOLCHAIN: "1.98.1"
+  RUSTTOOLCHAIN: "1.99.0"
 
 concurrency:
   group: stable-${{ github.event.pull_request.number || github.ref }}
@@ -102,10 +102,10 @@ jobs:
       command: |
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
-        cargo +1.98.1 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
-        cargo +1.98.1 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
-        cargo +1.98.1 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
-      rust-toolchain: "1.98.1"
+        cargo +1.99.0 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
+        cargo +1.99.0 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
+        cargo +1.99.0 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
+      rust-toolchain: "1.99.0"
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
