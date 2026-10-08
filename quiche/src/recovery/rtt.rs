@@ -46,6 +46,8 @@ pub struct RttStats {
     pub(super) max_ack_delay: Duration,
 
     pub(super) has_first_rtt_sample: bool,
+
+    pub(super) first_rtt_sample_time: Option<Instant>,
 }
 
 impl std::fmt::Debug for RttStats {
@@ -68,6 +70,7 @@ impl RttStats {
             max_rtt: initial_rtt,
             rttvar: initial_rtt / 2,
             has_first_rtt_sample: false,
+            first_rtt_sample_time: None,
             max_ack_delay,
         }
     }
@@ -84,6 +87,7 @@ impl RttStats {
             self.max_rtt = latest_rtt;
             self.rttvar = latest_rtt / 2;
             self.has_first_rtt_sample = true;
+            self.first_rtt_sample_time = Some(now);
             return;
         }
 
