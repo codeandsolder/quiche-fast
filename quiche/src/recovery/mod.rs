@@ -90,6 +90,9 @@ const MAX_PTO_PROBES_COUNT: usize = 2;
 
 const MINIMUM_WINDOW_PACKETS: usize = 2;
 
+// https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.1
+const PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
+
 const LOSS_REDUCTION_FACTOR: f64 = 0.5;
 
 // How many non ACK eliciting packets we send before including a PING to solicit
@@ -2731,6 +2734,237 @@ mod tests {
         assert_eq!(r.bytes_in_flight_duration(), Duration::from_micros(11250));
         assert_eq!(r.lost_count(), 0);
         assert_eq!(r.startup_exit(), None);
+    }
+
+    /// RFC 9002, Section 7.6: losing every packet sent over a period longer
+    /// than the persistent congestion duration collapses the window to the
+    /// minimum.
+    #[rstest]
+    fn persistent_congestion_collapses_cwnd(
+        #[values("cubic", "reno")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        let start = Instant::now();
+
+        // An RTT sample is needed before the duration can be computed.
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(0, start, 1000),
+            epoch,
+            HandshakeStatus::default(),
+            start,
+            "",
+        );
+
+        let mut acked = RangeSet::default();
+        acked.insert(0..1);
+        r.on_ack_received(
+            &acked,
+            0,
+            epoch,
+            HandshakeStatus::default(),
+            start + Duration::from_millis(10),
+            None,
+            "",
+        )
+        .unwrap();
+
+        // Three packets spanning ten seconds, none of which is acknowledged.
+        for (pkt_num, offset) in [(1, 0), (2, 5), (3, 10)] {
+            let sent_at = start + Duration::from_secs(offset);
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                epoch,
+                HandshakeStatus::default(),
+                sent_at,
+                "",
+            );
+        }
+
+        let cwnd_before = r.cwnd();
+        assert!(cwnd_before > r.max_datagram_size() * MINIMUM_WINDOW_PACKETS);
+
+        // A later packet gets through, so the three above are declared lost.
+        let now = start + Duration::from_secs(11);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(4, now, 1000),
+            epoch,
+            HandshakeStatus::default(),
+            now,
+            "",
+        );
+
+        let mut acked = RangeSet::default();
+        acked.insert(4..5);
+        r.on_ack_received(
+            &acked,
+            0,
+            epoch,
+            HandshakeStatus::default(),
+            now,
+            None,
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(r.cwnd(), r.max_datagram_size() * MINIMUM_WINDOW_PACKETS);
+    }
+
+    /// RFC 9002 Section 7.6 only considers persistent-congestion endpoints
+    /// sent after the first RTT sample was obtained.
+    #[rstest]
+    fn persistent_congestion_ignores_packets_sent_before_first_rtt_sample(
+        #[values("cubic", "reno")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        let start = Instant::now();
+
+        // These two packets span long enough for persistent congestion, but
+        // both predate the first RTT sample.
+        for (pkt_num, offset) in [(0, 0), (1, 5)] {
+            let sent_at = start + Duration::from_secs(offset);
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                epoch,
+                HandshakeStatus::default(),
+                sent_at,
+                "",
+            );
+        }
+
+        // ACK a later packet to obtain the first RTT sample and declare the
+        // two earlier packets lost in the same ACK processing pass.
+        let sample_sent = start + Duration::from_secs(6);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(2, sample_sent, 1000),
+            epoch,
+            HandshakeStatus::default(),
+            sample_sent,
+            "",
+        );
+
+        let mut acked = RangeSet::default();
+        acked.insert(2..3);
+        r.on_ack_received(
+            &acked,
+            0,
+            epoch,
+            HandshakeStatus::default(),
+            sample_sent + Duration::from_millis(10),
+            None,
+            "",
+        )
+        .unwrap();
+
+        assert!(r.cwnd() > r.max_datagram_size() * MINIMUM_WINDOW_PACKETS);
+    }
+
+    /// The RFC's no-ACK-between-endpoints condition spans all packet number
+    /// spaces, including ACKed packets that their epoch has already drained.
+    #[rstest]
+    fn persistent_congestion_respects_drained_cross_space_ack(
+        #[values("cubic", "reno")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let mut r = Recovery::new(&cfg);
+        let app = packet::Epoch::Application;
+        let handshake = packet::Epoch::Handshake;
+        let start = Instant::now();
+
+        // Establish the first RTT sample before the candidate loss interval.
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(0, start, 1000),
+            app,
+            HandshakeStatus::default(),
+            start,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(0..1);
+        r.on_ack_received(
+            &acked,
+            0,
+            app,
+            HandshakeStatus::default(),
+            start + Duration::from_millis(10),
+            None,
+            "",
+        )
+        .unwrap();
+
+        let first_lost = start + Duration::from_secs(1);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(1, first_lost, 1000),
+            app,
+            HandshakeStatus::default(),
+            first_lost,
+            "",
+        );
+
+        // This ACK sits chronologically between the eventual lost endpoints,
+        // but is in another packet-number space and gets drained immediately.
+        let middle = start + Duration::from_secs(3);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(0, middle, 1000),
+            handshake,
+            HandshakeStatus::default(),
+            middle,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(0..1);
+        r.on_ack_received(
+            &acked,
+            0,
+            handshake,
+            HandshakeStatus::default(),
+            middle + Duration::from_millis(10),
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(r.sent_packets_len(handshake), 0);
+
+        let last_lost = start + Duration::from_secs(6);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(2, last_lost, 1000),
+            app,
+            HandshakeStatus::default(),
+            last_lost,
+            "",
+        );
+
+        let trigger = start + Duration::from_secs(7);
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(3, trigger, 1000),
+            app,
+            HandshakeStatus::default(),
+            trigger,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(3..4);
+        r.on_ack_received(
+            &acked,
+            0,
+            app,
+            HandshakeStatus::default(),
+            trigger + Duration::from_millis(10),
+            None,
+            "",
+        )
+        .unwrap();
+
+        assert!(r.cwnd() > r.max_datagram_size() * MINIMUM_WINDOW_PACKETS);
     }
 
     // Modeling delivery_rate for gcongestion is non-trivial so we only test the

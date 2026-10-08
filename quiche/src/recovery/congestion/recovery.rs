@@ -29,6 +29,7 @@ use std::cmp;
 use std::time::Duration;
 use std::time::Instant;
 
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 
 use super::RecoveryConfig;
@@ -65,7 +66,9 @@ use crate::recovery::INITIAL_TIME_THRESHOLD;
 use crate::recovery::MAX_OUTSTANDING_NON_ACK_ELICITING;
 use crate::recovery::MAX_PACKET_THRESHOLD;
 use crate::recovery::MAX_PTO_PROBES_COUNT;
+use crate::recovery::MINIMUM_WINDOW_PACKETS;
 use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
+use crate::recovery::PERSISTENT_CONGESTION_THRESHOLD;
 
 #[derive(Default)]
 struct RecoveryEpoch {
@@ -92,6 +95,10 @@ struct RecoveryEpoch {
 
     acked_frames: Vec<frame::Frame>,
 
+    /// Send times newly acknowledged by the current ACK, including spurious
+    /// acknowledgments of packets that had already been declared lost.
+    newly_acked_send_times: Vec<Instant>,
+
     // Frames scheduled for retransmission due to PTO are tracked
     // separately so we can check that frames were drained before
     // generating more PTO probes.
@@ -116,6 +123,13 @@ struct LossDetectionResult {
     lost_packets: usize,
     lost_bytes: usize,
     pmtud_lost_bytes: usize,
+
+    // Send times of the first and last ack-eliciting in-flight packets
+    // declared lost, and how many there were, to establish persistent
+    // congestion.
+    first_lost_ack_eliciting: Option<Instant>,
+    last_lost_ack_eliciting: Option<Instant>,
+    lost_ack_eliciting: usize,
 }
 
 impl RecoveryEpoch {
@@ -126,6 +140,7 @@ impl RecoveryEpoch {
         trace_id: &str,
     ) -> Result<AckedDetectionResult> {
         newly_acked.clear();
+        self.newly_acked_send_times.clear();
 
         let mut acked_bytes = 0;
         let mut spurious_losses = 0;
@@ -190,6 +205,7 @@ impl RecoveryEpoch {
                             1,
                     );
                     unacked.time_acked = Some(now);
+                    self.newly_acked_send_times.push(unacked.time_sent);
 
                     if unacked.in_flight {
                         has_in_flight_spurious_loss = true;
@@ -220,6 +236,7 @@ impl RecoveryEpoch {
 
                     has_ack_eliciting |= unacked.ack_eliciting;
                     unacked.time_acked = Some(now);
+                    self.newly_acked_send_times.push(unacked.time_sent);
                 }
             }
         }
@@ -243,7 +260,7 @@ impl RecoveryEpoch {
 
     fn detect_lost_packets(
         &mut self, loss_delay: Duration, pkt_thresh: u64, now: Instant,
-        trace_id: &str, epoch: Epoch,
+        trace_id: &str, epoch: Epoch, first_rtt_sample_time: Option<Instant>,
     ) -> LossDetectionResult {
         self.loss_time = None;
 
@@ -259,6 +276,10 @@ impl RecoveryEpoch {
         let mut pmtud_lost_bytes = 0;
 
         let mut largest_lost_pkt = None;
+
+        let mut first_lost_ack_eliciting: Option<Instant> = None;
+        let mut last_lost_ack_eliciting: Option<Instant> = None;
+        let mut lost_ack_eliciting = 0;
 
         let skipped_packet_numbers = &self.skipped_packet_numbers;
 
@@ -295,6 +316,18 @@ impl RecoveryEpoch {
                 if unacked.in_flight {
                     lost_bytes += unacked.size;
 
+                    if unacked.ack_eliciting &&
+                        first_rtt_sample_time.is_some_and(|first_rtt| {
+                            unacked.time_sent > first_rtt
+                        })
+                    {
+                        // Packets are visited in packet number order, so this
+                        // records the span the lost packets were sent over.
+                        first_lost_ack_eliciting.get_or_insert(unacked.time_sent);
+                        last_lost_ack_eliciting = Some(unacked.time_sent);
+                        lost_ack_eliciting += 1;
+                    }
+
                     // Frames have already been removed from the packet, so
                     // cloning the whole packet should be relatively cheap.
                     largest_lost_pkt = Some(unacked.clone());
@@ -328,6 +361,9 @@ impl RecoveryEpoch {
             lost_packets,
             lost_bytes,
             pmtud_lost_bytes,
+            first_lost_ack_eliciting,
+            last_lost_ack_eliciting,
+            lost_ack_eliciting,
         }
     }
 
@@ -417,6 +453,10 @@ pub struct LegacyRecovery {
 
     /// A resusable list of acks.
     newly_acked: Vec<Acked>,
+
+    /// Send times of acknowledged packets that can still separate future
+    /// persistent-congestion endpoints across packet-number spaces.
+    acked_packet_send_times: BTreeSet<Instant>,
 }
 
 impl LegacyRecovery {
@@ -458,6 +498,7 @@ impl LegacyRecovery {
             congestion: Congestion::from_config(recovery_config),
 
             newly_acked: Vec::new(),
+            acked_packet_send_times: BTreeSet::new(),
         }
     }
 
@@ -557,6 +598,67 @@ impl LegacyRecovery {
         }
     }
 
+    // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.2
+    fn in_persistent_congestion(&self, first: Instant, last: Instant) -> bool {
+        // RFC 9002 only considers packets sent after the first RTT sample was
+        // obtained. The loss collector applies the same filter; keep this
+        // check here as a defensive invariant at the declaration boundary.
+        let Some(first_rtt_sample_time) = self.rtt_stats.first_rtt_sample_time
+        else {
+            return false;
+        };
+        if first <= first_rtt_sample_time {
+            return false;
+        }
+
+        // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.1
+        let duration = (self.rtt_stats.smoothed_rtt +
+            cmp::max(self.rtt_stats.rttvar * 4, GRANULARITY) +
+            self.rtt_stats.max_ack_delay) *
+            PERSISTENT_CONGESTION_THRESHOLD;
+
+        if last.saturating_duration_since(first) <= duration {
+            return false;
+        }
+
+        // Across all packet number spaces, none of the packets sent between the
+        // two may have been acknowledged. Recovery epochs eagerly drain ACKed
+        // packets, so the live packet queues alone are insufficient for this
+        // cross-space RFC requirement.
+        self.acked_packet_send_times
+            .range((
+                std::ops::Bound::Excluded(first),
+                std::ops::Bound::Excluded(last),
+            ))
+            .next()
+            .is_none()
+    }
+
+    fn prune_acked_packet_send_times(&mut self) {
+        let oldest_outstanding = self
+            .epochs
+            .iter()
+            .flat_map(|epoch| epoch.sent_packets.iter())
+            .filter(|pkt| pkt.time_acked.is_none() && pkt.time_lost.is_none())
+            .map(|pkt| pkt.time_sent)
+            .min();
+
+        if let Some(oldest_outstanding) = oldest_outstanding {
+            self.acked_packet_send_times =
+                self.acked_packet_send_times.split_off(&oldest_outstanding);
+        } else {
+            self.acked_packet_send_times.clear();
+        }
+    }
+
+    fn on_persistent_congestion(&mut self) {
+        self.congestion.congestion_window =
+            self.max_datagram_size * MINIMUM_WINDOW_PACKETS;
+        self.congestion.congestion_recovery_start_time = None;
+        self.congestion.bytes_acked_sl = 0;
+        self.congestion.bytes_acked_ca = 0;
+    }
+
     fn detect_lost_packets(
         &mut self, epoch: Epoch, now: Instant, trace_id: &str,
     ) -> (usize, usize) {
@@ -569,6 +671,7 @@ impl LegacyRecovery {
             now,
             trace_id,
             epoch,
+            self.rtt_stats.first_rtt_sample_time,
         );
 
         if let Some(pkt) = loss.largest_lost_pkt {
@@ -587,6 +690,19 @@ impl LegacyRecovery {
             self.bytes_in_flight
                 .saturating_subtract(loss.lost_bytes, now);
         };
+
+        // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6
+        // Losing every packet sent over a long enough period means the network
+        // is in persistent congestion and the window collapses.
+        if loss.lost_ack_eliciting >= 2 {
+            if let (Some(first), Some(last)) =
+                (loss.first_lost_ack_eliciting, loss.last_lost_ack_eliciting)
+            {
+                if self.in_persistent_congestion(first, last) {
+                    self.on_persistent_congestion();
+                }
+            }
+        }
 
         self.bytes_in_flight
             .saturating_subtract(loss.pmtud_lost_bytes, now);
@@ -724,6 +840,9 @@ impl RecoveryOps for LegacyRecovery {
             trace_id,
         )?;
 
+        self.acked_packet_send_times
+            .extend(self.epochs[epoch].newly_acked_send_times.iter().copied());
+
         self.lost_spurious_count += spurious_losses;
         if let Some(thresh) = spurious_pkt_thresh {
             self.pkt_thresh =
@@ -777,6 +896,7 @@ impl RecoveryOps for LegacyRecovery {
         self.set_loss_detection_timer(handshake_status, now);
         self.epochs[epoch]
             .drain_acked_and_lost_packets(now - self.rtt_stats.rtt());
+        self.prune_acked_packet_send_times();
 
         Ok(OnAckReceivedOutcome {
             lost_packets,

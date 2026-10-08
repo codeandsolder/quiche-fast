@@ -66,9 +66,9 @@ impl<'a> QlogSeqReader<'a> {
         mut reader: Box<dyn std::io::BufRead + Send + Sync + 'a>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         // "null record" skip it.
-        let _ = Self::read_record(reader.as_mut())?;
+        let _ = Self::read_record(reader.as_mut());
 
-        let header = Self::read_record(reader.as_mut())?.ok_or_else(|| {
+        let header = Self::read_record(reader.as_mut()).ok_or_else(|| {
             std::io::Error::other("error reading file header bytes")
         })?;
 
@@ -173,16 +173,20 @@ impl<'a> QlogSeqReader<'a> {
 
     fn read_record(
         reader: &mut (dyn std::io::BufRead + Send + Sync),
-    ) -> std::io::Result<Option<Vec<u8>>> {
+    ) -> Option<Vec<u8>> {
         let mut buf = Vec::<u8>::new();
-        let size = reader.read_until(b'', &mut buf)?;
+
+        // An I/O error (e.g. a corrupt or truncated compressed stream) ends
+        // the input. Keep whatever was read before the error so a final
+        // complete JSON record can still be returned.
+        let size = reader.read_until(b'\x1e', &mut buf).unwrap_or(buf.len());
         if size <= 1 {
-            return Ok(None);
+            return None;
         }
 
         buf.truncate(buf.len() - 1);
 
-        Ok(Some(buf))
+        Some(buf)
     }
 }
 
@@ -193,7 +197,7 @@ impl Iterator for QlogSeqReader<'_> {
     fn next(&mut self) -> Option<Self::Item> {
         // Attempt to deserialize events but skip them if that fails for any
         // reason, ensuring we always read all bytes in the reader.
-        while let Ok(Some(bytes)) = Self::read_record(&mut self.reader) {
+        while let Some(bytes) = Self::read_record(&mut self.reader) {
             let r: serde_json::Result<crate::events::Event> =
                 serde_json::from_slice(&bytes);
 
