@@ -215,6 +215,9 @@ pub trait RecoveryOps {
         &mut self, pkt: Sent, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, trace_id: &str,
     );
+    /// Records a connection-global packet number intentionally skipped by the
+    /// sender for optimistic-ACK detection.
+    fn on_packet_number_skipped(&mut self, pkt_num: u64);
     fn get_packet_send_time(&self, now: Instant) -> Instant;
 
     #[allow(
@@ -845,6 +848,7 @@ pub enum StartupExitReason {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame;
     use crate::packet;
     use crate::range_buf::RangeBuf;
     use crate::test_utils;
@@ -853,6 +857,99 @@ mod tests {
     use rstest::rstest;
     use smallvec::smallvec;
     use std::str::FromStr;
+
+    /// Sender-induced packet-number gaps are not reordering. The gap must
+    /// remain excluded from packet-threshold distance even after a higher ACK
+    /// has validated it and the optimistic-ACK marker itself is cleared.
+    #[rstest]
+    fn sender_gap_does_not_shorten_packet_threshold(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let now = Instant::now();
+        let mut r = Recovery::new(&cfg);
+        let hs = HandshakeStatus::default();
+
+        // PN 2 is deliberately skipped.
+        r.on_packet_number_skipped(2);
+        for pkt_num in [0, 1, 3] {
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pkt_num, now, 1000),
+                packet::Epoch::Application,
+                hs,
+                now,
+                "",
+            );
+        }
+
+        let mut acked = RangeSet::default();
+        acked.insert(3..4);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                Some(2),
+                "",
+            )
+            .unwrap();
+        assert_eq!(outcome.lost_packets, 0);
+
+        // In the real connection layer ACK 3 now validates skipped PN 2 and
+        // clears the marker. ACK 4 therefore arrives with skip_pn=None.
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(4, now, 1000),
+            packet::Epoch::Application,
+            hs,
+            now,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(3..5);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                None,
+                "",
+            )
+            .unwrap();
+
+        // Three packets (1,3,4) were actually sent after PN 0, but only two
+        // (3,4) after PN 1. Only PN 0 has crossed the threshold.
+        assert_eq!(outcome.lost_packets, 1);
+
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(5, now, 1000),
+            packet::Epoch::Application,
+            hs,
+            now,
+            "",
+        );
+        let mut acked = RangeSet::default();
+        acked.insert(3..6);
+        let outcome = r
+            .on_ack_received(
+                &acked,
+                25,
+                packet::Epoch::Application,
+                hs,
+                now,
+                None,
+                "",
+            )
+            .unwrap();
+
+        // PN 1 now has three actually-sent packets after it: 3, 4 and 5.
+        assert_eq!(outcome.lost_packets, 1);
+    }
 
     fn recovery_for_alg(algo: CongestionControlAlgorithm) -> Recovery {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
@@ -2462,7 +2559,9 @@ mod tests {
         assert_eq!(r.sent_packets_len(epoch), 0);
         assert_eq!(r.bytes_in_flight(), 0);
 
-        assert_eq!(r.get_largest_acked_on_epoch(epoch).unwrap(), 3);
+        // largest_acked is the connection-global ACK high-water mark, even
+        // when this path only sent packets through PN 3.
+        assert_eq!(r.get_largest_acked_on_epoch(epoch).unwrap(), 9);
         assert_eq!(r.largest_sent_pkt_num_on_path(epoch).unwrap(), 3);
     }
 
@@ -2845,6 +2944,87 @@ mod tests {
             );
         }
     }
+    /// RFC 9002 Section 6.2.4: when PTO fires, also probe the other
+    /// eligible packet-number spaces that still have data in flight.
+    #[rstest]
+    fn pto_probes_every_in_flight_packet_number_space(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let mut r = Recovery::new(&cfg);
+        let now = Instant::now();
+        let handshake_status = HandshakeStatus {
+            has_handshake_keys: true,
+            peer_verified_address: true,
+            completed: false,
+        };
+
+        for (pkt_num, epoch) in
+            [(0, packet::Epoch::Initial), (1, packet::Epoch::Handshake)]
+        {
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pkt_num, now, 1000),
+                epoch,
+                handshake_status,
+                now,
+                "",
+            );
+        }
+
+        let timeout = r.loss_detection_timer().unwrap();
+        r.on_loss_detection_timeout(handshake_status, timeout, "");
+
+        assert!(r.loss_probes(packet::Epoch::Initial) > 0);
+        assert!(r.loss_probes(packet::Epoch::Handshake) > 0);
+    }
+
+    /// ACKs for packets sent on a different path still advance the global
+    /// packet threshold. Control-only frames on the old path must therefore
+    /// become lost and eligible for retransmission even with no local ACK.
+    #[rstest]
+    fn cross_path_ack_marks_control_frame_lost(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let now = Instant::now();
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        let hs = HandshakeStatus::default();
+
+        let mut sent = test_utils::helper_packet_sent(0, now, 1000);
+        sent.has_data = false;
+        sent.frames = smallvec![frame::Frame::ResetStream {
+            stream_id: 0,
+            error_code: 42,
+            final_size: 0,
+        }];
+        r.on_packet_sent(sent, epoch, hs, now, "");
+
+        // PN 3 was sent on another path. Its ACK is connection-valid but does
+        // not newly acknowledge anything in this path-local recovery object.
+        let mut acked = RangeSet::default();
+        acked.insert(3..4);
+        let outcome = r
+            .on_ack_received(&acked, 0, epoch, hs, now, None, "")
+            .unwrap();
+
+        assert_eq!(outcome.acked_bytes, 0);
+        assert_eq!(outcome.lost_packets, 1);
+        assert_eq!(r.lost_frames_count(epoch), 1);
+        assert!(matches!(
+            r.next_lost_frame(epoch),
+            Some(frame::Frame::ResetStream {
+                stream_id: 0,
+                error_code: 42,
+                final_size: 0,
+            })
+        ));
+    }
+
     #[rstest]
     fn pto_overflow_reproduction(
         #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -3040,6 +3220,78 @@ mod tests {
         assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
         // Verify lost_count never increased (PTO doesn't trigger CC)
         assert_eq!(r.lost_count(), 0);
+    }
+
+    /// RFC 9002, Section 6.2.1: Initial ACKs do not reset a client's
+    /// PTO backoff until the peer has validated the client's address.
+    #[rstest]
+    fn pto_backoff_kept_until_peer_validated_address(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+
+        let unvalidated = HandshakeStatus {
+            has_handshake_keys: false,
+            peer_verified_address: false,
+            completed: false,
+        };
+
+        let mut now = Instant::now();
+        let mut r = Recovery::new(&cfg);
+
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(0, now, 1000),
+            packet::Epoch::Initial,
+            unvalidated,
+            now,
+            "",
+        );
+
+        now = r.loss_detection_timer().unwrap();
+        r.on_loss_detection_timeout(unvalidated, now, "");
+        assert_eq!(r.pto_count(), 1);
+
+        let mut acked = RangeSet::default();
+        acked.insert(0..1);
+        r.on_ack_received(
+            &acked,
+            25,
+            packet::Epoch::Initial,
+            unvalidated,
+            now,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(r.pto_count(), 1);
+
+        r.on_packet_sent(
+            test_utils::helper_packet_sent(1, now, 1000),
+            packet::Epoch::Initial,
+            unvalidated,
+            now,
+            "",
+        );
+
+        let validated = HandshakeStatus {
+            peer_verified_address: true,
+            ..unvalidated
+        };
+
+        let mut acked = RangeSet::default();
+        acked.insert(0..2);
+        r.on_ack_received(
+            &acked,
+            25,
+            packet::Epoch::Initial,
+            validated,
+            now,
+            None,
+            "",
+        )
+        .unwrap();
+        assert_eq!(r.pto_count(), 0);
     }
 
     // Test that send_on_path after PTO timeout properly sends retransmissions

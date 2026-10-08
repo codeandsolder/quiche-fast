@@ -72,6 +72,10 @@ fn on_packets_acked(
 fn on_packet_acked(
     r: &mut Congestion, packet: &Acked, now: Instant, rtt_stats: &RttStats,
 ) {
+    if !packet.in_flight {
+        return;
+    }
+
     if r.in_congestion_recovery(packet.time_sent) {
         return;
     }
@@ -88,7 +92,9 @@ fn on_packet_acked(
         if r.hystart.in_css() {
             r.congestion_window += r.hystart.css_cwnd_inc(r.max_datagram_size);
         } else {
-            r.congestion_window += r.max_datagram_size;
+            // RFC 9002, Section 7.3.1: while a sender is in slow start, the
+            // congestion window increases by the number of bytes acknowledged.
+            r.congestion_window += packet.size;
         }
 
         if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
@@ -205,6 +211,25 @@ mod tests {
     }
 
     #[test]
+    fn reno_slow_start_smaller_than_mss() {
+        let mut sender = test_sender();
+        let size = sender.max_datagram_size;
+
+        for _ in 0..sender.initial_congestion_window_packets {
+            sender.send_packet(size);
+        }
+
+        let partial = size / 4;
+        sender.send_packet(partial);
+        sender.ack_n_packets(sender.initial_congestion_window_packets, size);
+
+        let cwnd_prev = sender.congestion_window;
+        sender.ack_n_packets(1, partial);
+
+        assert_eq!(sender.congestion_window, cwnd_prev + partial);
+    }
+
+    #[test]
     fn reno_slow_start_multi_acks() {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -220,6 +245,36 @@ mod tests {
 
         // Acked 3 packets.
         assert_eq!(sender.congestion_window, cwnd_prev + size * 3);
+    }
+
+    #[test]
+    fn reno_ignores_non_in_flight_ack() {
+        let mut sender = test_sender();
+        let size = sender.max_datagram_size;
+
+        for _ in 0..sender.initial_congestion_window_packets {
+            sender.send_packet(size);
+        }
+
+        let cwnd_prev = sender.congestion_window;
+        let now = sender.time;
+
+        sender.inject_ack(
+            Acked {
+                pkt_num: 0,
+                time_sent: now,
+                size,
+                in_flight: false,
+                rtt: Duration::ZERO,
+                delivered: 0,
+                delivered_time: now,
+                first_sent_time: now,
+                is_app_limited: false,
+            },
+            now,
+        );
+
+        assert_eq!(sender.congestion_window, cwnd_prev);
     }
 
     #[test]

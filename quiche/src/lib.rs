@@ -1368,6 +1368,8 @@ where
     /// TLS handshake state.
     handshake: tls::Handshake,
 
+    early_data_rejection_handled: bool,
+
     /// Serialized TLS session buffer.
     ///
     /// This field is populated when a new session ticket is processed on the
@@ -2098,6 +2100,8 @@ impl<F: BufFactory> Connection<F> {
             local_transport_params: config.local_transport_params.clone(),
 
             handshake: tls,
+
+            early_data_rejection_handled: false,
 
             session: None,
 
@@ -2944,7 +2948,15 @@ impl<F: BufFactory> Connection<F> {
                         self.mark_closed();
                     }
 
-                    left
+                    // Long header packets carry their own length. A failed
+                    // packet must not hide a valid packet coalesced after it.
+                    // Short headers and malformed lengths have no reliable
+                    // boundary, so discard the rest of the datagram.
+                    packet::long_header_packet_len(
+                        &mut buf[len - left..len],
+                        self.source_id().len(),
+                    )
+                    .unwrap_or(left)
                 },
 
                 Err(e) => {
@@ -3323,6 +3335,11 @@ impl<F: BufFactory> Connection<F> {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
         })?;
 
+        // RFC 9000 requires the reserved bits to be zero after header
+        // protection is removed. Keep the value until packet protection has
+        // been authenticated; only then can a peer be penalized for it.
+        let reserved_bits = reserved_bits(b.buf()[0], hdr.ty);
+
         let pn = packet::decode_pkt_num(
             self.pkt_num_spaces[epoch].largest_rx_pkt_num,
             hdr.pkt_num,
@@ -3391,6 +3408,17 @@ impl<F: BufFactory> Connection<F> {
         .map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
         })?;
+
+        // Deliberately not routed through `drop_pkt_on_err` like the other
+        // fallible calls above: RFC 9000 requires the reserved bits to cause
+        // a connection error (PROTOCOL_VIOLATION), but `drop_pkt_on_err`
+        // downgrades everything but a server's first packet to `Error::Done`,
+        // which `recv()` treats as "silently ignore this packet". Keeping
+        // this check bare, rather than harmonizing it with its neighbors,
+        // preserves the MUST from the spec.
+        if reserved_bits != 0 {
+            return Err(Error::InvalidPacket);
+        }
 
         if self.pkt_num_spaces[epoch].recv_pkt_num.contains(pn) {
             trace!("{} ignored duplicate packet {}", self.trace_id, pn);
@@ -4507,11 +4535,23 @@ impl<F: BufFactory> Connection<F> {
 
         let is_app_limited = self.delivery_rate_check_if_app_limited();
         let n_paths = self.paths.len();
+
+        if self
+            .pkt_num_manager
+            .should_skip_pn(self.handshake_completed)
+        {
+            let skipped_pn = self.next_pkt_num;
+            self.pkt_num_manager.set_skip_pn(Some(skipped_pn));
+            for (_, path) in self.paths.iter_mut() {
+                path.recovery.on_packet_number_skipped(skipped_pn);
+            }
+            self.next_pkt_num += 1;
+        }
+
         let path = self.paths.get_mut(send_pid)?;
         let flow_control = &mut self.flow_control;
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
-        let pkt_num_manager = &mut self.pkt_num_manager;
 
         let mut left = if let Some(pmtud) = path.pmtud.as_mut() {
             // Limit output buffer size by estimated path MTU.
@@ -4520,10 +4560,6 @@ impl<F: BufFactory> Connection<F> {
             b.cap()
         };
 
-        if pkt_num_manager.should_skip_pn(self.handshake_completed) {
-            pkt_num_manager.set_skip_pn(Some(self.next_pkt_num));
-            self.next_pkt_num += 1;
-        };
         let pn = self.next_pkt_num;
 
         let largest_acked_pkt =
@@ -4722,6 +4758,11 @@ impl<F: BufFactory> Connection<F> {
 
         let mut challenge_data = None;
 
+        // RFC 9000 Sections 8.2.1 and 8.2.2 require UDP datagrams carrying
+        // PATH_CHALLENGE or PATH_RESPONSE to be expanded to at least 1200
+        // bytes, including on an already validated path.
+        let mut has_path_frame = false;
+
         if pkt_type == Type::Short {
             // Create PMTUD probe.
             //
@@ -4799,6 +4840,7 @@ impl<F: BufFactory> Connection<F> {
                 let frame = frame::Frame::PathResponse { data: challenge };
 
                 if push_frame_to_pkt!(b, frames, frame, left) {
+                    has_path_frame = true;
                     ack_eliciting = true;
                     in_flight = true;
                 } else {
@@ -4818,6 +4860,7 @@ impl<F: BufFactory> Connection<F> {
                 if push_frame_to_pkt!(b, frames, frame, left) {
                     // Let's notify the path once we know the packet size.
                     challenge_data = Some(data);
+                    has_path_frame = true;
 
                     ack_eliciting = true;
                     in_flight = true;
@@ -5327,11 +5370,14 @@ impl<F: BufFactory> Connection<F> {
             while let Some(priority_key) = self.streams.peek_flushable() {
                 let stream_id = priority_key.id;
                 let stream = match self.streams.get_mut(stream_id) {
-                    // Avoid sending frames for streams that were already stopped.
-                    //
-                    // This might happen if stream data was buffered but not yet
-                    // flushed on the wire when a STOP_SENDING frame is received.
-                    Some(v) if !v.send.is_stopped() => v,
+                    // Revalidate the intrusive queue entry before emission.
+                    // ACK processing can remove retransmit data while leaving a
+                    // stale flushable node queued. Empty FIN is the one valid
+                    // zero-payload case and must remain eligible.
+                    Some(v)
+                        if !v.send.is_stopped() &&
+                            (v.is_flushable() || v.send.empty_fin_next()) =>
+                        v,
                     _ => {
                         self.streams.remove_flushable(&priority_key);
                         continue;
@@ -5499,14 +5545,22 @@ impl<F: BufFactory> Connection<F> {
         // as Initial always requires padding.
         //
         // 2) this is a probing packet towards an unvalidated peer address.
-        if (has_initial || !path.validated()) &&
-            pkt_type == Type::Short &&
-            left >= 1
-        {
-            let frame = frame::Frame::Padding { len: left };
+        if pkt_type == Type::Short && left >= 1 {
+            let pad_len = if has_initial || !path.validated() {
+                left
+            } else if has_path_frame {
+                let pkt_len = b.off() + crypto_overhead;
+                cmp::min(left, MIN_CLIENT_INITIAL_LEN.saturating_sub(pkt_len))
+            } else {
+                0
+            };
 
-            if push_frame_to_pkt!(b, frames, frame, left) {
-                in_flight = true;
+            if pad_len > 0 {
+                let frame = frame::Frame::Padding { len: pad_len };
+
+                if push_frame_to_pkt!(b, frames, frame, left) {
+                    in_flight = true;
+                }
             }
         }
 
@@ -5615,7 +5669,10 @@ impl<F: BufFactory> Connection<F> {
             time_sent: now,
             time_acked: None,
             time_lost: None,
-            size: if ack_eliciting { written } else { 0 },
+            // RFC 9002, Section 2: a packet containing a PADDING frame is
+            // counted toward bytes in flight even though it is not
+            // ack-eliciting, so record the size of every in-flight packet.
+            size: if in_flight { written } else { 0 },
             ack_eliciting,
             in_flight,
             delivered: 0,
@@ -7916,6 +7973,15 @@ impl<F: BufFactory> Connection<F> {
         self.handshake.early_data_reason()
     }
 
+    /// Returns whether the server rejected this client's 0-RTT data.
+    ///
+    /// Applications must recreate state bound to early streams and replay
+    /// requests after the handshake completes.
+    #[inline]
+    pub fn early_data_rejected(&self) -> bool {
+        self.handshake.early_data_rejected()
+    }
+
     /// Returns whether there is stream or DATAGRAM data available to read.
     #[inline]
     pub fn is_readable(&self) -> bool {
@@ -8257,6 +8323,34 @@ impl<F: BufFactory> Connection<F> {
 
                 self.local_transport_params = ex_data.local_transport_params;
             }
+        }
+
+        if self.handshake.early_data_rejected() &&
+            !self.early_data_rejection_handled
+        {
+            // Rejected 0-RTT shares the Application packet-number space with
+            // 1-RTT, so discard recovery state without rewinding packet
+            // numbers. No 1-RTT application packets can have been sent yet.
+            let status = self.handshake_status();
+            for (_, path) in self.paths.iter_mut() {
+                path.recovery.on_pkt_num_space_discarded(
+                    packet::Epoch::Application,
+                    status,
+                    now,
+                );
+            }
+
+            // State created using remembered transport/application parameters
+            // must not leak into the negotiated 1-RTT connection.
+            self.streams.reset_for_early_data_rejection();
+            self.tx_data = 0;
+            self.last_tx_data = 0;
+            self.blocked_limit = None;
+            self.streams_blocked_bidi_state = StreamsBlockedState::default();
+            self.streams_blocked_uni_state = StreamsBlockedState::default();
+            self.dgram_send_queue.purge(|_| true);
+            self.update_tx_cap();
+            self.early_data_rejection_handled = true;
         }
 
         if handshake_needs_retry {
@@ -9328,35 +9422,49 @@ impl<F: BufFactory> Connection<F> {
         // Automatically probes the new path.
         path.request_validation();
 
-        let pid = self.paths.insert_path(path, self.is_server)?;
+        let (pid, released_dcid_seq) =
+            self.paths.insert_path(path, self.is_server)?;
 
         // Notify the application of CID reuse only after the path was
         // successfully admitted. This bounds event queue growth by path Slab
         // capacity, preventing an attacker from growing the queue unboundedly
         // by rotating source ports.
-        match reused_cid_info {
-            Some((old_pid, old_local_addr, old_peer_addr)) => {
-                trace!(
-                    "{} reused CID seq {} of ({},{}) (path {}) on ({},{})",
-                    self.trace_id,
-                    in_scid_seq,
-                    old_local_addr,
-                    old_peer_addr,
-                    old_pid,
-                    info.to,
-                    info.from
-                );
+        if let Some((old_pid, old_local_addr, old_peer_addr)) = reused_cid_info {
+            trace!(
+                "{} reused CID seq {} of ({},{}) (path {}) on ({},{})",
+                self.trace_id,
+                in_scid_seq,
+                old_local_addr,
+                old_peer_addr,
+                old_pid,
+                info.to,
+                info.from
+            );
 
-                self.paths.notify_event(PathEvent::ReusedSourceConnectionId(
-                    in_scid_seq,
-                    (old_local_addr, old_peer_addr),
-                    (info.to, info.from),
-                ));
-            },
+            self.paths.notify_event(PathEvent::ReusedSourceConnectionId(
+                in_scid_seq,
+                (old_local_addr, old_peer_addr),
+                (info.to, info.from),
+            ));
+        }
 
-            None => {
-                ids.link_scid_to_path_id(in_scid_seq, pid)?;
+        // Preserve the existing CID owner while that original path still
+        // exists. A later packet on the new, now-known 4-tuple will relink it
+        // through the normal slow path. If insertion evicted the original
+        // owner, relink immediately so the CID never points at a removed path.
+        let original_owner_survived = reused_cid_info.as_ref().is_some_and(
+            |(old_pid, old_local_addr, old_peer_addr)| {
+                self.paths
+                    .path_id_from_addrs(&(*old_local_addr, *old_peer_addr)) ==
+                    Some(*old_pid)
             },
+        );
+        if reused_cid_info.is_none() || !original_owner_survived {
+            ids.link_scid_to_path_id(in_scid_seq, pid)?;
+        }
+
+        if let Some(seq) = released_dcid_seq {
+            self.release_dcid(seq)?;
         }
 
         Ok(pid)
@@ -9474,13 +9582,32 @@ impl<F: BufFactory> Connection<F> {
         );
         path.active_dcid_seq = Some(dcid_seq);
 
-        let pid = self
+        let (pid, released_dcid_seq) = self
             .paths
             .insert_path(path, false)
             .map_err(|_| Error::OutOfIdentifiers)?;
+
+        if let Some(seq) = released_dcid_seq {
+            self.release_dcid(seq)?;
+        }
+
         self.ids.link_dcid_to_path_id(dcid_seq, pid)?;
 
         Ok(pid)
+    }
+
+    /// Releases the Destination Connection ID a removed path was using.
+    ///
+    /// The ID goes back to the pool of spare IDs a new path can take, unless
+    /// DCID reuse is disabled, in which case it is retired.
+    fn release_dcid(&mut self, dcid_seq: u64) -> Result<()> {
+        if self.disable_dcid_reuse && !self.ids.zero_length_dcid() {
+            self.ids.retire_dcid(dcid_seq)?;
+        } else {
+            self.ids.unlink_dcid(dcid_seq);
+        }
+
+        Ok(())
     }
 
     // Marks the connection as closed and does any related tidyup.
@@ -9620,6 +9747,22 @@ fn drop_pkt_on_err(
     // Ignore other invalid packets that haven't been authenticated to prevent
     // man-in-the-middle and man-on-the-side attacks.
     Error::Done
+}
+
+/// Returns the reserved bits of a packet's first byte, after header
+/// protection has been removed.
+///
+/// Per RFC 9000 section 17.2 (long header) and section 17.3.1 (short
+/// header), these bits MUST be zero; a non-zero result means the caller
+/// should treat receipt of the packet as a connection error, but only
+/// after packet protection has also been removed (see the reserved-bits
+/// check in `recv_single`).
+fn reserved_bits(first_byte: u8, ty: Type) -> u8 {
+    if ty == Type::Short {
+        first_byte & 0x18
+    } else {
+        first_byte & 0x0c
+    }
 }
 
 struct AddrTupleFmt(SocketAddr, SocketAddr);

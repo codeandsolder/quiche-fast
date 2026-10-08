@@ -1896,16 +1896,26 @@ impl Connection {
         // inherently limited by how much data is in quiche's receive buffer for
         // that stream, so the BufMut cannot grow unbounded.
         while out.has_remaining_mut() {
-            let stream = self.streams.get_mut(&stream_id).ok_or(Error::Done)?;
+            let consume_result = {
+                let stream =
+                    self.streams.get_mut(&stream_id).ok_or(Error::Done)?;
 
-            if stream.state() != stream::State::Data {
-                break;
-            }
+                if stream.state() != stream::State::Data {
+                    break;
+                }
 
-            let (read, fin) = match stream.try_consume_data(conn, &mut out) {
+                stream.try_consume_data(conn, &mut out)
+            };
+
+            let (read, fin) = match consume_result {
                 Ok(v) => v,
 
                 Err(Error::Done) => break,
+
+                Err(e @ Error::TransportError(crate::Error::StreamReset(_))) => {
+                    self.remove_finished_stream(conn, stream_id);
+                    return Err(e);
+                },
 
                 Err(e) => return Err(e),
             };
@@ -1925,6 +1935,11 @@ impl Connection {
                 Ok(_) => unreachable!(),
 
                 Err(Error::Done) => (),
+
+                Err(e @ Error::TransportError(crate::Error::StreamReset(_))) => {
+                    self.remove_finished_stream(conn, stream_id);
+                    return Err(e);
+                },
 
                 Err(e) => return Err(e),
             };
@@ -2169,7 +2184,7 @@ impl Connection {
                 // Return early if the stream was reset, to avoid returning
                 // a Finished event later as well.
                 Err(Error::TransportError(crate::Error::StreamReset(e))) => {
-                    self.remove_local_finished_stream(s);
+                    self.remove_finished_stream(conn, s);
 
                     return Ok((s, Event::Reset(e)));
                 },
@@ -2989,9 +3004,13 @@ impl Connection {
         }
     }
 
-    fn remove_local_finished_stream(&mut self, stream_id: u64) {
+    fn remove_finished_stream<F: BufFactory>(
+        &mut self, conn: &super::Connection<F>, stream_id: u64,
+    ) {
         if let hash_map::Entry::Occupied(stream) = self.streams.entry(stream_id) {
-            if stream.get().local_finished() {
+            if stream.get().local_finished() ||
+                conn.streams.is_collected(stream_id)
+            {
                 stream.remove();
             }
         }
@@ -3002,7 +3021,7 @@ impl Connection {
     ) -> Option<(u64, Event)> {
         let finished = self.finished_streams.pop_front()?;
 
-        self.remove_local_finished_stream(finished);
+        self.remove_finished_stream(conn, finished);
 
         if conn.stream_readable(finished) {
             // The stream is finished, but is still readable, it may indicate
@@ -5013,6 +5032,23 @@ mod tests {
     }
 
     #[test]
+    /// Send a GOAWAY frame from the server with extra bytes after the ID.
+    fn goaway_from_server_trailing_bytes() {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+
+        // GOAWAY (type 0x7) with a 3-byte payload: ID 0, then 2 extra bytes.
+        s.send_arbitrary_stream_data_server(
+            &[0x07, 0x03, 0x00, 0xaa, 0xbb],
+            s.server.control_stream_id.unwrap(),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(s.poll_client(), Err(Error::FrameError));
+    }
+
+    #[test]
     /// Send multiple GOAWAY frames from the server, that increase the goaway
     /// ID.
     fn goaway_from_server_increase_id() {
@@ -6558,7 +6594,7 @@ mod tests {
         let pkt_type = crate::packet::Type::Short;
         assert_eq!(
             s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(39),
+            Ok(40),
         );
 
         let sent = s
@@ -8067,7 +8103,7 @@ mod tests {
         let pkt_type = crate::packet::Type::Short;
         assert_eq!(
             s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(39)
+            Ok(40)
         );
 
         // Server issues Reset event for the stream.
@@ -8077,7 +8113,7 @@ mod tests {
         // Sending RESET_STREAM again shouldn't trigger another Reset event.
         assert_eq!(
             s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(39)
+            Ok(40)
         );
 
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -8331,6 +8367,8 @@ mod tests {
         let mut s = Session::new().unwrap();
         s.handshake().unwrap();
 
+        let init_streams_server = s.server.streams.len();
+
         // Client sends HEADERS and doesn't fin.
         let (stream, req) = s.send_request(false).unwrap();
 
@@ -8346,6 +8384,10 @@ mod tests {
         // Server receives headers and data...
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
+
+        // Finish the local H3 send side first. Once the peer resets its
+        // receive side, the QUIC stream can be collected immediately.
+        s.send_response(stream, true).unwrap();
 
         // ..then Client sends RESET_STREAM.
         assert_eq!(
@@ -8367,6 +8409,51 @@ mod tests {
         // No more events and there are no more readable streams.
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.pipe.server.readable().len(), 0);
+        assert_eq!(s.server.streams.len(), init_streams_server);
+    }
+
+    #[test]
+    fn reset_while_data_payload_pending_frees_h3_state() {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+
+        let init_streams_server = s.server.streams.len();
+
+        let (stream, req) = s.send_request(false).unwrap();
+        assert_eq!(
+            s.poll_server(),
+            Ok((stream, Event::Headers {
+                list: req,
+                more_frames: true,
+            }))
+        );
+
+        // Send only a DATA frame header for a ten-byte payload. H3 enters the
+        // Data state, but no DATA payload is available to recv_body_buf().
+        assert_eq!(
+            s.pipe.client.stream_send(stream, &[0x00, 0x0a], false),
+            Ok(2)
+        );
+        assert_eq!(s.pipe.advance(), Ok(()));
+        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
+
+        // Finish the local H3 send side while the DATA payload is still
+        // pending, so consuming the peer reset makes QUIC collect the stream.
+        s.send_response(stream, true).unwrap();
+
+        assert_eq!(
+            s.pipe
+                .client
+                .stream_shutdown(stream, crate::Shutdown::Write, 0),
+            Ok(())
+        );
+        assert_eq!(s.pipe.advance(), Ok(()));
+
+        assert_eq!(
+            s.recv_body_server(stream, &mut [0; 100]),
+            Err(Error::TransportError(crate::Error::StreamReset(0)))
+        );
+        assert_eq!(s.server.streams.len(), init_streams_server);
     }
 
     #[test]
@@ -8434,7 +8521,7 @@ mod tests {
         let pkt_type = crate::packet::Type::Short;
         assert_eq!(
             s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(39)
+            Ok(40)
         );
 
         assert_eq!(s.pipe.advance(), Ok(()));
