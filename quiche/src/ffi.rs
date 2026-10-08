@@ -2173,7 +2173,9 @@ pub extern "C" fn quiche_conn_new_scid(
     let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
-    let Some(reset_token) = (unsafe { ffi_slice_from_raw_parts(reset_token, 16) }) else {
+    let Some(reset_token) =
+        (unsafe { ffi_slice_from_raw_parts(reset_token, 16) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
     let Some(reset_token) = <&[u8; 16]>::try_from(reset_token).ok() else {
@@ -2428,7 +2430,12 @@ pub extern "C" fn quiche_path_event_new(
     let ev = ffi_ref!(ev, ());
     if let PathEvent::New(local, peer) = ev {
         let _ = ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         );
     }
 }
@@ -2442,7 +2449,12 @@ pub extern "C" fn quiche_path_event_validated(
     let ev = ffi_ref!(ev, ());
     if let PathEvent::Validated(local, peer) = ev {
         let _ = ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         );
     }
 }
@@ -2456,7 +2468,12 @@ pub extern "C" fn quiche_path_event_failed_validation(
     let ev = ffi_ref!(ev, ());
     if let PathEvent::FailedValidation(local, peer) = ev {
         let _ = ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         );
     }
 }
@@ -2470,7 +2487,12 @@ pub extern "C" fn quiche_path_event_closed(
     let ev = ffi_ref!(ev, ());
     if let PathEvent::Closed(local, peer) = ev {
         let _ = ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         );
     }
 }
@@ -2484,7 +2506,8 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
     peer_addr: *mut sockaddr_storage, peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev, ());
-    let Some(cid_sequence_number) = (unsafe { ffi_ptr_mut(cid_sequence_number) }) else {
+    let Some(cid_sequence_number) = (unsafe { ffi_ptr_mut(cid_sequence_number) })
+    else {
         return;
     };
 
@@ -2522,7 +2545,12 @@ pub extern "C" fn quiche_path_event_peer_migrated(
     let ev = ffi_ref!(ev, ());
     if let PathEvent::PeerMigrated(local, peer) = ev {
         let _ = ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         );
     }
 }
@@ -2545,7 +2573,12 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
     } = ev
     {
         if ffi_path_event_addrs(
-            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+            local,
+            peer,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
         ) {
             *pmtu = *value;
         }
