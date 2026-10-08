@@ -1085,9 +1085,10 @@ mod tests {
 
         let mut settings = QuicSettings::default();
         settings.disable_client_ip_validation = true;
+        let (cert, private_key) = test_credentials();
         let tls_cert = TlsCertificatePaths {
-            cert: TEST_CERT_FILE,
-            private_key: TEST_KEY_FILE,
+            cert,
+            private_key,
             kind: crate::settings::CertificateKind::X509,
         };
         let mut params =
