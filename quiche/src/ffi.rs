@@ -124,6 +124,26 @@ macro_rules! ffi_mut {
     }};
 }
 
+macro_rules! ffi_ref_void {
+    ($ptr:expr) => {{
+        // SAFETY: C callers may pass null or misaligned pointers.
+        match unsafe { ffi_ptr_ref($ptr) } {
+            Some(value) => value,
+            None => return,
+        }
+    }};
+}
+
+macro_rules! ffi_mut_void {
+    ($ptr:expr) => {{
+        // SAFETY: C callers may pass null or misaligned pointers.
+        match unsafe { ffi_ptr_mut($ptr) } {
+            Some(value) => value,
+            None => return,
+        }
+    }};
+}
+
 fn ffi_shutdown_from_c(direction: c_int) -> Option<Shutdown> {
     match direction {
         0 => Some(Shutdown::Read),
@@ -357,21 +377,21 @@ pub extern "C" fn quiche_config_set_curves_list(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_verify_peer(config: *mut Config, v: bool) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.verify_peer(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_grease(config: *mut Config, v: bool) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.grease(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_discover_pmtu(config: *mut Config, v: bool) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.discover_pmtu(v);
 }
@@ -380,21 +400,21 @@ pub extern "C" fn quiche_config_discover_pmtu(config: *mut Config, v: bool) {
 pub extern "C" fn quiche_config_set_pmtud_max_probes(
     config: *mut Config, max_probes: u8,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_pmtud_max_probes(max_probes);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_log_keys(config: *mut Config) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.log_keys();
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_enable_early_data(config: *mut Config) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.enable_early_data();
 }
@@ -423,7 +443,7 @@ pub extern "C" fn quiche_config_set_application_protos(
 pub extern "C" fn quiche_config_set_max_amplification_factor(
     config: *mut Config, v: usize,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_amplification_factor(v);
 }
@@ -432,7 +452,7 @@ pub extern "C" fn quiche_config_set_max_amplification_factor(
 pub extern "C" fn quiche_config_set_max_idle_timeout(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_idle_timeout(v);
 }
@@ -441,7 +461,7 @@ pub extern "C" fn quiche_config_set_max_idle_timeout(
 pub extern "C" fn quiche_config_set_max_recv_udp_payload_size(
     config: *mut Config, v: size_t,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_recv_udp_payload_size(v);
 }
@@ -450,7 +470,7 @@ pub extern "C" fn quiche_config_set_max_recv_udp_payload_size(
 pub extern "C" fn quiche_config_set_initial_max_data(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_data(v);
 }
@@ -459,7 +479,7 @@ pub extern "C" fn quiche_config_set_initial_max_data(
 pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_local(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_stream_data_bidi_local(v);
 }
@@ -468,7 +488,7 @@ pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_local(
 pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_remote(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_stream_data_bidi_remote(v);
 }
@@ -477,7 +497,7 @@ pub extern "C" fn quiche_config_set_initial_max_stream_data_bidi_remote(
 pub extern "C" fn quiche_config_set_initial_max_stream_data_uni(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_stream_data_uni(v);
 }
@@ -486,7 +506,7 @@ pub extern "C" fn quiche_config_set_initial_max_stream_data_uni(
 pub extern "C" fn quiche_config_set_initial_max_streams_bidi(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_streams_bidi(v);
 }
@@ -495,7 +515,7 @@ pub extern "C" fn quiche_config_set_initial_max_streams_bidi(
 pub extern "C" fn quiche_config_set_initial_max_streams_uni(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_max_streams_uni(v);
 }
@@ -504,14 +524,14 @@ pub extern "C" fn quiche_config_set_initial_max_streams_uni(
 pub extern "C" fn quiche_config_set_ack_delay_exponent(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_ack_delay_exponent(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_ack_delay(config: *mut Config, v: u64) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_ack_delay(v);
 }
@@ -520,7 +540,7 @@ pub extern "C" fn quiche_config_set_max_ack_delay(config: *mut Config, v: u64) {
 pub extern "C" fn quiche_config_set_disable_active_migration(
     config: *mut Config, v: bool,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_disable_active_migration(v);
 }
@@ -545,7 +565,7 @@ pub extern "C" fn quiche_config_set_cc_algorithm_name(
 pub extern "C" fn quiche_config_set_cc_algorithm(
     config: *mut Config, algo: CongestionControlAlgorithm,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_cc_algorithm(algo);
 }
@@ -554,21 +574,21 @@ pub extern "C" fn quiche_config_set_cc_algorithm(
 pub extern "C" fn quiche_config_set_initial_congestion_window_packets(
     config: *mut Config, packets: size_t,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_initial_congestion_window_packets(packets);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_enable_hystart(config: *mut Config, v: bool) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.enable_hystart(v);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_enable_pacing(config: *mut Config, v: bool) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.enable_pacing(v);
 }
@@ -577,7 +597,7 @@ pub extern "C" fn quiche_config_enable_pacing(config: *mut Config, v: bool) {
 pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
     config: *mut Config, v: bool,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_enable_cubic_idle_restart_fix(v);
 }
@@ -587,12 +607,12 @@ pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
 pub extern "C" fn quiche_config_set_use_initial_max_data_as_flow_control_win(
     _config: *mut Config, _v: bool,
 ) {
-    let _config = ffi_mut!(_config, ());
+    let _config = ffi_mut_void!(_config);
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_max_pacing_rate(config: *mut Config, v: u64) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_pacing_rate(v);
 }
@@ -602,7 +622,7 @@ pub extern "C" fn quiche_config_enable_dgram(
     config: *mut Config, enabled: bool, recv_queue_len: size_t,
     send_queue_len: size_t,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.enable_dgram(enabled, recv_queue_len, send_queue_len);
 }
@@ -611,7 +631,7 @@ pub extern "C" fn quiche_config_enable_dgram(
 pub extern "C" fn quiche_config_set_max_send_udp_payload_size(
     config: *mut Config, v: size_t,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_send_udp_payload_size(v);
 }
@@ -620,7 +640,7 @@ pub extern "C" fn quiche_config_set_max_send_udp_payload_size(
 pub extern "C" fn quiche_config_set_max_connection_window(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_connection_window(v);
 }
@@ -629,7 +649,7 @@ pub extern "C" fn quiche_config_set_max_connection_window(
 pub extern "C" fn quiche_config_set_max_stream_window(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_max_stream_window(v);
 }
@@ -638,7 +658,7 @@ pub extern "C" fn quiche_config_set_max_stream_window(
 pub extern "C" fn quiche_config_set_active_connection_id_limit(
     config: *mut Config, v: u64,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_active_connection_id_limit(v);
 }
@@ -647,7 +667,7 @@ pub extern "C" fn quiche_config_set_active_connection_id_limit(
 pub extern "C" fn quiche_config_set_stateless_reset_token(
     config: *mut Config, v: *const u8,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     let Some(reset_token) = (unsafe { ffi_slice_from_raw_parts(v, 16) }) else {
         return;
@@ -664,7 +684,7 @@ pub extern "C" fn quiche_config_set_stateless_reset_token(
 pub extern "C" fn quiche_config_set_disable_dcid_reuse(
     config: *mut Config, v: bool,
 ) {
-    let config = ffi_mut!(config, ());
+    let config = ffi_mut_void!(config);
 
     config.set_disable_dcid_reuse(v);
 }
@@ -1036,7 +1056,7 @@ pub extern "C" fn quiche_conn_set_keylog_path(
 #[no_mangle]
 #[cfg(unix)]
 pub extern "C" fn quiche_conn_set_keylog_fd(conn: *mut Connection, fd: c_int) {
-    let conn = ffi_mut!(conn, ());
+    let conn = ffi_mut_void!(conn);
     let f = unsafe { std::fs::File::from_raw_fd(fd) };
     let writer = std::io::BufWriter::new(f);
 
@@ -1086,7 +1106,7 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
     conn: *mut Connection, fd: c_int, log_title: *const c_char,
     log_desc: *const c_char,
 ) {
-    let conn = ffi_mut!(conn, ());
+    let conn = ffi_mut_void!(conn);
     let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
         return;
     };
@@ -1478,7 +1498,7 @@ pub extern "C" fn quiche_conn_timeout_as_millis(conn: *const Connection) -> u64 
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_on_timeout(conn: *mut Connection) {
-    let conn = ffi_mut!(conn, ());
+    let conn = ffi_mut_void!(conn);
     conn.on_timeout()
 }
 
@@ -1486,9 +1506,9 @@ pub extern "C" fn quiche_conn_on_timeout(conn: *mut Connection) {
 pub extern "C" fn quiche_conn_trace_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     let trace_id = conn.trace_id();
 
@@ -1549,9 +1569,9 @@ pub extern "C" fn quiche_connection_id_iter_free(iter: *mut ConnectionIdIter) {
 pub extern "C" fn quiche_conn_source_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     let conn_id = conn.source_id();
     let id = conn_id.as_ref();
@@ -1563,9 +1583,9 @@ pub extern "C" fn quiche_conn_source_id(
 pub extern "C" fn quiche_conn_destination_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     let conn_id = conn.destination_id();
     let id = conn_id.as_ref();
@@ -1578,9 +1598,9 @@ pub extern "C" fn quiche_conn_destination_id(
 pub extern "C" fn quiche_conn_application_proto(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     let proto = conn.application_proto();
 
@@ -1592,9 +1612,9 @@ pub extern "C" fn quiche_conn_application_proto(
 pub extern "C" fn quiche_conn_peer_cert(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     match conn.peer_cert() {
         Some(peer_cert) => {
@@ -1610,9 +1630,9 @@ pub extern "C" fn quiche_conn_peer_cert(
 pub extern "C" fn quiche_conn_session(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     match conn.session() {
         Some(session) => {
@@ -1628,9 +1648,9 @@ pub extern "C" fn quiche_conn_session(
 pub extern "C" fn quiche_conn_server_name(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
-    let out_len = ffi_mut!(out_len, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
+    let out_len = ffi_mut_void!(out_len);
 
     match conn.server_name() {
         Some(server_name) => {
@@ -1805,8 +1825,8 @@ pub struct TransportParams {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stats(conn: *const Connection, out: *mut Stats) {
-    let conn = ffi_ref!(conn, ());
-    let out = ffi_mut!(out, ());
+    let conn = ffi_ref_void!(conn);
+    let out = ffi_mut_void!(out);
     let stats = conn.stats();
 
     out.recv = stats.recv;
@@ -2059,7 +2079,7 @@ pub extern "C" fn quiche_conn_dgram_recv(
 pub extern "C" fn quiche_conn_dgram_purge_outgoing(
     conn: *mut Connection, f: Option<extern "C" fn(*const u8, size_t) -> bool>,
 ) {
-    let conn = ffi_mut!(conn, ());
+    let conn = ffi_mut_void!(conn);
     let Some(f) = f else {
         return;
     };
@@ -2427,7 +2447,7 @@ pub extern "C" fn quiche_path_event_new(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     if let PathEvent::New(local, peer) = ev {
         let _ = ffi_path_event_addrs(
             local,
@@ -2446,7 +2466,7 @@ pub extern "C" fn quiche_path_event_validated(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     if let PathEvent::Validated(local, peer) = ev {
         let _ = ffi_path_event_addrs(
             local,
@@ -2465,7 +2485,7 @@ pub extern "C" fn quiche_path_event_failed_validation(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     if let PathEvent::FailedValidation(local, peer) = ev {
         let _ = ffi_path_event_addrs(
             local,
@@ -2484,7 +2504,7 @@ pub extern "C" fn quiche_path_event_closed(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     if let PathEvent::Closed(local, peer) = ev {
         let _ = ffi_path_event_addrs(
             local,
@@ -2505,7 +2525,7 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
     local_addr: *mut sockaddr_storage, local_addr_len: *mut socklen_t,
     peer_addr: *mut sockaddr_storage, peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     let Some(cid_sequence_number) = (unsafe { ffi_ptr_mut(cid_sequence_number) })
     else {
         return;
@@ -2542,7 +2562,7 @@ pub extern "C" fn quiche_path_event_peer_migrated(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     if let PathEvent::PeerMigrated(local, peer) = ev {
         let _ = ffi_path_event_addrs(
             local,
@@ -2561,7 +2581,7 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
     local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
     peer_addr_len: *mut socklen_t, pmtu: *mut size_t,
 ) {
-    let ev = ffi_ref!(ev, ());
+    let ev = ffi_ref_void!(ev);
     let Some(pmtu) = (unsafe { ffi_ptr_mut(pmtu) }) else {
         return;
     };
@@ -2704,6 +2724,7 @@ fn ffi_optional_std_addr_from_c(
     }
 }
 
+#[cfg(test)]
 fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
     match addr.sa_family as _ {
         AF_INET => {
