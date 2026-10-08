@@ -310,7 +310,8 @@ fn rejects_corrupt_gzip_payload() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("corrupt.sqlog.gz");
     std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "error reading file header bytes");
+    assert_with_file_err(&path, "error reading file header bytes")
+        .expect("corrupt gzip should be rejected");
 }
 
 /// Regression test: a gzip stream cut short after the header (e.g. the
@@ -320,7 +321,8 @@ fn rejects_corrupt_gzip_payload() {
 #[test]
 fn truncated_gzip_stops_iteration() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = emit_one_event(QlogCompression::Gzip, dir.path());
+    let path =
+        emit_one_event(QlogCompression::Gzip, dir.path()).expect("emit qlog");
 
     // Drop the 8-byte gzip trailer (CRC32 + ISIZE) so the decoder hits
     // an unexpected EOF after all the records have been decompressed.
