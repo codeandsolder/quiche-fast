@@ -1786,6 +1786,7 @@ pub struct Stats {
     tx_buffered_inconsistent: bool,
 }
 
+#[repr(C)]
 pub struct TransportParams {
     max_idle_timeout: u64,
     max_udp_payload_size: u64,
@@ -1803,7 +1804,9 @@ pub struct TransportParams {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_stats(conn: &Connection, out: &mut Stats) {
+pub extern "C" fn quiche_conn_stats(conn: *const Connection, out: *mut Stats) {
+    let conn = ffi_ref!(conn, ());
+    let out = ffi_mut!(out, ());
     let stats = conn.stats();
 
     out.recv = stats.recv;
@@ -1838,8 +1841,10 @@ pub extern "C" fn quiche_conn_stats(conn: &Connection, out: &mut Stats) {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_peer_transport_params(
-    conn: &Connection, out: &mut TransportParams,
+    conn: *const Connection, out: *mut TransportParams,
 ) -> bool {
+    let conn = ffi_ref!(conn, false);
+    let out = ffi_mut!(out, false);
     let tps = match conn.peer_transport_params() {
         Some(v) => v,
         None => return false,
@@ -1900,8 +1905,10 @@ pub struct PathStats {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_path_stats(
-    conn: &Connection, idx: usize, out: &mut PathStats,
+    conn: *const Connection, idx: usize, out: *mut PathStats,
 ) -> c_int {
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let out = ffi_mut!(out, FFI_ERR_INVALID_ARGUMENT as c_int);
     let stats = match conn.path_stats().nth(idx) {
         Some(p) => p,
         None => return Error::Done.to_c() as c_int,
@@ -2007,8 +2014,9 @@ pub extern "C" fn quiche_conn_dgram_send_queue_byte_size(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_send(
-    conn: &mut Connection, buf: *const u8, buf_len: size_t,
+    conn: *mut Connection, buf: *const u8, buf_len: size_t,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
     if let Err(e) = validate_ssize_len(buf_len) {
         return e;
     }
@@ -2026,8 +2034,9 @@ pub extern "C" fn quiche_conn_dgram_send(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_recv(
-    conn: &mut Connection, out: *mut u8, out_len: size_t,
+    conn: *mut Connection, out: *mut u8, out_len: size_t,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
     }
@@ -2048,8 +2057,12 @@ pub extern "C" fn quiche_conn_dgram_recv(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_dgram_purge_outgoing(
-    conn: &mut Connection, f: extern "C" fn(*const u8, size_t) -> bool,
+    conn: *mut Connection, f: Option<extern "C" fn(*const u8, size_t) -> bool>,
 ) {
+    let conn = ffi_mut!(conn, ());
+    let Some(f) = f else {
+        return;
+    };
     conn.dgram_purge_outgoing(|d: &[u8]| -> bool {
         let ptr: *const u8 = d.as_ptr();
         let len: size_t = d.len();
@@ -2078,8 +2091,9 @@ pub extern "C" fn quiche_conn_is_dgram_recv_queue_full(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_send_ack_eliciting(
-    conn: &mut Connection,
+    conn: *mut Connection,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
     match conn.send_ack_eliciting() {
         Ok(()) => 0,
         Err(e) => e.to_c(),
@@ -2088,11 +2102,16 @@ pub extern "C" fn quiche_conn_send_ack_eliciting(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_send_ack_eliciting_on_path(
-    conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
-    peer: &sockaddr, peer_len: socklen_t,
+    conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
+    peer: *const sockaddr, peer_len: socklen_t,
 ) -> ssize_t {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
     match conn.send_ack_eliciting_on_path(local, peer) {
         Ok(()) => 0,
         Err(e) => e.to_c(),
@@ -2147,22 +2166,27 @@ pub extern "C" fn quiche_conn_scids_left(conn: *const Connection) -> size_t {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_new_scid(
-    conn: &mut Connection, scid: *const u8, scid_len: size_t,
+    conn: *mut Connection, scid: *const u8, scid_len: size_t,
     reset_token: *const u8, retire_if_needed: bool, scid_seq: *mut u64,
 ) -> c_int {
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
-    let scid = ConnectionId::from_ref(scid);
-
-    let reset_token = unsafe { slice::from_raw_parts(reset_token, 16) };
-    let reset_token = match reset_token.try_into() {
-        Ok(rt) => rt,
-        Err(_) => unreachable!(),
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
-    let reset_token = u128::from_be_bytes(reset_token);
+    let Some(reset_token) = (unsafe { ffi_slice_from_raw_parts(reset_token, 16) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Some(reset_token) = <&[u8; 16]>::try_from(reset_token).ok() else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let scid_seq = ffi_mut!(scid_seq, FFI_ERR_INVALID_ARGUMENT as c_int);
+
+    let scid = ConnectionId::from_ref(scid);
+    let reset_token = u128::from_be_bytes(*reset_token);
 
     match conn.new_scid(&scid, reset_token, retire_if_needed) {
         Ok(c) => {
-            unsafe { *scid_seq = c }
+            *scid_seq = c;
             0
         },
         Err(e) => e.to_c() as c_int,
@@ -2171,8 +2195,10 @@ pub extern "C" fn quiche_conn_new_scid(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_retire_dcid(
-    conn: &mut Connection, dcid_seq: u64,
+    conn: *mut Connection, dcid_seq: u64,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.retire_dcid(dcid_seq) {
         Ok(_) => 0,
         Err(e) => e.to_c() as c_int,
@@ -2208,31 +2234,43 @@ pub extern "C" fn quiche_conn_retired_scid_iter(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_send_quantum_on_path(
-    conn: &Connection, local: &sockaddr, local_len: socklen_t, peer: &sockaddr,
-    peer_len: socklen_t,
+    conn: *const Connection, local: *const sockaddr, local_len: socklen_t,
+    peer: *const sockaddr, peer_len: socklen_t,
 ) -> size_t {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let conn = ffi_ref!(conn, 0);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return 0;
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return 0;
+    };
 
     conn.send_quantum_on_path(local, peer) as size_t
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_paths_iter(
-    conn: &Connection, from: &sockaddr, from_len: socklen_t,
+    conn: *const Connection, from: *const sockaddr, from_len: socklen_t,
 ) -> *mut SocketAddrIter {
-    let addr = std_addr_from_c(from, from_len);
+    let conn = ffi_ref!(conn, ptr::null_mut());
+    let Some(addr) = ffi_std_addr_from_c(from, from_len) else {
+        return ptr::null_mut();
+    };
 
     Box::into_raw(Box::new(conn.paths_iter(addr)))
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_socket_addr_iter_next(
-    iter: &mut SocketAddrIter, peer: &mut sockaddr_storage,
+    iter: *mut SocketAddrIter, peer: *mut sockaddr_storage,
     peer_len: *mut socklen_t,
 ) -> bool {
+    let iter = ffi_mut!(iter, false);
+    let peer = ffi_mut!(peer, false);
+    let peer_len = ffi_mut!(peer_len, false);
+
     if let Some(v) = iter.next() {
-        unsafe { *peer_len = std_addr_to_c(&v, peer) }
+        *peer_len = std_addr_to_c(&v, peer);
         return true;
     }
 
@@ -2248,11 +2286,17 @@ pub extern "C" fn quiche_socket_addr_iter_free(iter: *mut SocketAddrIter) {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_is_path_validated(
-    conn: &Connection, from: &sockaddr, from_len: socklen_t, to: &sockaddr,
-    to_len: socklen_t,
+    conn: *const Connection, from: *const sockaddr, from_len: socklen_t,
+    to: *const sockaddr, to_len: socklen_t,
 ) -> c_int {
-    let from = std_addr_from_c(from, from_len);
-    let to = std_addr_from_c(to, to_len);
+    let conn = ffi_ref!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(from) = ffi_std_addr_from_c(from, from_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Some(to) = ffi_std_addr_from_c(to, to_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+
     match conn.is_path_validated(from, to) {
         Ok(v) => v as c_int,
         Err(e) => e.to_c() as c_int,
@@ -2261,14 +2305,21 @@ pub extern "C" fn quiche_conn_is_path_validated(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_probe_path(
-    conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
-    peer: &sockaddr, peer_len: socklen_t, seq: *mut u64,
+    conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
+    peer: *const sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let seq = ffi_mut!(seq, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.probe_path(local, peer) {
         Ok(v) => {
-            unsafe { *seq = v }
+            *seq = v;
             0
         },
         Err(e) => e.to_c() as c_int,
@@ -2277,12 +2328,18 @@ pub extern "C" fn quiche_conn_probe_path(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_migrate_source(
-    conn: &mut Connection, local: &sockaddr, local_len: socklen_t, seq: *mut u64,
+    conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
+    seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let seq = ffi_mut!(seq, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.migrate_source(local) {
         Ok(v) => {
-            unsafe { *seq = v }
+            *seq = v;
             0
         },
         Err(e) => e.to_c() as c_int,
@@ -2291,14 +2348,21 @@ pub extern "C" fn quiche_conn_migrate_source(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_migrate(
-    conn: &mut Connection, local: &sockaddr, local_len: socklen_t,
-    peer: &sockaddr, peer_len: socklen_t, seq: *mut u64,
+    conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
+    peer: *const sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let seq = ffi_mut!(seq, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     match conn.migrate(local, peer) {
         Ok(v) => {
-            unsafe { *seq = v }
+            *seq = v;
             0
         },
         Err(e) => e.to_c() as c_int,
@@ -2307,8 +2371,10 @@ pub extern "C" fn quiche_conn_migrate(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_path_event_next(
-    conn: &mut Connection,
+    conn: *mut Connection,
 ) -> *mut PathEvent {
+    let conn = ffi_mut!(conn, ptr::null_mut());
+
     match conn.path_event_next() {
         Some(v) => Box::into_raw(Box::new(v)),
         None => ptr::null_mut(),
@@ -2316,144 +2382,173 @@ pub extern "C" fn quiche_conn_path_event_next(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_path_event_type(ev: &PathEvent) -> u32 {
+pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> u32 {
+    let ev = ffi_ref!(ev, u32::MAX);
+
     match ev {
         PathEvent::New { .. } => 0,
-
         PathEvent::Validated { .. } => 1,
-
         PathEvent::FailedValidation { .. } => 2,
-
         PathEvent::Closed { .. } => 3,
-
         PathEvent::ReusedSourceConnectionId { .. } => 4,
-
         PathEvent::PeerMigrated { .. } => 5,
-
         PathEvent::PmtuUpdated { .. } => 6,
     }
 }
 
+fn ffi_path_event_addrs(
+    local: &SocketAddr, peer: &SocketAddr, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
+) -> bool {
+    let Some(local_addr) = (unsafe { ffi_ptr_mut(local_addr) }) else {
+        return false;
+    };
+    let Some(local_addr_len) = (unsafe { ffi_ptr_mut(local_addr_len) }) else {
+        return false;
+    };
+    let Some(peer_addr) = (unsafe { ffi_ptr_mut(peer_addr) }) else {
+        return false;
+    };
+    let Some(peer_addr_len) = (unsafe { ffi_ptr_mut(peer_addr_len) }) else {
+        return false;
+    };
+
+    *local_addr_len = std_addr_to_c(local, local_addr);
+    *peer_addr_len = std_addr_to_c(peer, peer_addr);
+    true
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_path_event_new(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::New(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => unreachable!(),
+    let ev = ffi_ref!(ev, ());
+    if let PathEvent::New(local, peer) = ev {
+        let _ = ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        );
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_validated(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::Validated(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => unreachable!(),
+    let ev = ffi_ref!(ev, ());
+    if let PathEvent::Validated(local, peer) = ev {
+        let _ = ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        );
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_failed_validation(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::FailedValidation(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => unreachable!(),
+    let ev = ffi_ref!(ev, ());
+    if let PathEvent::FailedValidation(local, peer) = ev {
+        let _ = ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        );
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_closed(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::Closed(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr)
-        },
-
-        _ => unreachable!(),
+    let ev = ffi_ref!(ev, ());
+    if let PathEvent::Closed(local, peer) = ev {
+        let _ = ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        );
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_reused_source_connection_id(
-    ev: &PathEvent, cid_sequence_number: &mut u64,
-    old_local_addr: &mut sockaddr_storage, old_local_addr_len: &mut socklen_t,
-    old_peer_addr: &mut sockaddr_storage, old_peer_addr_len: &mut socklen_t,
-    local_addr: &mut sockaddr_storage, local_addr_len: &mut socklen_t,
-    peer_addr: &mut sockaddr_storage, peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, cid_sequence_number: *mut u64,
+    old_local_addr: *mut sockaddr_storage, old_local_addr_len: *mut socklen_t,
+    old_peer_addr: *mut sockaddr_storage, old_peer_addr_len: *mut socklen_t,
+    local_addr: *mut sockaddr_storage, local_addr_len: *mut socklen_t,
+    peer_addr: *mut sockaddr_storage, peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::ReusedSourceConnectionId(id, old, new) => {
-            *cid_sequence_number = *id;
-            *old_local_addr_len = std_addr_to_c(&old.0, old_local_addr);
-            *old_peer_addr_len = std_addr_to_c(&old.1, old_peer_addr);
+    let ev = ffi_ref!(ev, ());
+    let Some(cid_sequence_number) = (unsafe { ffi_ptr_mut(cid_sequence_number) }) else {
+        return;
+    };
 
-            *local_addr_len = std_addr_to_c(&new.0, local_addr);
-            *peer_addr_len = std_addr_to_c(&new.1, peer_addr)
-        },
-
-        _ => unreachable!(),
+    if let PathEvent::ReusedSourceConnectionId(id, old, new) = ev {
+        if !ffi_path_event_addrs(
+            &old.0,
+            &old.1,
+            old_local_addr,
+            old_local_addr_len,
+            old_peer_addr,
+            old_peer_addr_len,
+        ) {
+            return;
+        }
+        if !ffi_path_event_addrs(
+            &new.0,
+            &new.1,
+            local_addr,
+            local_addr_len,
+            peer_addr,
+            peer_addr_len,
+        ) {
+            return;
+        }
+        *cid_sequence_number = *id;
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_peer_migrated(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
 ) {
-    match ev {
-        PathEvent::PeerMigrated(local, peer) => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr);
-        },
-
-        _ => unreachable!(),
+    let ev = ffi_ref!(ev, ());
+    if let PathEvent::PeerMigrated(local, peer) = ev {
+        let _ = ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        );
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_pmtu_updated(
-    ev: &PathEvent, local_addr: &mut sockaddr_storage,
-    local_addr_len: &mut socklen_t, peer_addr: &mut sockaddr_storage,
-    peer_addr_len: &mut socklen_t, pmtu: &mut size_t,
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t, pmtu: *mut size_t,
 ) {
-    match ev {
-        PathEvent::PmtuUpdated {
-            local,
-            peer,
-            pmtu: value,
-        } => {
-            *local_addr_len = std_addr_to_c(local, local_addr);
-            *peer_addr_len = std_addr_to_c(peer, peer_addr);
-            *pmtu = *value;
-        },
+    let ev = ffi_ref!(ev, ());
+    let Some(pmtu) = (unsafe { ffi_ptr_mut(pmtu) }) else {
+        return;
+    };
 
-        _ => unreachable!(),
+    if let PathEvent::PmtuUpdated {
+        local,
+        peer,
+        pmtu: value,
+    } = ev
+    {
+        if ffi_path_event_addrs(
+            local, peer, local_addr, local_addr_len, peer_addr, peer_addr_len,
+        ) {
+            *pmtu = *value;
+        }
     }
 }
 
@@ -2941,6 +3036,125 @@ mod tests {
             invalid as c_int
         );
         quiche_conn_on_timeout(ptr::null_mut());
+        quiche_conn_stats(ptr::null(), ptr::null_mut());
+        assert!(!quiche_conn_peer_transport_params(
+            ptr::null(),
+            ptr::null_mut(),
+        ));
+        assert_eq!(
+            quiche_conn_path_stats(ptr::null(), 0, ptr::null_mut()),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_dgram_send(ptr::null_mut(), ptr::null(), 0),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_dgram_recv(ptr::null_mut(), ptr::null_mut(), 0),
+            invalid
+        );
+        quiche_conn_dgram_purge_outgoing(ptr::null_mut(), None);
+        assert_eq!(quiche_conn_send_ack_eliciting(ptr::null_mut()), invalid);
+        assert_eq!(
+            quiche_conn_send_ack_eliciting_on_path(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            ),
+            invalid
+        );
+
+        assert_eq!(
+            quiche_conn_new_scid(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                false,
+                ptr::null_mut(),
+            ),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_retire_dcid(ptr::null_mut(), 0),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_send_quantum_on_path(
+                ptr::null(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            ),
+            0
+        );
+        assert!(quiche_conn_paths_iter(ptr::null(), ptr::null(), 0).is_null());
+        assert!(!quiche_socket_addr_iter_next(
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        ));
+        assert_eq!(
+            quiche_conn_is_path_validated(
+                ptr::null(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+            ),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_probe_path(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+            ),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_migrate_source(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+            ),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_migrate(
+                ptr::null_mut(),
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+            ),
+            invalid as c_int
+        );
+        assert!(quiche_conn_path_event_next(ptr::null_mut()).is_null());
+        assert_eq!(quiche_path_event_type(ptr::null()), u32::MAX);
+        quiche_path_event_new(
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
+        quiche_path_event_pmtu_updated(
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        );
 
         assert!(matches!(ffi_shutdown_from_c(0), Some(Shutdown::Read)));
         assert!(matches!(ffi_shutdown_from_c(1), Some(Shutdown::Write)));
