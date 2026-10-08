@@ -105,7 +105,7 @@ macro_rules! ffi_ref {
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { $ptr.as_ref() } {
+        match unsafe { ffi_ptr_ref($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -117,7 +117,7 @@ macro_rules! ffi_mut {
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public
         // C API.
-        match unsafe { $ptr.as_mut() } {
+        match unsafe { ffi_ptr_mut($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -179,6 +179,22 @@ unsafe fn ffi_slice_from_raw_parts<'a, T>(
     }
 
     Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
+unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+        return None;
+    }
+
+    Some(unsafe { &*ptr })
+}
+
+unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+        return None;
+    }
+
+    Some(unsafe { &mut *ptr })
 }
 
 unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
@@ -675,60 +691,59 @@ pub extern "C" fn quiche_header_info(
     scid: *mut u8, scid_len: *mut size_t, dcid: *mut u8, dcid_len: *mut size_t,
     token: *mut u8, token_len: *mut size_t,
 ) -> c_int {
-    let buf = unsafe { slice::from_raw_parts_mut(buf, buf_len) };
+    let Some(buf) = (unsafe { ffi_slice_from_raw_parts_mut(buf, buf_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    let version = ffi_mut!(version, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let ty = ffi_mut!(ty, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let scid_len = ffi_mut!(scid_len, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let dcid_len = ffi_mut!(dcid_len, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let token_len = ffi_mut!(token_len, FFI_ERR_INVALID_ARGUMENT as c_int);
+
     let hdr = match Header::from_slice(buf, dcil) {
         Ok(v) => v,
-
         Err(e) => return e.to_c() as c_int,
     };
 
-    unsafe {
-        *version = hdr.version;
+    *version = hdr.version;
+    *ty = match hdr.ty {
+        Type::Initial => 1,
+        Type::Retry => 2,
+        Type::Handshake => 3,
+        Type::ZeroRTT => 4,
+        Type::Short => 5,
+        Type::VersionNegotiation => 6,
+    };
 
-        *ty = match hdr.ty {
-            Type::Initial => 1,
-            Type::Retry => 2,
-            Type::Handshake => 3,
-            Type::ZeroRTT => 4,
-            Type::Short => 5,
-            Type::VersionNegotiation => 6,
+    if *scid_len < hdr.scid.len() {
+        return -1;
+    }
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts_mut(scid, *scid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    scid[..hdr.scid.len()].copy_from_slice(&hdr.scid);
+    *scid_len = hdr.scid.len();
+
+    if *dcid_len < hdr.dcid.len() {
+        return -1;
+    }
+    let Some(dcid) = (unsafe { ffi_slice_from_raw_parts_mut(dcid, *dcid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
+    dcid[..hdr.dcid.len()].copy_from_slice(&hdr.dcid);
+    *dcid_len = hdr.dcid.len();
+
+    if let Some(tok) = hdr.token {
+        if *token_len < tok.len() {
+            return -1;
+        }
+        let Some(token) = (unsafe { ffi_slice_from_raw_parts_mut(token, *token_len) }) else {
+            return FFI_ERR_INVALID_ARGUMENT as c_int;
         };
-
-        if *scid_len < hdr.scid.len() {
-            return -1;
-        }
-
-        let scid = slice::from_raw_parts_mut(scid, *scid_len);
-        let scid = &mut scid[..hdr.scid.len()];
-        scid.copy_from_slice(&hdr.scid);
-
-        *scid_len = hdr.scid.len();
-
-        if *dcid_len < hdr.dcid.len() {
-            return -1;
-        }
-
-        let dcid = slice::from_raw_parts_mut(dcid, *dcid_len);
-        let dcid = &mut dcid[..hdr.dcid.len()];
-        dcid.copy_from_slice(&hdr.dcid);
-
-        *dcid_len = hdr.dcid.len();
-
-        match hdr.token {
-            Some(tok) => {
-                if *token_len < tok.len() {
-                    return -1;
-                }
-
-                let token = slice::from_raw_parts_mut(token, *token_len);
-                let token = &mut token[..tok.len()];
-                token.copy_from_slice(&tok);
-
-                *token_len = tok.len();
-            },
-
-            None => *token_len = 0,
-        }
+        token[..tok.len()].copy_from_slice(&tok);
+        *token_len = tok.len();
+    } else {
+        *token_len = 0;
     }
 
     0
@@ -737,26 +752,33 @@ pub extern "C" fn quiche_header_info(
 #[no_mangle]
 pub extern "C" fn quiche_accept(
     scid: *const u8, scid_len: size_t, odcid: *const u8, odcid_len: size_t,
-    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
-    config: &mut Config,
+    local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
+    peer_len: socklen_t, config: *mut Config,
 ) -> *mut Connection {
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return ptr::null_mut();
+    };
     let scid = ConnectionId::from_ref(scid);
 
-    let odcid = if !odcid.is_null() && odcid_len > 0 {
-        Some(ConnectionId::from_ref(unsafe {
-            slice::from_raw_parts(odcid, odcid_len)
-        }))
-    } else {
+    let odcid = if odcid_len == 0 {
         None
+    } else {
+        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) }) else {
+            return ptr::null_mut();
+        };
+        Some(ConnectionId::from_ref(odcid))
     };
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
+    let config = ffi_mut!(config, ptr::null_mut());
 
     match accept(&scid, odcid.as_ref(), local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
-
         Err(_) => ptr::null_mut(),
     }
 }
@@ -764,8 +786,8 @@ pub extern "C" fn quiche_accept(
 #[no_mangle]
 pub extern "C" fn quiche_connect(
     server_name: *const c_char, scid: *const u8, scid_len: size_t,
-    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
-    config: &mut Config,
+    local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
+    peer_len: socklen_t, config: *mut Config,
 ) -> *mut Connection {
     let server_name = if server_name.is_null() {
         None
@@ -776,15 +798,21 @@ pub extern "C" fn quiche_connect(
         Some(server_name)
     };
 
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return ptr::null_mut();
+    };
     let scid = ConnectionId::from_ref(scid);
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
+    let config = ffi_mut!(config, ptr::null_mut());
 
     match connect(server_name.as_deref(), &scid, local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
-
         Err(_) => ptr::null_mut(),
     }
 }
@@ -794,17 +822,21 @@ pub extern "C" fn quiche_negotiate_version(
     scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
     out: *mut u8, out_len: size_t,
 ) -> ssize_t {
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+
     let scid = ConnectionId::from_ref(scid);
-
-    let dcid = unsafe { slice::from_raw_parts(dcid, dcid_len) };
     let dcid = ConnectionId::from_ref(dcid);
-
-    let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
 
     match negotiate_version(&scid, &dcid, out) {
         Ok(v) => v as ssize_t,
-
         Err(e) => e.to_c(),
     }
 }
@@ -820,21 +852,30 @@ pub extern "C" fn quiche_retry(
     new_scid: *const u8, new_scid_len: size_t, token: *const u8,
     token_len: size_t, version: u32, out: *mut u8, out_len: size_t,
 ) -> ssize_t {
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(new_scid) =
+        (unsafe { ffi_slice_from_raw_parts(new_scid, new_scid_len) })
+    else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(token) = (unsafe { ffi_slice_from_raw_parts(token, token_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) }) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+
     let scid = ConnectionId::from_ref(scid);
-
-    let dcid = unsafe { slice::from_raw_parts(dcid, dcid_len) };
     let dcid = ConnectionId::from_ref(dcid);
-
-    let new_scid = unsafe { slice::from_raw_parts(new_scid, new_scid_len) };
     let new_scid = ConnectionId::from_ref(new_scid);
-
-    let token = unsafe { slice::from_raw_parts(token, token_len) };
-    let out = unsafe { slice::from_raw_parts_mut(out, out_len) };
 
     match retry(&scid, &dcid, &new_scid, token, version, out) {
         Ok(v) => v as ssize_t,
-
         Err(e) => e.to_c(),
     }
 }
@@ -2396,6 +2437,66 @@ pub extern "C" fn quiche_get_varint(
     b.off() as ssize_t
 }
 
+fn ffi_std_addr_from_c(
+    addr: *const sockaddr, addr_len: socklen_t,
+) -> Option<SocketAddr> {
+    let addr = unsafe { ffi_ptr_ref(addr) }?;
+
+    match addr.sa_family as _ {
+        AF_INET => {
+            if addr_len as usize != size_of::<sockaddr_in>() {
+                return None;
+            }
+            let in4 = unsafe { ffi_ptr_ref(addr as *const _ as *const sockaddr_in) }?;
+
+            #[cfg(not(windows))]
+            let ip_addr = Ipv4Addr::from(u32::from_be(in4.sin_addr.s_addr));
+            #[cfg(windows)]
+            let ip_addr = {
+                let ip_bytes = unsafe { in4.sin_addr.S_un.S_un_b };
+                Ipv4Addr::from([
+                    ip_bytes.s_b1,
+                    ip_bytes.s_b2,
+                    ip_bytes.s_b3,
+                    ip_bytes.s_b4,
+                ])
+            };
+
+            Some(SocketAddrV4::new(ip_addr, u16::from_be(in4.sin_port)).into())
+        },
+
+        AF_INET6 => {
+            if addr_len as usize != size_of::<sockaddr_in6>() {
+                return None;
+            }
+            let in6 =
+                unsafe { ffi_ptr_ref(addr as *const _ as *const sockaddr_in6) }?;
+
+            let ip_addr = Ipv6Addr::from(
+                #[cfg(not(windows))]
+                in6.sin6_addr.s6_addr,
+                #[cfg(windows)]
+                unsafe {
+                    in6.sin6_addr.u.Byte
+                },
+            );
+            let port = u16::from_be(in6.sin6_port);
+
+            #[cfg(not(windows))]
+            let scope_id = in6.sin6_scope_id;
+            #[cfg(windows)]
+            let scope_id = unsafe { in6.Anonymous.sin6_scope_id };
+
+            Some(
+                SocketAddrV6::new(ip_addr, port, in6.sin6_flowinfo, scope_id)
+                    .into(),
+            )
+        },
+
+        _ => None,
+    }
+}
+
 fn optional_std_addr_from_c(
     addr: *const sockaddr, addr_len: socklen_t,
 ) -> Option<SocketAddr> {
@@ -2596,6 +2697,98 @@ mod tests {
             quiche_config_set_ticket_key(ptr::null_mut(), ptr::null(), 0),
             FFI_ERR_INVALID_ARGUMENT as c_int
         );
+    }
+
+    #[test]
+    fn invalid_bootstrap_pointer_metadata_is_rejected() {
+        let one = [0u8; 1];
+        let mut out = [0u8; 64];
+
+        assert_eq!(
+            quiche_negotiate_version(
+                ptr::null(),
+                1,
+                one.as_ptr(),
+                one.len(),
+                out.as_mut_ptr(),
+                out.len(),
+            ),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+        assert_eq!(
+            quiche_retry(
+                one.as_ptr(),
+                one.len(),
+                one.as_ptr(),
+                one.len(),
+                ptr::null(),
+                1,
+                ptr::null(),
+                0,
+                PROTOCOL_VERSION,
+                out.as_mut_ptr(),
+                out.len(),
+            ),
+            FFI_ERR_INVALID_ARGUMENT
+        );
+
+        assert!(quiche_accept(
+            ptr::null(),
+            1,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+        )
+        .is_null());
+        assert!(quiche_connect(
+            ptr::null(),
+            ptr::null(),
+            1,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null_mut(),
+        )
+        .is_null());
+    }
+
+    #[test]
+    fn header_info_rejects_null_output_metadata() {
+        let mut packet = [0u8; 1];
+        let mut ty = 0;
+        let mut scid_len = 0;
+        let mut dcid_len = 0;
+        let mut token_len = 0;
+
+        assert_eq!(
+            quiche_header_info(
+                packet.as_mut_ptr(),
+                packet.len(),
+                0,
+                ptr::null_mut(),
+                &mut ty,
+                ptr::null_mut(),
+                &mut scid_len,
+                ptr::null_mut(),
+                &mut dcid_len,
+                ptr::null_mut(),
+                &mut token_len,
+            ),
+            FFI_ERR_INVALID_ARGUMENT as c_int
+        );
+    }
+
+    #[test]
+    fn ffi_pointer_helpers_reject_misalignment() {
+        let aligned = ptr::NonNull::<u64>::dangling().as_ptr().cast::<u8>();
+        let misaligned = aligned.wrapping_add(1).cast::<u64>();
+        assert!(unsafe { ffi_ptr_ref(misaligned) }.is_none());
+        assert!(unsafe { ffi_ptr_mut(misaligned.cast_mut()) }.is_none());
     }
 
     #[test]
