@@ -14661,11 +14661,10 @@ fn rejected_zero_rtt_clears_auxiliary_send_state(
         pipe.client.stream_send(4, b"x", false),
         Err(Error::StreamLimit)
     );
-    assert!(
-        pipe.client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame()
-    );
+    assert!(pipe
+        .client
+        .streams_blocked_bidi_state
+        .has_pending_stream_blocked_frame());
 
     assert_eq!(pipe.client.dgram_send(b"early-dgram"), Ok(()));
     assert_eq!(pipe.client.dgram_send_queue_len(), 1);
@@ -14678,18 +14677,14 @@ fn rejected_zero_rtt_clears_auxiliary_send_state(
 
     assert!(pipe.client.early_data_rejected());
     assert_eq!(pipe.client.blocked_limit, None);
-    assert!(
-        !pipe
-            .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame()
-    );
-    assert!(
-        !pipe
-            .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame()
-    );
+    assert!(!pipe
+        .client
+        .streams_blocked_bidi_state
+        .has_pending_stream_blocked_frame());
+    assert!(!pipe
+        .client
+        .streams_blocked_uni_state
+        .has_pending_stream_blocked_frame());
     assert_eq!(pipe.client.dgram_send_queue_len(), 0);
 }
 
@@ -14774,38 +14769,27 @@ fn rejected_zero_rtt_replays_http3_request(
 
     assert_eq!(
         server_h3.poll(&mut pipe.server),
-        Ok((
-            replay_stream,
-            h3::Event::Headers {
-                list: request,
-                more_frames: false,
-            },
-        )),
+        Ok((replay_stream, h3::Event::Headers {
+            list: request,
+            more_frames: false,
+        },)),
     );
 
     let response = vec![h3::Header::new(b":status", b"200")];
     assert_eq!(
-        server_h3.send_response(
-            &mut pipe.server,
-            replay_stream,
-            &response,
-            true,
-        ),
+        server_h3
+            .send_response(&mut pipe.server, replay_stream, &response, true,),
         Ok(()),
     );
     assert_eq!(pipe.advance(), Ok(()));
     assert_eq!(
         client_h3.poll(&mut pipe.client),
-        Ok((
-            replay_stream,
-            h3::Event::Headers {
-                list: response,
-                more_frames: false,
-            },
-        )),
+        Ok((replay_stream, h3::Event::Headers {
+            list: response,
+            more_frames: false,
+        },)),
     );
 }
-
 
 /// PADDING is not ack-eliciting, but RFC 9002 Section 2 still counts packets
 /// containing PADDING toward bytes in flight.

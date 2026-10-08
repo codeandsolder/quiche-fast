@@ -1186,7 +1186,8 @@ mod tests {
                     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                         time::sleep(Duration::from_millis(5)).await;
                     },
-                    Err(error) => panic!("failed to rebind listener socket: {error}"),
+                    Err(error) =>
+                        panic!("failed to rebind listener socket: {error}"),
                 }
             }
         })

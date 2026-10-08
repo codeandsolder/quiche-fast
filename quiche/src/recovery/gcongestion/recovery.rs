@@ -258,8 +258,11 @@ impl RecoveryEpoch {
                             let skipped_between = self
                                 .skipped_packet_numbers
                                 .iter()
-                                .filter(|&&pn| pn > *pkt_num && pn <= largest_acked)
-                                .count() as u64;
+                                .filter(|&&pn| {
+                                    pn > *pkt_num && pn <= largest_acked
+                                })
+                                .count()
+                                as u64;
                             spurious_pkt_thresh.get_or_insert(
                                 largest_acked
                                     .saturating_sub(*pkt_num)
@@ -835,7 +838,9 @@ impl RecoveryOps for GRecovery {
     }
 
     fn on_packet_number_skipped(&mut self, pkt_num: u64) {
-        self.epochs[packet::Epoch::Application].skipped_packet_numbers.push(pkt_num);
+        self.epochs[packet::Epoch::Application]
+            .skipped_packet_numbers
+            .push(pkt_num);
     }
 
     fn get_packet_send_time(&self, now: Instant) -> Instant {
@@ -880,8 +885,7 @@ impl RecoveryOps for GRecovery {
 
         let mut update_rtt = false;
         if let Some(largest_newly_acked) = self.newly_acked.last() {
-            update_rtt =
-                largest_newly_acked.pkt_num == largest_acked_pkt_num &&
+            update_rtt = largest_newly_acked.pkt_num == largest_acked_pkt_num &&
                 has_ack_eliciting;
             if update_rtt {
                 let latest_rtt = now - largest_newly_acked.time_sent;
@@ -911,8 +915,7 @@ impl RecoveryOps for GRecovery {
             );
         }
 
-        if !self.newly_acked.is_empty() &&
-            handshake_status.peer_verified_address
+        if !self.newly_acked.is_empty() && handshake_status.peer_verified_address
         {
             self.pto_count = 0;
         }
@@ -997,8 +1000,7 @@ impl RecoveryOps for GRecovery {
 
             // Match pto_time_and_space(): Application data is not an eligible
             // PTO space until the handshake is complete.
-            if other == packet::Epoch::Application &&
-                !handshake_status.completed
+            if other == packet::Epoch::Application && !handshake_status.completed
             {
                 continue;
             }

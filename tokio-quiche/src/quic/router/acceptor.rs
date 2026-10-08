@@ -37,9 +37,9 @@ use qlog::writer::qlog_file_name;
 use qlog::writer::QlogCompression;
 use quiche::ConnectionId;
 use quiche::Header;
-use quiche::MIN_CLIENT_INITIAL_LEN;
 use quiche::RetryConnectionIds;
 use quiche::Type as PacketType;
+use quiche::MIN_CLIENT_INITIAL_LEN;
 use task_killswitch::spawn_with_killswitch;
 
 use crate::metrics::labels;
@@ -352,7 +352,6 @@ mod tests {
     }
 }
 
-
 #[cfg(test)]
 mod initial_size_tests {
     use super::*;
@@ -406,9 +405,7 @@ mod initial_size_tests {
     }
 
     fn incoming(
-        mut buf: Vec<u8>,
-        peer_addr: SocketAddr,
-        local_addr: SocketAddr,
+        mut buf: Vec<u8>, peer_addr: SocketAddr, local_addr: SocketAddr,
     ) -> (Incoming, Header<'static>) {
         let hdr = Header::from_slice(&mut buf, MAX_CONN_ID_LEN).unwrap();
 
@@ -467,12 +464,10 @@ mod initial_size_tests {
             local_addr,
         );
 
-        assert!(
-            acceptor
-                .handle_initials(incoming, hdr, &mut config)
-                .unwrap()
-                .is_none()
-        );
+        assert!(acceptor
+            .handle_initials(incoming, hdr, &mut config)
+            .unwrap()
+            .is_none());
 
         let mut out = [0u8; MAX_DATAGRAM_SIZE];
         let (len, _) = timeout(Duration::from_secs(1), peer.recv_from(&mut out))

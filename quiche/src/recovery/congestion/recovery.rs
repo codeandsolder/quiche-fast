@@ -179,7 +179,9 @@ impl RecoveryEpoch {
                     let skipped_between = self
                         .skipped_packet_numbers
                         .iter()
-                        .filter(|&&pn| pn > unacked.pkt_num && pn <= largest_acked)
+                        .filter(|&&pn| {
+                            pn > unacked.pkt_num && pn <= largest_acked
+                        })
                         .count() as u64;
                     spurious_pkt_thresh.get_or_insert(
                         largest_acked
@@ -260,7 +262,8 @@ impl RecoveryEpoch {
 
         let skipped_packet_numbers = &self.skipped_packet_numbers;
 
-        let unacked_iter = self.sent_packets
+        let unacked_iter = self
+            .sent_packets
             .iter_mut()
             .take_while(|p| p.pkt_num <= largest_acked)
             .filter(|p| p.time_acked.is_none() && p.time_lost.is_none());
@@ -691,7 +694,9 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn on_packet_number_skipped(&mut self, pkt_num: u64) {
-        self.epochs[Epoch::Application].skipped_packet_numbers.push(pkt_num);
+        self.epochs[Epoch::Application]
+            .skipped_packet_numbers
+            .push(pkt_num);
     }
 
     fn get_packet_send_time(&self, now: Instant) -> Instant {
@@ -820,8 +825,7 @@ impl RecoveryOps for LegacyRecovery {
 
         self.pto_count += 1;
 
-        let probe_count =
-            cmp::min(self.pto_count as usize, MAX_PTO_PROBES_COUNT);
+        let probe_count = cmp::min(self.pto_count as usize, MAX_PTO_PROBES_COUNT);
 
         // RFC 9002 Section 6.2.4 recommends probing every other eligible
         // packet-number space that still has data in flight as well.

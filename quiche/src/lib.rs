@@ -9452,12 +9452,13 @@ impl<F: BufFactory> Connection<F> {
         // exists. A later packet on the new, now-known 4-tuple will relink it
         // through the normal slow path. If insertion evicted the original
         // owner, relink immediately so the CID never points at a removed path.
-        let original_owner_survived = reused_cid_info
-            .as_ref()
-            .is_some_and(|(old_pid, old_local_addr, old_peer_addr)| {
-                self.paths.path_id_from_addrs(&(*old_local_addr, *old_peer_addr)) ==
+        let original_owner_survived = reused_cid_info.as_ref().is_some_and(
+            |(old_pid, old_local_addr, old_peer_addr)| {
+                self.paths
+                    .path_id_from_addrs(&(*old_local_addr, *old_peer_addr)) ==
                     Some(*old_pid)
-            });
+            },
+        );
         if reused_cid_info.is_none() || !original_owner_survived {
             ids.link_scid_to_path_id(in_scid_seq, pid)?;
         }

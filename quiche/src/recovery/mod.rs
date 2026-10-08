@@ -848,8 +848,8 @@ pub enum StartupExitReason {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::packet;
     use crate::frame;
+    use crate::packet;
     use crate::range_buf::RangeBuf;
     use crate::test_utils;
     use crate::CongestionControlAlgorithm;
@@ -2961,10 +2961,9 @@ mod tests {
             completed: false,
         };
 
-        for (pkt_num, epoch) in [
-            (0, packet::Epoch::Initial),
-            (1, packet::Epoch::Handshake),
-        ] {
+        for (pkt_num, epoch) in
+            [(0, packet::Epoch::Initial), (1, packet::Epoch::Handshake)]
+        {
             r.on_packet_sent(
                 test_utils::helper_packet_sent(pkt_num, now, 1000),
                 epoch,
