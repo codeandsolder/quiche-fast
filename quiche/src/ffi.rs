@@ -3183,8 +3183,13 @@ mod tests {
         assert!(unsafe { ffi_ptr_mut(misaligned.cast_mut()) }.is_none());
 
         let addr = ptr::NonNull::<sockaddr>::dangling().as_ptr();
-        let misaligned_addr = addr.cast::<u8>().wrapping_add(1).cast::<sockaddr>();
-        assert!(optional_std_addr_from_c(misaligned_addr, size_of::<sockaddr>() as socklen_t).is_err());
+        let misaligned_addr =
+            addr.cast::<u8>().wrapping_add(1).cast::<sockaddr>();
+        assert!(optional_std_addr_from_c(
+            misaligned_addr,
+            size_of::<sockaddr>() as socklen_t
+        )
+        .is_err());
     }
 
     #[test]
