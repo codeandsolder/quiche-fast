@@ -124,6 +124,14 @@ macro_rules! ffi_mut {
     }};
 }
 
+fn ffi_shutdown_from_c(direction: c_int) -> Option<Shutdown> {
+    match direction {
+        0 => Some(Shutdown::Read),
+        1 => Some(Shutdown::Write),
+        _ => None,
+    }
+}
+
 fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
         Err(FFI_ERR_INVALID_ARGUMENT)
@@ -691,7 +699,8 @@ pub extern "C" fn quiche_header_info(
     scid: *mut u8, scid_len: *mut size_t, dcid: *mut u8, dcid_len: *mut size_t,
     token: *mut u8, token_len: *mut size_t,
 ) -> c_int {
-    let Some(buf) = (unsafe { ffi_slice_from_raw_parts_mut(buf, buf_len) }) else {
+    let Some(buf) = (unsafe { ffi_slice_from_raw_parts_mut(buf, buf_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
     let version = ffi_mut!(version, FFI_ERR_INVALID_ARGUMENT as c_int);
@@ -718,7 +727,8 @@ pub extern "C" fn quiche_header_info(
     if *scid_len < hdr.scid.len() {
         return -1;
     }
-    let Some(scid) = (unsafe { ffi_slice_from_raw_parts_mut(scid, *scid_len) }) else {
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts_mut(scid, *scid_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
     scid[..hdr.scid.len()].copy_from_slice(&hdr.scid);
@@ -727,7 +737,8 @@ pub extern "C" fn quiche_header_info(
     if *dcid_len < hdr.dcid.len() {
         return -1;
     }
-    let Some(dcid) = (unsafe { ffi_slice_from_raw_parts_mut(dcid, *dcid_len) }) else {
+    let Some(dcid) = (unsafe { ffi_slice_from_raw_parts_mut(dcid, *dcid_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
     dcid[..hdr.dcid.len()].copy_from_slice(&hdr.dcid);
@@ -737,7 +748,9 @@ pub extern "C" fn quiche_header_info(
         if *token_len < tok.len() {
             return -1;
         }
-        let Some(token) = (unsafe { ffi_slice_from_raw_parts_mut(token, *token_len) }) else {
+        let Some(token) =
+            (unsafe { ffi_slice_from_raw_parts_mut(token, *token_len) })
+        else {
             return FFI_ERR_INVALID_ARGUMENT as c_int;
         };
         token[..tok.len()].copy_from_slice(&tok);
@@ -763,7 +776,8 @@ pub extern "C" fn quiche_accept(
     let odcid = if odcid_len == 0 {
         None
     } else {
-        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) }) else {
+        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) })
+        else {
             return ptr::null_mut();
         };
         Some(ConnectionId::from_ref(odcid))
@@ -828,7 +842,8 @@ pub extern "C" fn quiche_negotiate_version(
     let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) }) else {
         return FFI_ERR_INVALID_ARGUMENT;
     };
-    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) }) else {
+    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT;
     };
 
@@ -863,10 +878,12 @@ pub extern "C" fn quiche_retry(
     else {
         return FFI_ERR_INVALID_ARGUMENT;
     };
-    let Some(token) = (unsafe { ffi_slice_from_raw_parts(token, token_len) }) else {
+    let Some(token) = (unsafe { ffi_slice_from_raw_parts(token, token_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT;
     };
-    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) }) else {
+    let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) })
+    else {
         return FFI_ERR_INVALID_ARGUMENT;
     };
 
@@ -895,7 +912,8 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     let dcid = if dcid_len == 0 {
         None
     } else {
-        let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) }) else {
+        let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) })
+        else {
             return ptr::null_mut();
         };
         Some(ConnectionId::from_ref(dcid))
@@ -957,7 +975,8 @@ pub extern "C" fn quiche_conn_new_with_tls(
     let odcid = if odcid_len == 0 {
         None
     } else {
-        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) }) else {
+        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) })
+        else {
             return ptr::null_mut();
         };
         Some(ConnectionId::from_ref(odcid))
@@ -991,8 +1010,9 @@ pub extern "C" fn quiche_conn_new_with_tls(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_set_keylog_path(
-    conn: &mut Connection, path: *const c_char,
+    conn: *mut Connection, path: *const c_char,
 ) -> bool {
+    let conn = ffi_mut!(conn, false);
     let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
         return false;
     };
@@ -1015,7 +1035,8 @@ pub extern "C" fn quiche_conn_set_keylog_path(
 
 #[no_mangle]
 #[cfg(unix)]
-pub extern "C" fn quiche_conn_set_keylog_fd(conn: &mut Connection, fd: c_int) {
+pub extern "C" fn quiche_conn_set_keylog_fd(conn: *mut Connection, fd: c_int) {
+    let conn = ffi_mut!(conn, ());
     let f = unsafe { std::fs::File::from_raw_fd(fd) };
     let writer = std::io::BufWriter::new(f);
 
@@ -1025,9 +1046,10 @@ pub extern "C" fn quiche_conn_set_keylog_fd(conn: &mut Connection, fd: c_int) {
 #[no_mangle]
 #[cfg(feature = "qlog")]
 pub extern "C" fn quiche_conn_set_qlog_path(
-    conn: &mut Connection, path: *const c_char, log_title: *const c_char,
+    conn: *mut Connection, path: *const c_char, log_title: *const c_char,
     log_desc: *const c_char,
 ) -> bool {
+    let conn = ffi_mut!(conn, false);
     let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
         return false;
     };
@@ -1061,9 +1083,10 @@ pub extern "C" fn quiche_conn_set_qlog_path(
 #[no_mangle]
 #[cfg(all(unix, feature = "qlog"))]
 pub extern "C" fn quiche_conn_set_qlog_fd(
-    conn: &mut Connection, fd: c_int, log_title: *const c_char,
+    conn: *mut Connection, fd: c_int, log_title: *const c_char,
     log_desc: *const c_char,
 ) {
+    let conn = ffi_mut!(conn, ());
     let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
         return;
     };
@@ -1083,8 +1106,9 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_set_session(
-    conn: &mut Connection, buf: *const u8, buf_len: size_t,
+    conn: *mut Connection, buf: *const u8, buf_len: size_t,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
     let Some(buf) = (unsafe { ffi_slice_from_raw_parts(buf, buf_len) }) else {
         return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
@@ -1098,8 +1122,9 @@ pub extern "C" fn quiche_conn_set_session(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_set_max_idle_timeout(
-    conn: &mut Connection, v: u64,
+    conn: *mut Connection, v: u64,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
     match conn.set_max_idle_timeout(v) {
         Ok(()) => 0,
 
@@ -1108,26 +1133,32 @@ pub extern "C" fn quiche_conn_set_max_idle_timeout(
 }
 
 #[repr(C)]
-pub struct RecvInfo<'a> {
-    from: &'a sockaddr,
+pub struct RecvInfo {
+    from: *const sockaddr,
     from_len: socklen_t,
-    to: &'a sockaddr,
+    to: *const sockaddr,
     to_len: socklen_t,
 }
 
-impl From<&RecvInfo<'_>> for crate::RecvInfo {
-    fn from(info: &RecvInfo) -> crate::RecvInfo {
-        crate::RecvInfo {
-            from: std_addr_from_c(info.from, info.from_len),
-            to: std_addr_from_c(info.to, info.to_len),
-        }
+impl RecvInfo {
+    fn to_internal(&self) -> Option<crate::RecvInfo> {
+        Some(crate::RecvInfo {
+            from: ffi_std_addr_from_c(self.from, self.from_len)?,
+            to: ffi_std_addr_from_c(self.to, self.to_len)?,
+        })
     }
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_recv(
-    conn: &mut Connection, buf: *mut u8, buf_len: size_t, info: &RecvInfo,
+    conn: *mut Connection, buf: *mut u8, buf_len: size_t, info: *const RecvInfo,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let info = ffi_ref!(info, FFI_ERR_INVALID_ARGUMENT);
+    let Some(info) = info.to_internal() else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+
     if let Err(e) = validate_ssize_len(buf_len) {
         return e;
     }
@@ -1137,7 +1168,7 @@ pub extern "C" fn quiche_conn_recv(
         return FFI_ERR_INVALID_ARGUMENT;
     };
 
-    match conn.recv(buf, info.into()) {
+    match conn.recv(buf, info) {
         Ok(v) => v as ssize_t,
 
         Err(e) => e.to_c(),
@@ -1156,8 +1187,11 @@ pub struct SendInfo {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_send(
-    conn: &mut Connection, out: *mut u8, out_len: size_t, out_info: &mut SendInfo,
+    conn: *mut Connection, out: *mut u8, out_len: size_t, out_info: *mut SendInfo,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let out_info = ffi_mut!(out_info, FFI_ERR_INVALID_ARGUMENT);
+
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
     }
@@ -1183,16 +1217,23 @@ pub extern "C" fn quiche_conn_send(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_send_on_path(
-    conn: &mut Connection, out: *mut u8, out_len: size_t, from: *const sockaddr,
+    conn: *mut Connection, out: *mut u8, out_len: size_t, from: *const sockaddr,
     from_len: socklen_t, to: *const sockaddr, to_len: socklen_t,
-    out_info: &mut SendInfo,
+    out_info: *mut SendInfo,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let out_info = ffi_mut!(out_info, FFI_ERR_INVALID_ARGUMENT);
+
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
     }
 
-    let from = optional_std_addr_from_c(from, from_len);
-    let to = optional_std_addr_from_c(to, to_len);
+    let Some(from) = ffi_optional_std_addr_from_c(from, from_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
+    let Some(to) = ffi_optional_std_addr_from_c(to, to_len) else {
+        return FFI_ERR_INVALID_ARGUMENT;
+    };
     let Some(out) = (unsafe { ffi_slice_from_raw_parts_mut(out, out_len) })
     else {
         return FFI_ERR_INVALID_ARGUMENT;
@@ -1214,9 +1255,13 @@ pub extern "C" fn quiche_conn_send_on_path(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_recv(
-    conn: &mut Connection, stream_id: u64, out: *mut u8, out_len: size_t,
-    fin: &mut bool, out_error_code: &mut u64,
+    conn: *mut Connection, stream_id: u64, out: *mut u8, out_len: size_t,
+    fin: *mut bool, out_error_code: *mut u64,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let fin = ffi_mut!(fin, FFI_ERR_INVALID_ARGUMENT);
+    let out_error_code = ffi_mut!(out_error_code, FFI_ERR_INVALID_ARGUMENT);
+
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
     }
@@ -1246,9 +1291,12 @@ pub extern "C" fn quiche_conn_stream_recv(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_send(
-    conn: &mut Connection, stream_id: u64, buf: *const u8, buf_len: size_t,
-    fin: bool, out_error_code: &mut u64,
+    conn: *mut Connection, stream_id: u64, buf: *const u8, buf_len: size_t,
+    fin: bool, out_error_code: *mut u64,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
+    let out_error_code = ffi_mut!(out_error_code, FFI_ERR_INVALID_ARGUMENT);
+
     if let Err(e) = validate_ssize_len(buf_len) {
         return e;
     }
@@ -1273,8 +1321,9 @@ pub extern "C" fn quiche_conn_stream_send(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_priority(
-    conn: &mut Connection, stream_id: u64, urgency: u8, incremental: bool,
+    conn: *mut Connection, stream_id: u64, urgency: u8, incremental: bool,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
     match conn.stream_priority(stream_id, urgency, incremental) {
         Ok(_) => 0,
 
@@ -1284,8 +1333,12 @@ pub extern "C" fn quiche_conn_stream_priority(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_shutdown(
-    conn: &mut Connection, stream_id: u64, direction: Shutdown, err: u64,
+    conn: *mut Connection, stream_id: u64, direction: c_int, err: u64,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(direction) = ffi_shutdown_from_c(direction) else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
+    };
     match conn.stream_shutdown(stream_id, direction, err) {
         Ok(_) => 0,
 
@@ -1295,8 +1348,9 @@ pub extern "C" fn quiche_conn_stream_shutdown(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_capacity(
-    conn: &mut Connection, stream_id: u64,
+    conn: *mut Connection, stream_id: u64,
 ) -> ssize_t {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT);
     match conn.stream_capacity(stream_id) {
         Ok(v) => v as ssize_t,
 
@@ -1314,14 +1368,16 @@ pub extern "C" fn quiche_conn_stream_readable(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_stream_readable_next(conn: &mut Connection) -> i64 {
+pub extern "C" fn quiche_conn_stream_readable_next(conn: *mut Connection) -> i64 {
+    let conn = ffi_mut!(conn, -1);
     conn.stream_readable_next().map(|v| v as i64).unwrap_or(-1)
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_writable(
-    conn: &mut Connection, stream_id: u64, len: usize,
+    conn: *mut Connection, stream_id: u64, len: usize,
 ) -> c_int {
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
     match conn.stream_writable(stream_id, len) {
         Ok(true) => 1,
 
@@ -1332,7 +1388,8 @@ pub extern "C" fn quiche_conn_stream_writable(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_stream_writable_next(conn: &mut Connection) -> i64 {
+pub extern "C" fn quiche_conn_stream_writable_next(conn: *mut Connection) -> i64 {
+    let conn = ffi_mut!(conn, -1);
     conn.stream_writable_next().map(|v| v as i64).unwrap_or(-1)
 }
 
@@ -1381,14 +1438,13 @@ pub extern "C" fn quiche_conn_is_readable(conn: *const Connection) -> bool {
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_close(
-    conn: &mut Connection, app: bool, err: u64, reason: *const u8,
+    conn: *mut Connection, app: bool, err: u64, reason: *const u8,
     reason_len: size_t,
 ) -> c_int {
-    let reason = if reason.is_null() {
-        assert_eq!(reason_len, 0);
-        &[]
-    } else {
-        unsafe { slice::from_raw_parts(reason, reason_len) }
+    let conn = ffi_mut!(conn, FFI_ERR_INVALID_ARGUMENT as c_int);
+    let Some(reason) = (unsafe { ffi_slice_from_raw_parts(reason, reason_len) })
+    else {
+        return FFI_ERR_INVALID_ARGUMENT as c_int;
     };
 
     match conn.close(app, err, reason) {
@@ -1421,7 +1477,8 @@ pub extern "C" fn quiche_conn_timeout_as_millis(conn: *const Connection) -> u64 
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_conn_on_timeout(conn: &mut Connection) {
+pub extern "C" fn quiche_conn_on_timeout(conn: *mut Connection) {
+    let conn = ffi_mut!(conn, ());
     conn.on_timeout()
 }
 
@@ -2458,7 +2515,8 @@ fn ffi_std_addr_from_c(
             if addr_len as usize != size_of::<sockaddr_in>() {
                 return None;
             }
-            let in4 = unsafe { ffi_ptr_ref(addr as *const _ as *const sockaddr_in) }?;
+            let in4 =
+                unsafe { ffi_ptr_ref(addr as *const _ as *const sockaddr_in) }?;
 
             #[cfg(not(windows))]
             let ip_addr = Ipv4Addr::from(u32::from_be(in4.sin_addr.s_addr));
@@ -2508,14 +2566,14 @@ fn ffi_std_addr_from_c(
     }
 }
 
-fn optional_std_addr_from_c(
+fn ffi_optional_std_addr_from_c(
     addr: *const sockaddr, addr_len: socklen_t,
-) -> Option<SocketAddr> {
-    if addr.is_null() || addr_len == 0 {
-        return None;
+) -> Option<Option<SocketAddr>> {
+    match (addr.is_null(), addr_len == 0) {
+        (true, true) => Some(None),
+        (false, false) => ffi_std_addr_from_c(addr, addr_len).map(Some),
+        _ => None,
     }
-
-    Some(std_addr_from_c(unsafe { &*addr }, addr_len))
 }
 
 fn std_addr_from_c(addr: &sockaddr, addr_len: socklen_t) -> SocketAddr {
@@ -2801,6 +2859,107 @@ mod tests {
     }
 
     #[test]
+    fn data_path_boundary_rejects_invalid_metadata() {
+        let invalid = FFI_ERR_INVALID_ARGUMENT;
+
+        assert!(!quiche_conn_set_keylog_path(ptr::null_mut(), ptr::null()));
+        #[cfg(unix)]
+        quiche_conn_set_keylog_fd(ptr::null_mut(), -1);
+        assert_eq!(
+            quiche_conn_set_session(ptr::null_mut(), ptr::null(), 0),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_set_max_idle_timeout(ptr::null_mut(), 0),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_recv(ptr::null_mut(), ptr::null_mut(), 0, ptr::null()),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_send(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut()
+            ),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_send_on_path(
+                ptr::null_mut(),
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null(),
+                0,
+                ptr::null_mut(),
+            ),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_stream_recv(
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+            ),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_stream_send(
+                ptr::null_mut(),
+                0,
+                ptr::null(),
+                0,
+                false,
+                ptr::null_mut(),
+            ),
+            invalid
+        );
+        assert_eq!(
+            quiche_conn_stream_priority(ptr::null_mut(), 0, 0, false),
+            invalid as c_int
+        );
+        assert_eq!(
+            quiche_conn_stream_shutdown(ptr::null_mut(), 0, 0, 0),
+            invalid as c_int
+        );
+        assert_eq!(quiche_conn_stream_capacity(ptr::null_mut(), 0), invalid);
+        assert_eq!(quiche_conn_stream_readable_next(ptr::null_mut()), -1);
+        assert_eq!(
+            quiche_conn_stream_writable(ptr::null_mut(), 0, 0),
+            invalid as c_int
+        );
+        assert_eq!(quiche_conn_stream_writable_next(ptr::null_mut()), -1);
+        assert_eq!(
+            quiche_conn_close(ptr::null_mut(), false, 0, ptr::null(), 0),
+            invalid as c_int
+        );
+        quiche_conn_on_timeout(ptr::null_mut());
+
+        assert!(matches!(ffi_shutdown_from_c(0), Some(Shutdown::Read)));
+        assert!(matches!(ffi_shutdown_from_c(1), Some(Shutdown::Write)));
+        assert!(ffi_shutdown_from_c(-1).is_none());
+        assert!(ffi_shutdown_from_c(2).is_none());
+
+        assert!(ffi_optional_std_addr_from_c(ptr::null(), 0).is_some());
+        assert!(ffi_optional_std_addr_from_c(ptr::null(), 1).is_none());
+
+        let info = RecvInfo {
+            from: ptr::null(),
+            from_len: 1,
+            to: ptr::null(),
+            to_len: 0,
+        };
+        assert!(info.to_internal().is_none());
+    }
+
+    #[test]
     fn header_info_rejects_null_output_metadata() {
         let mut packet = [0u8; 1];
         let mut ty = 0;
@@ -2831,7 +2990,7 @@ mod tests {
         let aligned = ptr::NonNull::<u64>::dangling().as_ptr().cast::<u8>();
         let misaligned = aligned.wrapping_add(1).cast::<u64>();
         assert!(unsafe { ffi_ptr_ref(misaligned) }.is_none());
-        assert!(unsafe { ffi_ptr_mut(misaligned.cast_mut()) }.is_none());
+        assert!(unsafe { ffi_ptr_mut(misaligned) }.is_none());
     }
 
     #[test]
