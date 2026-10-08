@@ -3265,7 +3265,11 @@ fn reset_stream_data_recvd(
     }];
 
     let pkt_type = Type::Short;
-    assert_eq!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf), Ok(40));
+    // The server response carries an ACK. Its encoded size is not stable: the
+    // optimistic-ACK defense intentionally skips packet numbers, which can add
+    // another ACK range. This test cares about RESET_STREAM semantics, not the
+    // exact ACK encoding length.
+    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
     // Server is notified of stream readability, due to reset.
     let mut r = pipe.server.readable();
@@ -3341,7 +3345,9 @@ fn reset_stream_data_not_recvd(
     }];
 
     let pkt_type = Type::Short;
-    assert_eq!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf), Ok(40));
+    // The response is an ACK whose wire size can vary when deliberate packet-
+    // number gaps add another ACK range; only successful processing matters.
+    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
     // Server is notified of stream readability, due to reset.
     let mut r = pipe.server.readable();
@@ -3355,8 +3361,9 @@ fn reset_stream_data_not_recvd(
 
     assert!(pipe.server.stream_finished(0));
 
-    // Sending RESET_STREAM again shouldn't make stream readable again.
-    assert_eq!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf), Ok(40));
+    // Sending RESET_STREAM again shouldn't make stream readable again. The
+    // response ACK length is likewise incidental here.
+    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
     let mut r = pipe.server.readable();
     assert_eq!(r.next(), None);
