@@ -2384,8 +2384,8 @@ pub extern "C" fn quiche_conn_path_event_next(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> u32 {
-    let ev = ffi_ref!(ev, u32::MAX);
+pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> c_int {
+    let ev = ffi_ref!(ev, -1);
 
     match ev {
         PathEvent::New { .. } => 0,
@@ -3172,7 +3172,7 @@ mod tests {
             invalid as c_int
         );
         assert!(quiche_conn_path_event_next(ptr::null_mut()).is_null());
-        assert_eq!(quiche_path_event_type(ptr::null()), u32::MAX);
+        assert_eq!(quiche_path_event_type(ptr::null()), -1);
         quiche_path_event_new(
             ptr::null(),
             ptr::null_mut(),
