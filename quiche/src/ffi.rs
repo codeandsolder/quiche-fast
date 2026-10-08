@@ -884,44 +884,48 @@ pub extern "C" fn quiche_retry(
 #[cfg(feature = "custom-client-dcid")]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
-    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
-    config: &Config, ssl: *mut c_void,
+    local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
+    peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
 ) -> *mut Connection {
-    {
-        let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
-        let scid = ConnectionId::from_ref(scid);
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return ptr::null_mut();
+    };
+    let scid = ConnectionId::from_ref(scid);
 
-        let dcid = if !dcid.is_null() && dcid_len > 0 {
-            Some(ConnectionId::from_ref(unsafe {
-                slice::from_raw_parts(dcid, dcid_len)
-            }))
-        } else {
-            None
+    let dcid = if dcid_len == 0 {
+        None
+    } else {
+        let Some(dcid) = (unsafe { ffi_slice_from_raw_parts(dcid, dcid_len) }) else {
+            return ptr::null_mut();
         };
+        Some(ConnectionId::from_ref(dcid))
+    };
 
-        let local = std_addr_from_c(local, local_len);
-        let peer = std_addr_from_c(peer, peer_len);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
+    let config = ffi_ref!(config, ptr::null_mut());
 
-        let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
-            Ok(v) => v,
+    let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
+        Ok(v) => v,
+        Err(_) => return ptr::null_mut(),
+    };
 
-            Err(_) => return ptr::null_mut(),
-        };
-
-        match Connection::with_tls(
-            &scid,
-            None, // retry_cids
-            dcid.as_ref(),
-            local,
-            peer,
-            config,
-            tls,
-            false,
-        ) {
-            Ok(c) => Box::into_raw(Box::new(c)),
-
-            Err(_) => ptr::null_mut(),
-        }
+    match Connection::with_tls(
+        &scid,
+        None,
+        dcid.as_ref(),
+        local,
+        peer,
+        config,
+        tls,
+        false,
+    ) {
+        Ok(c) => Box::into_raw(Box::new(c)),
+        Err(_) => ptr::null_mut(),
     }
 }
 
@@ -929,9 +933,9 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 #[cfg(not(feature = "custom-client-dcid"))]
 #[allow(unused_variables)]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
-    scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
-    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
-    config: &Config, ssl: *mut c_void,
+    _scid: *const u8, _scid_len: size_t, _dcid: *const u8, _dcid_len: size_t,
+    _local: *const sockaddr, _local_len: socklen_t, _peer: *const sockaddr,
+    _peer_len: socklen_t, _config: *const Config, _ssl: *mut c_void,
 ) -> *mut Connection {
     // It's always an error to call this function without the custom-client-dcid
     // feature enabled.
@@ -941,18 +945,22 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 #[no_mangle]
 pub extern "C" fn quiche_conn_new_with_tls(
     scid: *const u8, scid_len: size_t, odcid: *const u8, odcid_len: size_t,
-    local: &sockaddr, local_len: socklen_t, peer: &sockaddr, peer_len: socklen_t,
-    config: &Config, ssl: *mut c_void, is_server: bool,
+    local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
+    peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
+    is_server: bool,
 ) -> *mut Connection {
-    let scid = unsafe { slice::from_raw_parts(scid, scid_len) };
+    let Some(scid) = (unsafe { ffi_slice_from_raw_parts(scid, scid_len) }) else {
+        return ptr::null_mut();
+    };
     let scid = ConnectionId::from_ref(scid);
 
-    let odcid = if !odcid.is_null() && odcid_len > 0 {
-        Some(ConnectionId::from_ref(unsafe {
-            slice::from_raw_parts(odcid, odcid_len)
-        }))
-    } else {
+    let odcid = if odcid_len == 0 {
         None
+    } else {
+        let Some(odcid) = (unsafe { ffi_slice_from_raw_parts(odcid, odcid_len) }) else {
+            return ptr::null_mut();
+        };
+        Some(ConnectionId::from_ref(odcid))
     };
 
     let retry_cids = odcid.as_ref().map(|odcid| RetryConnectionIds {
@@ -960,12 +968,16 @@ pub extern "C" fn quiche_conn_new_with_tls(
         retry_source_cid: &scid,
     });
 
-    let local = std_addr_from_c(local, local_len);
-    let peer = std_addr_from_c(peer, peer_len);
+    let Some(local) = ffi_std_addr_from_c(local, local_len) else {
+        return ptr::null_mut();
+    };
+    let Some(peer) = ffi_std_addr_from_c(peer, peer_len) else {
+        return ptr::null_mut();
+    };
+    let config = ffi_ref!(config, ptr::null_mut());
 
     let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
         Ok(v) => v,
-
         Err(_) => return ptr::null_mut(),
     };
 
@@ -973,7 +985,6 @@ pub extern "C" fn quiche_conn_new_with_tls(
         &scid, retry_cids, None, local, peer, config, tls, is_server,
     ) {
         Ok(c) => Box::into_raw(Box::new(c)),
-
         Err(_) => ptr::null_mut(),
     }
 }
@@ -2752,6 +2763,38 @@ mod tests {
             0,
             ptr::null(),
             0,
+            ptr::null_mut(),
+        )
+        .is_null());
+    }
+
+    #[test]
+    fn tls_connection_constructors_reject_invalid_pointer_metadata() {
+        assert!(quiche_conn_new_with_tls(
+            ptr::null(),
+            1,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            ptr::null_mut(),
+            false,
+        )
+        .is_null());
+
+        assert!(quiche_conn_new_with_tls_and_client_dcid(
+            ptr::null(),
+            1,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
+            0,
+            ptr::null(),
             ptr::null_mut(),
         )
         .is_null());
