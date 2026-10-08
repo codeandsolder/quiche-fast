@@ -130,9 +130,15 @@ mod httpbin_tests {
     #[derive(Debug, serde::Deserialize)]
     struct HttpBinResponseBody {
         args: Option<HashMap<String, String>>,
-        #[expect(dead_code, reason = "Retained for API/test parity across build configurations")]
+        #[expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )]
         data: Option<String>,
-        #[expect(dead_code, reason = "Retained for API/test parity across build configurations")]
+        #[expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )]
         files: Option<HashMap<String, String>>,
         form: Option<HashMap<String, String>>,
         headers: Option<HashMap<String, String>>,
@@ -143,7 +149,10 @@ mod httpbin_tests {
         #[serde(rename = "content-type")]
         content_type: Option<Vec<String>>,
         origin: Option<String>,
-        #[expect(dead_code, reason = "Retained for API/test parity across build configurations")]
+        #[expect(
+            dead_code,
+            reason = "Retained for API/test parity across build configurations"
+        )]
         url: Option<String>,
     }
 
