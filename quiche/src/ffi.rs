@@ -3180,7 +3180,7 @@ mod tests {
         let aligned = ptr::NonNull::<u16>::dangling().as_ptr();
         let misaligned = aligned.cast::<u8>().wrapping_add(1).cast::<u16>();
         assert!(unsafe { ffi_ptr_ref(misaligned) }.is_none());
-        assert!(unsafe { ffi_ptr_mut(misaligned.cast_mut()) }.is_none());
+        assert!(unsafe { ffi_ptr_mut(misaligned) }.is_none());
 
         let addr = ptr::NonNull::<sockaddr>::dangling().as_ptr();
         let misaligned_addr =
