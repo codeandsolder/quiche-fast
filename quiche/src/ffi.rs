@@ -101,11 +101,31 @@ use crate::*;
 
 const FFI_ERR_INVALID_ARGUMENT: ssize_t = -24;
 
+unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+        return None;
+    }
+
+    // SAFETY: null and alignment are checked above. Allocation validity and
+    // lifetime remain part of the C caller contract.
+    Some(unsafe { &*ptr })
+}
+
+unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+        return None;
+    }
+
+    // SAFETY: null and alignment are checked above. Allocation validity,
+    // lifetime and exclusivity remain part of the C caller contract.
+    Some(unsafe { &mut *ptr })
+}
+
 macro_rules! ffi_ref {
     ($ptr:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { $ptr.as_ref() } {
+        match unsafe { ffi_ptr_ref($ptr) } {
             Some(value) => value,
             None => return,
         }
@@ -113,7 +133,7 @@ macro_rules! ffi_ref {
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { $ptr.as_ref() } {
+        match unsafe { ffi_ptr_ref($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -125,7 +145,7 @@ macro_rules! ffi_mut {
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public C
         // API.
-        match unsafe { $ptr.as_mut() } {
+        match unsafe { ffi_ptr_mut($ptr) } {
             Some(value) => value,
             None => return,
         }
@@ -134,7 +154,7 @@ macro_rules! ffi_mut {
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public
         // C API.
-        match unsafe { $ptr.as_mut() } {
+        match unsafe { ffi_ptr_mut($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -2429,8 +2449,8 @@ pub extern "C" fn quiche_conn_path_event_next(
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> u32 {
-    let ev = ffi_ref!(ev, u32::MAX);
+pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> c_int {
+    let ev = ffi_ref!(ev, -1);
 
     match ev {
         PathEvent::New { .. } => 0,
@@ -2644,7 +2664,11 @@ fn optional_std_addr_from_c(
         return Ok(None);
     }
 
-    std_addr_from_c(unsafe { &*addr }, addr_len).map(Some)
+    let Some(addr) = (unsafe { ffi_ptr_ref(addr) }) else {
+        return Err(());
+    };
+
+    std_addr_from_c(addr, addr_len).map(Some)
 }
 
 fn std_addr_from_c(
@@ -3144,7 +3168,28 @@ mod tests {
         assert_eq!(quiche_conn_max_send_udp_payload_size(ptr::null()), 0);
         assert_eq!(quiche_conn_timeout_as_nanos(ptr::null()), 0);
         assert_eq!(quiche_conn_send_quantum(ptr::null()), 0);
-        assert_eq!(quiche_path_event_type(ptr::null()), u32::MAX);
+        assert_eq!(quiche_path_event_type(ptr::null()), -1);
+    }
+
+    #[test]
+    fn checked_raw_pointers_reject_null_and_misalignment() {
+        // SAFETY: these helpers validate pointer metadata before dereference.
+        assert!(unsafe { ffi_ptr_ref::<u16>(ptr::null()) }.is_none());
+        assert!(unsafe { ffi_ptr_mut::<u16>(ptr::null_mut()) }.is_none());
+
+        let aligned = ptr::NonNull::<u16>::dangling().as_ptr();
+        let misaligned = aligned.cast::<u8>().wrapping_add(1).cast::<u16>();
+        assert!(unsafe { ffi_ptr_ref(misaligned) }.is_none());
+        assert!(unsafe { ffi_ptr_mut(misaligned) }.is_none());
+
+        let addr = ptr::NonNull::<sockaddr>::dangling().as_ptr();
+        let misaligned_addr =
+            addr.cast::<u8>().wrapping_add(1).cast::<sockaddr>();
+        assert!(optional_std_addr_from_c(
+            misaligned_addr,
+            size_of::<sockaddr>() as socklen_t
+        )
+        .is_err());
     }
 
     #[test]

@@ -889,6 +889,7 @@ int quiche_conn_migrate(quiche_conn *conn,
                              uint64_t *seq);
 
 enum quiche_path_event_type {
+    QUICHE_PATH_EVENT_INVALID = -1,
     QUICHE_PATH_EVENT_NEW,
     QUICHE_PATH_EVENT_VALIDATED,
     QUICHE_PATH_EVENT_FAILED_VALIDATION,
@@ -903,7 +904,7 @@ typedef struct quiche_path_event quiche_path_event;
 // Retrieves the next event. Returns NULL if there is no event to process.
 quiche_path_event *quiche_conn_path_event_next(quiche_conn *conn);
 
-// Returns the type of the event.
+// Returns the type of the event, or QUICHE_PATH_EVENT_INVALID for NULL.
 enum quiche_path_event_type quiche_path_event_type(const quiche_path_event *ev);
 
 // Should be called if the quiche_path_event_type(...) returns QUICHE_PATH_EVENT_NEW.
