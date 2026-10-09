@@ -81,8 +81,12 @@ bytes = { workspace = true }
 crossbeam = { workspace = true, default-features = false }
 datagram-socket = { workspace = true }
 foundations = { workspace = true, default-features = false, features = [
-  "server-client-common-default",
+  "logging",
+  "metrics",
+  "settings",
+  "testing",
 ] }
+
 futures = { workspace = true }
 futures-util = { workspace = true }
 ipnetwork = { workspace = true }
@@ -108,6 +112,13 @@ tokio-util = { workspace = true, features = [
   "rt",
 ] }
 url = { workspace = true }
+
+# `foundations/tracing` pulls cf-rustracing's backtrace dependency. libc 0.2.190
+# removed dyld APIs that backtrace 0.3.76 still references on Apple mobile OSs.
+# Keep tracing enabled everywhere else, while avoiding that broken dependency
+# edge on iOS/tvOS/watchOS/visionOS until the upstream stack is corrected.
+[target.'cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos")))'.dependencies]
+foundations = { workspace = true, default-features = false, features = ["tracing"] }
 
 [dev-dependencies]
 assert_matches = { workspace = true }
