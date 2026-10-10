@@ -61,6 +61,11 @@ jobs:
       - name: Unused dependency check
         uses: bnjbvr/cargo-machete@135555c9cd9f3b4723dee2766f0cacb99aac092b # main
 
+      - name: Keep Foundations on one ABI
+        shell: bash
+        run: |
+          cargo metadata --format-version 1 | python3 -c 'import json, sys; versions = sorted({p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "foundations"}); print("foundations versions:", ", ".join(versions)); raise SystemExit(0 if len(versions) == 1 else 1)'
+
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
 
