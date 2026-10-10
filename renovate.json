@@ -14,6 +14,16 @@
   "rebaseWhen": "behind-base-branch",
   "packageRules": [
     {
+      "description": "Keep Cargo manifest requirements semver-ranged; Cargo.lock provides reproducibility",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "pin"
+      ],
+      "enabled": false
+    },
+    {
       "description": "Automerge ordinary compatible updates after CI",
       "matchUpdateTypes": [
         "minor",
