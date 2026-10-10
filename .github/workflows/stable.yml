@@ -61,6 +61,11 @@ jobs:
       - name: Unused dependency check
         uses: bnjbvr/cargo-machete@135555c9cd9f3b4723dee2766f0cacb99aac092b # main
 
+      - name: Keep Foundations on one ABI
+        shell: bash
+        run: |
+          cargo metadata --format-version 1 | python3 -c 'import json, sys; versions = sorted({p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "foundations"}); print("foundations versions:", ", ".join(versions)); raise SystemExit(0 if len(versions) == 1 else 1)'
+
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
 
@@ -97,7 +102,7 @@ jobs:
     permissions:
       contents: read
       id-token: write
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@67b13fe5fac98b5387cbbaa74ee4cff3013357c6
     with:
       command: |
         sudo apt-get update -qq
@@ -279,7 +284,7 @@ jobs:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
 
       - name: Install cargo-binstall
-        uses: cargo-bins/cargo-binstall@main
+        uses: cargo-bins/cargo-binstall@f1a7de174e4a50a2de9554a8eefc2340b34a18e9
 
       - name: Install cross
         run: cargo-binstall -y cross

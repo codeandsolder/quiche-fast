@@ -1,8 +1,7 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended",
-    "helpers:pinGitHubActionDigests"
+    "config:best-practices"
   ],
   "forkProcessing": "enabled",
   "dependencyDashboard": true,
@@ -14,6 +13,16 @@
   "prHourlyLimit": 0,
   "rebaseWhen": "behind-base-branch",
   "packageRules": [
+    {
+      "description": "Keep Cargo manifest requirements semver-ranged; Cargo.lock provides reproducibility",
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchUpdateTypes": [
+        "pin"
+      ],
+      "enabled": false
+    },
     {
       "description": "Automerge ordinary compatible updates after CI",
       "matchUpdateTypes": [
@@ -47,5 +56,13 @@
       "minimumReleaseAge": null,
       "automerge": false
     }
-  ]
+  ],
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": [
+      "before 5am on monday"
+    ],
+    "automerge": true,
+    "automergeType": "pr"
+  }
 }
