@@ -28,7 +28,7 @@ jobs:
       SEMGREP_APP_URL: https://cloudflare.semgrep.dev
       SEMGREP_VERSION_CHECK_URL: https://cloudflare.semgrep.dev/api/check-version
     container:
-      image: semgrep/semgrep
+      image: semgrep/semgrep@sha256:529ee8a277ec8adc5b534d7c74eea0a47e9de21d62852b6ba7ac6ba9566845c3
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - run: semgrep ci

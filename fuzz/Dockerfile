@@ -1,4 +1,4 @@
-FROM rustlang/rust:nightly as fuzz
+FROM rustlang/rust:nightly@sha256:804de53425cd96dad8b6447ee5e8cfae1e0fbd11bd09834030064856609d5027 as fuzz
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ RUN make build-fuzz
 ##
 ## quiche-libfuzzer: quiche image for fuzzing
 ##
-FROM debian:latest as quiche-libfuzzer
+FROM debian:latest@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 as quiche-libfuzzer
 
 LABEL maintainer="alessandro@cloudflare.com"
 
