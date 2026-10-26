@@ -228,7 +228,10 @@ pub fn spawn_with_killswitch(
     TASK_KILLSWITCH.spawn_task(fut)
 }
 
-#[deprecated = "activate() was unnecessarily declared async. Use activate_now() instead."]
+#[deprecated(
+    since = "0.2.1",
+    note = "activate() was unnecessarily declared async. Use activate_now() instead."
+)]
 #[expect(
     clippy::unused_async,
     reason = "Preserve the deprecated async API for source compatibility while callers migrate to activate_now"
