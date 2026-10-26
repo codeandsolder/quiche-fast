@@ -63,9 +63,9 @@ struct TaskKillswitch {
     /// their next yield, which may be after this triggers.
     all_killed: watch::Receiver<()>,
     // NOTE: All we want here is to take ownership of `signal_killed` when
-    // activating the killswitch. That code path only runs once per instance, but
-    // requires interior mutability. Using `Mutex` is easier than bothering with
-    // an `UnsafeCell`. The mutex is guaranteed to be unlocked.
+    // activating the killswitch. That code path only runs once per instance,
+    // but requires interior mutability. Using `Mutex` is easier than bothering
+    // with an `UnsafeCell`. The mutex is guaranteed to be unlocked.
     signal_killed: Mutex<Option<watch::Sender<()>>>,
 }
 
@@ -228,7 +228,10 @@ pub fn spawn_with_killswitch(
     TASK_KILLSWITCH.spawn_task(fut)
 }
 
-#[deprecated = "activate() was unnecessarily declared async. Use activate_now() instead."]
+#[deprecated(
+    since = "0.2.1",
+    note = "activate() was unnecessarily declared async. Use activate_now() instead."
+)]
 #[expect(
     clippy::unused_async,
     reason = "Preserve the deprecated async API for source compatibility while callers migrate to activate_now"

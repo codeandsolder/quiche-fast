@@ -365,8 +365,8 @@ pub trait DatagramSocketRecv: Send {
                 Poll::Ready(Ok(())) => read += 1,
 
                 Poll::Ready(Err(e)) if read == 0 => return Poll::Ready(Err(e)),
-                // Only return Ready if at least one datagram was read; otherwise
-                // block.
+                // Only return Ready if at least one datagram was read;
+                // otherwise block.
                 Poll::Pending if read == 0 => return Poll::Pending,
                 Poll::Ready(Err(_)) | Poll::Pending => break,
             }
