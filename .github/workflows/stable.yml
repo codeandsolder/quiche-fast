@@ -15,7 +15,7 @@ env:
   DEFAULT_OPTIONS: "--features=async,ffi,qlog,rpk --workspace"
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
-  RUSTFLAGS: ${{ (startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
+  RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
   RUSTTOOLCHAIN: "1.99.1"
 
 concurrency:
@@ -170,7 +170,7 @@ jobs:
         run: cargo build --workspace --exclude qlog-dancer --exclude quiche_apps --target=${{ matrix.target }} --verbose
 
   quiche_windows:
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: windows-2025
     strategy:
       matrix:
