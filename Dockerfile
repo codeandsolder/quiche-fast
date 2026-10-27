@@ -23,7 +23,7 @@ RUN cargo build --release --manifest-path apps/Cargo.toml
 ##
 ## quiche-base: quiche image for apps
 ##
-FROM debian:latest AS quiche-base
+FROM debian:latest@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS quiche-base
 
 RUN apt-get update && apt-get install -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
@@ -41,7 +41,7 @@ ENV RUST_LOG=info
 ## https://github.com/marten-seemann/quic-network-simulator
 ## https://github.com/marten-seemann/quic-interop-runner
 ##
-FROM martenseemann/quic-network-simulator-endpoint:latest AS quiche-qns
+FROM martenseemann/quic-network-simulator-endpoint:latest@sha256:3b2b9e6fa317da238c8140a7b6d2bf8d4d45a8464b873eecac3ff2a32520b71a AS quiche-qns
 
 WORKDIR /quiche
 
