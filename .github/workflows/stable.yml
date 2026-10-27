@@ -16,7 +16,7 @@ env:
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
   RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
-  RUSTTOOLCHAIN: "1.99.0"
+  RUSTTOOLCHAIN: "1.99.1"
 
 concurrency:
   group: stable-${{ github.event.pull_request.number || github.ref }}
@@ -106,10 +106,10 @@ jobs:
       command: |
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
-        cargo +1.99.0 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
-        cargo +1.99.0 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
-        cargo +1.99.0 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
-      rust-toolchain: "1.99.0"
+        cargo +1.99.1 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
+        cargo +1.99.1 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
+        cargo +1.99.1 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
+      rust-toolchain: "1.99.1"
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
@@ -171,7 +171,7 @@ jobs:
 
   quiche_windows:
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-2022
+    runs-on: windows-2025
     strategy:
       matrix:
         target: ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "x86_64-pc-windows-gnu", "i686-pc-windows-gnu"]
@@ -202,8 +202,8 @@ jobs:
           toolchain: ${{ env.RUSTTOOLCHAIN }}
           targets: ${{ matrix.target }}
 
-      # The windows-2022 image preinstalls MSYS2 (gcc 14.2.0) at
-      # `C:\msys64` but doesn't put it on PATH. For x86_64-pc-windows-gnu
+      # The hosted Windows image preinstalls MSYS2 at `C:\msys64` but doesn't
+      # put it on PATH. For x86_64-pc-windows-gnu
       # we rely on these preinstalled tools and just point the C/C++
       # toolchain at them, matching `boring`'s own CI workflow.
       - name: Set up MinGW for 64 bit
