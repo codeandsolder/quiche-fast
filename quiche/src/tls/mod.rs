@@ -121,10 +121,6 @@ struct X509_STORE_CTX {
     _unused: c_void,
 }
 
-#[expect(
-    non_camel_case_types,
-    reason = "Name mirrors the external C/BoringSSL ABI"
-)]
 #[repr(transparent)]
 #[cfg(windows)]
 struct X509 {
