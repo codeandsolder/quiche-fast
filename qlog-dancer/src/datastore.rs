@@ -1856,15 +1856,8 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                 if event_hdr.ty_string.starts_with("HTTP_") {
                     let event = netlog::http::parse_event(&event_hdr, &event);
 
-                    // This will eventually deal with other events, and having
-                    // to refactor back and forth is a waste.
-                    #[expect(
-                        clippy::single_match,
-                        reason = "This match is intentionally shaped for additional event variants"
-                    )]
-                    match event {
-                        Some(netlog::Event::Http(e)) => {
-                            match e {
+                    if let Some(netlog::Event::Http(e)) = event {
+                        match e {
                                 http::Event::HttpStreamJobBoundToRequest(v)  => {
                                     let request_discovery_id = v.params.source_dependency.id;
                                     if let Some(rd) = request_discovery.get_mut(&request_discovery_id) {
@@ -1902,12 +1895,8 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                                     }
                                 }
 
-                                _ => (),
-                            }
-                        },
-
-                        // ignore other events
-                        _ => (),
+                            _ => (),
+                        }
                     }
                 }
 

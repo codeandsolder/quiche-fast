@@ -32,10 +32,6 @@ use super::SourceDependency;
 use regex::Regex;
 use std::convert::TryFrom;
 
-#[allow(
-    clippy::enum_variant_names,
-    reason = "Variants mirror Chrome netlog HTTP/2 event names and are part of the public API"
-)]
 #[derive(Debug)]
 pub enum Event {
     Http2Session(Http2SessionEvent),
@@ -315,10 +311,6 @@ pub struct Http2SessionCloseEvent {
     pub params: Http2SessionCloseParams,
 }
 
-#[allow(
-    clippy::struct_field_names,
-    reason = "Field names mirror Chrome netlog JSON keys and are public"
-)]
 #[derive(Deserialize, Debug, Default)]
 pub struct Htt2SessionStalledMaxStreamsParams {
     pub max_concurrent_streams: u32,

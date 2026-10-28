@@ -415,10 +415,6 @@ pub struct ConnectionStateUpdated {
 
 #[serde_with::skip_serializing_none]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
-#[allow(
-    clippy::struct_field_names,
-    reason = "Field names mirror the published qlog schema and are part of the public API"
-)]
 pub struct TupleAssigned {
     pub tuple_id: String,
     pub tuple_remote: Option<TupleEndpointInfo>,

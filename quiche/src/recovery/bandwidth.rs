@@ -128,7 +128,7 @@ impl Bandwidth {
         not(test),
         expect(
             dead_code,
-            reason = "Retained for API/test parity across build configurations"
+            reason = "test-only rate-conversion assertions inspect the raw bit/s representation; production uses byte/s accessors"
         )
     )]
     pub const fn to_bits_per_second(self) -> u64 {

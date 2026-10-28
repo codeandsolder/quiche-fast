@@ -68,6 +68,10 @@ pub enum Frame {
         mtu_probe: Option<usize>,
     },
 
+    #[expect(
+        clippy::upper_case_acronyms,
+        reason = "ACK is the standardized QUIC frame name"
+    )]
     ACK {
         ack_delay: u64,
         ranges: ranges::RangeSet,

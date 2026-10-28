@@ -35,10 +35,6 @@ use crate::events::ExData;
 /// Times are always logged in units of whole milliseconds with optional
 /// precision, determining the number of decimal places output by the
 /// serializer.
-#[allow(
-    clippy::enum_variant_names,
-    reason = "Variant names are part of the established public qlog API"
-)]
 pub enum EventTimePrecision {
     /// Logging may contain 1 decimal place to ensure float serialization e.g.,
     /// 1.0, 2.0,
@@ -455,7 +451,7 @@ impl QlogStreamer {
     /// Returns the writer.
     #[expect(
         clippy::borrowed_box,
-        reason = "Preserve the established public writer accessor type during the strict-gate migration"
+        reason = "Preserve the established public writer accessor return type for source compatibility"
     )]
     #[must_use]
     pub fn writer(&self) -> &Box<dyn std::io::Write + Send + Sync> {

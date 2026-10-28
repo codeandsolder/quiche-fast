@@ -29,10 +29,6 @@ use serde::Serialize;
 
 use super::EventHeader;
 
-#[allow(
-    clippy::enum_variant_names,
-    reason = "Variants mirror Chrome netlog HTTP/3 event names and are part of the public API"
-)]
 #[derive(Debug)]
 pub enum Event {
     Http3PriorityUpdateSent(Http3PriorityUpdateSentEvent),

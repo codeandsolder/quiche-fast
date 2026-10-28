@@ -191,6 +191,10 @@ pub struct OnLossDetectionTimeoutOutcome {
 }
 
 #[enum_dispatch::enum_dispatch]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "RecoveryOps has one protocol-state transition whose established signature carries the QUIC ACK inputs explicitly"
+)]
 /// Api for the Recovery implementation
 pub trait RecoveryOps {
     fn lost_count(&self) -> usize;
@@ -222,11 +226,6 @@ pub trait RecoveryOps {
     /// sender for optimistic-ACK detection.
     fn on_packet_number_skipped(&mut self, pkt_num: u64);
     fn get_packet_send_time(&self, now: Instant) -> Instant;
-
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "RecoveryOps mirrors the QUIC recovery state-transition inputs across implementations"
-    )]
     fn on_ack_received(
         &mut self, ranges: &RangeSet, ack_delay: u64, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, skip_pn: Option<u64>,

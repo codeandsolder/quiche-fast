@@ -33,6 +33,10 @@
 use std::cmp;
 
 #[derive(Default, Debug)]
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "PRR is the RFC 6937 algorithm name"
+)]
 pub struct PRR {
     // Total bytes delivered during recovery.
     prr_delivered: usize,

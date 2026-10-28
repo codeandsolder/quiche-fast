@@ -25,8 +25,11 @@ categories = ["network-programming"]
 
 [workspace.lints.clippy]
 mem_forget = "deny"
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 
 [workspace.lints.rust]
+unfulfilled_lint_expectations = "deny"
 unexpected_cfgs = { level = "warn", check-cfg = [
   'cfg(capture_keylogs)',
   'cfg(test_invalid_len_compilation_fail)',

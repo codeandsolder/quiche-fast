@@ -70,6 +70,10 @@ struct SSL_CTX {
     _unused: c_void,
 }
 
+#[expect(
+    clippy::upper_case_acronyms,
+    reason = "SSL mirrors the external C/BoringSSL ABI"
+)]
 #[repr(transparent)]
 struct SSL {
     _unused: c_void,
@@ -144,7 +148,7 @@ struct STACK_OF {
 )]
 #[expect(
     dead_code,
-    reason = "Retained for API/test parity across build configurations"
+    reason = "test-only BoringSSL callback ABI mirror includes result variants not exercised by every test"
 )]
 enum ssl_private_key_result_t {
     ssl_private_key_success,

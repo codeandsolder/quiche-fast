@@ -641,7 +641,7 @@ impl<F: BufFactory> SendBuf<F> {
         not(test),
         expect(
             dead_code,
-            reason = "Retained for API/test parity across build configurations"
+            reason = "stream tests inspect buffer-count coalescing and retirement; production does not need this accessor"
         )
     )]
     pub fn bufs_count(&self) -> usize {
