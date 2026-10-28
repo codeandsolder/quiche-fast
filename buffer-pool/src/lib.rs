@@ -194,6 +194,10 @@ impl<const S: usize, T: Default + Reuse> Pool<S, T> {
         pooled
     }
 
+    #[expect(
+        clippy::wrong_self_convention,
+        reason = "Preserve the established public Pool::from_owned API"
+    )]
     pub fn from_owned(&'static self, inner: T) -> Pooled<T> {
         let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % S;
         let shard = &self.queues[shard];

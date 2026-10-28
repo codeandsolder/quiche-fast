@@ -29,6 +29,10 @@ use serde::Serialize;
 
 use super::EventHeader;
 
+#[expect(
+    clippy::enum_variant_names,
+    reason = "Variants mirror Chrome netlog QUIC event names and are part of the public API"
+)]
 #[derive(Debug)]
 pub enum Event {
     QuicSession(QuicSessionEvent),
