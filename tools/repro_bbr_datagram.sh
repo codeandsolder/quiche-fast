@@ -50,7 +50,11 @@ if [[ -f "$root/Cargo.lock" ]]; then
 fi
 
 if [[ -n "$target_dir" ]]; then
-    target="$(cd "$(dirname "$target_dir")" && pwd)/$(basename "$target_dir")"
+    if [[ "$target_dir" == /* ]]; then
+        target=$target_dir
+    else
+        target="$PWD/$target_dir"
+    fi
 else
     target="$temp/target"
 fi
