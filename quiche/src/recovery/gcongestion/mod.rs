@@ -108,6 +108,8 @@ pub(super) trait CongestionControl: Debug {
     fn limit_cwnd(&mut self, _max_cwnd: usize) {}
 
     fn is_in_recovery(&self) -> bool;
+
+    #[cfg(any(test, feature = "qlog"))]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool;
 
     fn pacing_rate(

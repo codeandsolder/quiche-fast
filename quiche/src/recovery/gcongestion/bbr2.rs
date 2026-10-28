@@ -780,6 +780,7 @@ impl CongestionControl for BBRv2 {
         self.last_quiescence_start.is_none()
     }
 
+    #[cfg(any(test, feature = "qlog"))]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool {
         bytes_in_flight >= self.get_congestion_window()
     }

@@ -122,6 +122,7 @@ impl RttStats {
         self.smoothed_rtt
     }
 
+    #[cfg(feature = "qlog")]
     pub(crate) fn latest_rtt(&self) -> Duration {
         self.latest_rtt
     }
