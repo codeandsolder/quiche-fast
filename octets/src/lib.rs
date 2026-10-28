@@ -78,7 +78,6 @@ pub trait OctetsWriter {
     /// partial output. Sinks that perform irreversible writes, such as sending
     /// data over the network, must buffer the output or guarantee success.
     #[cfg(feature = "huffman_hpack")]
-    ///
     /// # Errors
     /// Returns the output sink's error if an encoded chunk cannot be written.
     fn put_huffman_encoded<const LOWER_CASE: bool>(
@@ -341,7 +340,6 @@ impl<'a> Octets<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
-    ///
     /// # Errors
     /// Returns [`BufferTooShortError`] when the requested operation cannot be
     /// completed within the available buffer or encoding width.
@@ -354,7 +352,6 @@ impl<'a> Octets<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
-    ///
     /// # Errors
     /// Returns [`BufferTooShortError`] when the requested operation cannot be
     /// completed within the available buffer or encoding width.
@@ -885,7 +882,6 @@ impl<'a> OctetsMut<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
-    ///
     /// # Errors
     /// Returns the output sink's error if an encoded chunk cannot be written.
     pub fn put_huffman_encoded<const LOWER_CASE: bool>(
@@ -1062,9 +1058,9 @@ pub const fn varint_parse_len(first: u8) -> usize {
 ///
 /// The Huffman code implemented is the one defined for HPACK (RFC7541).
 #[cfg(feature = "huffman_hpack")]
-///
 /// # Errors
-/// Returns [`BufferTooShortError`] if the encoded length cannot be represented safely.
+/// Returns [`BufferTooShortError`] if the encoded length cannot be represented
+/// safely.
 pub fn huffman_encoding_len<const LOWER_CASE: bool>(src: &[u8]) -> Result<usize> {
     use self::huffman_table::ENCODE_TABLE;
 

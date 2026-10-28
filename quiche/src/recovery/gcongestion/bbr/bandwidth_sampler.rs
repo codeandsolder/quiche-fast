@@ -305,7 +305,6 @@ impl MaxAckHeightTracker {
         }
     }
 
-
     #[expect(
         clippy::too_many_arguments,
         reason = "The signature mirrors protocol state and grouping would obscure call sites"
@@ -844,7 +843,6 @@ impl BandwidthSampler {
     pub(crate) fn total_bytes_lost(&self) -> usize {
         self.total_bytes_lost
     }
-
 
     pub(crate) fn max_ack_height(&self) -> Option<usize> {
         self.max_ack_height_tracker

@@ -14734,10 +14734,11 @@ fn server_qlog() {
     pipe.server.qlog_streamer().unwrap().finish_log().unwrap();
 
     let raw = pipe.server.qlog_streamer().unwrap().writer();
-    // SAFETY: this test installed a Cursor<Vec<u8>> as the qlog writer above and
-    // does not replace it before reading it back.
+    // SAFETY: this test installed a Cursor<Vec<u8>> as the qlog writer above
+    // and does not replace it before reading it back.
     let w = unsafe {
-        &*(raw.as_ref() as *const dyn std::io::Write as *const std::io::Cursor<Vec<u8>>)
+        &*(raw.as_ref() as *const dyn std::io::Write
+            as *const std::io::Cursor<Vec<u8>>)
     };
     let bytes = w.get_ref().clone();
 

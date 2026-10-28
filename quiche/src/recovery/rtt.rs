@@ -121,6 +121,7 @@ impl RttStats {
     pub(crate) fn rtt(&self) -> Duration {
         self.smoothed_rtt
     }
+
     pub(crate) fn latest_rtt(&self) -> Duration {
         self.latest_rtt
     }

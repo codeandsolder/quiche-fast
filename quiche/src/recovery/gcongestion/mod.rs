@@ -104,7 +104,6 @@ pub(super) trait CongestionControl: Debug {
     /// remaining unacked packets.
     fn on_retransmission_timeout(&mut self, packets_retransmitted: bool);
 
-
     /// Adjust the current cwnd to a new maximal size
     fn limit_cwnd(&mut self, _max_cwnd: usize) {}
 
