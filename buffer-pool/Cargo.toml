@@ -11,6 +11,11 @@ description = "Pooled in-memory buffers"
 [lints]
 workspace = true
 
+[features]
+# CI-only: enable expectations for lints emitted by latest-nightly Clippy
+# but not by the pinned stable toolchain. No runtime/API behavior changes.
+nightly-clippy-expects = []
+
 [dependencies]
 crossbeam = { workspace = true, features = ["alloc"] }
 foundations = { workspace = true, default-features = false, features = [
