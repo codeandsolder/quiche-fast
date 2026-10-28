@@ -692,10 +692,6 @@ impl HandshakeInfo {
 /// timer expires, or [`ApplicationOverQuic::wait_for_data`] resolves.
 /// Implementors can interact with the underlying connection via the mutable
 /// reference passed to trait methods.
-#[expect(
-    unused_variables,
-    reason = "Signature is shared across feature or platform configurations"
-)] // for default functions
 pub trait ApplicationOverQuic: Send + 'static {
     /// Callback to customize the [`ApplicationOverQuic`] after the QUIC
     /// handshake completed successfully.
@@ -769,8 +765,8 @@ pub trait ApplicationOverQuic: Send + 'static {
     /// any local error. Otherwise, the state of `qconn` depends on the
     /// error type and application behavior.
     fn on_conn_close<M: Metrics>(
-        &mut self, qconn: &mut QuicheConnection, metrics: &M,
-        connection_result: &QuicResult<()>,
+        &mut self, _qconn: &mut QuicheConnection, _metrics: &M,
+        _connection_result: &QuicResult<()>,
     ) {
     }
 }

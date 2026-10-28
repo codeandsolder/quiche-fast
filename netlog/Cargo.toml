@@ -13,6 +13,11 @@ readme = "README.md"
 [lints]
 workspace = true
 
+[features]
+# CI-only: enable expectations for lints emitted by latest-nightly Clippy
+# but not by the pinned stable toolchain. No runtime/API behavior changes.
+nightly-clippy-expects = []
+
 [dependencies]
 log = { workspace = true }
 regex = { workspace = true }

@@ -14734,11 +14734,12 @@ fn server_qlog() {
     pipe.server.qlog_streamer().unwrap().finish_log().unwrap();
 
     let raw = pipe.server.qlog_streamer().unwrap().writer();
-    #[expect(
-        clippy::borrowed_box,
-        reason = "The boxed writer representation is required by this API or test downcast"
-    )]
-    let w: &Box<std::io::Cursor<Vec<u8>>> = unsafe { std::mem::transmute(raw) };
+    // SAFETY: this test installed a Cursor<Vec<u8>> as the qlog writer above
+    // and does not replace it before reading it back.
+    let w = unsafe {
+        &*(raw.as_ref() as *const dyn std::io::Write
+            as *const std::io::Cursor<Vec<u8>>)
+    };
     let bytes = w.get_ref().clone();
 
     let mut reader = QlogSeqReader::new(Box::new(std::io::BufReader::new(

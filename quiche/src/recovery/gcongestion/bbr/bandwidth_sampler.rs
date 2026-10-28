@@ -153,7 +153,7 @@ pub struct SendTimeState {
         not(test),
         expect(
             dead_code,
-            reason = "Retained for API/test parity across build configurations"
+            reason = "BBR sampler tests assert the send-time loss snapshot; production uses the sampler aggregate instead"
         )
     )]
     pub total_bytes_lost: usize,
@@ -303,22 +303,6 @@ impl MaxAckHeightTracker {
             start_new_aggregation_epoch_after_full_round: true,
             reduce_extra_acked_on_bandwidth_increase: true,
         }
-    }
-
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
-    fn reset(&mut self, new_height: usize, new_time: usize) {
-        self.max_ack_height_filter.reset(
-            ExtraAckedEvent {
-                extra_acked: new_height,
-                bytes_acked: 0,
-                time_delta: Duration::ZERO,
-                round: new_time,
-            },
-            new_time,
-        );
     }
 
     #[expect(
@@ -532,7 +516,7 @@ impl BandwidthSampler {
         not(test),
         expect(
             dead_code,
-            reason = "Retained for API/test parity across build configurations"
+            reason = "BBR sampler tests inspect app-limited state through this accessor; production reads the state internally"
         )
     )]
     pub(crate) fn is_app_limited(&self) -> bool {
@@ -858,16 +842,6 @@ impl BandwidthSampler {
 
     pub(crate) fn total_bytes_lost(&self) -> usize {
         self.total_bytes_lost
-    }
-
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
-    pub(crate) fn reset_max_ack_height_tracker(
-        &mut self, new_height: usize, new_time: usize,
-    ) {
-        self.max_ack_height_tracker.reset(new_height, new_time);
     }
 
     pub(crate) fn max_ack_height(&self) -> Option<usize> {

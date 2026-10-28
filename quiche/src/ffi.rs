@@ -999,18 +999,14 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 
 #[no_mangle]
 #[cfg(not(feature = "custom-client-dcid"))]
-#[allow(
-    unused_variables,
-    reason = "Feature-disabled FFI stub preserves the public ABI while rejecting every call"
-)]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
-    scid: *const u8, scid_len: size_t, dcid: *const u8, dcid_len: size_t,
-    local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
-    peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
+    _scid: *const u8, _scid_len: size_t, _dcid: *const u8, _dcid_len: size_t,
+    local: *const sockaddr, _local_len: socklen_t, peer: *const sockaddr,
+    _peer_len: socklen_t, config: *const Config, _ssl: *mut c_void,
 ) -> *mut Connection {
-    let local = ffi_ref!(local, ptr::null_mut());
-    let peer = ffi_ref!(peer, ptr::null_mut());
-    let config = ffi_ref!(config, ptr::null_mut());
+    let _ = ffi_ref!(local, ptr::null_mut());
+    let _ = ffi_ref!(peer, ptr::null_mut());
+    let _ = ffi_ref!(config, ptr::null_mut());
 
     // It's always an error to call this function without the custom-client-dcid
     // feature enabled.

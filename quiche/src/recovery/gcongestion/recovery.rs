@@ -120,7 +120,7 @@ struct RecoveryEpoch {
         not(test),
         expect(
             dead_code,
-            reason = "Retained for API/test parity across build configurations"
+            reason = "test-only recovery bookkeeping exposes the largest sent packet number for path-transition assertions"
         )
     )]
     test_largest_sent_pkt_num_on_path: Option<u64>,

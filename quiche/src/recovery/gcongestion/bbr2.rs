@@ -775,13 +775,12 @@ impl CongestionControl for BBRv2 {
 
     fn on_retransmission_timeout(&mut self, _packets_retransmitted: bool) {}
 
-    fn on_connection_migration(&mut self) {}
-
     fn is_in_recovery(&self) -> bool {
         // TODO(vlad): is this true?
         self.last_quiescence_start.is_none()
     }
 
+    #[cfg(any(test, feature = "qlog"))]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool {
         bytes_in_flight >= self.get_congestion_window()
     }

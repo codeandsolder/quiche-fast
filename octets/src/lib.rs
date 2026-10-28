@@ -24,10 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#![expect(
-    clippy::missing_errors_doc,
-    reason = "all fallible buffer accessors use the crate's single documented BufferTooShortError"
-)]
 //! Zero-copy abstraction for parsing and constructing network packets.
 use std::mem;
 use std::ptr;
@@ -68,6 +64,9 @@ pub trait OctetsWriter {
     type Error;
 
     /// Writes `v` to the output sink.
+    ///
+    /// # Errors
+    /// Returns the output sink's error if the bytes cannot be written.
     fn put_bytes(&mut self, v: &[u8]) -> std::result::Result<(), Self::Error>;
 
     /// Writes `v` to the output sink after HPACK Huffman-encoding it.
@@ -79,6 +78,8 @@ pub trait OctetsWriter {
     /// partial output. Sinks that perform irreversible writes, such as sending
     /// data over the network, must buffer the output or guarantee success.
     #[cfg(feature = "huffman_hpack")]
+    /// # Errors
+    /// Returns the output sink's error if an encoded chunk cannot be written.
     fn put_huffman_encoded<const LOWER_CASE: bool>(
         &mut self, v: &[u8],
     ) -> std::result::Result<(), Self::Error>
@@ -190,42 +191,70 @@ impl<'a> Octets<'a> {
 
     /// Reads an unsigned 8-bit integer from the current offset and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u8(&mut self) -> Result<u8> {
         get_u!(self, u8, 1)
     }
 
     /// Reads an unsigned 8-bit integer from the current offset without
     /// advancing the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn peek_u8(&self) -> Result<u8> {
         peek_u!(self, u8, 1)
     }
 
     /// Reads an unsigned 16-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u16(&mut self) -> Result<u16> {
         get_u!(self, u16, 2)
     }
 
     /// Reads an unsigned 24-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u24(&mut self) -> Result<u32> {
         get_u!(self, u32, 3)
     }
 
     /// Reads an unsigned 32-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u32(&mut self) -> Result<u32> {
         get_u!(self, u32, 4)
     }
 
     /// Reads an unsigned 64-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u64(&mut self) -> Result<u64> {
         get_u!(self, u64, 8)
     }
 
     /// Reads an unsigned variable-length integer in network byte-order from
     /// the current offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_varint(&mut self) -> Result<u64> {
         let first = self.peek_u8()?;
 
@@ -252,6 +281,10 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes(&mut self, len: usize) -> Result<Self> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -269,6 +302,10 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 8-bit integer prefix.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_u8_length(&mut self) -> Result<Self> {
         let len = self.get_u8()?;
         self.get_bytes(len as usize)
@@ -277,6 +314,10 @@ impl<'a> Octets<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 16-bit integer prefix in network
     /// byte-order.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_u16_length(&mut self) -> Result<Self> {
         let len = self.get_u16()?;
         self.get_bytes(len as usize)
@@ -285,6 +326,10 @@ impl<'a> Octets<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned variable-length integer prefix
     /// in network byte-order.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_varint_length(&mut self) -> Result<Self> {
         let len = usize::try_from(self.get_varint()?)
             .map_err(|_| BufferTooShortError)?;
@@ -295,6 +340,9 @@ impl<'a> Octets<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_huffman_decoded(&mut self) -> Result<Vec<u8>> {
         self.get_huffman_decoded_with_max_length(usize::MAX)
     }
@@ -304,6 +352,9 @@ impl<'a> Octets<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_huffman_decoded_with_max_length(
         &mut self, max_len: usize,
     ) -> Result<Vec<u8>> {
@@ -352,6 +403,10 @@ impl<'a> Octets<'a> {
 
     /// Reads `len` bytes from the current offset without copying and without
     /// advancing the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn peek_bytes(&self, len: usize) -> Result<Self> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -366,6 +421,10 @@ impl<'a> Octets<'a> {
     }
 
     /// Rewinds the buffer offset by `len` elements.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub const fn rewind(&mut self, len: usize) -> Result<()> {
         if self.off() < len {
             return Err(BufferTooShortError);
@@ -377,6 +436,10 @@ impl<'a> Octets<'a> {
     }
 
     /// Returns a slice of `len` elements from the current offset.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn slice(&self, len: usize) -> Result<&'a [u8]> {
         if len > self.cap() {
             return Err(BufferTooShortError);
@@ -386,6 +449,10 @@ impl<'a> Octets<'a> {
     }
 
     /// Returns a slice of `len` elements from the end of the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn slice_last(&self, len: usize) -> Result<&'a [u8]> {
         if len > self.cap() {
             return Err(BufferTooShortError);
@@ -396,6 +463,10 @@ impl<'a> Octets<'a> {
     }
 
     /// Advances the buffer's offset.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub const fn skip(&mut self, skip: usize) -> Result<()> {
         if skip > self.cap() {
             return Err(BufferTooShortError);
@@ -469,72 +540,120 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads an unsigned 8-bit integer from the current offset and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u8(&mut self) -> Result<u8> {
         get_u!(self, u8, 1)
     }
 
     /// Reads an unsigned 8-bit integer from the current offset without
     /// advancing the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn peek_u8(&self) -> Result<u8> {
         peek_u!(self, u8, 1)
     }
 
     /// Writes an unsigned 8-bit integer at the current offset and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_u8(&mut self, v: u8) -> Result<&mut [u8]> {
         put_u!(self, u8, v, 1)
     }
 
     /// Reads an unsigned 16-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u16(&mut self) -> Result<u16> {
         get_u!(self, u16, 2)
     }
 
     /// Writes an unsigned 16-bit integer in network byte-order at the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_u16(&mut self, v: u16) -> Result<&mut [u8]> {
         put_u!(self, u16, v, 2)
     }
 
     /// Reads an unsigned 24-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u24(&mut self) -> Result<u32> {
         get_u!(self, u32, 3)
     }
 
     /// Writes an unsigned 24-bit integer in network byte-order at the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_u24(&mut self, v: u32) -> Result<&mut [u8]> {
         put_u!(self, u32, v, 3)
     }
 
     /// Reads an unsigned 32-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u32(&mut self) -> Result<u32> {
         get_u!(self, u32, 4)
     }
 
     /// Writes an unsigned 32-bit integer in network byte-order at the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_u32(&mut self, v: u32) -> Result<&mut [u8]> {
         put_u!(self, u32, v, 4)
     }
 
     /// Reads an unsigned 64-bit integer in network byte-order from the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_u64(&mut self) -> Result<u64> {
         get_u!(self, u64, 8)
     }
 
     /// Writes an unsigned 64-bit integer in network byte-order at the current
     /// offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_u64(&mut self, v: u64) -> Result<&mut [u8]> {
         put_u!(self, u64, v, 8)
     }
 
     /// Reads an unsigned variable-length integer in network byte-order from
     /// the current offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_varint(&mut self) -> Result<u64> {
         let first = self.peek_u8()?;
 
@@ -561,12 +680,20 @@ impl<'a> OctetsMut<'a> {
 
     /// Writes an unsigned variable-length integer in network byte-order at the
     /// current offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_varint(&mut self, v: u64) -> Result<&mut [u8]> {
         self.put_varint_with_len(v, varint_len(v))
     }
 
     /// Writes an unsigned variable-length integer of the specified length, in
     /// network byte-order at the current offset and advances the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn put_varint_with_len(
         &mut self, v: u64, len: usize,
     ) -> Result<&mut [u8]> {
@@ -615,6 +742,10 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes(&mut self, len: usize) -> Result<Octets<'_>> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -632,6 +763,10 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_mut(&mut self, len: usize) -> Result<OctetsMut<'_>> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -649,6 +784,10 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 8-bit integer prefix.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_u8_length(&mut self) -> Result<Octets<'_>> {
         let len = self.get_u8()?;
         self.get_bytes(len as usize)
@@ -657,6 +796,10 @@ impl<'a> OctetsMut<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned 16-bit integer prefix in network
     /// byte-order.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_u16_length(&mut self) -> Result<Octets<'_>> {
         let len = self.get_u16()?;
         self.get_bytes(len as usize)
@@ -665,6 +808,10 @@ impl<'a> OctetsMut<'a> {
     /// Reads `len` bytes from the current offset without copying and advances
     /// the buffer, where `len` is an unsigned variable-length integer prefix
     /// in network byte-order.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn get_bytes_with_varint_length(&mut self) -> Result<Octets<'_>> {
         let len = usize::try_from(self.get_varint()?)
             .map_err(|_| BufferTooShortError)?;
@@ -673,6 +820,10 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads `len` bytes from the current offset without copying and without
     /// advancing the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn peek_bytes(&self, len: usize) -> Result<Octets<'_>> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -688,6 +839,10 @@ impl<'a> OctetsMut<'a> {
 
     /// Reads `len` bytes from the current offset without copying and without
     /// advancing the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn peek_bytes_mut(&mut self, len: usize) -> Result<OctetsMut<'_>> {
         if self.cap() < len {
             return Err(BufferTooShortError);
@@ -702,6 +857,9 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Writes `v` to the current offset.
+    ///
+    /// # Errors
+    /// Returns the output sink's error if the bytes cannot be written.
     pub fn put_bytes(&mut self, v: &[u8]) -> Result<()> {
         let len = v.len();
 
@@ -724,6 +882,8 @@ impl<'a> OctetsMut<'a> {
     ///
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
+    /// # Errors
+    /// Returns the output sink's error if an encoded chunk cannot be written.
     pub fn put_huffman_encoded<const LOWER_CASE: bool>(
         &mut self, v: &[u8],
     ) -> Result<()> {
@@ -731,6 +891,10 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Rewinds the buffer offset by `len` elements.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub const fn rewind(&mut self, len: usize) -> Result<()> {
         if self.off() < len {
             return Err(BufferTooShortError);
@@ -742,6 +906,10 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Splits the buffer in two at the given absolute offset.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub const fn split_at(
         &mut self, off: usize,
     ) -> Result<(OctetsMut<'_>, OctetsMut<'_>)> {
@@ -759,6 +927,10 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Returns a slice of `len` elements from the current offset.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn slice(&'a mut self, len: usize) -> Result<&'a mut [u8]> {
         if len > self.cap() {
             return Err(BufferTooShortError);
@@ -768,6 +940,10 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Returns a slice of `len` elements from the end of the buffer.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub fn slice_last(&'a mut self, len: usize) -> Result<&'a mut [u8]> {
         if len > self.cap() {
             return Err(BufferTooShortError);
@@ -778,6 +954,10 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Advances the buffer's offset.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the requested operation cannot be
+    /// completed within the available buffer or encoding width.
     pub const fn skip(&mut self, skip: usize) -> Result<()> {
         if skip > self.cap() {
             return Err(BufferTooShortError);
@@ -878,6 +1058,9 @@ pub const fn varint_parse_len(first: u8) -> usize {
 ///
 /// The Huffman code implemented is the one defined for HPACK (RFC7541).
 #[cfg(feature = "huffman_hpack")]
+/// # Errors
+/// Returns [`BufferTooShortError`] if the encoded length cannot be represented
+/// safely.
 pub fn huffman_encoding_len<const LOWER_CASE: bool>(src: &[u8]) -> Result<usize> {
     use self::huffman_table::ENCODE_TABLE;
 

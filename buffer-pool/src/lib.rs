@@ -194,9 +194,12 @@ impl<const S: usize, T: Default + Reuse> Pool<S, T> {
         pooled
     }
 
-    #[allow(
-        clippy::wrong_self_convention,
-        reason = "Preserve the established public Pool::from_owned API"
+    #[cfg_attr(
+        feature = "nightly-clippy-expects",
+        expect(
+            clippy::wrong_self_convention,
+            reason = "Preserve the established public Pool::from_owned API"
+        )
     )]
     pub fn from_owned(&'static self, inner: T) -> Pooled<T> {
         let shard = self.next_shard.fetch_add(1, Ordering::Relaxed) % S;
@@ -268,7 +271,7 @@ mod tests {
     use super::*;
 
     #[test]
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "One end-to-end test deliberately exercises the complete shard lifecycle in order"
     )]

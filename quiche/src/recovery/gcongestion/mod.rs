@@ -104,22 +104,12 @@ pub(super) trait CongestionControl: Debug {
     /// remaining unacked packets.
     fn on_retransmission_timeout(&mut self, packets_retransmitted: bool);
 
-    /// Called when connection migrates and cwnd needs to be reset.
-    #[expect(
-        dead_code,
-        reason = "Retained for API/test parity across build configurations"
-    )]
-    fn on_connection_migration(&mut self);
-
     /// Adjust the current cwnd to a new maximal size
     fn limit_cwnd(&mut self, _max_cwnd: usize) {}
 
     fn is_in_recovery(&self) -> bool;
 
-    #[allow(
-        dead_code,
-        reason = "Used by the BBRv2 pacer in qlog/test configurations but not the default Stable feature mix"
-    )]
+    #[cfg(any(test, feature = "qlog"))]
     fn is_cwnd_limited(&self, bytes_in_flight: usize) -> bool;
 
     fn pacing_rate(

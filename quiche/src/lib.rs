@@ -378,10 +378,6 @@
 
 #![deny(missing_docs)]
 #![deny(unused_qualifications)]
-#![expect(
-    clippy::upper_case_acronyms,
-    reason = "Protocol and C API names intentionally use standardized acronyms"
-)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 #[macro_use]
@@ -5570,11 +5566,9 @@ impl<F: BufFactory> Connection<F> {
                 len: PAYLOAD_MIN_LEN - payload_len,
             };
 
-            #[expect(
-                unused_assignments,
-                reason = "Current control flow intentionally overwrites this value on some paths"
-            )]
-            if push_frame_to_pkt!(b, frames, frame, left) {
+            if frame.wire_len() <= left {
+                frame.to_bytes(&mut b)?;
+                frames.push(frame);
                 in_flight = true;
             }
         }
