@@ -18,5 +18,5 @@ jobs:
     with:
       # Stage strict Clippy package-by-package. Legacy packages migrate in
       # #52/#54/#55; source-policy scanning still covers the whole repository.
-      cargo-args: "--all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch"
+      cargo-args: "--all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch --features qlog/nightly-clippy-expects"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"

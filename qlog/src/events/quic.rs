@@ -414,9 +414,12 @@ pub struct ConnectionStateUpdated {
 }
 
 #[serde_with::skip_serializing_none]
-#[expect(
-    clippy::struct_field_names,
-    reason = "Field names mirror the published qlog schema and are part of the public API"
+#[cfg_attr(
+    feature = "nightly-clippy-expects",
+    expect(
+        clippy::struct_field_names,
+        reason = "Field names mirror the published qlog schema and are part of the public API"
+    )
 )]
 #[derive(Serialize, Deserialize, Clone, PartialEq, Eq, Debug)]
 pub struct TupleAssigned {

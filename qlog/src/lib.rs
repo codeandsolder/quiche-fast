@@ -402,9 +402,12 @@ use serde::Deserialize;
 use serde::Serialize;
 
 /// A quiche qlog error.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "IoError is part of the established public qlog Error API"
+#[cfg_attr(
+    feature = "nightly-clippy-expects",
+    expect(
+        clippy::enum_variant_names,
+        reason = "IoError is part of the established public qlog Error API"
+    )
 )]
 #[derive(Debug)]
 pub enum Error {
