@@ -949,9 +949,9 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
     peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
 ) -> *mut Connection {
-    let _ = ffi_ref!(local, ptr::null_mut());
-    let _ = ffi_ref!(peer, ptr::null_mut());
-    let _ = ffi_ref!(config, ptr::null_mut());
+    let local = ffi_ref!(local, ptr::null_mut());
+    let peer = ffi_ref!(peer, ptr::null_mut());
+    let config = ffi_ref!(config, ptr::null_mut());
 
     {
         let scid = ffi_slice!(scid, scid_len, ptr::null_mut());
