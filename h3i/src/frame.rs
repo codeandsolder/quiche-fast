@@ -207,8 +207,8 @@ impl EnrichedHeaders {
     /// let headers = EnrichedHeaders::from(vec![Header::new(b":status", b"200")]);
     /// assert_eq!(headers.status_code().expect("status code is Some"), b"200");
     /// ```
-    pub fn status_code(&self) -> Option<&Vec<u8>> {
-        self.header_map.get(b":status".as_slice())
+    pub fn status_code(&self) -> Option<&[u8]> {
+        self.header_map.get(b":status".as_slice()).map(Vec::as_slice)
     }
 }
 
