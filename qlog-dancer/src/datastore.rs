@@ -382,7 +382,7 @@ impl Datastore {
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         event: &netlog::Event, constants: &netlog::constants::Constants,
         stream_bind: &StreamBindingMap,
-        h3_session_requests: Option<&Vec<ReqOverH3>>,
+        h3_session_requests: Option<&[ReqOverH3]>,
     ) {
         match event {
             // nothing to do for this type just now
@@ -685,7 +685,7 @@ impl Datastore {
 
     fn consume_netlog_h3(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
-        ev: &h3::Event, h3_session_requests: Option<&Vec<ReqOverH3>>,
+        ev: &h3::Event, h3_session_requests: Option<&[ReqOverH3]>,
     ) {
         let rel_event_time = (ev_hdr.time_num - session_start_time) as f64;
 
@@ -1939,7 +1939,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                     event,
                     constants,
                     &stream_bind,
-                    h3_session_requests.get(session_id),
+                    h3_session_requests.get(session_id).map(Vec::as_slice),
                 );
             }
 
