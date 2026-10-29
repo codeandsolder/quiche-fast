@@ -208,7 +208,9 @@ impl EnrichedHeaders {
     /// assert_eq!(headers.status_code().expect("status code is Some"), b"200");
     /// ```
     pub fn status_code(&self) -> Option<&[u8]> {
-        self.header_map.get(b":status".as_slice()).map(Vec::as_slice)
+        self.header_map
+            .get(b":status".as_slice())
+            .map(Vec::as_slice)
     }
 }
 
