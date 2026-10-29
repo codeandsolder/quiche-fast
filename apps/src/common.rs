@@ -508,9 +508,9 @@ impl HttpConn for Http09Conn {
                     },
 
                     None => {
-                        self.output_sink.borrow_mut()(unsafe {
-                            String::from_utf8_unchecked(stream_buf.to_vec())
-                        });
+                        self.output_sink.borrow_mut()(
+                            String::from_utf8_lossy(stream_buf).into_owned(),
+                        );
                     },
                 }
 
@@ -1285,11 +1285,10 @@ impl HttpConn for Http3Conn {
 
                             None =>
                                 if !self.dump_json {
-                                    self.output_sink.borrow_mut()(unsafe {
-                                        String::from_utf8_unchecked(
-                                            buf[..read].to_vec(),
-                                        )
-                                    });
+                                    self.output_sink.borrow_mut()(
+                                        String::from_utf8_lossy(&buf[..read])
+                                            .into_owned(),
+                                    );
                                 },
                         }
                     }
