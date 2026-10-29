@@ -509,7 +509,7 @@ impl HttpConn for Http09Conn {
 
                     None => {
                         self.output_sink.borrow_mut()(
-                            String::from_utf8_lossy(&stream_buf).into_owned(),
+                            String::from_utf8_lossy(stream_buf).into_owned(),
                         );
                     },
                 }
