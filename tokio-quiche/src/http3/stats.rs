@@ -96,13 +96,13 @@ impl H3AuditStats {
     /// The number of bytes sent over the stream.
     #[inline]
     pub fn downstream_bytes_sent(&self) -> u64 {
-        self.downstream_bytes_sent.load(Ordering::SeqCst)
+        self.downstream_bytes_sent.load(Ordering::Relaxed)
     }
 
     /// The number of bytes received over the stream.
     #[inline]
     pub fn downstream_bytes_recvd(&self) -> u64 {
-        self.downstream_bytes_recvd.load(Ordering::SeqCst)
+        self.downstream_bytes_recvd.load(Ordering::Relaxed)
     }
 
     /// A STOP_SENDING error code received from the peer.
@@ -110,7 +110,7 @@ impl H3AuditStats {
     /// -1 indicates that this error code was not received yet.
     #[inline]
     pub fn recvd_stop_sending_error_code(&self) -> i64 {
-        self.recvd_stop_sending_error_code.load(Ordering::SeqCst)
+        self.recvd_stop_sending_error_code.load(Ordering::Relaxed)
     }
 
     /// A RESET_STREAM error code received from the peer.
@@ -118,7 +118,7 @@ impl H3AuditStats {
     /// -1 indicates that this error code was not received yet.
     #[inline]
     pub fn recvd_reset_stream_error_code(&self) -> i64 {
-        self.recvd_reset_stream_error_code.load(Ordering::SeqCst)
+        self.recvd_reset_stream_error_code.load(Ordering::Relaxed)
     }
 
     /// A STOP_SENDING error code sent to the peer.
@@ -126,7 +126,7 @@ impl H3AuditStats {
     /// -1 indicates that this error code was not received yet.
     #[inline]
     pub fn sent_stop_sending_error_code(&self) -> i64 {
-        self.sent_stop_sending_error_code.load(Ordering::SeqCst)
+        self.sent_stop_sending_error_code.load(Ordering::Relaxed)
     }
 
     /// A RESET_STREAM error code sent to the peer.
@@ -134,7 +134,7 @@ impl H3AuditStats {
     /// -1 indicates that this error code was not received yet.
     #[inline]
     pub fn sent_reset_stream_error_code(&self) -> i64 {
-        self.sent_reset_stream_error_code.load(Ordering::SeqCst)
+        self.sent_reset_stream_error_code.load(Ordering::Relaxed)
     }
 
     /// Stream FIN received from the peer.
@@ -163,13 +163,13 @@ impl H3AuditStats {
     #[inline]
     pub fn add_downstream_bytes_sent(&self, bytes_sent: u64) {
         self.downstream_bytes_sent
-            .fetch_add(bytes_sent, Ordering::SeqCst);
+            .fetch_add(bytes_sent, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn add_downstream_bytes_recvd(&self, bytes_recvd: u64) {
         self.downstream_bytes_recvd
-            .fetch_add(bytes_recvd, Ordering::SeqCst);
+            .fetch_add(bytes_recvd, Ordering::Relaxed);
     }
 
     #[inline]
@@ -177,7 +177,7 @@ impl H3AuditStats {
         &self, recvd_stop_sending_error_code: i64,
     ) {
         self.recvd_stop_sending_error_code
-            .store(recvd_stop_sending_error_code, Ordering::SeqCst);
+            .store(recvd_stop_sending_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -185,7 +185,7 @@ impl H3AuditStats {
         &self, recvd_reset_stream_error_code: i64,
     ) {
         self.recvd_reset_stream_error_code
-            .store(recvd_reset_stream_error_code, Ordering::SeqCst);
+            .store(recvd_reset_stream_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -193,7 +193,7 @@ impl H3AuditStats {
         &self, sent_stop_sending_error_code: i64,
     ) {
         self.sent_stop_sending_error_code
-            .store(sent_stop_sending_error_code, Ordering::SeqCst);
+            .store(sent_stop_sending_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -201,7 +201,7 @@ impl H3AuditStats {
         &self, sent_reset_stream_error_code: i64,
     ) {
         self.sent_reset_stream_error_code
-            .store(sent_reset_stream_error_code, Ordering::SeqCst);
+            .store(sent_reset_stream_error_code, Ordering::Relaxed);
     }
 
     #[inline]
