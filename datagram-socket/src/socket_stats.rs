@@ -157,25 +157,25 @@ impl QuicAuditStats {
     #[inline]
     pub fn recvd_conn_close_transport_error_code(&self) -> i64 {
         self.recvd_conn_close_transport_error_code
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn sent_conn_close_transport_error_code(&self) -> i64 {
         self.sent_conn_close_transport_error_code
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn recvd_conn_close_application_error_code(&self) -> i64 {
         self.recvd_conn_close_application_error_code
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
     }
 
     #[inline]
     pub fn sent_conn_close_application_error_code(&self) -> i64 {
         self.sent_conn_close_application_error_code
-            .load(Ordering::SeqCst)
+            .load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -183,7 +183,7 @@ impl QuicAuditStats {
         &self, recvd_conn_close_transport_error_code: i64,
     ) {
         self.recvd_conn_close_transport_error_code
-            .store(recvd_conn_close_transport_error_code, Ordering::SeqCst);
+            .store(recvd_conn_close_transport_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -191,7 +191,7 @@ impl QuicAuditStats {
         &self, sent_conn_close_transport_error_code: i64,
     ) {
         self.sent_conn_close_transport_error_code
-            .store(sent_conn_close_transport_error_code, Ordering::SeqCst);
+            .store(sent_conn_close_transport_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -199,7 +199,7 @@ impl QuicAuditStats {
         &self, recvd_conn_close_application_error_code: i64,
     ) {
         self.recvd_conn_close_application_error_code
-            .store(recvd_conn_close_application_error_code, Ordering::SeqCst);
+            .store(recvd_conn_close_application_error_code, Ordering::Relaxed);
     }
 
     #[inline]
@@ -207,12 +207,12 @@ impl QuicAuditStats {
         &self, sent_conn_close_application_error_code: i64,
     ) {
         self.sent_conn_close_application_error_code
-            .store(sent_conn_close_application_error_code, Ordering::SeqCst);
+            .store(sent_conn_close_application_error_code, Ordering::Relaxed);
     }
 
     #[inline]
     pub fn transport_handshake_duration_us(&self) -> i64 {
-        self.transport_handshake_duration_us.load(Ordering::SeqCst)
+        self.transport_handshake_duration_us.load(Ordering::Relaxed)
     }
 
     #[inline]
@@ -227,7 +227,7 @@ impl QuicAuditStats {
     pub fn set_transport_handshake_duration(&self, duration: Duration) {
         let dur = i64::try_from(duration.as_micros()).unwrap_or(-1);
         self.transport_handshake_duration_us
-            .store(dur, Ordering::SeqCst);
+            .store(dur, Ordering::Relaxed);
     }
 
     #[inline]
