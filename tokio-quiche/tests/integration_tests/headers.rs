@@ -96,11 +96,11 @@ async fn test_additional_headers() {
 
     assert_eq!(
         headers.next().expect("initial headers").status_code(),
-        Some(&Vec::from("103".as_bytes()))
+        Some(b"103".as_slice())
     );
     assert_eq!(
         headers.next().expect("additional headers").status_code(),
-        Some(&Vec::from("200".as_bytes()))
+        Some(b"200".as_slice())
     );
     assert!(headers.next().is_none());
 }
