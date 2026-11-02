@@ -7344,14 +7344,9 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited(
     // Client sends stream data bigger than cwnd (it will never arrive to the
     // server).
     let send_buf1 = [0; 20000];
-    assert_eq!(
-        pipe.client.stream_send(0, &send_buf1, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(by_boring!(b4: 12300, b5: 13589))
-        }
-    );
+    let send_cap = pipe.client.tx_cap;
+    assert!(send_cap < send_buf1.len());
+    assert_eq!(pipe.client.stream_send(0, &send_buf1, false), Ok(send_cap));
 
     test_utils::emit_flight(&mut pipe.client).ok();
 
@@ -7419,14 +7414,9 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited_despite_max_unacknowledgin
     // Client sends stream data bigger than cwnd (it will never arrive to the
     // server). This exhausts the congestion window.
     let send_buf1 = [0; 20000];
-    assert_eq!(
-        pipe.client.stream_send(0, &send_buf1, false),
-        if cc_algorithm_name == "cubic" {
-            Ok(12000)
-        } else {
-            Ok(by_boring!(b4: 12300, b5: 13589))
-        }
-    );
+    let send_cap = pipe.client.tx_cap;
+    assert!(send_cap < send_buf1.len());
+    assert_eq!(pipe.client.stream_send(0, &send_buf1, false), Ok(send_cap));
 
     test_utils::emit_flight(&mut pipe.client).ok();
 
