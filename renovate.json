@@ -1,7 +1,8 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:best-practices"
+    "config:best-practices",
+    "github>codeandsolder/ci-workflows:renovate-ci-trust-root"
   ],
   "forkProcessing": "enabled",
   "dependencyDashboard": true,
@@ -53,6 +54,13 @@
       "matchUpdateTypes": [
         "replacement"
       ],
+      "minimumReleaseAge": null,
+      "automerge": false
+    },
+    {
+      "description": "Shared CI trust roots remain review-only and bypass only the release-age hold",
+      "matchManagers": ["github-actions"],
+      "matchPackageNames": ["/^codeandsolder\\/(?:ci-workflows|rust-skills2)(?:\\/|$)/"],
       "minimumReleaseAge": null,
       "automerge": false
     }
