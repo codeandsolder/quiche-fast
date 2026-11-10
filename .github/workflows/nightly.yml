@@ -26,6 +26,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "nightly"
+
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -62,6 +67,10 @@ jobs:
           sudo apt-get install libev-dev uthash-dev
           make -C quiche/examples
 
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+
   fuzz:
     runs-on: ubuntu-latest
     # `quiche-fuzz` calls `RAND_reset_for_fuzzing`, which BoringSSL only
@@ -77,6 +86,11 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "nightly"
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -95,11 +109,20 @@ jobs:
       - name: Run cargo fuzz for qpack_decode
         run: cargo fuzz run qpack_decode -- -runs=1
 
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+
   http3_test_nightly:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "nightly"
 
       - name: Install nightly toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -108,6 +131,10 @@ jobs:
 
       - name: Run cargo test
         run: cargo test --no-run --verbose --manifest-path=tools/http3_test/Cargo.toml
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
 
   fmt:
     runs-on: ubuntu-latest

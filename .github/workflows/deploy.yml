@@ -21,6 +21,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "nightly-2026-10-08"
+
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c
         with:
@@ -42,6 +47,10 @@ jobs:
           fqdn: docs.quic.tech
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
 
   docker:
     runs-on: ubuntu-latest

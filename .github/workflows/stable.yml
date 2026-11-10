@@ -33,6 +33,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
+
       - name: Reject allow attributes
         shell: bash
         run: |
@@ -103,6 +108,9 @@ jobs:
           sudo apt-get install libev-dev uthash-dev
           make -C quiche/examples
 
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
 
   shared-sccache:
     name: Linux workspace (shared sccache)
@@ -136,6 +144,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -149,6 +162,10 @@ jobs:
           brew install libev uthash
           make -C quiche/examples
 
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+
   quiche_ios:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: macos-latest
@@ -160,6 +177,11 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -176,6 +198,10 @@ jobs:
         # Keeping them out of this target build avoids their host-only
         # wirefilter/backtrace and nix/socket dependency edges.
         run: cargo build --workspace --exclude qlog-dancer --exclude quiche_apps --target=${{ matrix.target }} --verbose
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
 
   quiche_windows:
     if: startsWith(github.ref, 'refs/tags/')
@@ -203,6 +229,11 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
 
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -273,6 +304,10 @@ jobs:
         if: endsWith(matrix.target, '-msvc')
         run: cargo test --target=${{ matrix.target }} --verbose --all-targets ${{ env.DEFAULT_OPTIONS }} --exclude qlog-dancer
 
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+
   quiche_multiarch:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
@@ -304,6 +339,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
+
       - name: Install stable toolchain
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -315,6 +355,10 @@ jobs:
 
       - name: Run cargo clippy
         run: cargo clippy --manifest-path=tools/http3_test/Cargo.toml -- -D warnings
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
 
   docker:
     if: startsWith(github.ref, 'refs/tags/')
@@ -347,6 +391,11 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
+        with:
+          rust-toolchain: "1.99.1"
+
       - name: Install stable toolchain for the target
         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
@@ -358,3 +407,7 @@ jobs:
 
       - name: Run cargo ndk
         run: cargo ndk --manifest-path quiche/Cargo.toml --target ${{ matrix.arch }} --platform ${{ env.API_LEVEL }} -- build --verbose --features ffi
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@be66a1ada16209be5b75d39724ef7383892d92cc # main
