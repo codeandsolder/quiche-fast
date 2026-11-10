@@ -41,6 +41,8 @@ jobs:
           persist-credentials: false
 
       - name: Run Bonk
+        id: bonk-review
+        continue-on-error: true
         uses: ask-bonk/ask-bonk/github@2c20fe37255d2e0e186fb0e16dd2c5704e4116cf # main
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CF_AI_GATEWAY_ACCOUNT_ID }}
@@ -59,3 +61,7 @@ jobs:
             Review this pull request. Summarize what it changes and flag any
             correctness, security, or style issues as inline review comments.
             Do not push commits.
+
+      - name: Record unavailable optional review
+        if: steps.bonk-review.outcome == 'failure'
+        run: echo "::warning::Bonk review service is unavailable; optional review did not run. Required Rust and security checks remain independent."
