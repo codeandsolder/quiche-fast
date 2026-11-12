@@ -23,7 +23,7 @@ RUN cargo build --release --manifest-path apps/Cargo.toml
 ##
 ## quiche-base: quiche image for apps
 ##
-FROM debian:latest@sha256:4c25275446ca371766b8b093c696782eabce06263fccacb8d5d813b3dc44b308 AS quiche-base
+FROM debian:latest@sha256:9c6e381421d0f48d1b8133e573f33c185ee16cbf505eda9c4a8a4791b25ea8a6 AS quiche-base
 
 RUN apt-get update && apt-get install -y ca-certificates && \
     rm -rf /var/lib/apt/lists/*
