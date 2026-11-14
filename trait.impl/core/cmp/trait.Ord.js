@@ -1,0 +1,9 @@
+(function() {
+    const implementors = Object.fromEntries([["qlog",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"qlog/events/enum.EventImportance.html\" title=\"enum qlog::events::EventImportance\">EventImportance</a>",0]]],["qlog_dancer",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"qlog_dancer/enum.PacketType.html\" title=\"enum qlog_dancer::PacketType\">PacketType</a>",0],["impl&lt;T: <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a>&gt; <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"struct\" href=\"qlog_dancer/request_stub/struct.NaOption.html\" title=\"struct qlog_dancer::request_stub::NaOption\">NaOption</a>&lt;T&gt;",0]]],["tokio_quiche",[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/nightly/core/cmp/trait.Ord.html\" title=\"trait core::cmp::Ord\">Ord</a> for <a class=\"enum\" href=\"tokio_quiche/settings/enum.CertificateKind.html\" title=\"enum tokio_quiche::settings::CertificateKind\">CertificateKind</a>",0]]]]);
+    if (window.register_implementors) {
+        window.register_implementors(implementors);
+    } else {
+        window.pending_implementors = implementors;
+    }
+})()
+//{"start":59,"fragment_lengths":[280,697,309]}
