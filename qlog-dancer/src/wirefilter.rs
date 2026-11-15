@@ -90,17 +90,12 @@ fn stream_ids(event: &Event) -> TypedArray<'_, i64> {
 pub fn filter_sqlog_events(mut events: Vec<Event>, filter: &str) -> Vec<Event> {
     let mut ret = vec![];
 
-    let mut builder = Scheme! {
+    let scheme = Scheme! {
         category: Bytes,
         name: Bytes,
         stream_id: Array(Int),
-    };
-
-    builder
-        .add_function("any", wirefilter::AnyFunction {})
-        .unwrap();
-
-    let scheme = builder.build();
+    }
+    .build();
     let ast = scheme.parse(filter).unwrap();
     let filter = ast.compile();
 
