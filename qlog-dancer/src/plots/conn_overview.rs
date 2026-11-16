@@ -340,6 +340,7 @@ fn draw_main_plot<'a, DB: DrawingBackend + 'a>(
     chart
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_stream_send_plot<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters, axis: XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
@@ -390,6 +391,7 @@ fn draw_stream_send_plot<'a, DB: DrawingBackend + 'a>(
     chart
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn draw_stream_recv_plot<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters, axis: XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
