@@ -216,7 +216,7 @@ pub fn parse_log_file(
                 &trace.events,
                 &details.qlog_vantage_point_type.inner,
                 !config.ignore_acks,
-            );
+            )?;
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
             let raw = RawLogEvents::QlogJson {
@@ -251,7 +251,7 @@ pub fn parse_log_file(
                 &events,
                 &details.qlog_vantage_point_type.inner,
                 !config.ignore_acks,
-            );
+            )?;
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
             let raw = RawLogEvents::QlogJsonSeq { events };
@@ -269,7 +269,7 @@ pub fn parse_log_file(
             let file = std::fs::File::open(config.file.clone())?;
             let mut reader = BufReader::new(file);
 
-            let constants = netlog_with_reader(&mut reader)?;
+            let constants = netlog::read_netlog_constants(&mut reader)?;
 
             // trace!("{:?}", constants);
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
@@ -340,62 +340,6 @@ pub fn qlog_seq_reader(
     Ok((qlog_reader, log_file_details))
 }
 
-pub fn netlog_with_reader<R: std::io::BufRead>(
-    reader: &mut R,
-) -> Result<netlog::constants::Constants, Box<dyn Error>> {
-    // Netlog format is sort of newline-delimited. It starts off creating a JSON
-    // object, within that is an object containing constants, followed by an
-    // array of line-delimited events. This franken-JSON needs a bit of molding
-    // to fit serde parsing.
-    let mut buf = Vec::<u8>::new();
-
-    // Chrome netlogs start with a constants object followed by a comma and
-    // the events array. Convert that prefix into an independent JSON object.
-    // Do not assume the header ends in exactly ",\n": CRLF, whitespace,
-    // truncated files and failed reads must not panic.
-    reader.read_until(b'\n', &mut buf)?;
-    let end = buf
-        .iter()
-        .rposition(|byte| !byte.is_ascii_whitespace())
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "netlog constants header is empty",
-            )
-        })?;
-    match buf[end] {
-        b',' => buf[end] = b'}',
-        b'}' => {}, // Already a complete standalone constants object.
-        _ => {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "netlog constants header must end with ',' or '}'",
-            )
-            .into());
-        },
-    }
-    buf.truncate(end + 1);
-
-    let res: Result<netlog::constants::ConstantsLine, serde_json::Error> =
-        serde_json::from_slice(&buf);
-
-    match res {
-        Ok(mut line) => {
-            line.constants.populate_id_keyed();
-
-            Ok(line.constants)
-        },
-
-        Err(e) => {
-            error!("Error deserializing: {}", e);
-
-            // Just swallow the failure and move on
-
-            Err(e.into())
-        },
-    }
-}
-
 pub fn stringify_last<T>(src: &[T]) -> String
 where
     T: std::fmt::Debug,
@@ -462,29 +406,11 @@ pub mod wirefilter;
 
 #[cfg(test)]
 mod input_tests {
-    use super::netlog_with_reader;
     use super::stringify_last;
     use std::io::Cursor;
 
-    #[test]
-    fn netlog_constants_header_rejects_empty_and_truncated_input() {
-        for bytes in [
-            b"".as_slice(),
-            b"\n".as_slice(),
-            b"{\n".as_slice(),
-            b"{\"constants\":{}}[".as_slice(),
-        ] {
-            let mut reader = Cursor::new(bytes);
-            assert!(netlog_with_reader(&mut reader).is_err());
-        }
-    }
-
-    #[test]
-    fn netlog_constants_header_accepts_crlf_and_preserves_following_events(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::Read;
-
-        let header = serde_json::json!({
+    fn netlog_constants_document() -> serde_json::Value {
+        serde_json::json!({
             "constants": {
                 "activeFieldTrialGroups": [],
                 "addressFamily": {},
@@ -495,8 +421,8 @@ mod input_tests {
                 "dnsQueryType": {},
                 "loadFlag": {},
                 "loadState": {},
-                "logEventPhase": {},
-                "logEventTypes": {},
+                "logEventPhase": {"PHASE_BEGIN": 1},
+                "logEventTypes": {"HTTP2_SESSION": 101, "QUIC_SESSION": 102},
                 "logFormatVersion": 123,
                 "logSourceType": {},
                 "netError": {},
@@ -505,18 +431,60 @@ mod input_tests {
                 "secureDnsMode": {},
                 "timeTickOffset": 0
             }
-        });
-        let encoded = header.to_string();
-        let prefix = encoded
+        })
+    }
+
+    #[test]
+    fn malformed_netlog_event_records_do_not_abort_later_sessions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::collections::HashSet;
+
+        let document = netlog_constants_document().to_string();
+        let prefix = document
             .strip_suffix('}')
             .ok_or("missing JSON object suffix")?;
-        let mut reader =
-            Cursor::new(format!("{prefix},\r\n\"events\":[]}}").into_bytes());
-        let constants = netlog_with_reader(&mut reader)?;
-        assert_eq!(constants.log_format_version, 123);
-        let mut remainder = String::new();
-        reader.read_to_string(&mut remainder)?;
-        assert_eq!(remainder, "\"events\":[]}");
+        let event = |id: i64,
+                     ty: i64,
+                     phase: i64,
+                     time: &str,
+                     params: serde_json::Value| {
+            serde_json::json!({
+                "phase": phase,
+                "source": {"id": id, "type": 7, "start_time": "0"},
+                "time": time,
+                "type": ty,
+                "params": params,
+            })
+        };
+        let records = [
+            event(1, 999, 1, "1", serde_json::json!({})),
+            event(2, 101, 999, "2", serde_json::json!({})),
+            event(3, 101, 1, "garbage", serde_json::json!({})),
+            event(4, 101, 1, "3", serde_json::json!({})),
+            event(5, 102, 1, "4", serde_json::json!({})),
+            event(
+                6,
+                101,
+                1,
+                "5",
+                serde_json::json!({"host": "example.test", "proxy": ""}),
+            ),
+        ];
+        let data = format!(
+            "{prefix},\r\n\"events\": [\r\n{}\r\n]\r\n}}",
+            records.map(|value| value.to_string()).join(",\r\n")
+        );
+        let mut reader = Cursor::new(data.into_bytes());
+        let constants = netlog::read_netlog_constants(&mut reader)?;
+        let (logs, sessions) = crate::datastore::with_netlog_reader(
+            &mut reader,
+            HashSet::new(),
+            &constants,
+        );
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.contains_key(&6));
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].datastore.host.as_deref(), Some("example.test"));
         Ok(())
     }
 

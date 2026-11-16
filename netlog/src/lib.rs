@@ -78,7 +78,9 @@
 //!
 //!     match res {
 //!         Ok(mut event_hdr) => {
-//!             event_hdr.populate_strings(&constants);
+//!             let Ok(()) = event_hdr.populate_strings(&constants) else {
+//!                 continue;
+//!             };
 //!             event_hdr.time_num = event_hdr.time.parse::<u64>().unwrap();
 //!
 //!             // Netlogs can hold many different sessions.
@@ -152,12 +154,46 @@ pub struct EventHeader {
     pub ty: i64,
 }
 
+/// A numeric event code missing from the Chrome netlog constants table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EventLookupError {
+    UnknownEventType(i64),
+    UnknownEventPhase(i64),
+}
+
+impl std::fmt::Display for EventLookupError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownEventType(id) =>
+                write!(f, "unknown netlog event type ID {id}"),
+            Self::UnknownEventPhase(id) =>
+                write!(f, "unknown netlog phase ID {id}"),
+        }
+    }
+}
+
+impl std::error::Error for EventLookupError {}
+
 impl EventHeader {
-    /// Populate the event details based on the provided netlog file constants.
-    pub fn populate_strings(&mut self, constants: &constants::Constants) {
-        self.ty_string = constants.log_event_types_id_keyed[&self.ty].clone();
-        self.phase_string =
-            constants.log_event_phase_id_keyed[&self.phase].clone();
+    /// Resolve the event and phase IDs against the log's constants table.
+    ///
+    /// # Errors
+    /// Returns an error if either ID is not defined by this log's constants.
+    /// Leaves the existing strings unchanged when resolution fails.
+    pub fn populate_strings(
+        &mut self, constants: &constants::Constants,
+    ) -> Result<(), EventLookupError> {
+        let event_type = constants
+            .log_event_types_id_keyed
+            .get(&self.ty)
+            .ok_or(EventLookupError::UnknownEventType(self.ty))?;
+        let phase = constants
+            .log_event_phase_id_keyed
+            .get(&self.phase)
+            .ok_or(EventLookupError::UnknownEventPhase(self.phase))?;
+        self.ty_string.clone_from(event_type);
+        self.phase_string.clone_from(phase);
+        Ok(())
     }
 }
 
@@ -193,10 +229,26 @@ pub fn read_netlog_constants<R: BufRead>(
         .read_until(b'\n', &mut buf)
         .map_err(serde_json::Error::io)?;
 
-    if buf.ends_with(b",\n") {
-        let closing = buf.len() - 2;
-        buf[closing] = b'}';
+    let end = buf
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .ok_or_else(|| {
+            serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "netlog constants header is empty",
+            ))
+        })?;
+    match buf[end] {
+        b',' => buf[end] = b'}',
+        b'}' => {}, // Already a complete standalone constants object.
+        _ => {
+            return Err(serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "netlog constants header must end with ',' or '}'",
+            )));
+        },
     }
+    buf.truncate(end + 1);
 
     let res: Result<ConstantsLine, serde_json::Error> =
         serde_json::from_slice(&buf);
@@ -223,38 +275,37 @@ pub fn read_netlog_constants<R: BufRead>(
 #[must_use]
 pub fn read_netlog_record<R: BufRead>(reader: &mut R) -> Option<Vec<u8>> {
     let mut buf = Vec::<u8>::new();
-    let size = match reader.read_until(b'\n', &mut buf) {
-        Ok(size) => size,
-        Err(e) => {
-            log::error!("Error reading netlog record: {e}");
+
+    loop {
+        buf.clear();
+        let size = match reader.read_until(b'\n', &mut buf) {
+            Ok(size) => size,
+            Err(error) => {
+                log::error!("Error reading netlog record: {error}");
+                return None;
+            },
+        };
+        if size == 0 {
             return None;
-        },
-    };
+        }
 
-    if size <= 1 {
-        return None;
+        // Empty lines are legal JSON whitespace between array records.
+        let mut record = buf.trim_ascii();
+        if record.is_empty() {
+            continue;
+        }
+        // Non-event lines are structural array endings, or the polledData
+        // section that follows the events array.
+        if record.first() != Some(&b'{') {
+            return None;
+        }
+        record = record.strip_suffix(b",").unwrap_or(record);
+        // A closing ']' sometimes shares the final event's line.
+        record = record.strip_suffix(b"]").unwrap_or(record);
+
+        log::trace!("read record={}", String::from_utf8_lossy(record));
+        return Some(record.to_vec());
     }
-
-    // After netlog events, line holds polledData struct. Ignore it and return.
-    if buf.first() != Some(&b'{') {
-        return None;
-    }
-
-    if buf.last() == Some(&b'\n') {
-        buf.pop();
-    }
-    if buf.last() == Some(&b',') {
-        buf.pop();
-    }
-
-    // Last line of events closes the array. Ignore the bracket.
-    if buf.last() == Some(&b']') {
-        buf.pop();
-    }
-
-    log::trace!("read record={}", String::from_utf8_lossy(&buf));
-
-    Some(buf)
 }
 
 fn decode_event<T: DeserializeOwned>(event: &[u8]) -> Option<T> {
@@ -288,3 +339,128 @@ pub mod h2;
 pub mod h3;
 pub mod http;
 pub mod quic;
+
+#[cfg(test)]
+mod input_tests {
+    use super::read_netlog_constants;
+    use super::read_netlog_record;
+    use super::EventHeader;
+    use super::EventLookupError;
+    use std::io::Cursor;
+    use std::io::Read;
+
+    fn constants_document() -> serde_json::Value {
+        serde_json::json!({
+            "constants": {
+                "activeFieldTrialGroups": [],
+                "addressFamily": {},
+                "certPathBuilderDigestPolicy": {},
+                "certStatusFlag": {},
+                "certVerifierFlags": {},
+                "clientInfo": {},
+                "dnsQueryType": {},
+                "loadFlag": {},
+                "loadState": {},
+                "logEventPhase": {"PHASE_BEGIN": 1},
+                "logEventTypes": {"HTTP2_SESSION": 101},
+                "logFormatVersion": 123,
+                "logSourceType": {},
+                "netError": {},
+                "quicError": {},
+                "quicRstStreamError": {},
+                "secureDnsMode": {},
+                "timeTickOffset": 0
+            }
+        })
+    }
+
+    #[test]
+    fn unknown_event_id_or_phase_is_recoverable_and_atomic(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let data = constants_document().to_string();
+        let mut reader = Cursor::new(data.as_bytes());
+        let constants = read_netlog_constants(&mut reader)?;
+
+        let mut event = EventHeader {
+            ty: 999,
+            phase: 1,
+            ty_string: "previous type".into(),
+            phase_string: "previous phase".into(),
+            ..EventHeader::default()
+        };
+        assert_eq!(
+            event.populate_strings(&constants),
+            Err(EventLookupError::UnknownEventType(999)),
+        );
+        assert_eq!(event.ty_string, "previous type");
+        assert_eq!(event.phase_string, "previous phase");
+
+        event.ty = 101;
+        event.phase = 999;
+        assert_eq!(
+            event.populate_strings(&constants),
+            Err(EventLookupError::UnknownEventPhase(999)),
+        );
+        assert_eq!(event.ty_string, "previous type");
+        assert_eq!(event.phase_string, "previous phase");
+
+        event.phase = 1;
+        event.populate_strings(&constants)?;
+        assert_eq!(event.ty_string, "HTTP2_SESSION");
+        assert_eq!(event.phase_string, "PHASE_BEGIN");
+        Ok(())
+    }
+
+    #[test]
+    fn constants_header_accepts_lf_crlf_whitespace_and_eof(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let document = constants_document().to_string();
+        let prefix = document.strip_suffix('}').ok_or("no closing JSON brace")?;
+
+        for bytes in [
+            format!("{prefix},\nnext"),
+            format!("{prefix},\r\nnext"),
+            format!("{prefix},   \t\r\nnext"),
+            format!("{document}\nnext"),
+        ] {
+            let mut reader = Cursor::new(bytes.as_bytes());
+            let constants = read_netlog_constants(&mut reader)?;
+            assert_eq!(constants.log_format_version, 123);
+            let mut remaining = String::new();
+            reader.read_to_string(&mut remaining)?;
+            assert_eq!(remaining, "next");
+        }
+
+        for bytes in [format!("{prefix},"), document] {
+            let mut reader = Cursor::new(bytes.as_bytes());
+            assert_eq!(
+                read_netlog_constants(&mut reader)?.log_format_version,
+                123
+            );
+            assert_eq!(reader.position(), bytes.len() as u64);
+        }
+
+        for bad in ["", "\r\n", "{", "{}]"] {
+            assert!(
+                read_netlog_constants(&mut Cursor::new(bad.as_bytes())).is_err()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn record_reader_handles_blank_lines_crlf_and_last_array_bracket() {
+        let raw = b"  \r\n\n  {\"type\":1},  \r\n\t{\"type\":2}]\r\n\"polledData\":{}\r\n";
+        let mut reader = Cursor::new(raw.as_slice());
+        assert_eq!(
+            read_netlog_record(&mut reader).as_deref(),
+            Some(b"{\"type\":1}".as_slice())
+        );
+        assert_eq!(
+            read_netlog_record(&mut reader).as_deref(),
+            Some(b"{\"type\":2}".as_slice())
+        );
+        assert_eq!(read_netlog_record(&mut reader), None);
+        assert_eq!(read_netlog_record(&mut reader), None);
+    }
+}

@@ -75,8 +75,11 @@ fn run() -> i32 {
     let mut log_file = match parse_log_file(&config) {
         Ok(v) => v,
 
-        Err(e) if e.is::<qlog_dancer::wirefilter::FilterError>() => {
-            error!("Unable to apply qlog filter: {e}");
+        Err(e)
+            if e.is::<qlog_dancer::wirefilter::FilterError>() ||
+                e.is::<qlog_dancer::datastore::UnsupportedVantagePoint>() =>
+        {
+            error!("Unable to process qlog: {e}");
             return 1;
         },
         Err(e) => {
