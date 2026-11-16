@@ -112,6 +112,39 @@ jobs:
         if: always()
         uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
 
+  qlog-dancer-wasm:
+    name: qlog-dancer WASM library (shared sccache)
+    runs-on: ubuntu-latest
+    # The workflow-wide x86-64-v2 RUSTFLAGS are invalid for wasm32.
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - name: Checkout sources
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
+        with:
+          rust-toolchain: "1.100.0"
+
+      - name: Install WASM stable target
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+
+      - name: Install chart backend build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
+
+      - name: Check qlog-dancer browser library
+        run: cargo +1.100.0 check --locked --target wasm32-unknown-unknown -p qlog-dancer --lib
+
+      - name: Finalize mandatory sccache
+        if: always()
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
+
   shared-sccache:
     name: Linux workspace (shared sccache)
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
