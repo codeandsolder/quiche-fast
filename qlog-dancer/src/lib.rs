@@ -193,7 +193,13 @@ pub fn parse_log_file(
             println!("parsing qlog as JSON...");
             let mark = std::time::Instant::now();
             let qlog = read_qlog_from_file(config.file.clone())?;
-            let vp = qlog.traces[0].vantage_point.clone().unwrap_or_default().ty;
+            let trace = qlog.traces.first().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "qlog file contains no traces",
+                )
+            })?;
+            let vp = trace.vantage_point.clone().unwrap_or_default().ty;
 
             let details = LogFileDetails {
                 file_schema: qlog.file_schema.clone(),
@@ -207,14 +213,14 @@ pub fn parse_log_file(
             let mark = std::time::Instant::now();
             // TODO: support more than one trace in a file
             let datastore = Datastore::with_qlog_events(
-                &qlog.traces[0].events,
+                &trace.events,
                 &details.qlog_vantage_point_type.inner,
                 !config.ignore_acks,
             );
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
             let raw = RawLogEvents::QlogJson {
-                events: qlog.traces[0].events.clone(),
+                events: trace.events.clone(),
             };
 
             Ok(LogFileParseResult {
@@ -235,18 +241,18 @@ pub fn parse_log_file(
             let mark = std::time::Instant::now();
             let events: Vec<qlog::reader::Event> =
                 qlog_reader.into_iter().collect();
+            let events = if let Some(filter) = &config.qlog_wirefilter {
+                filter_sqlog_events(events, filter)?
+            } else {
+                events
+            };
+            // Keep plot series, stats, and raw event exports in agreement.
             let datastore: Datastore = Datastore::with_sqlog_reader_events(
                 &events,
                 &details.qlog_vantage_point_type.inner,
                 !config.ignore_acks,
             );
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            let events = if let Some(filter) = &config.qlog_wirefilter {
-                filter_sqlog_events(events, filter)
-            } else {
-                events
-            };
 
             let raw = RawLogEvents::QlogJsonSeq { events };
 
@@ -263,7 +269,7 @@ pub fn parse_log_file(
             let file = std::fs::File::open(config.file.clone())?;
             let mut reader = BufReader::new(file);
 
-            let constants = netlog_with_reader(&mut reader).unwrap();
+            let constants = netlog_with_reader(&mut reader)?;
 
             // trace!("{:?}", constants);
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
@@ -343,12 +349,32 @@ pub fn netlog_with_reader<R: std::io::BufRead>(
     // to fit serde parsing.
     let mut buf = Vec::<u8>::new();
 
-    // read the constants line
-    let len = reader.read_until(b'\n', &mut buf).unwrap();
-
-    // replace the trailing comma (,) with a brace (}) to close the object and
-    // make it parseable.
-    buf[len - 2] = b'}';
+    // Chrome netlogs start with a constants object followed by a comma and
+    // the events array. Convert that prefix into an independent JSON object.
+    // Do not assume the header ends in exactly ",\n": CRLF, whitespace,
+    // truncated files and failed reads must not panic.
+    reader.read_until(b'\n', &mut buf)?;
+    let end = buf
+        .iter()
+        .rposition(|byte| !byte.is_ascii_whitespace())
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "netlog constants header is empty",
+            )
+        })?;
+    match buf[end] {
+        b',' => buf[end] = b'}',
+        b'}' => {}, // Already a complete standalone constants object.
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "netlog constants header must end with ',' or '}'",
+            )
+            .into());
+        },
+    }
+    buf.truncate(end + 1);
 
     let res: Result<netlog::constants::ConstantsLine, serde_json::Error> =
         serde_json::from_slice(&buf);
@@ -374,10 +400,9 @@ pub fn stringify_last<T>(src: &[T]) -> String
 where
     T: std::fmt::Debug,
 {
-    if src.len() == 1 {
-        "n/a".to_string()
-    } else {
-        format!("{:?}", src.last().unwrap())
+    match src {
+        [] | [_] => "n/a".to_string(),
+        [.., last] => format!("{last:?}"),
     }
 }
 
@@ -434,3 +459,71 @@ pub mod trackers;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 pub mod wirefilter;
+
+#[cfg(test)]
+mod input_tests {
+    use super::netlog_with_reader;
+    use super::stringify_last;
+    use std::io::Cursor;
+
+    #[test]
+    fn netlog_constants_header_rejects_empty_and_truncated_input() {
+        for bytes in [
+            b"".as_slice(),
+            b"\n".as_slice(),
+            b"{\n".as_slice(),
+            b"{\"constants\":{}}[".as_slice(),
+        ] {
+            let mut reader = Cursor::new(bytes);
+            assert!(netlog_with_reader(&mut reader).is_err());
+        }
+    }
+
+    #[test]
+    fn netlog_constants_header_accepts_crlf_and_preserves_following_events(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::Read;
+
+        let header = serde_json::json!({
+            "constants": {
+                "activeFieldTrialGroups": [],
+                "addressFamily": {},
+                "certPathBuilderDigestPolicy": {},
+                "certStatusFlag": {},
+                "certVerifierFlags": {},
+                "clientInfo": {},
+                "dnsQueryType": {},
+                "loadFlag": {},
+                "loadState": {},
+                "logEventPhase": {},
+                "logEventTypes": {},
+                "logFormatVersion": 123,
+                "logSourceType": {},
+                "netError": {},
+                "quicError": {},
+                "quicRstStreamError": {},
+                "secureDnsMode": {},
+                "timeTickOffset": 0
+            }
+        });
+        let encoded = header.to_string();
+        let prefix = encoded
+            .strip_suffix('}')
+            .ok_or("missing JSON object suffix")?;
+        let mut reader =
+            Cursor::new(format!("{prefix},\r\n\"events\":[]}}").into_bytes());
+        let constants = netlog_with_reader(&mut reader)?;
+        assert_eq!(constants.log_format_version, 123);
+        let mut remainder = String::new();
+        reader.read_to_string(&mut remainder)?;
+        assert_eq!(remainder, "\"events\":[]}");
+        Ok(())
+    }
+
+    #[test]
+    fn stringify_last_handles_empty_and_single_item_slices() {
+        assert_eq!(stringify_last::<u8>(&[]), "n/a");
+        assert_eq!(stringify_last(&[1_u8]), "n/a");
+        assert_eq!(stringify_last(&[1_u8, 2_u8]), "2");
+    }
+}

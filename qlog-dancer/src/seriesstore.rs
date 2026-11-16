@@ -136,7 +136,7 @@ impl SeriesStore {
     }
 
     fn update_received_x_axis_max(&mut self, x: f64) {
-        self.received_x_max = self.sent_x_max.max(x);
+        self.received_x_max = self.received_x_max.max(x);
     }
 
     fn update_congestion_y_axis_max(&mut self, y: u64) {
@@ -769,5 +769,28 @@ impl SeriesStore {
 
         self.received_max_data(data_store);
         self.sum_received_stream_max_data(data_store);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SeriesStore;
+
+    #[test]
+    fn received_time_range_is_independent_of_sent_packets_and_monotonic() {
+        let mut series = SeriesStore {
+            sent_x_max: 100.0,
+            ..SeriesStore::default()
+        };
+
+        series.update_received_x_axis_max(5.0);
+        assert_eq!(series.received_x_max, 5.0);
+
+        series.update_received_x_axis_max(2.0);
+        assert_eq!(series.received_x_max, 5.0);
+
+        series.update_received_x_axis_max(14.0);
+        assert_eq!(series.received_x_max, 14.0);
+        assert_eq!(series.sent_x_max, 100.0);
     }
 }

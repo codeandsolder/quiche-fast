@@ -75,19 +75,35 @@ fn run() -> i32 {
     let mut log_file = match parse_log_file(&config) {
         Ok(v) => v,
 
+        Err(e) if e.is::<qlog_dancer::wirefilter::FilterError>() => {
+            error!("Unable to apply qlog filter: {e}");
+            return 1;
+        },
         Err(e) => {
             // Failed, so try a fallback once
             match config.log_format {
                 SerializationFormat::QlogJson => {
                     warn!("Failed to parse as qlog: {}, trying sqlog", e);
                     config.log_format = SerializationFormat::QlogJsonSeq;
-                    parse_log_file(&config).unwrap()
+                    match parse_log_file(&config) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            error!("Unable to parse log in either format: {err}");
+                            return 1;
+                        },
+                    }
                 },
 
                 SerializationFormat::QlogJsonSeq => {
                     warn!("Failed to parse as sqlog: {}, trying qlog", e);
                     config.log_format = SerializationFormat::QlogJson;
-                    parse_log_file(&config).unwrap()
+                    match parse_log_file(&config) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            error!("Unable to parse log in either format: {err}");
+                            return 1;
+                        },
+                    }
                 },
 
                 _ => {
