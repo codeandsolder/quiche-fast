@@ -28,7 +28,7 @@ serde_json = { workspace = true }
 tabled = "0.22.0"
 table_to_html = "0.11.0"
 
-wirefilter-engine = { git = "https://github.com/cloudflare/wirefilter.git", rev="f656cc5c04bc112977d949b6afd48c5ebe426ece" }
+wirefilter-engine = { git = "https://github.com/cloudflare/wirefilter.git", rev="a101f7c0fc60012803ee23432b5514644d9fbe4f" }
 
 # By default, getrandom doesn't have any source of randomness on wasm32-unknown.
 # This optional dependency allows us to build with `--features getrandom/wasm_js`.
