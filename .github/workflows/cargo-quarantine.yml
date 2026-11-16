@@ -1,0 +1,15 @@
+name: Cargo release-age quarantine
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cargo-quarantine-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quarantine:
+    uses: codeandsolder/ci-workflows/.github/workflows/cargo-release-quarantine.yml@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
