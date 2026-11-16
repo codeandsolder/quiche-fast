@@ -32,6 +32,10 @@
 use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
+use plotters::drawing::DrawingAreaErrorKind;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
+use std::error::Error;
 
 use tabled::Tabled;
 
@@ -122,6 +126,13 @@ enum SparkCaption {
     },
 }
 
+type SparkDrawingResult<DB> =
+    Result<(), DrawingAreaErrorKind<<DB as DrawingBackend>::ErrorType>>;
+
+fn format_delta(value: Option<f64>, label: &str) -> String {
+    value.map_or_else(String::new, |duration| format!("{label}{duration:.2}ms"))
+}
+
 impl SparkCaption {
     fn request_at_client_from_stub(
         application_proto: ApplicationProto, req: &HttpRequestStub,
@@ -130,50 +141,23 @@ impl SparkCaption {
             "ID= {}, status= {}, proto= {:?}",
             req.stream_id, req.status, application_proto
         );
-        let empty = &"".to_string();
-
-        let duration_tx_hdr_rx_hdr =
-            match req.at_client_deltas.as_ref().unwrap().tx_hdr_rx_hdr.inner {
-                Some(t) => format!("d_tx_hdr_rx_hdr:               {:.2}ms", t),
-
-                None => empty.to_owned(),
-            };
-
-        let duration_tx_hdr_rx_first_data = match req
-            .at_client_deltas
-            .as_ref()
-            .unwrap()
-            .tx_hdr_rx_first_data
-            .inner
-        {
-            Some(t) => format!("d_tx_hdr_rx_data_first:        {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
-
-        let duration_tx_hdr_rx_last_data = match req
-            .at_client_deltas
-            .as_ref()
-            .unwrap()
-            .tx_hdr_rx_last_data
-            .inner
-        {
-            Some(t) => format!("d_tx_hdr_rx_data_last:         {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
-
-        let duration_tx_first_data_tx_last_data = match req
-            .at_client_deltas
-            .as_ref()
-            .unwrap()
-            .tx_first_data_tx_last_data
-            .inner
-        {
-            Some(t) => format!("d_tx_data_first_tx_data_last:  {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
+        let deltas = req.at_client_deltas.as_ref();
+        let duration_tx_hdr_rx_hdr = format_delta(
+            deltas.and_then(|value| value.tx_hdr_rx_hdr.inner),
+            "d_tx_hdr_rx_hdr:               ",
+        );
+        let duration_tx_hdr_rx_first_data = format_delta(
+            deltas.and_then(|value| value.tx_hdr_rx_first_data.inner),
+            "d_tx_hdr_rx_data_first:        ",
+        );
+        let duration_tx_hdr_rx_last_data = format_delta(
+            deltas.and_then(|value| value.tx_hdr_rx_last_data.inner),
+            "d_tx_hdr_rx_data_last:         ",
+        );
+        let duration_tx_first_data_tx_last_data = format_delta(
+            deltas.and_then(|value| value.tx_first_data_tx_last_data.inner),
+            "d_tx_data_first_tx_data_last:  ",
+        );
 
         SparkCaption::RequestAtClient {
             summary,
@@ -218,50 +202,23 @@ impl SparkCaption {
         stream_id: u64, req: &HttpRequestStub,
     ) -> Self {
         let summary = format!("ID= {}, status= {}", stream_id, req.status);
-        let empty = &"".to_string();
-
-        let duration_rx_hdr_tx_hdr =
-            match req.at_server_deltas.as_ref().unwrap().rx_hdr_tx_hdr.inner {
-                Some(t) => format!("d_rx_hdr_tx_hdr:               {:.2}ms", t),
-
-                None => empty.to_owned(),
-            };
-
-        let duration_rx_hdr_tx_first_data = match req
-            .at_server_deltas
-            .as_ref()
-            .unwrap()
-            .rx_hdr_tx_first_data
-            .inner
-        {
-            Some(t) => format!("d_rx_hdr_tx_data_first:        {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
-
-        let duration_rx_hdr_tx_last_data = match req
-            .at_server_deltas
-            .as_ref()
-            .unwrap()
-            .rx_hdr_tx_last_data
-            .inner
-        {
-            Some(t) => format!("d_rx_hdr_tx_data_last:         {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
-
-        let duration_tx_first_data_tx_last_data = match req
-            .at_server_deltas
-            .as_ref()
-            .unwrap()
-            .tx_first_data_tx_last_data
-            .inner
-        {
-            Some(t) => format!("d_tx_data_first_tx_data_last:  {:.2}ms", t),
-
-            None => empty.to_owned(),
-        };
+        let deltas = req.at_server_deltas.as_ref();
+        let duration_rx_hdr_tx_hdr = format_delta(
+            deltas.and_then(|value| value.rx_hdr_tx_hdr.inner),
+            "d_rx_hdr_tx_hdr:               ",
+        );
+        let duration_rx_hdr_tx_first_data = format_delta(
+            deltas.and_then(|value| value.rx_hdr_tx_first_data.inner),
+            "d_rx_hdr_tx_data_first:        ",
+        );
+        let duration_rx_hdr_tx_last_data = format_delta(
+            deltas.and_then(|value| value.rx_hdr_tx_last_data.inner),
+            "d_rx_hdr_tx_data_last:         ",
+        );
+        let duration_tx_first_data_tx_last_data = format_delta(
+            deltas.and_then(|value| value.tx_first_data_tx_last_data.inner),
+            "d_tx_data_first_tx_data_last:  ",
+        );
 
         SparkCaption::RequestAtServer {
             summary,
@@ -327,7 +284,7 @@ impl SparkCaption {
     fn draw<DB: DrawingBackend>(
         &self, color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>,
         x: i32, y: i32,
-    ) {
+    ) -> SparkDrawingResult<DB> {
         let style = &("monospace", 12).into_text_style(root).color(color);
 
         let newline_offset = 10;
@@ -335,7 +292,7 @@ impl SparkCaption {
 
         match self {
             SparkCaption::UniStream { summary } => {
-                root.draw_text(summary, style, (x, y)).unwrap();
+                root.draw_text(summary, style, (x, y))?;
             },
 
             SparkCaption::RequestAtServer {
@@ -352,69 +309,59 @@ impl SparkCaption {
                 duration_tx_first_data_tx_last_data,
                 ..
             } => {
-                root.draw_text(summary, style, (x, y)).unwrap();
+                root.draw_text(summary, style, (x, y))?;
 
-                root.draw_text(method, style, (x, y + newline_offset))
-                    .unwrap();
+                root.draw_text(method, style, (x, y + newline_offset))?;
 
-                root.draw_text(path, style, (x, y + newline_offset * 2))
-                    .unwrap();
+                root.draw_text(path, style, (x, y + newline_offset * 2))?;
 
                 root.draw_text(
                     client_content_length,
                     style,
                     (x, y + newline_offset * 3),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     server_content_length,
                     style,
                     (x, y + newline_offset * 4),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     client_pri_hdr,
                     style,
                     (x, y + newline_offset * 6),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     server_pri_hdr,
                     style,
                     (x, y + newline_offset * 7),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_rx_hdr_tx_hdr,
                     style,
                     (x, y + newline_offset * 8),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_rx_hdr_tx_first_data,
                     style,
                     (x, y + newline_offset * 9),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_rx_hdr_tx_last_data,
                     style,
                     (x, y + newline_offset * 10),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_tx_first_data_tx_last_data,
                     style,
                     (x, y + newline_offset * 11),
-                )
-                .unwrap();
+                )?;
             },
 
             SparkCaption::RequestAtClient {
@@ -432,84 +379,74 @@ impl SparkCaption {
                 duration_tx_first_data_tx_last_data,
                 ..
             } => {
-                root.draw_text(summary, style, (x, y)).unwrap();
+                root.draw_text(summary, style, (x, y))?;
 
-                root.draw_text(method, style, (x, y + newline_offset))
-                    .unwrap();
-                root.draw_text(path, style, (x, y + newline_offset * 2))
-                    .unwrap();
+                root.draw_text(method, style, (x, y + newline_offset))?;
+                root.draw_text(path, style, (x, y + newline_offset * 2))?;
 
                 root.draw_text(
                     client_content_length,
                     style,
                     (x, y + newline_offset * 3),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     server_content_length,
                     style,
                     (x, y + newline_offset * 4),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     client_pri_hdr,
                     style,
                     (x, y + newline_offset * 6),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     client_pri_update,
                     style,
                     (x, y + newline_offset * 7),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     server_pri_hdr,
                     style,
                     (x, y + newline_offset * 8),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_tx_hdr_rx_hdr,
                     style,
                     (x, y + newline_offset * 9),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_tx_hdr_rx_first_data,
                     style,
                     (x, y + newline_offset * 10),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_tx_hdr_rx_last_data,
                     style,
                     (x, y + newline_offset * 11),
-                )
-                .unwrap();
+                )?;
 
                 root.draw_text(
                     duration_tx_first_data_tx_last_data,
                     style,
                     (x, y + newline_offset * 12),
-                )
-                .unwrap();
+                )?;
             },
         }
+        Ok(())
     }
 }
 
 fn plot_legend<DB: DrawingBackend>(
     color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>, x: i32,
     y: i32, params: &SparkPlotsParams, transmission_type: TransmissionType,
-) {
+) -> SparkDrawingResult<DB> {
     // TODO: only considers vert layout, needs to consider grid layout too
     let style = &("monospace", 12).into_text_style(root).color(color);
     let x: i32 = x + params.spark_dimension_x as i32 + 300;
@@ -517,7 +454,7 @@ fn plot_legend<DB: DrawingBackend>(
     let line_len: i32 = 50;
     let nl_off: i32 = 20;
 
-    root.draw_text("Legend", style, (x, y)).unwrap();
+    root.draw_text("Legend", style, (x, y))?;
 
     // stream data
     let label = match transmission_type {
@@ -527,23 +464,19 @@ fn plot_legend<DB: DrawingBackend>(
     root.draw(&PathElement::new(
         vec![(x, y + nl_off), (x + line_len, y + nl_off)],
         PURPLE_500,
-    ))
-    .unwrap();
-    root.draw_text(label, style, (x + line_len + 10, y + (nl_off) - 5))
-        .unwrap();
+    ))?;
+    root.draw_text(label, style, (x + line_len + 10, y + (nl_off) - 5))?;
 
     // stream data buffered
     root.draw(&PathElement::new(
         vec![(x, y + nl_off * 2), (x + line_len, y + nl_off * 2)],
         MAGENTA,
-    ))
-    .unwrap();
+    ))?;
     root.draw_text(
         "Stream data buffered",
         style,
         (x + line_len + 10, y + (nl_off * 2) - 5),
-    )
-    .unwrap();
+    )?;
 
     // max stream data
     let label = match transmission_type {
@@ -554,51 +487,86 @@ fn plot_legend<DB: DrawingBackend>(
     root.draw(&PathElement::new(
         vec![(x, y + nl_off * 3), (x + line_len, y + nl_off * 3)],
         MUSTARD,
-    ))
-    .unwrap();
-    root.draw_text(label, style, (x + line_len + 10, y + (nl_off * 3) - 5))
-        .unwrap();
+    ))?;
+    root.draw_text(label, style, (x + line_len + 10, y + (nl_off * 3) - 5))?;
 
     // headers transmitted
     root.draw(&PathElement::new(
         vec![(x, y + nl_off * 4), (x + line_len, y + nl_off * 4)],
         CYAN,
-    ))
-    .unwrap();
+    ))?;
     root.draw_text(
         "Request headers sent",
         style,
         (x + line_len + 10, y + (nl_off * 4) - 5),
-    )
-    .unwrap();
+    )?;
 
     // first data frame
     root.draw(&PathElement::new(
         vec![(x, y + nl_off * 5), (x + line_len, y + nl_off * 5)],
         ORANGE,
-    ))
-    .unwrap();
+    ))?;
     root.draw_text(
         "First data frame read",
         style,
         (x + line_len + 10, y + (nl_off * 5) - 5),
-    )
-    .unwrap();
+    )?;
 
     // last data frame
     root.draw(&PathElement::new(
         vec![(x, y + nl_off * 6), (x + line_len, y + nl_off * 6)],
         BROWN,
-    ))
-    .unwrap();
+    ))?;
     root.draw_text(
         "Last data frame read",
         style,
         (x + line_len + 10, y + (nl_off * 6) - 5),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn spark_bitmap_area<'a>(
+    path: &'a str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
+) -> Result<DrawingArea<BitMapBackend<'a>, plotters::coord::Shift>, Box<dyn Error>>
+{
+    let area =
+        BitMapBackend::new(path, (size.width, size.height)).into_drawing_area();
+    area.fill(&colors.fill)?;
+    Ok(area.margin(margin.top, margin.bottom, margin.left, margin.right))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn required_canvas_id(config: &ChartConfig) -> Result<String, std::io::Error> {
+    config.canvas_id().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("spark chart {:?} requires a canvas output", config.title),
+        )
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn spark_canvas_area(
+    canvas_id: &str, colors: PlotColors, margin: ChartMargin,
+) -> Result<DrawingArea<CanvasBackend, plotters::coord::Shift>, Box<dyn Error>> {
+    let backend = CanvasBackend::new(canvas_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("spark canvas {canvas_id:?} not found"),
+        )
+    })?;
+    let area = backend.into_drawing_area();
+    area.fill(&colors.fill)?;
+    Ok(area.margin(margin.top, margin.bottom, margin.left, margin.right))
+}
+
+/// Renders stream spark charts for the supported application protocols and
+/// vantages.
+///
+/// # Errors
+/// Returns an error on invalid layout sizes, output-directory/PNG I/O failures,
+/// missing canvases, or drawing backend failures.
 #[expect(
     clippy::too_many_arguments,
     reason = "The signature mirrors protocol state and grouping would obscure call sites"
@@ -607,50 +575,73 @@ pub fn plot_sparks(
     params: &SparkPlotsParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
     abs_dl_ty: &ChartOutputType, rel_dl_ty: &ChartOutputType,
     abs_ul_ty: &ChartOutputType, rel_ul_ty: &ChartOutputType,
-) {
+) -> Result<(), Box<dyn Error>> {
+    if params.sparks_per_row == 0 ||
+        params.spark_dimension_x == 0 ||
+        params.spark_dimension_y == 0
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "sparks_per_row and spark dimensions must be nonzero",
+        )
+        .into());
+    }
+
     let (stream_frame_dl_series_to_plot, stream_frame_ul_series_to_plot) =
-        match (ds.vantage_point, ds.application_proto) {
-            (VantagePoint::Client, ApplicationProto::Http3) => (
-                &ss.received_stream_frames_series,
-                &ss.sent_stream_frames_series,
-            ),
-            (VantagePoint::Server, ApplicationProto::Http3) => (
-                &ss.sent_stream_frames_series,
-                &ss.received_stream_frames_series,
-            ),
-            (VantagePoint::Client, ApplicationProto::Http2) =>
-                (&ss.received_data_frames_series, &ss.sent_data_frames_series),
-            _ => unimplemented!(),
+        match ds.application_proto {
+            ApplicationProto::Http3 => match ds.vantage_point {
+                VantagePoint::Client => (
+                    &ss.received_stream_frames_series,
+                    &ss.sent_stream_frames_series,
+                ),
+                VantagePoint::Server => (
+                    &ss.sent_stream_frames_series,
+                    &ss.received_stream_frames_series,
+                ),
+            },
+            ApplicationProto::Http2 => match ds.vantage_point {
+                VantagePoint::Client =>
+                    (&ss.received_data_frames_series, &ss.sent_data_frames_series),
+                VantagePoint::Server =>
+                    (&ss.sent_data_frames_series, &ss.received_data_frames_series),
+            },
         };
 
     #[cfg(not(target_arch = "wasm32"))]
-    let (total_dl_sparks, total_ul_sparks) =
+    let (total_dl_sparks, total_ul_sparks): (u32, u32) =
         if params.bidi_only && ds.application_proto == ApplicationProto::Http3 {
             let total_dl = stream_frame_dl_series_to_plot
                 .iter()
-                .filter(|(k, _)| (*k & 0x2) == 0)
-                .count() as u32;
+                .filter(|(k, points)| (*k & 0x2) == 0 && !points.is_empty())
+                .count()
+                .try_into()?;
 
             let total_ul = stream_frame_ul_series_to_plot
                 .iter()
-                .filter(|(k, _)| (*k & 0x2) == 0)
-                .count() as u32;
+                .filter(|(k, points)| (*k & 0x2) == 0 && !points.is_empty())
+                .count()
+                .try_into()?;
 
             (total_dl, total_ul)
         } else {
             (
-                stream_frame_dl_series_to_plot.len() as u32,
-                stream_frame_ul_series_to_plot.len() as u32,
+                stream_frame_dl_series_to_plot
+                    .values()
+                    .filter(|points| !points.is_empty())
+                    .count()
+                    .try_into()?,
+                stream_frame_ul_series_to_plot
+                    .values()
+                    .filter(|points| !points.is_empty())
+                    .count()
+                    .try_into()?,
             )
         };
 
-    // TODO: replace with div_ceil once stablized- https://github.com/rust-lang/rust/issues/88581
     #[cfg(not(target_arch = "wasm32"))]
-    let total_dl_rows: u32 = total_dl_sparks / params.sparks_per_row +
-        u32::from(total_dl_sparks % params.sparks_per_row != 0);
+    let total_dl_rows = total_dl_sparks.div_ceil(params.sparks_per_row).max(1);
     #[cfg(not(target_arch = "wasm32"))]
-    let total_ul_rows: u32 = total_ul_sparks / params.sparks_per_row +
-        u32::from(total_ul_sparks % params.sparks_per_row != 0);
+    let total_ul_rows = total_ul_sparks.div_ceil(params.sparks_per_row).max(1);
 
     #[cfg(not(target_arch = "wasm32"))]
     let caption_area_width = if params.captions_on_top {
@@ -666,23 +657,45 @@ pub fn plot_sparks(
     };
 
     #[cfg(not(target_arch = "wasm32"))]
-    let spark_and_captions_width = params.spark_dimension_x +
-        (params.spark_offset_x as f32 * 1.2) as u32 +
-        caption_area_width;
+    let dimension_overflow = || {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "spark chart dimensions overflow u32",
+        )
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    let spark_and_captions_height = params.spark_dimension_y +
-        params.spark_offset_y +
-        (params.label_area_height) +
-        caption_area_height;
+    let spark_and_captions_width = params
+        .spark_dimension_x
+        .checked_add(
+            params
+                .spark_offset_x
+                .checked_mul(6)
+                .ok_or_else(dimension_overflow)? /
+                5,
+        )
+        .and_then(|width| width.checked_add(caption_area_width))
+        .ok_or_else(dimension_overflow)?;
+    #[cfg(not(target_arch = "wasm32"))]
+    let spark_and_captions_height = params
+        .spark_dimension_y
+        .checked_add(params.spark_offset_y)
+        .and_then(|height| height.checked_add(params.label_area_height))
+        .and_then(|height| height.checked_add(caption_area_height))
+        .ok_or_else(dimension_overflow)?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    let root_width: u32 = params.sparks_per_row * spark_and_captions_width;
-
+    let root_width = params
+        .sparks_per_row
+        .checked_mul(spark_and_captions_width)
+        .ok_or_else(dimension_overflow)?;
     #[cfg(not(target_arch = "wasm32"))]
-    let dl_root_height: u32 = total_dl_rows * spark_and_captions_height;
-
+    let dl_root_height = total_dl_rows
+        .checked_mul(spark_and_captions_height)
+        .ok_or_else(dimension_overflow)?;
     #[cfg(not(target_arch = "wasm32"))]
-    let ul_root_height: u32 = total_ul_rows * spark_and_captions_height;
+    let ul_root_height = total_ul_rows
+        .checked_mul(spark_and_captions_height)
+        .ok_or_else(dimension_overflow)?;
 
     let mut x_min = match ds.vantage_point {
         VantagePoint::Client => ss.received_x_min,
@@ -712,7 +725,6 @@ pub fn plot_sparks(
         session_id: ds.session_id,
         ty: abs_dl_ty.clone(),
     };
-    abs_dl_chart_config.init_chart_dir();
 
     let rel_dl_chart_config = ChartConfig {
         title: "stream-spark-dl-relative".into(),
@@ -723,7 +735,6 @@ pub fn plot_sparks(
         session_id: ds.session_id,
         ty: rel_dl_ty.clone(),
     };
-    rel_dl_chart_config.init_chart_dir();
 
     let abs_ul_chart_config = ChartConfig {
         title: "stream-spark-ul-absolute".into(),
@@ -734,7 +745,6 @@ pub fn plot_sparks(
         session_id: ds.session_id,
         ty: abs_ul_ty.clone(),
     };
-    abs_ul_chart_config.init_chart_dir();
 
     let rel_ul_chart_config = ChartConfig {
         title: "stream-spark-ul-relative".into(),
@@ -745,7 +755,22 @@ pub fn plot_sparks(
         session_id: ds.session_id,
         ty: rel_ul_ty.clone(),
     };
-    rel_ul_chart_config.init_chart_dir();
+
+    #[cfg(not(target_arch = "wasm32"))]
+    for config in [
+        &abs_dl_chart_config,
+        &rel_dl_chart_config,
+        &abs_ul_chart_config,
+        &rel_ul_chart_config,
+    ] {
+        if matches!(config.ty, ChartOutputType::Png { .. }) {
+            if let Some(dir) =
+                std::path::Path::new(&config.chart_filepath()).parent()
+            {
+                std::fs::create_dir_all(dir)?;
+            }
+        }
+    }
 
     #[cfg(not(target_arch = "wasm32"))]
     let dl_size = ChartSize {
@@ -773,61 +798,45 @@ pub fn plot_sparks(
     let rel_ul_chart_path = rel_ul_chart_config.chart_filepath();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let abs_dl_root = make_chart_bitmap_area(
-        &abs_dl_chart_path,
-        dl_size,
-        params.colors,
-        margin,
-    );
+    let abs_dl_root =
+        spark_bitmap_area(&abs_dl_chart_path, dl_size, params.colors, margin)?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    let rel_dl_root = make_chart_bitmap_area(
-        &rel_dl_chart_path,
-        dl_size,
-        params.colors,
-        margin,
-    );
+    let rel_dl_root =
+        spark_bitmap_area(&rel_dl_chart_path, dl_size, params.colors, margin)?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    let abs_ul_root = make_chart_bitmap_area(
-        &abs_ul_chart_path,
-        ul_size,
-        params.colors,
-        margin,
-    );
+    let abs_ul_root =
+        spark_bitmap_area(&abs_ul_chart_path, ul_size, params.colors, margin)?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    let rel_ul_root = make_chart_bitmap_area(
-        &rel_ul_chart_path,
-        ul_size,
-        params.colors,
-        margin,
-    );
+    let rel_ul_root =
+        spark_bitmap_area(&rel_ul_chart_path, ul_size, params.colors, margin)?;
 
     #[cfg(target_arch = "wasm32")]
-    let abs_dl_canvas_id = abs_dl_chart_config.canvas_id().unwrap_or_default();
+    let abs_dl_canvas_id = required_canvas_id(&abs_dl_chart_config)?;
 
     #[cfg(target_arch = "wasm32")]
-    let rel_dl_canvas_id = rel_dl_chart_config.canvas_id().unwrap_or_default();
+    let rel_dl_canvas_id = required_canvas_id(&rel_dl_chart_config)?;
 
     #[cfg(target_arch = "wasm32")]
-    let abs_ul_canvas_id = abs_ul_chart_config.canvas_id().unwrap_or_default();
+    let abs_ul_canvas_id = required_canvas_id(&abs_ul_chart_config)?;
 
     #[cfg(target_arch = "wasm32")]
-    let rel_ul_canvas_id = rel_ul_chart_config.canvas_id().unwrap_or_default();
+    let rel_ul_canvas_id = required_canvas_id(&rel_ul_chart_config)?;
 
     #[cfg(target_arch = "wasm32")]
     let abs_dl_root =
-        make_chart_canvas_area(&abs_dl_canvas_id, params.colors, margin);
+        spark_canvas_area(&abs_dl_canvas_id, params.colors, margin)?;
     #[cfg(target_arch = "wasm32")]
     let rel_dl_root =
-        make_chart_canvas_area(&rel_dl_canvas_id, params.colors, margin);
+        spark_canvas_area(&rel_dl_canvas_id, params.colors, margin)?;
     #[cfg(target_arch = "wasm32")]
     let abs_ul_root =
-        make_chart_canvas_area(&abs_ul_canvas_id, params.colors, margin);
+        spark_canvas_area(&abs_ul_canvas_id, params.colors, margin)?;
     #[cfg(target_arch = "wasm32")]
     let rel_ul_root =
-        make_chart_canvas_area(&rel_ul_canvas_id, params.colors, margin);
+        spark_canvas_area(&rel_ul_canvas_id, params.colors, margin)?;
 
     let mut upper_x = params.spark_offset_x;
     let mut dl_upper_y = params.spark_offset_y;
@@ -840,7 +849,7 @@ pub fn plot_sparks(
         dl_upper_y as i32,
         params,
         TransmissionType::Download,
-    );
+    )?;
     plot_legend(
         &params.colors.caption,
         &rel_dl_root,
@@ -848,7 +857,7 @@ pub fn plot_sparks(
         dl_upper_y as i32,
         params,
         TransmissionType::Download,
-    );
+    )?;
     plot_legend(
         &params.colors.caption,
         &abs_ul_root,
@@ -856,7 +865,7 @@ pub fn plot_sparks(
         ul_upper_y as i32,
         params,
         TransmissionType::Upload,
-    );
+    )?;
     plot_legend(
         &params.colors.caption,
         &rel_ul_root,
@@ -864,7 +873,7 @@ pub fn plot_sparks(
         ul_upper_y as i32,
         params,
         TransmissionType::Upload,
-    );
+    )?;
 
     let mut dl_layout_count = 0;
     let mut ul_layout_count = 0;
@@ -874,6 +883,11 @@ pub fn plot_sparks(
             params.bidi_only &&
             (stream_id & 0x2) != 0
         {
+            continue;
+        }
+
+        // Log traces can contain streams whose measured series is empty.
+        if dl_stream_frames.is_empty() {
             continue;
         }
 
@@ -897,13 +911,13 @@ pub fn plot_sparks(
             (params.spark_dimension_x, params.spark_dimension_y),
         );
 
-        let dl_zoom_x_min = dl_stream_frames.first().unwrap().0;
-        let dl_zoom_x_max = dl_stream_frames.last().unwrap().0;
+        let dl_zoom_x_min = dl_stream_frames[0].0;
+        let dl_zoom_x_max = dl_stream_frames[dl_stream_frames.len() - 1].0;
 
         let dl_zoom_y_max = if let Some(y_max) = params.clamp.stream_y_max {
             y_max
         } else {
-            dl_stream_frames.last().unwrap().1
+            dl_stream_frames[dl_stream_frames.len() - 1].1
         };
 
         let mut abs_dl_chart = ChartBuilder::on(&abs_dl_small_area)
@@ -912,9 +926,8 @@ pub fn plot_sparks(
                 LabelAreaPosition::Bottom,
                 params.label_area_height,
             )
-            .build_cartesian_2d(x_min..x_max, 0..dl_zoom_y_max)
-            .unwrap();
-        draw_mesh(&params.colors, &mut abs_dl_chart);
+            .build_cartesian_2d(x_min..x_max, 0..dl_zoom_y_max)?;
+        draw_mesh(&params.colors, &mut abs_dl_chart)?;
 
         let mut rel_dl_chart = ChartBuilder::on(&rel_dl_small_area)
             .set_label_area_size(LabelAreaPosition::Left, params.label_area_width)
@@ -922,35 +935,32 @@ pub fn plot_sparks(
                 LabelAreaPosition::Bottom,
                 params.label_area_height,
             )
-            .build_cartesian_2d(dl_zoom_x_min..dl_zoom_x_max, 0..dl_zoom_y_max)
-            .unwrap();
-        draw_mesh(&params.colors, &mut rel_dl_chart);
+            .build_cartesian_2d(dl_zoom_x_min..dl_zoom_x_max, 0..dl_zoom_y_max)?;
+        draw_mesh(&params.colors, &mut rel_dl_chart)?;
 
         dl_layout_count += 1;
 
-        let ul_stream_frames = stream_frame_ul_series_to_plot.get(stream_id);
+        let ul_stream_frames = stream_frame_ul_series_to_plot
+            .get(stream_id)
+            .filter(|frames| !frames.is_empty());
 
         // TODO upload window
-        let ul_h2_send_window =
-            ss.h2_send_window_series_balanced.get(&(*stream_id as u32));
+        let h2_stream_id = u32::try_from(*stream_id).ok();
+        let ul_h2_send_window = h2_stream_id
+            .and_then(|id| ss.h2_send_window_series_balanced.get(&id));
         let ul_h2_send_window_max =
-            ss.h2_send_window_balanced_max.get(&(*stream_id as u32));
+            h2_stream_id.and_then(|id| ss.h2_send_window_balanced_max.get(&id));
 
         let (abs_ul_chart, rel_ul_chart) = match ul_stream_frames {
             Some(frames) => {
-                let ul_zoom_x_min = frames.first().unwrap().0;
-                let ul_zoom_x_max = frames.last().unwrap().0;
-
-                // let ul_zoom_x_min_send_window =
-                //     ul_send_window.unwrap().first().unwrap().0;
-                // let ul_zoom_x_max_send_window =
-                //     ul_send_window.unwrap().last().unwrap().0;
+                let ul_zoom_x_min = frames[0].0;
+                let ul_zoom_x_max = frames[frames.len() - 1].0;
 
                 let ul_zoom_y_max = if let Some(y_max) = params.clamp.stream_y_max
                 {
                     y_max
                 } else {
-                    frames.last().unwrap().1
+                    frames[frames.len() - 1].1
                 };
 
                 // TODO: this is a hack because the underlying chart types make
@@ -967,17 +977,16 @@ pub fn plot_sparks(
                         LabelAreaPosition::Bottom,
                         params.label_area_height,
                     )
-                    .build_cartesian_2d(x_min..x_max, 0..ul_zoom_y_max)
-                    .unwrap()
+                    .build_cartesian_2d(x_min..x_max, 0..ul_zoom_y_max)?
                     .set_secondary_coord(
                         x_min..x_max,
                         0i32..*ul_h2_send_window_y_max,
                     );
 
-                draw_mesh(&params.colors, &mut abs_ul_chart);
+                draw_mesh(&params.colors, &mut abs_ul_chart)?;
 
                 if ul_h2_send_window_max.is_some() {
-                    abs_ul_chart.configure_secondary_axes().draw().unwrap();
+                    abs_ul_chart.configure_secondary_axes().draw()?;
                 }
 
                 let mut rel_ul_chart = ChartBuilder::on(&rel_ul_small_area)
@@ -993,20 +1002,15 @@ pub fn plot_sparks(
                     .build_cartesian_2d(
                         ul_zoom_x_min..ul_zoom_x_max,
                         0..ul_zoom_y_max,
-                    )
-                    .unwrap()
+                    )?
                     .set_secondary_coord(
                         ul_zoom_x_min..ul_zoom_x_max,
                         0i32..*ul_h2_send_window_y_max,
                     );
-                draw_mesh(&params.colors, &mut rel_ul_chart);
+                draw_mesh(&params.colors, &mut rel_ul_chart)?;
 
                 if ul_h2_send_window_max.is_some() {
-                    rel_ul_chart
-                        .configure_secondary_axes()
-                        .y_labels(5)
-                        .draw()
-                        .unwrap();
+                    rel_ul_chart.configure_secondary_axes().y_labels(5).draw()?;
                 }
 
                 ul_layout_count += 1;
@@ -1029,7 +1033,7 @@ pub fn plot_sparks(
             upper_x,
             dl_upper_y,
             ul_upper_y,
-        );
+        )?;
 
         upper_x += params.spark_dimension_x + params.spark_offset_x;
 
@@ -1068,17 +1072,15 @@ pub fn plot_sparks(
             dl_stream_frames,
             &mut abs_dl_chart,
             &mut rel_dl_chart,
-        );
+        )?;
 
         if let (Some(mut abs), Some(mut rel), Some(frames)) =
             (abs_ul_chart, rel_ul_chart, ul_stream_frames)
         {
             if let Some(v) = ul_h2_send_window {
-                abs.draw_secondary_series(LineSeries::new(v.to_vec(), ORANGE))
-                    .unwrap();
+                abs.draw_secondary_series(LineSeries::new(v.to_vec(), ORANGE))?;
 
-                rel.draw_secondary_series(LineSeries::new(v.to_vec(), ORANGE))
-                    .unwrap();
+                rel.draw_secondary_series(LineSeries::new(v.to_vec(), ORANGE))?;
             } else {
                 draw_stream_max_line(
                     *stream_id,
@@ -1087,10 +1089,10 @@ pub fn plot_sparks(
                     TransmissionType::Upload,
                     &mut abs,
                     &mut rel,
-                );
+                )?;
             }
 
-            draw_stream_frames_line(frames, &mut abs, &mut rel);
+            draw_stream_frames_line(frames, &mut abs, &mut rel)?;
         }
 
         draw_buffered_data_line(
@@ -1099,7 +1101,7 @@ pub fn plot_sparks(
             &ds.vantage_point,
             &mut abs_dl_chart,
             &mut rel_dl_chart,
-        );
+        )?;
 
         draw_stream_max_line(
             *stream_id,
@@ -1108,7 +1110,7 @@ pub fn plot_sparks(
             TransmissionType::Download,
             &mut abs_dl_chart,
             &mut rel_dl_chart,
-        );
+        )?;
 
         let y_max = match ds.vantage_point {
             VantagePoint::Client => ss.y_max_stream_recv_plot,
@@ -1121,13 +1123,19 @@ pub fn plot_sparks(
             y_max,
             &mut abs_dl_chart,
             &mut rel_dl_chart,
-        );
+        )?;
     }
-}
 
+    abs_dl_root.present()?;
+    rel_dl_root.present()?;
+    abs_ul_root.present()?;
+    rel_ul_root.present()?;
+    Ok(())
+}
 fn draw_mesh<XT, YT, X, Y, DB: DrawingBackend>(
     colors: &PlotColors, chart: &mut ChartContext<DB, Cartesian2d<X, Y>>,
-) where
+) -> SparkDrawingResult<DB>
+where
     X: Ranged<ValueType = XT> + ValueFormatter<XT>,
     Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
 {
@@ -1138,8 +1146,8 @@ fn draw_mesh<XT, YT, X, Y, DB: DrawingBackend>(
         .y_labels(5)
         .axis_style(colors.axis)
         .label_style(chart_label_style(&colors.caption))
-        .draw()
-        .unwrap();
+        .draw()?;
+    Ok(())
 }
 
 #[expect(
@@ -1153,7 +1161,7 @@ fn draw_captions<DB: DrawingBackend>(
     rel_ul_root: &DrawingArea<DB, plotters::coord::Shift>,
     params: &SparkPlotsParams, ds: &Datastore, stream_id: u64, upload_data: bool,
     upper_x: u32, dl_upper_y: u32, ul_upper_y: u32,
-) {
+) -> SparkDrawingResult<DB> {
     if let Some(captions) = SparkCaption::from_data_store(ds, stream_id) {
         let x_offset = if params.captions_on_top {
             0
@@ -1168,13 +1176,13 @@ fn draw_captions<DB: DrawingBackend>(
             abs_dl_root,
             (upper_x + x_offset) as i32,
             dl_upper_y as i32,
-        );
+        )?;
         captions.draw(
             &params.colors.caption,
             rel_dl_root,
             (upper_x + x_offset) as i32,
             dl_upper_y as i32,
-        );
+        )?;
 
         if upload_data {
             captions.draw(
@@ -1182,64 +1190,57 @@ fn draw_captions<DB: DrawingBackend>(
                 abs_ul_root,
                 (upper_x + x_offset) as i32,
                 ul_upper_y as i32,
-            );
+            )?;
             captions.draw(
                 &params.colors.caption,
                 rel_ul_root,
                 (upper_x + x_offset) as i32,
                 ul_upper_y as i32,
-            );
+            )?;
         }
     }
+    Ok(())
 }
 
 fn draw_stream_frames_line<DB: DrawingBackend>(
     stream_frames: &[(f64, u64)],
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
-    abs_chart
-        .draw_series(LineSeries::new(stream_frames.to_vec(), PURPLE_500))
-        .unwrap();
+) -> SparkDrawingResult<DB> {
+    abs_chart.draw_series(LineSeries::new(stream_frames.to_vec(), PURPLE_500))?;
 
-    rel_chart
-        .draw_series(LineSeries::new(stream_frames.to_vec(), PURPLE_500))
-        .unwrap();
+    rel_chart.draw_series(LineSeries::new(stream_frames.to_vec(), PURPLE_500))?;
 
     let circles: Vec<Circle<(f64, u64), i32>> = stream_frames
         .iter()
         .map(|point| Circle::new(*point, 2, PURPLE_500))
         .collect();
-    rel_chart.draw_series(circles).unwrap();
+    rel_chart.draw_series(circles)?;
+    Ok(())
 }
 
 fn draw_buffered_data_line<DB: DrawingBackend>(
     stream_id: u64, ss: &SeriesStore, vantage_point: &VantagePoint,
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
+) -> SparkDrawingResult<DB> {
     let buffered_data_to_plot = match vantage_point {
         VantagePoint::Client => ss.stream_buffer_reads.get(&stream_id),
         VantagePoint::Server => ss.stream_buffer_writes.get(&stream_id),
     };
 
     if let Some(buffered_data) = buffered_data_to_plot {
-        abs_chart
-            .draw_series(LineSeries::new(buffered_data.clone(), MAGENTA))
-            .unwrap();
+        abs_chart.draw_series(LineSeries::new(buffered_data.clone(), MAGENTA))?;
 
-        rel_chart
-            .draw_series(LineSeries::new(buffered_data.clone(), MAGENTA))
-            .unwrap();
+        rel_chart.draw_series(LineSeries::new(buffered_data.clone(), MAGENTA))?;
 
-        rel_chart
-            .draw_series(
-                buffered_data
-                    .iter()
-                    .map(|point| TriangleMarker::new(*point, 3, MAGENTA)),
-            )
-            .unwrap();
+        rel_chart.draw_series(
+            buffered_data
+                .iter()
+                .map(|point| TriangleMarker::new(*point, 3, MAGENTA)),
+        )?;
     }
+    Ok(())
 }
 
 fn draw_stream_max_line<DB: DrawingBackend>(
@@ -1247,7 +1248,7 @@ fn draw_stream_max_line<DB: DrawingBackend>(
     transmission_type: TransmissionType,
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
+) -> SparkDrawingResult<DB> {
     let stream_max_data_to_plot = match (vantage_point, transmission_type) {
         (VantagePoint::Client, TransmissionType::Download) =>
             ss.sent_stream_max_data.get(&stream_id),
@@ -1261,38 +1262,31 @@ fn draw_stream_max_line<DB: DrawingBackend>(
 
     if let Some(stream_max_data) = stream_max_data_to_plot {
         abs_chart
-            .draw_series(LineSeries::new(stream_max_data.clone(), MUSTARD))
-            .unwrap();
+            .draw_series(LineSeries::new(stream_max_data.clone(), MUSTARD))?;
 
         rel_chart
-            .draw_series(LineSeries::new(stream_max_data.clone(), MUSTARD))
-            .unwrap();
+            .draw_series(LineSeries::new(stream_max_data.clone(), MUSTARD))?;
     }
+    Ok(())
 }
 
 fn draw_request_timing_lines<DB: DrawingBackend>(
     ds: &Datastore, stream_id: u64, y_max: u64,
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
+) -> SparkDrawingResult<DB> {
     if let Some(req) = ds.http_requests.get(&stream_id) {
         if let Some(h) = req.time_first_headers_rx {
             let points = vec![(h, 0), (h, y_max)];
-            abs_chart
-                .draw_series(LineSeries::new(points, GREEN))
-                .unwrap();
+            abs_chart.draw_series(LineSeries::new(points, GREEN))?;
 
             // don't care about rx events on the relative spark chart
         }
 
         if let Some(h) = req.time_first_headers_tx {
             let points = vec![(h, 0), (h, y_max)];
-            abs_chart
-                .draw_series(LineSeries::new(points.clone(), CYAN))
-                .unwrap();
-            rel_chart
-                .draw_series(LineSeries::new(points, CYAN))
-                .unwrap();
+            abs_chart.draw_series(LineSeries::new(points.clone(), CYAN))?;
+            rel_chart.draw_series(LineSeries::new(points, CYAN))?;
         }
 
         let (first_data_to_plot, last_data_to_plot) = match ds.vantage_point {
@@ -1304,22 +1298,220 @@ fn draw_request_timing_lines<DB: DrawingBackend>(
 
         if let Some(t) = first_data_to_plot {
             let points = vec![(t, 0), (t, y_max)];
-            abs_chart
-                .draw_series(LineSeries::new(points.clone(), ORANGE))
-                .unwrap();
-            rel_chart
-                .draw_series(LineSeries::new(points, ORANGE))
-                .unwrap();
+            abs_chart.draw_series(LineSeries::new(points.clone(), ORANGE))?;
+            rel_chart.draw_series(LineSeries::new(points, ORANGE))?;
         }
 
         if let Some(t) = last_data_to_plot {
             let points = vec![(t, 0), (t, y_max)];
-            abs_chart
-                .draw_series(LineSeries::new(points.clone(), BROWN))
-                .unwrap();
-            rel_chart
-                .draw_series(LineSeries::new(points, BROWN))
-                .unwrap();
+            abs_chart.draw_series(LineSeries::new(points.clone(), BROWN))?;
+            rel_chart.draw_series(LineSeries::new(points, BROWN))?;
         }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_delta;
+    use super::plot_sparks;
+    use super::SparkCaption;
+    use super::SparkPlotsParams;
+    use crate::datastore::ApplicationProto;
+    use crate::datastore::Datastore;
+    use crate::datastore::VantagePoint;
+    use crate::plots::ChartOutputType;
+    use crate::request_stub::HttpRequestStub;
+    use crate::seriesstore::SeriesStore;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::atomic::Ordering;
+    use std::time::SystemTime;
+    use std::time::UNIX_EPOCH;
+
+    static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+    struct OutputDir(PathBuf);
+
+    impl OutputDir {
+        fn new() -> Result<Self, Box<dyn std::error::Error>> {
+            let nonce = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+            let timestamp =
+                SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "qlog-spark-render-{}-{timestamp}-{nonce}",
+                std::process::id()
+            ));
+            std::fs::create_dir(&path)?;
+            Ok(Self(path))
+        }
+
+        fn png(&self) -> ChartOutputType {
+            ChartOutputType::Png {
+                output_dir: self.0.to_string_lossy().into_owned(),
+                cwnd_y_max: None,
+                stream_y_max: None,
+            }
+        }
+    }
+
+    impl Drop for OutputDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn render(
+        params: &SparkPlotsParams, series: &SeriesStore, datastore: &Datastore,
+        output: &ChartOutputType,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        plot_sparks(
+            params,
+            "spark-regression",
+            series,
+            datastore,
+            output,
+            output,
+            output,
+            output,
+        )
+    }
+
+    #[test]
+    fn captions_tolerate_absent_timing_data() {
+        let req = HttpRequestStub::default();
+        if let SparkCaption::RequestAtClient {
+            duration_tx_hdr_rx_hdr,
+            duration_tx_hdr_rx_first_data,
+            duration_tx_hdr_rx_last_data,
+            duration_tx_first_data_tx_last_data,
+            ..
+        } = SparkCaption::request_at_client_from_stub(
+            ApplicationProto::Http3,
+            &req,
+        ) {
+            assert_eq!(duration_tx_hdr_rx_hdr, "");
+            assert_eq!(duration_tx_hdr_rx_first_data, "");
+            assert_eq!(duration_tx_hdr_rx_last_data, "");
+            assert_eq!(duration_tx_first_data_tx_last_data, "");
+        } else {
+            panic!("client request must produce a client caption");
+        }
+
+        if let SparkCaption::RequestAtServer {
+            duration_rx_hdr_tx_hdr,
+            duration_rx_hdr_tx_first_data,
+            duration_rx_hdr_tx_last_data,
+            duration_tx_first_data_tx_last_data,
+            ..
+        } = SparkCaption::request_at_server_from_stub(4, &req)
+        {
+            assert_eq!(duration_rx_hdr_tx_hdr, "");
+            assert_eq!(duration_rx_hdr_tx_first_data, "");
+            assert_eq!(duration_rx_hdr_tx_last_data, "");
+            assert_eq!(duration_tx_first_data_tx_last_data, "");
+        } else {
+            panic!("server request must produce a server caption");
+        }
+        assert_eq!(format_delta(Some(12.345), "duration="), "duration=12.35ms");
+    }
+
+    #[test]
+    fn invalid_layouts_are_errors_instead_of_panics() {
+        let series = SeriesStore::default();
+        let datastore = Datastore::default();
+        let output = ChartOutputType::Canvas {
+            canvas_id: String::new(),
+        };
+        for params in [
+            SparkPlotsParams {
+                sparks_per_row: 0,
+                ..Default::default()
+            },
+            SparkPlotsParams {
+                spark_dimension_x: 0,
+                ..Default::default()
+            },
+            SparkPlotsParams {
+                spark_dimension_y: 0,
+                ..Default::default()
+            },
+            SparkPlotsParams {
+                sparks_per_row: u32::MAX,
+                ..Default::default()
+            },
+        ] {
+            assert!(render(&params, &series, &datastore, &output).is_err());
+        }
+    }
+
+    #[test]
+    fn http2_server_can_render_both_directions_and_empty_series(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let output_dir = OutputDir::new()?;
+        let mut series = SeriesStore {
+            sent_x_min: 0.0,
+            sent_x_max: 12.0,
+            received_x_min: 0.0,
+            received_x_max: 12.0,
+            y_max_stream_send_plot: 10,
+            y_max_stream_recv_plot: 10,
+            ..SeriesStore::default()
+        };
+        series
+            .sent_data_frames_series
+            .insert(1, vec![(1.0, 2), (10.0, 8)]);
+        series
+            .received_data_frames_series
+            .insert(1, vec![(2.0, 3), (11.0, 7)]);
+        series.sent_data_frames_series.insert(3, Vec::new());
+        let datastore = Datastore {
+            application_proto: ApplicationProto::Http2,
+            vantage_point: VantagePoint::Server,
+            ..Datastore::default()
+        };
+        let params = SparkPlotsParams {
+            sparks_per_row: 1,
+            spark_dimension_x: 260,
+            spark_dimension_y: 200,
+            ..SparkPlotsParams::default()
+        };
+        render(&params, &series, &datastore, &output_dir.png())?;
+
+        let files: Vec<_> = std::fs::read_dir(&output_dir.0)?
+            .map(|entry| entry.map(|e| e.path()))
+            .collect::<Result<_, _>>()?;
+        assert_eq!(files.len(), 4);
+        for path in files {
+            let png = std::fs::read(&path)?;
+            assert!(
+                png.starts_with(b"\x89PNG\r\n\x1a\n"),
+                "bad PNG: {}",
+                path.display()
+            );
+            assert!(png.len() > 100);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn failed_output_directory_creation_is_reported(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let output_dir = OutputDir::new()?;
+        let blocked = output_dir.0.join("file-not-directory");
+        std::fs::write(&blocked, b"block creation")?;
+        let output = ChartOutputType::Png {
+            output_dir: blocked.to_string_lossy().into_owned(),
+            cwnd_y_max: None,
+            stream_y_max: None,
+        };
+        let result = render(
+            &SparkPlotsParams::default(),
+            &SeriesStore::default(),
+            &Datastore::default(),
+            &output,
+        );
+        assert!(result.is_err());
+        Ok(())
     }
 }

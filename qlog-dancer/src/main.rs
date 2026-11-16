@@ -255,7 +255,7 @@ fn run() -> i32 {
                 let mark = std::time::Instant::now();
                 info!("drawing sparks for {}...", label);
 
-                stream_sparks::plot_sparks(
+                if let Err(error) = stream_sparks::plot_sparks(
                     &config.sparks_layout,
                     &config.filename,
                     ss,
@@ -264,7 +264,12 @@ fn run() -> i32 {
                     &chart_config,
                     &chart_config,
                     &chart_config,
-                );
+                ) {
+                    error!(
+                        "Unable to draw stream spark charts for {label}: {error}"
+                    );
+                    return 1;
+                }
 
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }

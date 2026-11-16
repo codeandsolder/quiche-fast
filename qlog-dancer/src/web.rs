@@ -545,7 +545,7 @@ impl QlogDancerWeb {
     pub fn draw_sparks(
         &mut self, abs_dl_canvas_id: &str, abs_ul_canvas_id: &str,
         rel_dl_canvas_id: &str, rel_ul_canvas_id: &str,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let spark_params = SparkPlotsParams {
                 clamp: ClampParams {
@@ -579,8 +579,10 @@ impl QlogDancerWeb {
                 &ChartOutputType::Canvas {
                     canvas_id: rel_ul_canvas_id.to_string(),
                 },
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
