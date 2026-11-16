@@ -99,3 +99,27 @@ fn empty_qlog_traces_fail_cleanly() -> Result<(), Box<dyn std::error::Error>> {
     );
     Ok(())
 }
+
+#[test]
+fn unsupported_qlog_vantage_is_reported_without_format_retry(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let input = TempLog::new(
+        "qlog",
+        br#"{"file_schema":"0.3","serialization_format":"JSON","traces":[{"event_schemas":[],"events":[]}]}"#,
+    )?;
+    let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+        .arg(&input.0)
+        .env("RUST_LOG", "error")
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "unexpected status: {stderr}");
+    assert!(
+        stderr.contains("unsupported qlog vantage point"),
+        "missing vantage error: {stderr}",
+    );
+    assert!(
+        !stderr.contains("Unable to parse log in either format"),
+        "vantage validation retried unrelated formats: {stderr}",
+    );
+    Ok(())
+}

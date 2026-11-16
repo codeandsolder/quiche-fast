@@ -134,6 +134,34 @@ pub enum VantagePoint {
     Server,
 }
 
+/// A qlog vantage point with no valid client/server interpretation.
+#[derive(Debug)]
+pub struct UnsupportedVantagePoint(pub qlog::VantagePointType);
+
+impl std::fmt::Display for UnsupportedVantagePoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "unsupported qlog vantage point {:?}: expected client or server",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for UnsupportedVantagePoint {}
+
+impl TryFrom<&qlog::VantagePointType> for VantagePoint {
+    type Error = UnsupportedVantagePoint;
+
+    fn try_from(value: &qlog::VantagePointType) -> Result<Self, Self::Error> {
+        match value {
+            qlog::VantagePointType::Client => Ok(Self::Client),
+            qlog::VantagePointType::Server => Ok(Self::Server),
+            other => Err(UnsupportedVantagePoint(other.clone())),
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct StreamDatapoint {
     pub offset: u64,
@@ -1133,15 +1161,15 @@ impl Datastore {
         }
     }
 
+    /// Builds a datastore from qlog JSON events.
+    ///
+    /// # Errors
+    /// Returns an error when the log's vantage point is not client or server.
     pub fn with_qlog_events(
         events: &[qlog::events::Event], vantage_point: &qlog::VantagePointType,
         process_acks: bool,
-    ) -> Self {
-        let vp = match vantage_point {
-            qlog::VantagePointType::Client => VantagePoint::Client,
-            qlog::VantagePointType::Server => VantagePoint::Server,
-            _ => panic!("unknown vantage point type"),
-        };
+    ) -> Result<Self, UnsupportedVantagePoint> {
+        let vp = VantagePoint::try_from(vantage_point)?;
 
         let mut ds = Datastore {
             vantage_point: vp,
@@ -1155,7 +1183,7 @@ impl Datastore {
         ds.hydrate_http_requests();
         ds.finalize();
 
-        ds
+        Ok(ds)
     }
 
     pub fn finalize(&mut self) {
@@ -1318,10 +1346,10 @@ impl Datastore {
     fn consume_qlog_packet_sent(
         &mut self, ps: &qlog::events::quic::PacketSent, ev_time: f64,
     ) {
-        // If there's no packet number we'll have to skip processing.
-        if ps.header.packet_number.is_none() {
+        // Packet number is optional for some packet types.
+        let Some(packet_number) = ps.header.packet_number else {
             return;
-        }
+        };
 
         let packet_type =
             PacketType::from_qlog_packet_type(&ps.header.packet_type);
@@ -1331,12 +1359,12 @@ impl Datastore {
             created_time: ev_time,
             send_at_time: ps.send_at_time,
             ty: packet_type,
-            number: ps.header.packet_number.unwrap(),
+            number: packet_number,
         };
 
         let s = self.packet_sent.entry(packet_type).or_default();
 
-        s.insert(ps.header.packet_number.unwrap(), packet_info);
+        s.insert(packet_number, packet_info);
 
         // Prefer to use the packet_sent send_at_time if it exists. Otherwise
         // fallback to the event time.
@@ -1666,15 +1694,15 @@ impl Datastore {
         }
     }
 
+    /// Builds a datastore from qlog JSON-SEQ events.
+    ///
+    /// # Errors
+    /// Returns an error when the log's vantage point is not client or server.
     pub fn with_sqlog_reader_events(
         events: &[qlog::reader::Event], vantage_point: &qlog::VantagePointType,
         process_acks: bool,
-    ) -> Self {
-        let vp = match vantage_point {
-            qlog::VantagePointType::Client => VantagePoint::Client,
-            qlog::VantagePointType::Server => VantagePoint::Server,
-            _ => panic!("unknown vantage point type"),
-        };
+    ) -> Result<Self, UnsupportedVantagePoint> {
+        let vp = VantagePoint::try_from(vantage_point)?;
 
         let mut ds = Datastore {
             total_sent_stream_frame_count: 0,
@@ -1698,7 +1726,7 @@ impl Datastore {
         ds.hydrate_http_requests();
         ds.finalize();
 
-        ds
+        Ok(ds)
     }
 }
 
@@ -1773,8 +1801,21 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
 
         match res {
             Ok(mut event_hdr) => {
-                event_hdr.populate_strings(constants);
-                event_hdr.time_num = event_hdr.time.parse::<u64>().unwrap();
+                if let Err(error) = event_hdr.populate_strings(constants) {
+                    log::warn!(
+                        "Skipping netlog record with undefined event ID: {error}"
+                    );
+                    continue;
+                }
+                let Ok(time) = event_hdr.time.parse::<u64>() else {
+                    log::warn!(
+                        "Skipping netlog {} record with invalid timestamp {:?}",
+                        event_hdr.ty_string,
+                        event_hdr.time
+                    );
+                    continue;
+                };
+                event_hdr.time_num = time;
 
                 // If this is a session creation, store the session, so we can
                 // link events with it. The source ID of these events is the
@@ -1785,7 +1826,13 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                     match event_hdr.ty_string.as_str() {
                         "QUIC_SESSION" => {
                             let ev: QuicSessionEvent =
-                                serde_json::from_slice(&event).unwrap();
+                                match serde_json::from_slice(&event) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        log::warn!("Skipping malformed QUIC_SESSION: {error}");
+                                        continue;
+                                    },
+                                };
 
                             // QUIC sessions split host and port, which
                             // interferes with filter expression, so merge them
@@ -1796,10 +1843,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                                 session_id: event_hdr.source.id,
                                 application_proto: ApplicationProto::Http3,
                                 host: host.clone(),
-                                start_time: event_hdr
-                                    .time
-                                    .parse::<u64>()
-                                    .unwrap(),
+                                start_time: event_hdr.time_num,
                             });
 
                             let do_insert = hostname_filter.is_empty() ||
@@ -1816,16 +1860,19 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
 
                         "HTTP2_SESSION" => {
                             let ev: Http2SessionEvent =
-                                serde_json::from_slice(&event).unwrap();
+                                match serde_json::from_slice(&event) {
+                                    Ok(value) => value,
+                                    Err(error) => {
+                                        log::warn!("Skipping malformed HTTP2_SESSION: {error}");
+                                        continue;
+                                    },
+                                };
 
                             sessions.insert(event_hdr.source.id, NetlogSession {
                                 session_id: event_hdr.source.id,
                                 application_proto: ApplicationProto::Http2,
                                 host: ev.params.host.clone(),
-                                start_time: event_hdr
-                                    .time
-                                    .parse::<u64>()
-                                    .unwrap(),
+                                start_time: event_hdr.time_num,
                             });
 
                             let do_insert = hostname_filter.is_empty() ||
@@ -1953,4 +2000,40 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
     }
 
     (log_file_data, sessions)
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::Datastore;
+    use super::VantagePoint;
+    use qlog::VantagePointType;
+
+    #[test]
+    fn invalid_vantage_points_are_reported_in_both_log_formats() {
+        for value in [VantagePointType::Unknown, VantagePointType::Network] {
+            let normal = Datastore::with_qlog_events(&[], &value, false);
+            let sequential =
+                Datastore::with_sqlog_reader_events(&[], &value, false);
+            for result in [normal, sequential] {
+                assert!(result.is_err_and(|error| {
+                    error.to_string().contains("unsupported qlog vantage point")
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn client_and_server_vantage_points_are_recognized(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let client =
+            Datastore::with_qlog_events(&[], &VantagePointType::Client, false)?;
+        let server = Datastore::with_sqlog_reader_events(
+            &[],
+            &VantagePointType::Server,
+            false,
+        )?;
+        assert!(matches!(client.vantage_point, VantagePoint::Client));
+        assert!(matches!(server.vantage_point, VantagePoint::Server));
+        Ok(())
+    }
 }
