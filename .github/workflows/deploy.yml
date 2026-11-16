@@ -10,7 +10,7 @@ env:
 
 concurrency:
   group: deploy-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   docs:
@@ -24,7 +24,7 @@ jobs:
       - name: Setup mandatory sccache
         uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@902094bd4b69dc21860a6253bbc819542a2acfa3 # main
         with:
-          rust-toolchain: "nightly-2026-10-08"
+          rust-toolchain: "nightly-2026-11-13"
 
       - name: Install pinned Rust nightly
         uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c
@@ -37,7 +37,7 @@ jobs:
           sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
 
       - name: Run cargo doc
-        run: cargo +nightly-2026-10-08 doc --no-deps --all-features
+        run: cargo +nightly-2026-11-13 doc --no-deps --all-features
 
       - name: Deploy to GitHub Pages
         uses: crazy-max/ghaction-github-pages@1d6ee9b181a81033a16bd707a1401afa978daab4 # v5
