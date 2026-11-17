@@ -55,7 +55,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 | Modify event filters | `src/wirefilter.rs` (wirefilter-engine DSL) |
 | CLI args / config | `src/config.rs` (AppConfig, clap) |
 | Wasm API surface | `src/web.rs` (`#[wasm_bindgen]` exports) |
-| Report formatting | `src/reports/` -- `events.rs` renders QUIC and HTTP/3 frames directly into existing `String` buffers using `std::fmt::Write`, avoiding temporary allocations in the per-frame path; `text.rs::packet_loss_session_report()` reports netlog ACK gaps using `packet_sent` for received ACKs and `packet_received` for sent ACKs. Counts with no observed packets are `n/a`, not zero-percent or confirmed loss. `text.rs::SentPacketLine` streams the actual `PacketInfoStub.acked` state (`yes`, `no`, or `unknown`) through an allocation-free `Display` formatter; `None` is not confirmed loss |
+| Report formatting | `src/reports/` -- `events.rs` renders QUIC and HTTP/3 frames directly into existing `String` buffers using `std::fmt::Write`, avoiding temporary allocations in the per-frame path; `text.rs::AckGapSession` streams netlog ACK gaps directly through a `Display` formatter, using `packet_sent` for received ACKs and `packet_received` for sent ACKs. Counts with no observed packets are `n/a`, not zero-percent or confirmed loss. `text.rs::SentPacketLine` streams the actual `PacketInfoStub.acked` state (`yes`, `no`, or `unknown`) through an allocation-free `Display` formatter; `None` is not confirmed loss |
 
 ## NOTES
 

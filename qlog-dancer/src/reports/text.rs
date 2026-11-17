@@ -29,7 +29,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::fmt::Write as _;
 
 use qlog::events::quic::QuicFrame;
 use tabled::settings::location::ByColumnName;
@@ -416,19 +415,19 @@ fn ack_gap_percentage(gaps: usize, observed: usize) -> String {
 }
 
 fn append_ack_gap_section(
-    report: &mut String, heading: &str,
+    output: &mut impl std::fmt::Write, heading: &str,
     missing: &BTreeMap<crate::PacketType, BTreeSet<u64>>,
     observed: &HashMap<crate::PacketType, BTreeMap<u64, PacketInfoStub>>,
-) {
+) -> std::fmt::Result {
     if !missing.values().any(|numbers| !numbers.is_empty()) {
-        return;
+        return Ok(());
     }
 
-    let _ = writeln!(report, "  {heading}");
-    let _ = writeln!(
-        report,
+    writeln!(output, "  {heading}")?;
+    writeln!(
+        output,
         "    Packet type, Observed packets, ACK gaps, ACK gaps / observed (%), Missing packet numbers"
-    );
+    )?;
 
     for (packet_type, missing_numbers) in missing {
         if missing_numbers.is_empty() {
@@ -440,54 +439,57 @@ fn append_ack_gap_section(
         let observed_count = observed.get(packet_type).map_or(0, BTreeMap::len);
         let percentage =
             ack_gap_percentage(missing_numbers.len(), observed_count);
-        let _ = writeln!(
-            report,
+        writeln!(
+            output,
             "    {packet_type:?}, {observed_count}, {}, {percentage}, {missing_numbers:?}",
             missing_numbers.len(),
-        );
+        )?;
     }
-    let _ = writeln!(report);
+    writeln!(output)
 }
 
-/// Format one session so the report and its edge cases are testable without
-/// intercepting process-wide stdout.
-fn packet_loss_session_report(data: &Datastore) -> String {
-    let sent_gaps = &data.netlog_ack_received_missing_packet;
-    let received_gaps = &data.netlog_ack_sent_missing_packet;
+/// Format an ACK-gap session directly to the output formatter. The CLI never
+/// accumulates the packet-number sets into a second full-report buffer.
+struct AckGapSession<'a>(&'a Datastore);
 
-    if !sent_gaps.values().any(|numbers| !numbers.is_empty()) &&
-        !received_gaps.values().any(|numbers| !numbers.is_empty())
-    {
-        return String::new();
+impl std::fmt::Display for AckGapSession<'_> {
+    fn fmt(&self, output: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let data = self.0;
+        let sent_gaps = &data.netlog_ack_received_missing_packet;
+        let received_gaps = &data.netlog_ack_sent_missing_packet;
+
+        if !sent_gaps.values().any(|numbers| !numbers.is_empty()) &&
+            !received_gaps.values().any(|numbers| !numbers.is_empty())
+        {
+            return Ok(());
+        }
+
+        writeln!(
+            output,
+            "Session={}, host={}",
+            data.session_id.unwrap_or(-1),
+            data.host.as_deref().unwrap_or("ERROR UNKNOWN")
+        )?;
+        writeln!(
+            output,
+            "  ACK gaps are not confirmed loss; netlog packet-space attribution may be approximate."
+        )?;
+
+        // ACKs from the peer describe packets we transmitted; ACKs we sent
+        // describe packets transmitted by the peer.
+        append_ack_gap_section(
+            output,
+            "Packets sent, missing from received ACKs",
+            sent_gaps,
+            &data.packet_sent,
+        )?;
+        append_ack_gap_section(
+            output,
+            "Packets received, missing from sent ACKs",
+            received_gaps,
+            &data.packet_received,
+        )
     }
-
-    let mut report = String::new();
-    let _ = writeln!(
-        report,
-        "Session={}, host={}",
-        data.session_id.unwrap_or(-1),
-        data.host.as_deref().unwrap_or("ERROR UNKNOWN")
-    );
-    let _ = writeln!(
-        report,
-        "  ACK gaps are not confirmed loss; netlog packet-space attribution may be approximate."
-    );
-
-    // ACKs from the peer describe the packets we transmitted, *not* packets
-    // received from the peer. ACKs we sent describe peer transmissions.
-    append_ack_gap_section(
-        &mut report,
-        "Packets sent, missing from received ACKs",
-        sent_gaps,
-        &data.packet_sent,
-    );
-    append_ack_gap_section(
-        &mut report,
-        "Packets received, missing from sent ACKs",
-        received_gaps,
-        &data.packet_received,
-    );
-    report
 }
 
 /// Print the Chrome netlog ACK-gap report across all parsed sessions.
@@ -501,7 +503,7 @@ pub fn print_packet_loss(data: &[LogFileData]) {
     println!("================");
 
     for session in data {
-        print!("{}", packet_loss_session_report(&session.datastore));
+        print!("{}", AckGapSession(&session.datastore));
     }
     println!();
 }
@@ -624,7 +626,7 @@ mod report_safety_tests {
             .netlog_ack_sent_missing_packet
             .insert(packet_type, BTreeSet::from([1]));
 
-        let report = packet_loss_session_report(&datastore);
+        let report = AckGapSession(&datastore).to_string();
         assert!(report.contains("Session=7, host=example.test"));
         assert!(report.contains("Packets sent, missing from received ACKs"));
         assert!(report.contains("    OneRtt, 8, 2, 25.00, {2, 3}"));
@@ -640,7 +642,7 @@ mod report_safety_tests {
             .netlog_ack_sent_missing_packet
             .insert(crate::PacketType::Unknown, BTreeSet::from([u64::MAX]));
 
-        let report = packet_loss_session_report(&datastore);
+        let report = AckGapSession(&datastore).to_string();
         assert!(report.contains("Session=-1, host=ERROR UNKNOWN"));
         assert!(report.contains("Packets received, missing from sent ACKs"));
         assert!(
@@ -657,12 +659,12 @@ mod report_safety_tests {
         datastore
             .netlog_ack_received_missing_packet
             .insert(crate::PacketType::Initial, BTreeSet::new());
-        assert_eq!(packet_loss_session_report(&datastore), "");
+        assert_eq!(AckGapSession(&datastore).to_string(), "");
 
         datastore
             .netlog_ack_received_missing_packet
             .insert(crate::PacketType::Handshake, BTreeSet::from([99]));
-        let report = packet_loss_session_report(&datastore);
+        let report = AckGapSession(&datastore).to_string();
         assert!(report.contains("    Handshake, 0, 1, n/a, {99}"));
         assert!(!report.contains("    Initial,"));
     }
