@@ -46,7 +46,8 @@ use crate::plots::ChartOutputType;
 use crate::plots::ChartSize;
 use crate::plots::ClampParams;
 use crate::plots::PlotParameters;
-use crate::reports::html::event_list_html_from_sqlog;
+use crate::reports::events::sqlog_event_list;
+use crate::reports::html::event_list_html_from_table;
 
 use crate::datastore::Datastore;
 use crate::datastore::VantagePoint;
@@ -767,15 +768,25 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    pub fn populate_event_table(&self, event_div_id: &str) {
-        let window: Window = web_sys::window().unwrap();
-        let document: Document = window.document().unwrap();
-
+    pub fn populate_event_table(
+        &self, event_div_id: &str,
+    ) -> Result<(), JsValue> {
+        let window: Window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("browser window unavailable"))?;
+        let document: Document = window
+            .document()
+            .ok_or_else(|| JsValue::from_str("browser document unavailable"))?;
         let target_div: Element =
-            document.get_element_by_id(event_div_id).unwrap();
+            document.get_element_by_id(event_div_id).ok_or_else(|| {
+                JsValue::from_str(&format!(
+                    "event table container {event_div_id:?} is missing"
+                ))
+            })?;
 
-        let event_table = event_list_html_from_sqlog(&self.qlog_events);
+        let event_table =
+            event_list_html_from_table(sqlog_event_list(&self.qlog_events));
         target_div.set_inner_html(&event_table);
+        Ok(())
     }
 
     #[wasm_bindgen]

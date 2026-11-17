@@ -223,14 +223,21 @@ fn http_frame_to_string(frame: &Http3Frame) -> String {
     s
 }
 
-pub fn sqlog_event_list(
-    events: &[qlog::reader::Event],
+/// A borrowed view of both the native and extensible qlog record encodings.
+/// The same formatter serves JSON and JSON-SEQ logs without cloning events.
+enum EventView<'a> {
+    Native(&'a qlog::events::Event),
+    Json(&'a qlog::events::JsonEvent),
+}
+
+fn qlog_event_rows<'a>(
+    events: impl IntoIterator<Item = EventView<'a>>,
 ) -> tabled::builder::Builder {
     let mut pp = vec![];
 
     for event in events {
         match event {
-            qlog::reader::Event::Qlog(ev) => {
+            EventView::Native(ev) => {
                 let (cat, ty) = category_and_type_from_event(ev);
 
                 let mut p = PrintableEvent {
@@ -439,7 +446,7 @@ pub fn sqlog_event_list(
                 pp.push(p);
             },
 
-            qlog::reader::Event::Json(ev) => {
+            EventView::Json(ev) => {
                 let (cat, ty) = category_and_type_from_name(&ev.name);
 
                 let p = PrintableEvent {
@@ -455,4 +462,55 @@ pub fn sqlog_event_list(
     }
 
     Table::builder(pp)
+}
+
+/// Render native qlog JSON records without copying the event list.
+pub fn qlog_event_list(
+    events: &[qlog::events::Event],
+) -> tabled::builder::Builder {
+    qlog_event_rows(events.iter().map(EventView::Native))
+}
+
+/// Render both typed and extensible qlog JSON-SEQ records.
+pub fn sqlog_event_list(
+    events: &[qlog::reader::Event],
+) -> tabled::builder::Builder {
+    qlog_event_rows(events.iter().map(|event| match event {
+        qlog::reader::Event::Qlog(event) => EventView::Native(event),
+        qlog::reader::Event::Json(event) => EventView::Json(event),
+    }))
+}
+
+/// Display exact identifiers and timestamps for the recognized, parsed
+/// Chrome netlog events of one session (the netlog deserializer supports a
+/// selected subset of Chromium event types).
+pub fn netlog_event_list(
+    events: &[(netlog::EventHeader, netlog::Event)],
+) -> tabled::builder::Builder {
+    #[derive(Tabled)]
+    struct PrintableNetlogEvent {
+        time: String,
+        #[tabled(rename = "Type")]
+        ty: String,
+        phase: String,
+        source_id: i64,
+        details: String,
+    }
+
+    Table::builder(events.iter().map(|(header, event)| PrintableNetlogEvent {
+        time: header.time.clone(),
+        ty: header.ty_string.clone(),
+        phase: header.phase_string.clone(),
+        source_id: header.source.id,
+        details: format!("{event:?}"),
+    }))
+}
+
+/// Convert any of the three supported log formats into a report table.
+pub fn event_list(raw: &crate::RawLogEvents) -> tabled::builder::Builder {
+    match raw {
+        crate::RawLogEvents::QlogJson { events } => qlog_event_list(events),
+        crate::RawLogEvents::QlogJsonSeq { events } => sqlog_event_list(events),
+        crate::RawLogEvents::Netlog { events } => netlog_event_list(events),
+    }
 }

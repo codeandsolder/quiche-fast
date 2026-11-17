@@ -34,7 +34,7 @@ use table_to_html::HtmlTable;
 use tabled::Table;
 
 use crate::create_file_recursive;
-use crate::reports::events::sqlog_event_list;
+use crate::reports::events::event_list as build_event_list;
 use crate::reports::text::request_timing_table;
 use crate::AppConfig;
 use crate::LogFileParseResult;
@@ -394,9 +394,33 @@ pub fn requests(log_file: &LogFileParseResult, config: &AppConfig) {
     .unwrap();
 }
 
-pub fn event_list_html_from_sqlog(events: &[qlog::reader::Event]) -> String {
-    let table = sqlog_event_list(events);
-    let table = HtmlTable::with_header(Vec::<Vec<String>>::from(table));
+/// Escape data (not markup) before handing it to table_to_html, whose
+/// `HtmlValue::Content` renderer prints cell text verbatim.
+fn escape_html_cell(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// Render escaped event-list HTML from a previously populated row builder.
+#[must_use]
+pub fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
+    let mut rows = Vec::<Vec<String>>::from(table);
+    for row in &mut rows {
+        for cell in row {
+            *cell = escape_html_cell(cell);
+        }
+    }
+    let table = HtmlTable::with_header(rows);
     inject_table_id_class(
         &table,
         None,
@@ -406,50 +430,52 @@ pub fn event_list_html_from_sqlog(events: &[qlog::reader::Event]) -> String {
     )
 }
 
-pub fn event_list(log_file: &LogFileParseResult, config: &AppConfig) {
+/// Writes the recognized-event list from any parsed log encoding.
+///
+/// # Errors
+/// Returns an I/O error if the report directory or output file cannot be
+/// created/written.
+pub fn event_list(
+    log_file: &LogFileParseResult, config: &AppConfig,
+) -> std::io::Result<()> {
     let filename = format!("{}-reports/event-list.html", config.filename);
-    let mut file = create_file_recursive(&filename).unwrap();
+    let mut file = create_file_recursive(&filename)?;
 
-    file.write_all(HTML_INCLUDES.as_bytes()).unwrap();
-    file.write_all(TABLE_INIT_SCRIPT.as_bytes()).unwrap();
-    file.write_all(SESSIONS_STYLES.as_bytes()).unwrap();
+    file.write_all(HTML_INCLUDES.as_bytes())?;
+    file.write_all(TABLE_INIT_SCRIPT.as_bytes())?;
+    file.write_all(SESSIONS_STYLES.as_bytes())?;
     file.write_all(
         r#"<html>
-    <head><head>
+    <head></head>
     <body>
         <div>
-            <h1 class="center">List of events</h1>
-            <p class="center">This page lists all the events
-            that were present in a log file.</p>
+            <h1 class="center">Recognized log events</h1>
+            <p class="center">This page lists the parsed events understood by qlog-dancer
+            for each selected connection. Unrecognized Chrome netlog events are not included.</p>
             "#
         .as_bytes(),
-    )
-    .unwrap();
+    )?;
 
     for data in &log_file.data {
-        match &data.raw {
-            crate::RawLogEvents::QlogJson { events: _ } => {
-                println!("Support for event list of contained qlog is TODO")
-            },
-            crate::RawLogEvents::QlogJsonSeq { events } => {
-                let table = event_list_html_from_sqlog(events);
-
-                file.write_all(table.as_bytes()).unwrap();
-            },
-            crate::RawLogEvents::Netlog => {
-                println!("Support for event list of netlog is TODO")
-            },
-        }
+        let table = event_list_html_from_table(build_event_list(&data.raw));
+        let session = data.datastore.session_id.map_or_else(
+            || "qlog trace".to_string(),
+            |id| format!("session {id}"),
+        );
+        file.write_all(
+            format!("<h2 class=\"center\">{session}</h2>").as_bytes(),
+        )?;
+        file.write_all(table.as_bytes())?;
     }
 
     file.write_all(
         r#"
         </div>
     </body>
-    <html>"#
+    </html>"#
             .as_bytes(),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
 fn table_cell_value(cell: &HtmlElement) -> Option<String> {
@@ -657,5 +683,30 @@ impl HtmlVisitorMut for RequestTableDecorator {
         }
 
         true
+    }
+}
+
+#[cfg(test)]
+mod report_event_html_tests {
+    use super::*;
+    use qlog::events::JsonEvent;
+    use qlog::reader::Event;
+
+    #[test]
+    fn escapes_user_supplied_event_details_and_preserves_unicode() {
+        let record = Event::Json(JsonEvent {
+            time: 1.0,
+            importance: Default::default(),
+            name: "custom:<img src=x onerror='alert(1)'>".to_string(),
+            data: serde_json::json!({"key": "<script>alert(1)</script>&🏁"}),
+        });
+        let raw = crate::RawLogEvents::QlogJsonSeq {
+            events: vec![record],
+        };
+        let html = event_list_html_from_table(build_event_list(&raw));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;&amp;🏁"));
+        assert!(html.contains("&lt;img src=x onerror=&#39;alert(1)&#39;&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+        assert!(!html.contains("<img src=x"));
     }
 }

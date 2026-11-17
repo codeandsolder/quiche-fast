@@ -334,7 +334,10 @@ fn run() -> i32 {
 
     println!();
 
-    report(&log_file, &config);
+    if let Err(err) = report(&log_file, &config) {
+        error!("Unable to write log report: {err}");
+        return 1;
+    }
 
     print!("input logs parsed successfully, check output(s)");
 
