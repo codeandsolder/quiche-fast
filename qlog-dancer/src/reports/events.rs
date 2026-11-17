@@ -97,23 +97,41 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 }
                 s += "}";
             },
-            QuicFrame::ResetStream { stream_id, error, error_code, final_size, .. } => {
+            QuicFrame::ResetStream {
+                stream_id,
+                error,
+                error_code,
+                final_size,
+                ..
+            } => {
                 s += &format!(" RESET_STREAM {{id={stream_id}, error={error:?}, error_code={error_code:?}, final_size={final_size}}}");
             },
-            QuicFrame::StopSending { stream_id, error, error_code, ..} => {
+            QuicFrame::StopSending {
+                stream_id,
+                error,
+                error_code,
+                ..
+            } => {
                 s += &format!(" STOP_SENDING {{id={stream_id}, error={error:?}, error_code={error_code:?}}}");
             },
             QuicFrame::Crypto { offset, raw } => {
                 s += &format!(" CRYPTO {{off={offset}, raw={raw:?}}}");
             },
-            QuicFrame::NewToken { token , ..} => {
-               s += " NEW_TOKEN ";
-               if let Some(ty) = &token.ty {
+            QuicFrame::NewToken { token, .. } => {
+                s += " NEW_TOKEN ";
+                if let Some(ty) = &token.ty {
                     s += &format!("{{ty={ty:?}}}");
-               }
+                }
             },
-            QuicFrame::Stream { stream_id, offset, fin, raw } => {
-                s += &format!(" STREAM {{id={stream_id}, off={offset:?}, raw={raw:?}");
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                fin,
+                raw,
+            } => {
+                s += &format!(
+                    " STREAM {{id={stream_id}, off={offset:?}, raw={raw:?}"
+                );
                 if let Some(f) = fin {
                     s += &format!(", fin={f}")
                 }
@@ -122,50 +140,88 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
             QuicFrame::MaxData { maximum, .. } => {
                 s += &format!(" MAX_DATA {{max={maximum}}}");
             },
-            QuicFrame::MaxStreamData { stream_id, maximum, .. } => {
-                s += &format!(" MAX_STREAM_DATA {{id={stream_id}, max={maximum}}}");
+            QuicFrame::MaxStreamData {
+                stream_id, maximum, ..
+            } => {
+                s += &format!(
+                    " MAX_STREAM_DATA {{id={stream_id}, max={maximum}}}"
+                );
             },
-            QuicFrame::MaxStreams { stream_type, maximum, .. } => {
-                s += &format!(" MAX_STREAMS {{ty={stream_type:?}, max={maximum}}}");
+            QuicFrame::MaxStreams {
+                stream_type,
+                maximum,
+                ..
+            } => {
+                s += &format!(
+                    " MAX_STREAMS {{ty={stream_type:?}, max={maximum}}}"
+                );
             },
             QuicFrame::DataBlocked { limit, .. } => {
                 s += &format!(" DATA_BLOCKED {{limit={limit}}}");
             },
-            QuicFrame::StreamDataBlocked { stream_id, limit, .. } => {
-                s += &format!(" STREAM_DATA_BLOCKED {{id={stream_id}, limit={limit}}}");
+            QuicFrame::StreamDataBlocked {
+                stream_id, limit, ..
+            } => {
+                s += &format!(
+                    " STREAM_DATA_BLOCKED {{id={stream_id}, limit={limit}}}"
+                );
             },
-            QuicFrame::StreamsBlocked { stream_type, limit , ..} => {
-                s += &format!(" STREAMS_BLOCKED {{ty={stream_type:?}, limit={limit}}}");
+            QuicFrame::StreamsBlocked {
+                stream_type, limit, ..
+            } => {
+                s += &format!(
+                    " STREAMS_BLOCKED {{ty={stream_type:?}, limit={limit}}}"
+                );
             },
-            QuicFrame::NewConnectionId { /*sequence_number, retire_prior_to, connection_id_length, connection_id, stateless_reset_token*/ .. } => {
-                s += " NEW_CONNECTION_ID {{todo='todo'}}";
+            QuicFrame::NewConnectionId {
+                sequence_number,
+                retire_prior_to,
+                connection_id_length,
+                connection_id,
+                stateless_reset_token,
+                ..
+            } => {
+                s += &format!(
+                    " NEW_CONNECTION_ID {{sn={sequence_number}, retire_prior_to={retire_prior_to}, cid_length={connection_id_length:?}, cid={connection_id:?}, reset_token={stateless_reset_token:?}}}"
+                );
             },
-            QuicFrame::RetireConnectionId { sequence_number , ..} => {
-                s += &format!(" RETIRE_CONNECION_ID {{sn={sequence_number}}}");
+            QuicFrame::RetireConnectionId {
+                sequence_number, ..
+            } => {
+                s += &format!(" RETIRE_CONNECTION_ID {{sn={sequence_number}}}");
             },
-            QuicFrame::PathChallenge { /*data*/ .. } => {
-                s += " PATH_CHALLENGE {{todo='todo'}}";
+            QuicFrame::PathChallenge { data, .. } => {
+                s += &format!(" PATH_CHALLENGE {{data={data:?}}}");
             },
-            QuicFrame::PathResponse { /*data*/ .. } => {
-                s += " PATH_RESPONSE {{todo='todo'}}";
+            QuicFrame::PathResponse { data, .. } => {
+                s += &format!(" PATH_RESPONSE {{data={data:?}}}");
             },
-            QuicFrame::ConnectionClose { error_space, error_code, reason, .. } => {
-               s += " CONNECTION_CLOSE {";
-               if let Some(es) = error_space {
+            QuicFrame::ConnectionClose {
+                error_space,
+                error_code,
+                reason,
+                ..
+            } => {
+                s += " CONNECTION_CLOSE {";
+                if let Some(es) = error_space {
                     s += &format!(" ty={es:?},");
-               }
-               printyo!(" code", error_code, s);
-               printyo!(" reason", reason, s);
-               s += "}";
+                }
+                printyo!(" code", error_code, s);
+                printyo!(" reason", reason, s);
+                s += "}";
             },
             QuicFrame::HandshakeDone { .. } => {
                 s += " HANDSHAKE_DONE";
             },
             QuicFrame::Datagram { raw, .. } => {
-               s += &format!(" DATAGRAM {{raw={raw:?}}}");
+                s += &format!(" DATAGRAM {{raw={raw:?}}}");
             },
-            QuicFrame::Unknown { frame_type_bytes, .. } => {
-               s += &format!(" UNKNOWN {{frame_type_bytes={frame_type_bytes:?}}}");
+            QuicFrame::Unknown {
+                frame_type_bytes, ..
+            } => {
+                s += &format!(
+                    " UNKNOWN {{frame_type_bytes={frame_type_bytes:?}}}"
+                );
             },
         }
     }
@@ -177,7 +233,7 @@ fn http_frame_to_string(frame: &Http3Frame) -> String {
     let mut s = String::new();
 
     match frame {
-        Http3Frame::Data { raw } =>{
+        Http3Frame::Data { raw } => {
             s += " DATA";
             if let Some(r) = raw {
                 printyo!("len", r.length, s);
@@ -194,30 +250,43 @@ fn http_frame_to_string(frame: &Http3Frame) -> String {
 
             s += "}";
         },
-        Http3Frame::CancelPush { push_id , ..} => {
+        Http3Frame::CancelPush { push_id, .. } => {
             s += &format!(" CANCEL_PUSH {{id={push_id}}}");
         },
-        Http3Frame::Settings { /* settings */ ..} => {
-            s += " SETTINGS {{todo}}";
-        }
-        Http3Frame::PushPromise { /*push_id, headers */ ..} => {
-            s += " PUSH_PROMISE {{todo}}";
-        }
-        Http3Frame::Goaway { id , ..} => {
+        Http3Frame::Settings { settings, .. } => {
+            s += &format!(" SETTINGS {{settings={settings:?}}}");
+        },
+        Http3Frame::PushPromise {
+            push_id, headers, ..
+        } => {
+            s += &format!(
+                " PUSH_PROMISE {{push_id={push_id}, headers={headers:?}}}"
+            );
+        },
+        Http3Frame::Goaway { id, .. } => {
             s += &format!(" GOAWAY {{id={id}}}");
-        }
-        Http3Frame::MaxPushId { push_id , ..} => {
+        },
+        Http3Frame::MaxPushId { push_id, .. } => {
             s += &format!(" MAX_PUSH_ID {{id={push_id}}}");
-        }
-        Http3Frame::PriorityUpdate { /*target_stream_type, prioritized_element_id, priority_field_value*/ .. } => {
-            s += " PRIORITY_UPDATE {{todo}}";
         },
-        Http3Frame::Reserved { /*length*/ .. } => {
-            s += " GREASE {{todo}}";
+        Http3Frame::PriorityUpdate {
+            stream_id,
+            push_id,
+            priority_field_value,
+            ..
+        } => {
+            s += &format!(" PRIORITY_UPDATE {{stream_id={stream_id:?}, push_id={push_id:?}, priority={priority_field_value:?}}}");
         },
-        Http3Frame::Unknown { frame_type_bytes, .. } => {
+        Http3Frame::Reserved {
+            frame_type_bytes, ..
+        } => {
+            s += &format!(" GREASE {{ty={frame_type_bytes}}}");
+        },
+        Http3Frame::Unknown {
+            frame_type_bytes, ..
+        } => {
             s += &format!(" UNKNOWN {{ty={frame_type_bytes}}}");
-        }
+        },
     }
 
     s
@@ -263,8 +332,8 @@ fn qlog_event_rows<'a>(
                         printyo!("remote_ip_v6", &v.remote.ip_v6, p.details);
                         printyo!("remote_port_v6", &v.remote.port_v6, p.details);
                         printy!(
-                            "remote_cid",
-                            format!("{:?}", &v.local.connection_ids),
+                            "remote_cids",
+                            format!("{:?}", &v.remote.connection_ids),
                             p.details
                         );
                     },
@@ -376,10 +445,10 @@ fn qlog_event_rows<'a>(
                         // TODO: v.unknown_parameters
                     },
                     EventData::QuicPacketSent(v) => {
-                        p.details +=
-                            &serde_json::to_string(&v.header.packet_type)
-                                .unwrap()
-                                .replace("\"", "");
+                        p.details.push_str(
+                            serde_json::to_string(&v.header.packet_type)?
+                                .trim_matches('"'),
+                        );
                         printyo!(" pn", v.header.packet_number, p.details);
 
                         if let Some(frames) = &v.frames {
@@ -387,10 +456,10 @@ fn qlog_event_rows<'a>(
                         }
                     },
                     EventData::QuicPacketReceived(v) => {
-                        p.details +=
-                            &serde_json::to_string(&v.header.packet_type)
-                                .unwrap()
-                                .replace("\"", "");
+                        p.details.push_str(
+                            serde_json::to_string(&v.header.packet_type)?
+                                .trim_matches('"'),
+                        );
                         printyo!(" pn", v.header.packet_number, p.details);
 
                         if let Some(frames) = &v.frames {
@@ -514,5 +583,122 @@ pub fn event_list(
         crate::RawLogEvents::QlogJson { events } => qlog_event_list(events),
         crate::RawLogEvents::QlogJsonSeq { events } => sqlog_event_list(events),
         crate::RawLogEvents::Netlog { events } => Ok(netlog_event_list(events)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::frames_to_string;
+    use super::http_frame_to_string;
+    use super::qlog_event_list;
+    use qlog::events::quic::PacketHeader;
+    use qlog::events::quic::PacketSent;
+    use qlog::events::quic::PacketType;
+    use qlog::events::quic::QuicFrame;
+    use qlog::events::Event;
+    use qlog::events::EventData;
+    use serde_json::json;
+
+    #[test]
+    fn quic_frame_report_includes_connection_and_path_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frames: Vec<QuicFrame> = serde_json::from_value(json!([
+            {
+                "frame_type": "new_connection_id",
+                "sequence_number": 7,
+                "retire_prior_to": 3,
+                "connection_id_length": 2,
+                "connection_id": "beef",
+                "stateless_reset_token": "0123"
+            },
+            {"frame_type": "retire_connection_id", "sequence_number": 9},
+            {"frame_type": "path_challenge", "data": "aabb"},
+            {"frame_type": "path_response", "data": "ccdd"}
+        ]))?;
+        let printed = frames_to_string(&frames);
+        for expected in [
+            "sn=7",
+            "retire_prior_to=3",
+            "cid=\"beef\"",
+            "reset_token=Some(\"0123\")",
+            "RETIRE_CONNECTION_ID",
+            "PATH_CHALLENGE {data=Some(\"aabb\")}",
+            "PATH_RESPONSE {data=Some(\"ccdd\")}",
+        ] {
+            assert!(
+                printed.contains(expected),
+                "{expected} missing from {printed}"
+            );
+        }
+        assert!(!printed.contains("todo"));
+        Ok(())
+    }
+
+    #[test]
+    fn http3_frame_report_includes_settings_push_and_priority_details(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let frames: Vec<qlog::events::http3::Http3Frame> =
+            serde_json::from_value(json!([
+                {"frame_type": "settings", "settings": [
+                    {"name": "qpack_max_table_capacity", "value": 42}
+                ]},
+                {"frame_type": "push_promise", "push_id": 12, "headers": [
+                    {"name": "x-test", "value": "abc"}
+                ]},
+                {"frame_type": "priority_update", "stream_id": 4,
+                 "priority_field_value": "u=3"},
+                {"frame_type": "reserved", "frame_type_bytes": 31}
+            ]))?;
+        let printed: String = frames.iter().map(http_frame_to_string).collect();
+        for expected in [
+            "SETTINGS",
+            "qpack_max_table_capacity",
+            "value: 42",
+            "PUSH_PROMISE {push_id=12",
+            "x-test",
+            "abc",
+            "PRIORITY_UPDATE {stream_id=Some(4)",
+            "priority=\"u=3\"",
+            "GREASE {ty=31}",
+        ] {
+            assert!(
+                printed.contains(expected),
+                "{expected} missing from {printed}"
+            );
+        }
+        assert!(!printed.contains("todo"));
+        Ok(())
+    }
+
+    #[test]
+    fn event_report_uses_remote_connection_ids_and_fallible_packet_types(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let started: qlog::events::quic::ConnectionStarted =
+            serde_json::from_value(json!({
+                "local": {"connection_ids": ["local-cid"]},
+                "remote": {"connection_ids": ["remote-cid"]}
+            }))?;
+        let sent = PacketSent {
+            header: PacketHeader {
+                packet_type: PacketType::OneRtt,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let events = [
+            Event::with_time(1.0, EventData::QuicConnectionStarted(started)),
+            Event::with_time(2.0, EventData::QuicPacketSent(sent)),
+        ];
+        let table = qlog_event_list(&events)?.build().to_string();
+        assert!(
+            table.contains("local_cids=Some([\"local-cid\"])"),
+            "{table}"
+        );
+        assert!(
+            table.contains("remote_cids=Some([\"remote-cid\"])"),
+            "{table}"
+        );
+        assert!(table.contains("1RTT"), "{table}");
+        Ok(())
     }
 }
