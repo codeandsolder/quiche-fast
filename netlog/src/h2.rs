@@ -108,6 +108,7 @@ pub struct Http2SessionSendSettingsEvent {
 ///
 /// Unknown but syntactically valid setting names are accepted; interpretation
 /// of the numeric identifier belongs to `Http2Settings::set_from_wire`.
+#[must_use]
 pub fn parse_recv_setting_id(value: &str) -> Option<u16> {
     let (id, description) = value.split_once(" (")?;
     let name = description.strip_suffix(')')?;
