@@ -1034,8 +1034,9 @@ impl Datastore {
                 // A WINDOW_UPDATE increment must be positive; the unsigned
                 // grant history must not turn a negative log value into an
                 // enormous u64 grant.
-                if let Ok(delta) =
-                    u64::try_from(e.params.delta).filter(|delta| *delta > 0)
+                if let Ok(delta) = u64::try_from(e.params.delta)
+                    .ok()
+                    .filter(|delta| *delta > 0)
                 {
                     self.h2_send_window_updates_absolute
                         .entry(e.params.stream_id)
