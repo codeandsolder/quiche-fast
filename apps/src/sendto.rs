@@ -35,7 +35,23 @@ pub fn detect_gso(socket: &mio::net::UdpSocket, segment_size: usize) -> bool {
     use nix::sys::socket::sockopt::UdpGsoSegment;
     use std::os::unix::io::AsFd;
 
-    setsockopt(&socket.as_fd(), UdpGsoSegment, &(segment_size as i32)).is_ok()
+    let Ok(size) = valid_gso_segment_size(segment_size) else {
+        return false;
+    };
+    setsockopt(&socket.as_fd(), UdpGsoSegment, &i32::from(size)).is_ok()
+}
+
+#[cfg(target_os = "linux")]
+fn valid_gso_segment_size(segment_size: usize) -> io::Result<u16> {
+    u16::try_from(segment_size)
+        .ok()
+        .filter(|size| *size != 0)
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "UDP GSO segment size must be in 1..=65535",
+            )
+        })
 }
 
 /// For non-Linux, there is no GSO support.
@@ -58,7 +74,7 @@ fn send_to_gso_pacing(
     use std::os::unix::io::AsRawFd;
 
     let iov = [IoSlice::new(buf)];
-    let segment_size = segment_size as u16;
+    let segment_size = valid_gso_segment_size(segment_size)?;
     let dst = SockaddrStorage::from(send_info.to);
     let sockfd = socket.as_raw_fd();
 
@@ -81,15 +97,6 @@ fn send_to_gso_pacing(
     }
 }
 
-/// For non-Linux platforms.
-#[cfg(not(target_os = "linux"))]
-fn send_to_gso_pacing(
-    _socket: &mio::net::UdpSocket, _buf: &[u8], _send_info: &quiche::SendInfo,
-    _segment_size: usize,
-) -> io::Result<usize> {
-    panic!("send_to_gso() should not be called on non-linux platforms");
-}
-
 /// A wrapper function of send_to().
 ///
 /// When GSO and SO_TXTIME are enabled, send packets using send_to_gso().
@@ -98,16 +105,19 @@ pub fn send_to(
     socket: &mio::net::UdpSocket, buf: &[u8], send_info: &quiche::SendInfo,
     segment_size: usize, pacing: bool, enable_gso: bool,
 ) -> io::Result<usize> {
-    if pacing && enable_gso {
-        match send_to_gso_pacing(socket, buf, send_info, segment_size) {
-            Ok(v) => {
-                return Ok(v);
-            },
-            Err(e) => {
-                return Err(e);
-            },
-        }
+    if segment_size == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "UDP segment size must be positive",
+        ));
     }
+
+    #[cfg(target_os = "linux")]
+    if pacing && enable_gso {
+        return send_to_gso_pacing(socket, buf, send_info, segment_size);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = (pacing, enable_gso);
 
     let mut off = 0;
     let mut left = buf.len();
@@ -129,50 +139,155 @@ pub fn send_to(
 }
 
 #[cfg(target_os = "linux")]
-fn std_time_to_u64(deadline: &std::time::Instant) -> io::Result<u64> {
-    let now = std::time::Instant::now();
-    let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
-    // SAFETY: clock_gettime initializes the timespec on success.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) } != 0
-    {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: clock_gettime returned success.
-    let ts = unsafe { ts.assume_init() };
-    let secs =
+fn monotonic_timespec_ns(ts: libc::timespec) -> io::Result<u64> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+    let seconds =
         u64::try_from(ts.tv_sec).map_err(|_| io::ErrorKind::InvalidData)?;
-    let nanos =
+    let nanoseconds =
         u64::try_from(ts.tv_nsec).map_err(|_| io::ErrorKind::InvalidData)?;
-    if nanos >= 1_000_000_000 {
+    if nanoseconds >= NANOS_PER_SECOND {
         return Err(io::ErrorKind::InvalidData.into());
     }
-    let base = secs
-        .checked_mul(1_000_000_000)
-        .and_then(|n| n.checked_add(nanos))
-        .ok_or(io::ErrorKind::InvalidData)?;
-    let result = if *deadline >= now {
-        u64::try_from(deadline.duration_since(now).as_nanos())
-            .ok()
-            .and_then(|delta| base.checked_add(delta))
-    } else {
-        u64::try_from(now.duration_since(*deadline).as_nanos())
-            .ok()
-            .and_then(|delta| base.checked_sub(delta))
-    };
-    result.ok_or_else(|| io::ErrorKind::InvalidInput.into())
+    seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|seconds| seconds.checked_add(nanoseconds))
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-#[cfg(all(test, target_os = "linux"))]
+#[cfg(target_os = "linux")]
+fn deadline_from_anchor(
+    deadline: std::time::Instant, anchor: std::time::Instant, anchor_ns: u64,
+) -> io::Result<u64> {
+    let (forward, difference) = if deadline >= anchor {
+        (true, deadline.duration_since(anchor))
+    } else {
+        (false, anchor.duration_since(deadline))
+    };
+    let difference_ns = u64::try_from(difference.as_nanos())
+        .map_err(|_| io::ErrorKind::InvalidInput)?;
+    if forward {
+        anchor_ns.checked_add(difference_ns)
+    } else {
+        anchor_ns.checked_sub(difference_ns)
+    }
+    .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+}
+
+/// Convert Rust's opaque Instant into the CLOCK_MONOTONIC nanoseconds expected
+/// by Linux SCM_TXTIME, without depending on Instant's private layout.
+#[cfg(target_os = "linux")]
+fn std_time_to_u64(deadline: &std::time::Instant) -> io::Result<u64> {
+    // The socket is configured with CLOCK_MONOTONIC. Bracket the kernel clock
+    // read to bound the sampling error even if the thread is preempted.
+    let before = std::time::Instant::now();
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts is a valid writable timespec that clock_gettime fills on
+    // success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let after = std::time::Instant::now();
+    let span = after
+        .checked_duration_since(before)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let anchor = before
+        .checked_add(span / 2)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    deadline_from_anchor(*deadline, anchor, monotonic_timespec_ns(ts)?)
+}
+
+#[cfg(test)]
 mod pacing_tests {
     use super::*;
+
+    fn addresses() -> io::Result<(mio::net::UdpSocket, quiche::SendInfo)> {
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let receiver = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        sender.set_nonblocking(true)?;
+        let info = quiche::SendInfo {
+            from: sender.local_addr()?,
+            to: receiver.local_addr()?,
+            at: std::time::Instant::now(),
+        };
+        Ok((mio::net::UdpSocket::from_std(sender), info))
+    }
+
     #[test]
-    fn monotonic_deadlines_are_ordered() {
+    fn zero_segment_is_rejected_instead_of_looping_forever() -> io::Result<()> {
+        let (sender, info) = addresses()?;
+        for (pacing, gso) in [(false, false), (true, true)] {
+            let error = send_to(&sender, b"payload", &info, 0, pacing, gso)
+                .expect_err("zero segment must be an error");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        }
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn monotonic_clock_conversion_is_checked_and_deterministic() {
+        use std::time::Duration;
+
         let now = std::time::Instant::now();
-        let earlier = std_time_to_u64(&now).unwrap();
-        let later =
-            std_time_to_u64(&(now + std::time::Duration::from_millis(50)))
-                .unwrap();
-        assert!(later > earlier);
-        assert!(later.abs_diff(earlier).abs_diff(50_000_000) < 10_000_000);
+        let ahead = now.checked_add(Duration::from_nanos(5)).unwrap();
+        let behind = now.checked_sub(Duration::from_nanos(5)).unwrap();
+
+        assert_eq!(deadline_from_anchor(now, now, 42).unwrap(), 42);
+        assert_eq!(deadline_from_anchor(ahead, now, 42).unwrap(), 47);
+        assert_eq!(deadline_from_anchor(behind, now, 42).unwrap(), 37);
+        assert_eq!(
+            deadline_from_anchor(ahead, now, u64::MAX - 5).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(deadline_from_anchor(behind, now, 5).unwrap(), 0);
+        assert_eq!(
+            deadline_from_anchor(ahead, now, u64::MAX - 4)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            deadline_from_anchor(behind, now, 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        assert!(std_time_to_u64(&now).unwrap() > 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_timespec_and_gso_segment_bounds_are_validated() {
+        let ts = |sec, nsec| libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        };
+        assert_eq!(
+            monotonic_timespec_ns(ts(1, 999_999_999)).unwrap(),
+            1_999_999_999
+        );
+        for invalid in [ts(-1, 0), ts(0, -1), ts(0, 1_000_000_000)] {
+            assert_eq!(
+                monotonic_timespec_ns(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        if let Ok(secs) = libc::time_t::try_from(u64::MAX / 1_000_000_000 + 1) {
+            assert_eq!(
+                monotonic_timespec_ns(ts(secs, 0)).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        assert_eq!(valid_gso_segment_size(1).unwrap(), 1);
+        assert_eq!(valid_gso_segment_size(u16::MAX as usize).unwrap(), u16::MAX);
+        for invalid in [0, u16::MAX as usize + 1, usize::MAX] {
+            assert_eq!(
+                valid_gso_segment_size(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+        }
     }
 }
