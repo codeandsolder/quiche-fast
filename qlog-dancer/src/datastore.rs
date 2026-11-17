@@ -315,6 +315,42 @@ impl Display for H2StreamReset {
     }
 }
 
+/// Most recent observed QUIC packet number in each independently numbered
+/// packet-number space. 0-RTT and 1-RTT both use Application Data numbering.
+#[derive(Debug, Default)]
+pub struct NetlogPacketNumberProgress {
+    initial: Option<u64>,
+    handshake: Option<u64>,
+    application: Option<u64>,
+}
+
+impl NetlogPacketNumberProgress {
+    const fn previous(&self, packet_type: PacketType) -> Option<u64> {
+        match packet_type {
+            PacketType::Initial => self.initial,
+            PacketType::Handshake => self.handshake,
+            PacketType::ZeroRtt | PacketType::OneRtt => self.application,
+            // Retry/Version Negotiation do not carry ordinary QUIC packet
+            // numbers. Unknown is insufficient to identify a space safely.
+            PacketType::Retry |
+            PacketType::VersionNegotiation |
+            PacketType::Unknown => None,
+        }
+    }
+
+    const fn observe(&mut self, packet_type: PacketType, number: u64) {
+        let slot = match packet_type {
+            PacketType::Initial => &mut self.initial,
+            PacketType::Handshake => &mut self.handshake,
+            PacketType::ZeroRtt | PacketType::OneRtt => &mut self.application,
+            PacketType::Retry |
+            PacketType::VersionNegotiation |
+            PacketType::Unknown => return,
+        };
+        *slot = Some(number);
+    }
+}
+
 #[derive(Default, Debug)]
 pub struct Datastore {
     pub vantage_point: VantagePoint,
@@ -438,6 +474,7 @@ pub struct Datastore {
     pub netlog_quic_stream_received_connection_cumulative: Vec<QlogPointu64>,
 
     pub received_packets_netlog: Vec<(f64, PacketInfoStub)>,
+    pub received_netlog_packet_numbers: NetlogPacketNumberProgress,
     pub discontinuous_packet_number_count: u64,
 
     pub netlog_ack_sent_missing_packets_raw: Vec<(f64, Vec<u64>)>,
@@ -652,14 +689,18 @@ impl Datastore {
             },
 
             QuicSessionUnauthenticatedPacketHeaderReceived(e) => {
-                if let Some((_, last)) = self.received_packets_netlog.last() {
-                    let gap = if e.params.packet_number > last.number {
-                        e.params.packet_number - last.number
-                    } else {
-                        last.number.saturating_sub(e.params.packet_number)
-                    };
+                let packet_type = PacketType::from_netlog_packet_header(
+                    &e.params.header_format,
+                    e.params.long_header_type.as_deref(),
+                );
 
-                    if gap > 1 {
+                // The most recently logged packet might be in a different
+                // QUIC packet-number space. Compare only consecutive
+                // observations in the *same* space to avoid false gaps.
+                if let Some(previous) =
+                    self.received_netlog_packet_numbers.previous(packet_type)
+                {
+                    if previous.abs_diff(e.params.packet_number) > 1 {
                         self.discontinuous_packet_number_count =
                             checked_netlog_sum(
                                 self.discontinuous_packet_number_count,
@@ -669,10 +710,10 @@ impl Datastore {
                     }
                 }
 
-                let packet_type = PacketType::from_netlog_packet_header(
-                    &e.params.header_format,
-                    e.params.long_header_type.as_deref(),
-                );
+                // Record the latest number only after validating overflow;
+                // rejected events must not alter progress or packet maps.
+                self.received_netlog_packet_numbers
+                    .observe(packet_type, e.params.packet_number);
 
                 let packet_info = PacketInfoStub {
                     acked: None,
@@ -2835,6 +2876,137 @@ mod netlog_tests {
         assert!(datastore.netlog_ack_sent_missing_packets_raw.is_empty());
         assert_eq!(datastore.max_ack_sent_missing_packets_size, 0);
         assert_eq!(datastore.max_ack_received_missing_packets_size, 0);
+    }
+
+    fn quic_received_packet_header(
+        header_format: &str, long_header_type: Option<&str>, number: u64,
+    ) -> netlog::Event {
+        netlog::Event::Quic(
+            quic::Event::QuicSessionUnauthenticatedPacketHeaderReceived(
+                quic::QuicSessionUnauthenticatedPacketHeaderReceived {
+                    params: quic::QuicSessionUnauthenticatedPacketHeaderReceivedParams {
+                        header_format: header_format.to_owned(),
+                        long_header_type: long_header_type.map(str::to_owned),
+                        packet_number: number,
+                        ..Default::default()
+                    },
+                },
+            ),
+        )
+    }
+
+    #[test]
+    fn netlog_packet_gaps_are_counted_only_within_each_packet_number_space() {
+        let mut datastore = Datastore::default();
+        let initial = |number| {
+            quic_received_packet_header(
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                Some("INITIAL"),
+                number,
+            )
+        };
+        let handshake = |number| {
+            quic_received_packet_header(
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                Some("HANDSHAKE"),
+                number,
+            )
+        };
+        let application = |number| {
+            quic_received_packet_header(
+                "IETF_QUIC_SHORT_HEADER_PACKET",
+                None,
+                number,
+            )
+        };
+
+        // Switching spaces must not manufacture a packet-number gap.
+        for event in [
+            initial(10),
+            handshake(0),
+            initial(11),
+            handshake(1),
+            application(200),
+            application(201),
+        ] {
+            consume(&mut datastore, 101, &event)
+                .expect("valid received packet header");
+        }
+        assert_eq!(datastore.discontinuous_packet_number_count, 0);
+
+        // Only jumps within an individual space count; reordering retains
+        // the existing absolute-difference behavior.
+        for (event, expected) in [
+            (initial(14), 1),
+            (handshake(5), 2),
+            (application(198), 3),
+            (application(199), 3),
+        ] {
+            consume(&mut datastore, 102, &event).expect("valid packet header");
+            assert_eq!(datastore.discontinuous_packet_number_count, expected);
+        }
+
+        // Unclassified headers cannot establish a packet-number space.
+        consume(
+            &mut datastore,
+            103,
+            &quic_received_packet_header("UNRECOGNIZED", None, 9000),
+        )
+        .expect("unknown packet header should be preserved");
+        consume(&mut datastore, 104, &initial(15))
+            .expect("continuation of Initial space");
+        assert_eq!(datastore.discontinuous_packet_number_count, 3);
+        assert_eq!(datastore.received_packets_netlog.len(), 12);
+        assert_eq!(
+            datastore
+                .received_netlog_packet_numbers
+                .previous(PacketType::Initial),
+            Some(15)
+        );
+    }
+
+    #[test]
+    fn netlog_application_space_is_shared_by_zero_and_one_rtt() {
+        let mut progress = NetlogPacketNumberProgress::default();
+        progress.observe(PacketType::ZeroRtt, 4);
+        assert_eq!(progress.previous(PacketType::OneRtt), Some(4));
+        progress.observe(PacketType::OneRtt, 5);
+        assert_eq!(progress.previous(PacketType::ZeroRtt), Some(5));
+        assert_eq!(progress.previous(PacketType::Initial), None);
+        assert_eq!(progress.previous(PacketType::Handshake), None);
+        assert_eq!(progress.previous(PacketType::Retry), None);
+        progress.observe(PacketType::Unknown, 999);
+        assert_eq!(progress.previous(PacketType::OneRtt), Some(5));
+    }
+
+    #[test]
+    fn netlog_discontinuity_overflow_preserves_last_observed_packet_number() {
+        let mut datastore = Datastore::default();
+        datastore
+            .received_netlog_packet_numbers
+            .observe(PacketType::Handshake, 100);
+        datastore.discontinuous_packet_number_count = u64::MAX;
+
+        let event = quic_received_packet_header(
+            "IETF_QUIC_LONG_HEADER_PACKET",
+            Some("HANDSHAKE"),
+            104,
+        );
+        assert!(matches!(
+            consume(&mut datastore, 120, &event),
+            Err(DatastoreError::NetlogCounterOverflow {
+                field: "discontinuous_packet_number_count"
+            })
+        ));
+        assert_eq!(
+            datastore
+                .received_netlog_packet_numbers
+                .previous(PacketType::Handshake),
+            Some(100)
+        );
+        assert!(datastore.packet_received.is_empty());
+        assert!(datastore.received_packets_netlog.is_empty());
+        assert_eq!(datastore.discontinuous_packet_number_count, u64::MAX);
     }
 
     #[test]
