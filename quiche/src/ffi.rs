@@ -2822,14 +2822,67 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+fn monotonic_deadline_timespec(
+    deadline: Instant, anchor: Instant, clock: timespec,
+) -> Option<timespec> {
+    // A kernel CLOCK_MONOTONIC reading must be normalized and nonnegative.
+    // Validate it before using it as the anchor for Rust's opaque Instant.
+    if clock.tv_sec < 0 || !(0..1_000_000_000).contains(&clock.tv_nsec) {
+        return None;
+    }
+
+    let base = i128::from(clock.tv_sec)
+        .checked_mul(1_000_000_000)?
+        .checked_add(i128::from(clock.tv_nsec))?;
+    let offset = if deadline >= anchor {
+        i128::try_from(deadline.duration_since(anchor).as_nanos()).ok()?
+    } else {
+        i128::try_from(anchor.duration_since(deadline).as_nanos())
+            .ok()?
+            .checked_neg()?
+    };
+
+    let ns = base.checked_add(offset)?;
+    if ns < 0 {
+        return None;
+    }
+
+    Some(timespec {
+        tv_sec: libc::time_t::try_from(ns.div_euclid(1_000_000_000)).ok()?,
+        tv_nsec: libc::c_long::try_from(ns.rem_euclid(1_000_000_000)).ok()?,
+    })
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 fn std_time_to_c(time: &Instant, out: &mut timespec) {
-    const INSTANT_ZERO: Instant =
-        unsafe { std::mem::transmute(std::time::UNIX_EPOCH) };
+    // Bracket the kernel clock reading with Instant samples. Their midpoint
+    // bounds scheduling skew without depending on Instant's private layout.
+    let before = Instant::now();
+    let mut clock = timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock is initialized, writable, and the kernel writes a
+    // timespec to it on success.
+    let sampled = unsafe {
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut clock) == 0
+    };
+    let after = Instant::now();
 
-    let raw_time = time.duration_since(INSTANT_ZERO);
+    let converted = if sampled {
+        after
+            .checked_duration_since(before)
+            .and_then(|span| before.checked_add(span / 2))
+            .and_then(|anchor| monotonic_deadline_timespec(*time, anchor, clock))
+    } else {
+        None
+    };
 
-    out.tv_sec = raw_time.as_secs() as libc::time_t;
-    out.tv_nsec = raw_time.subsec_nanos() as libc::c_long;
+    // The C-facing API historically encodes unrepresentable times as zero.
+    *out = converted.unwrap_or(timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    });
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
@@ -2846,6 +2899,108 @@ mod tests {
     use libc::c_void;
     #[cfg(windows)]
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
+    #[test]
+    fn ffi_monotonic_timestamp_preserves_deadline_spacing() {
+        let anchor = Instant::now();
+        let clock = timespec {
+            tv_sec: 10,
+            tv_nsec: 100,
+        };
+
+        let first = monotonic_deadline_timespec(anchor, anchor, clock)
+            .expect("valid monotonic anchor");
+        assert_eq!(first.tv_sec, 10);
+        assert_eq!(first.tv_nsec, 100);
+
+        let later = monotonic_deadline_timespec(
+            anchor + Duration::from_millis(50),
+            anchor,
+            clock,
+        )
+        .expect("valid later deadline");
+        assert_eq!(later.tv_sec, 10);
+        assert_eq!(later.tv_nsec, 50_000_100);
+
+        let earlier = monotonic_deadline_timespec(
+            anchor - Duration::from_millis(200),
+            anchor,
+            clock,
+        )
+        .expect("valid earlier deadline");
+        assert_eq!(earlier.tv_sec, 9);
+        assert_eq!(earlier.tv_nsec, 800_000_100);
+
+        let crossing = monotonic_deadline_timespec(
+            anchor + Duration::from_secs(2),
+            anchor,
+            timespec {
+                tv_sec: 10,
+                tv_nsec: 999_999_999,
+            },
+        )
+        .expect("valid second rollover");
+        assert_eq!(crossing.tv_sec, 12);
+        assert_eq!(crossing.tv_nsec, 999_999_999);
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
+    #[test]
+    fn ffi_monotonic_conversion_rejects_invalid_or_unrepresentable_times() {
+        let anchor = Instant::now();
+        let ts = |seconds, nanos| timespec {
+            tv_sec: seconds,
+            tv_nsec: nanos,
+        };
+        assert!(monotonic_deadline_timespec(anchor, anchor, ts(2, -1)).is_none());
+        assert!(monotonic_deadline_timespec(
+            anchor,
+            anchor,
+            ts(2, 1_000_000_000)
+        )
+        .is_none());
+        assert!(monotonic_deadline_timespec(anchor, anchor, ts(-1, 0)).is_none());
+        assert!(monotonic_deadline_timespec(
+            anchor - Duration::from_secs(2),
+            anchor,
+            ts(1, 0)
+        )
+        .is_none());
+
+        let too_large = anchor + Duration::from_secs(2);
+        assert!(monotonic_deadline_timespec(
+            too_large,
+            anchor,
+            ts(libc::time_t::MAX, 999_999_999)
+        )
+        .is_none());
+    }
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
+    #[test]
+    fn ffi_real_monotonic_timestamp_is_normalized() {
+        let now = Instant::now();
+        let mut ts = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        std_time_to_c(&now, &mut ts);
+        assert!(ts.tv_sec > 0);
+        assert!((0..1_000_000_000).contains(&ts.tv_nsec));
+    }
 
     #[test]
     fn invalid_utf8_ffi_string_returns_invalid_argument() {
