@@ -287,22 +287,29 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    pub fn populate_datastore(&mut self) {
+    pub fn populate_datastore(&mut self) -> Result<(), JsValue> {
+        // Construct the dataset separately so a rejected event does not
+        // expose partially updated stream stats or stale plot data.
+        self.ss = None;
+        let mut ds = Datastore {
+            vantage_point: self.ds.vantage_point,
+            ..Datastore::default()
+        };
         for event in &self.qlog_events {
             match event {
-                qlog::reader::Event::Qlog(ev) => {
-                    self.ds.consume_qlog_event(ev, true);
-                },
-
+                qlog::reader::Event::Qlog(ev) => ds
+                    .consume_qlog_event(ev, true)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?,
                 qlog::reader::Event::Json(_) => {
-                    // This will be handled elsewhere
+                    // Extensible events are not mapped to typed datastore
+                    // fields.
                 },
             }
         }
-
-        // Always finish off the datastore regardless of readable stream type.
-        self.ds.hydrate_http_requests();
-        self.ds.finalize();
+        ds.hydrate_http_requests();
+        ds.finalize();
+        self.ds = ds;
+        Ok(())
     }
 
     #[wasm_bindgen]

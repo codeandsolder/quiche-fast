@@ -123,3 +123,59 @@ fn unsupported_qlog_vantage_is_reported_without_format_retry(
     );
     Ok(())
 }
+
+#[test]
+fn qlog_tracker_overflow_is_a_fatal_input_error_in_both_encodings(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let overflow_event = serde_json::json!({
+        "time": 2.0,
+        "name": "quic:stream_data_moved",
+        "data": {
+            "stream_id": 42,
+            "offset": u64::MAX,
+            "to": "application",
+            "raw": { "length": 1 }
+        }
+    });
+    let json = serde_json::json!({
+        "file_schema": "0.3",
+        "serialization_format": "JSON",
+        "traces": [{
+            "vantage_point": { "type": "client" },
+            "event_schemas": [],
+            "events": [overflow_event]
+        }]
+    });
+    let sequential_header = serde_json::json!({
+        "file_schema": "0.3",
+        "serialization_format": "JSON-SEQ",
+        "trace": {
+            "vantage_point": { "type": "client" },
+            "event_schemas": []
+        }
+    });
+    let sequential = format!("\x1e{sequential_header}\n\x1e{overflow_event}\n");
+
+    for (extension, bytes) in [
+        ("qlog", json.to_string().into_bytes()),
+        ("sqlog", sequential.into_bytes()),
+    ] {
+        let input = TempLog::new(extension, &bytes)?;
+        let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+            .arg(&input.0)
+            .env("RUST_LOG", "error")
+            .output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{extension}: {stderr}");
+        assert!(
+            stderr.contains("stream 42 end offset overflows"),
+            "{extension}: {stderr}"
+        );
+        assert!(
+            !stderr.contains("Unable to parse log in either format"),
+            "{extension}: {stderr}"
+        );
+        assert!(!stderr.contains("panicked at"), "{extension}: {stderr}");
+    }
+    Ok(())
+}

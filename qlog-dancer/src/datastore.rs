@@ -47,6 +47,7 @@ use crate::request_stub::HttpRequestStub;
 use crate::request_stub::NaOption;
 use crate::trackers::StreamBufferTracker;
 use crate::trackers::StreamMaxTracker;
+use crate::trackers::TrackerError;
 use crate::LogFileData;
 use crate::PacketType;
 use crate::QlogPointRtt;
@@ -148,6 +149,45 @@ impl std::fmt::Display for UnsupportedVantagePoint {
 }
 
 impl std::error::Error for UnsupportedVantagePoint {}
+
+/// Failure to build a qlog datastore: either an unusable vantage point or
+/// a stream value that cannot be represented without overflow.
+#[derive(Debug)]
+pub enum DatastoreError {
+    UnsupportedVantagePoint(UnsupportedVantagePoint),
+    Tracker(TrackerError),
+}
+
+impl From<UnsupportedVantagePoint> for DatastoreError {
+    fn from(value: UnsupportedVantagePoint) -> Self {
+        Self::UnsupportedVantagePoint(value)
+    }
+}
+
+impl From<TrackerError> for DatastoreError {
+    fn from(value: TrackerError) -> Self {
+        Self::Tracker(value)
+    }
+}
+
+impl std::fmt::Display for DatastoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedVantagePoint(error) =>
+                std::fmt::Display::fmt(error, f),
+            Self::Tracker(error) => std::fmt::Display::fmt(error, f),
+        }
+    }
+}
+
+impl std::error::Error for DatastoreError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::UnsupportedVantagePoint(error) => Some(error),
+            Self::Tracker(error) => Some(error),
+        }
+    }
+}
 
 impl TryFrom<&qlog::VantagePointType> for VantagePoint {
     type Error = UnsupportedVantagePoint;
@@ -1112,27 +1152,29 @@ impl Datastore {
         }
     }
 
+    /// Consume one typed qlog event.
+    ///
+    /// # Errors
+    /// Returns the tracker overflow. A multi-frame event may already have
+    /// updated unrelated fields; discard the datastore on failure. Both log
+    /// constructors and the browser's transactional builder do so.
     pub fn consume_qlog_event(
         &mut self, event: &qlog::events::Event, process_acks: bool,
-    ) {
+    ) -> Result<(), TrackerError> {
         let ev_time = event.time;
-
-        if ev_time > self.last_event_time {
-            self.last_event_time = ev_time;
-        }
 
         match &event.data {
             EventData::QuicParametersSet(v) =>
                 self.consume_qlog_transport_parameters_set(v),
 
             EventData::QuicPacketReceived(v) =>
-                self.consume_qlog_packet_received(v, ev_time, process_acks),
+                self.consume_qlog_packet_received(v, ev_time, process_acks)?,
 
             EventData::QuicPacketSent(v) =>
-                self.consume_qlog_packet_sent(v, ev_time),
+                self.consume_qlog_packet_sent(v, ev_time)?,
 
             EventData::QuicStreamDataMoved(v) =>
-                self.consume_qlog_stream_data_moved(v, ev_time),
+                self.consume_qlog_stream_data_moved(v, ev_time)?,
 
             EventData::QuicMetricsUpdated(v) =>
                 self.consume_qlog_metrics_updated(v, ev_time),
@@ -1156,16 +1198,21 @@ impl Datastore {
 
             _ => (), // trace!("skipping {:?}", event.data),
         }
+        if ev_time > self.last_event_time {
+            self.last_event_time = ev_time;
+        }
+        Ok(())
     }
 
     /// Builds a datastore from qlog JSON events.
     ///
     /// # Errors
-    /// Returns an error when the log's vantage point is not client or server.
+    /// Returns an error for unsupported vantage points or tracker arithmetic
+    /// overflow.
     pub fn with_qlog_events(
         events: &[qlog::events::Event], vantage_point: &qlog::VantagePointType,
         process_acks: bool,
-    ) -> Result<Self, UnsupportedVantagePoint> {
+    ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
         let mut ds = Datastore {
@@ -1174,7 +1221,7 @@ impl Datastore {
         };
 
         for event in events {
-            ds.consume_qlog_event(event, process_acks);
+            ds.consume_qlog_event(event, process_acks)?;
         }
 
         ds.hydrate_http_requests();
@@ -1252,7 +1299,7 @@ impl Datastore {
     fn consume_qlog_packet_received(
         &mut self, pr: &qlog::events::quic::PacketReceived, ev_time: f64,
         process_acks: bool,
-    ) {
+    ) -> Result<(), TrackerError> {
         if let Some(frames) = &pr.frames {
             for frame in frames {
                 match frame {
@@ -1290,7 +1337,7 @@ impl Datastore {
                             self.peer_init_max_stream_data_uni
                         };
                         self.received_stream_max_data_tracker
-                            .update(*stream_id, *maximum, ev_time, init_val);
+                            .update(*stream_id, *maximum, ev_time, init_val)?;
                     },
 
                     QuicFrame::ResetStream { stream_id, .. } => {
@@ -1340,14 +1387,15 @@ impl Datastore {
                 }
             }
         }
+        Ok(())
     }
 
     fn consume_qlog_packet_sent(
         &mut self, ps: &qlog::events::quic::PacketSent, ev_time: f64,
-    ) {
+    ) -> Result<(), TrackerError> {
         // Packet number is optional for some packet types.
         let Some(packet_number) = ps.header.packet_number else {
-            return;
+            return Ok(());
         };
 
         let packet_type =
@@ -1389,7 +1437,7 @@ impl Datastore {
                             self.local_init_max_stream_data_uni
                         };
                         self.sent_stream_max_data_tracker
-                            .update(*stream_id, *maximum, ev_time, init_val);
+                            .update(*stream_id, *maximum, ev_time, init_val)?;
                     },
 
                     QuicFrame::ResetStream { stream_id, .. } => {
@@ -1440,11 +1488,12 @@ impl Datastore {
                 }
             }
         }
+        Ok(())
     }
 
     fn consume_qlog_stream_data_moved(
         &mut self, dm: &qlog::events::quic::StreamDataMoved, ev_time: f64,
-    ) {
+    ) -> Result<(), TrackerError> {
         if let Some(recipient) = &dm.to {
             let tracker = match recipient {
                 qlog::events::DataRecipient::Application =>
@@ -1467,11 +1516,12 @@ impl Datastore {
                             stream_id,
                             StreamAccess { offset, length },
                             ev_time,
-                        );
+                        )?;
                     }
                 }
             }
         }
+        Ok(())
     }
 
     fn consume_qlog_metrics_updated(
@@ -1699,11 +1749,12 @@ impl Datastore {
     /// Builds a datastore from qlog JSON-SEQ events.
     ///
     /// # Errors
-    /// Returns an error when the log's vantage point is not client or server.
+    /// Returns an error for unsupported vantage points or tracker arithmetic
+    /// overflow.
     pub fn with_sqlog_reader_events(
         events: &[qlog::reader::Event], vantage_point: &qlog::VantagePointType,
         process_acks: bool,
-    ) -> Result<Self, UnsupportedVantagePoint> {
+    ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
         let mut ds = Datastore {
@@ -1715,7 +1766,7 @@ impl Datastore {
         for event in events {
             match event {
                 qlog::reader::Event::Qlog(ev) => {
-                    ds.consume_qlog_event(ev, process_acks);
+                    ds.consume_qlog_event(ev, process_acks)?;
                 },
 
                 qlog::reader::Event::Json(ev) => {
@@ -2066,10 +2117,12 @@ mod input_tests {
                 }),
                 ..Default::default()
             };
-            datastore.consume_qlog_event(
-                &Event::with_time(2.0, EventData::QuicStreamDataMoved(moved)),
-                false,
-            );
+            assert!(datastore
+                .consume_qlog_event(
+                    &Event::with_time(2.0, EventData::QuicStreamDataMoved(moved)),
+                    false,
+                )
+                .is_ok());
             let trackers = [
                 (&DataRecipient::User, &datastore.stream_buffer_user_tracker),
                 (
@@ -2102,6 +2155,99 @@ mod input_tests {
     }
 
     #[test]
+    fn stream_end_overflow_propagates_through_both_qlog_decoders() {
+        use qlog::events::quic::StreamDataMoved;
+        use qlog::events::DataRecipient;
+
+        let event = Event::with_time(
+            2.0,
+            EventData::QuicStreamDataMoved(StreamDataMoved {
+                stream_id: Some(42),
+                offset: Some(u64::MAX),
+                to: Some(DataRecipient::Application),
+                raw: Some(qlog::events::RawInfo {
+                    length: Some(1),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        );
+        let regular = Datastore::with_qlog_events(
+            std::slice::from_ref(&event),
+            &VantagePointType::Client,
+            false,
+        );
+        let sequential = Datastore::with_sqlog_reader_events(
+            &[qlog::reader::Event::Qlog(event.clone())],
+            &VantagePointType::Client,
+            false,
+        );
+        for result in [regular, sequential] {
+            assert!(matches!(
+                result,
+                Err(super::DatastoreError::Tracker(
+                    super::TrackerError::StreamEndOverflow {
+                        stream_id: 42,
+                        offset: u64::MAX,
+                        length: 1,
+                    }
+                ))
+            ));
+        }
+
+        let mut ds = Datastore::default();
+        assert!(ds.consume_qlog_event(&event, false).is_err());
+        assert_eq!(ds.last_event_time, 0.0);
+        assert!(ds.stream_buffer_reads_tracker.per_stream.is_empty());
+    }
+
+    #[test]
+    fn stream_max_aggregate_overflow_propagates_from_packet_frames() {
+        use qlog::events::quic::PacketReceived;
+        use qlog::events::quic::QuicFrame;
+        let make_event = |time: f64, stream_id: u64, maximum: u64| {
+            Event::with_time(
+                time,
+                EventData::QuicPacketReceived(PacketReceived {
+                    frames: Some(vec![QuicFrame::MaxStreamData {
+                        stream_id,
+                        maximum,
+                        raw: None,
+                    }]),
+                    ..PacketReceived::default()
+                }),
+            )
+        };
+        let events = [make_event(1.0, 1, u64::MAX), make_event(2.0, 2, 1)];
+        let result = Datastore::with_qlog_events(
+            &events,
+            &VantagePointType::Client,
+            false,
+        );
+        assert!(matches!(
+            result,
+            Err(super::DatastoreError::Tracker(
+                super::TrackerError::RunningSumOverflow {
+                    stream_id: 2,
+                    total: u64::MAX,
+                    increment: 1,
+                }
+            ))
+        ));
+
+        let mut ds = Datastore::default();
+        assert!(ds.consume_qlog_event(&events[0], false).is_ok());
+        assert_eq!(ds.last_event_time, 1.0);
+        assert!(ds.consume_qlog_event(&events[1], false).is_err());
+        assert_eq!(ds.last_event_time, 1.0);
+        assert!(!ds
+            .received_stream_max_data_tracker
+            .per_stream
+            .contains_key(&2));
+        assert_eq!(ds.received_stream_max_data_tracker.current_sum(), u64::MAX);
+    }
+
+    #[test]
     fn missing_transport_parameter_initiator_is_ignored_without_a_panic() {
         let mut datastore = Datastore::default();
         let limits = ParametersSet {
@@ -2110,13 +2256,15 @@ mod input_tests {
             initial_max_stream_data_bidi_local: Some(456),
             ..ParametersSet::default()
         };
-        datastore.consume_qlog_event(
-            &Event::with_time(
-                1.0,
-                EventData::QuicParametersSet(Box::new(limits)),
-            ),
-            false,
-        );
+        assert!(datastore
+            .consume_qlog_event(
+                &Event::with_time(
+                    1.0,
+                    EventData::QuicParametersSet(Box::new(limits)),
+                ),
+                false,
+            )
+            .is_ok());
         assert!(datastore.sent_max_data.is_empty());
         assert!(datastore.received_max_data.is_empty());
         assert_eq!(datastore.local_init_max_stream_data_bidi_local, 0);
@@ -2132,13 +2280,15 @@ mod input_tests {
                 initial_max_data: Some(123),
                 ..ParametersSet::default()
             };
-            datastore.consume_qlog_event(
-                &Event::with_time(
-                    1.0,
-                    EventData::QuicParametersSet(Box::new(limits)),
-                ),
-                false,
-            );
+            assert!(datastore
+                .consume_qlog_event(
+                    &Event::with_time(
+                        1.0,
+                        EventData::QuicParametersSet(Box::new(limits)),
+                    ),
+                    false,
+                )
+                .is_ok());
             assert_eq!(
                 datastore.sent_max_data,
                 if expected_local {
