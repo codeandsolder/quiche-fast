@@ -448,8 +448,6 @@ where
 
         #[cfg(target_os = "linux")]
         {
-            use libc::SOL_SOCKET;
-            use libc::SO_MARK;
             use nix::errno::Errno;
             use nix::sys::socket::*;
             use std::net::SocketAddrV4;
@@ -594,26 +592,11 @@ where
                                     // messages because we set IP_PKTINFO on the
                                     // socket.
                                 },
-                                ControlMessageOwned::Unknown(raw_cmsg) => {
-                                    let UnknownCmsg {
-                                        cmsg_header,
-                                        data_bytes,
-                                    } = raw_cmsg;
-
-                                    if cmsg_header.cmsg_level == SOL_SOCKET &&
-                                        cmsg_header.cmsg_type == SO_MARK
-                                    {
-                                        let Ok(arr) =
-                                            <[u8; 4]>::try_from(data_bytes)
-                                        else {
-                                            // SO_MARK is a `u32`. This should
-                                            // always succeed.
-                                            // https://elixir.bootlin.com/linux/v6.17/source/include/net/sock.h#L487
-                                            continue;
-                                        };
-
-                                        let _ = mark_bytes.insert(arr);
-                                    }
+                                ControlMessageOwned::SoMark(mark) => {
+                                    // Preserve the native-endian byte
+                                    // representation expected by the connection
+                                    // audit metadata.
+                                    mark_bytes = Some(mark.to_ne_bytes());
                                 },
                                 _ => {
                                     // Unrecognized cmsg received, just ignore
