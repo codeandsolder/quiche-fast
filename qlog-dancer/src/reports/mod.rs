@@ -78,6 +78,6 @@ pub fn report(
     Ok(())
 }
 
-mod events;
+pub(crate) mod events;
 pub mod html;
 mod text;
