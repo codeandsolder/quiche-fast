@@ -54,7 +54,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 | Modify event filters | `src/wirefilter.rs` (wirefilter-engine DSL) |
 | CLI args / config | `src/config.rs` (AppConfig, clap) |
 | Wasm API surface | `src/web.rs` (`#[wasm_bindgen]` exports) |
-| Report formatting | `src/reports/` |
+| Report formatting | `src/reports/` -- `events.rs` renders QUIC and HTTP/3 frames directly into existing `String` buffers using `std::fmt::Write`, avoiding temporary allocations in the per-frame path |
 
 ## NOTES
 

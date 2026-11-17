@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::fmt::Write;
+
 use qlog::events::http3::Http3Frame;
 use qlog::events::quic::QuicFrame;
 use qlog::events::EventData;
@@ -35,21 +37,22 @@ use crate::category_and_type_from_name;
 
 macro_rules! printy {
     ($k:expr, $value:expr, $s:expr) => {{
-        $s += &format!("{}={}, ", $k, $value);
+        let _ = write!(&mut $s, "{}={}, ", $k, $value);
     }};
 }
 
 macro_rules! printyo {
     ($k:expr, $value:expr, $s:expr) => {{
         if let Some(v) = $value {
-            $s += &format!("{}={}, ", $k, v);
+            let _ = write!(&mut $s, "{}={}, ", $k, v);
         }
     }};
 }
 
 macro_rules! printy_json {
     ($k:expr, $value:expr, $s:expr) => {{
-        $s += &format!(
+        let _ = write!(
+            &mut $s,
             "{}={}, ",
             $k,
             &serde_json::to_string(&$value)?.replace("\"", "")
@@ -60,7 +63,8 @@ macro_rules! printy_json {
 macro_rules! printyo_json {
     ($k:expr, $value:expr, $s:expr) => {{
         if let Some(v) = $value {
-            $s += &format!(
+            let _ = write!(
+                &mut $s,
                 "{}={}, ",
                 $k,
                 &serde_json::to_string(&v)?.replace("\"", "")
@@ -83,7 +87,7 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
     for f in frames {
         match f {
             QuicFrame::Padding { raw, .. } => {
-                s += &format!(" PADDING {{raw={raw:?}}}");
+                let _ = write!(&mut s, " PADDING {{raw={raw:?}}}");
             },
             QuicFrame::Ping { .. } => {
                 s += " PING";
@@ -92,7 +96,7 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 s += " ACK {";
                 if let Some(acked_ranges) = acked_ranges {
                     for range in acked_ranges {
-                        s += &format!("{}, ", range);
+                        let _ = write!(&mut s, "{range}, ");
                     }
                 }
                 s += "}";
@@ -104,7 +108,7 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 final_size,
                 ..
             } => {
-                s += &format!(" RESET_STREAM {{id={stream_id}, error={error:?}, error_code={error_code:?}, final_size={final_size}}}");
+                let _ = write!(&mut s, " RESET_STREAM {{id={stream_id}, error={error:?}, error_code={error_code:?}, final_size={final_size}}}");
             },
             QuicFrame::StopSending {
                 stream_id,
@@ -112,15 +116,15 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 error_code,
                 ..
             } => {
-                s += &format!(" STOP_SENDING {{id={stream_id}, error={error:?}, error_code={error_code:?}}}");
+                let _ = write!(&mut s, " STOP_SENDING {{id={stream_id}, error={error:?}, error_code={error_code:?}}}");
             },
             QuicFrame::Crypto { offset, raw } => {
-                s += &format!(" CRYPTO {{off={offset}, raw={raw:?}}}");
+                let _ = write!(&mut s, " CRYPTO {{off={offset}, raw={raw:?}}}");
             },
             QuicFrame::NewToken { token, .. } => {
                 s += " NEW_TOKEN ";
                 if let Some(ty) = &token.ty {
-                    s += &format!("{{ty={ty:?}}}");
+                    let _ = write!(&mut s, "{{ty={ty:?}}}");
                 }
             },
             QuicFrame::Stream {
@@ -129,21 +133,23 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 fin,
                 raw,
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " STREAM {{id={stream_id}, off={offset:?}, raw={raw:?}"
                 );
                 if let Some(f) = fin {
-                    s += &format!(", fin={f}")
+                    let _ = write!(&mut s, ", fin={f}");
                 }
                 s += "}";
             },
             QuicFrame::MaxData { maximum, .. } => {
-                s += &format!(" MAX_DATA {{max={maximum}}}");
+                let _ = write!(&mut s, " MAX_DATA {{max={maximum}}}");
             },
             QuicFrame::MaxStreamData {
                 stream_id, maximum, ..
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " MAX_STREAM_DATA {{id={stream_id}, max={maximum}}}"
                 );
             },
@@ -152,24 +158,27 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 maximum,
                 ..
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " MAX_STREAMS {{ty={stream_type:?}, max={maximum}}}"
                 );
             },
             QuicFrame::DataBlocked { limit, .. } => {
-                s += &format!(" DATA_BLOCKED {{limit={limit}}}");
+                let _ = write!(&mut s, " DATA_BLOCKED {{limit={limit}}}");
             },
             QuicFrame::StreamDataBlocked {
                 stream_id, limit, ..
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " STREAM_DATA_BLOCKED {{id={stream_id}, limit={limit}}}"
                 );
             },
             QuicFrame::StreamsBlocked {
                 stream_type, limit, ..
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " STREAMS_BLOCKED {{ty={stream_type:?}, limit={limit}}}"
                 );
             },
@@ -181,20 +190,23 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 stateless_reset_token,
                 ..
             } => {
-                s += &format!(
+                let _ = write!(&mut s,
                     " NEW_CONNECTION_ID {{sn={sequence_number}, retire_prior_to={retire_prior_to}, cid_length={connection_id_length:?}, cid={connection_id:?}, reset_token={stateless_reset_token:?}}}"
                 );
             },
             QuicFrame::RetireConnectionId {
                 sequence_number, ..
             } => {
-                s += &format!(" RETIRE_CONNECTION_ID {{sn={sequence_number}}}");
+                let _ = write!(
+                    &mut s,
+                    " RETIRE_CONNECTION_ID {{sn={sequence_number}}}"
+                );
             },
             QuicFrame::PathChallenge { data, .. } => {
-                s += &format!(" PATH_CHALLENGE {{data={data:?}}}");
+                let _ = write!(&mut s, " PATH_CHALLENGE {{data={data:?}}}");
             },
             QuicFrame::PathResponse { data, .. } => {
-                s += &format!(" PATH_RESPONSE {{data={data:?}}}");
+                let _ = write!(&mut s, " PATH_RESPONSE {{data={data:?}}}");
             },
             QuicFrame::ConnectionClose {
                 error_space,
@@ -204,7 +216,7 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
             } => {
                 s += " CONNECTION_CLOSE {";
                 if let Some(es) = error_space {
-                    s += &format!(" ty={es:?},");
+                    let _ = write!(&mut s, " ty={es:?},");
                 }
                 printyo!(" code", error_code, s);
                 printyo!(" reason", reason, s);
@@ -214,12 +226,13 @@ pub fn frames_to_string(frames: &[QuicFrame]) -> String {
                 s += " HANDSHAKE_DONE";
             },
             QuicFrame::Datagram { raw, .. } => {
-                s += &format!(" DATAGRAM {{raw={raw:?}}}");
+                let _ = write!(&mut s, " DATAGRAM {{raw={raw:?}}}");
             },
             QuicFrame::Unknown {
                 frame_type_bytes, ..
             } => {
-                s += &format!(
+                let _ = write!(
+                    &mut s,
                     " UNKNOWN {{frame_type_bytes={frame_type_bytes:?}}}"
                 );
             },
@@ -245,29 +258,30 @@ fn http_frame_to_string(frame: &Http3Frame) -> String {
             for header in headers {
                 let name = header.name.as_deref().unwrap_or("<binary>");
                 let value = header.value.as_deref().unwrap_or("<binary>");
-                s += &format!("{}: {}, ", name, value);
+                let _ = write!(&mut s, "{name}: {value}, ");
             }
 
             s += "}";
         },
         Http3Frame::CancelPush { push_id, .. } => {
-            s += &format!(" CANCEL_PUSH {{id={push_id}}}");
+            let _ = write!(&mut s, " CANCEL_PUSH {{id={push_id}}}");
         },
         Http3Frame::Settings { settings, .. } => {
-            s += &format!(" SETTINGS {{settings={settings:?}}}");
+            let _ = write!(&mut s, " SETTINGS {{settings={settings:?}}}");
         },
         Http3Frame::PushPromise {
             push_id, headers, ..
         } => {
-            s += &format!(
+            let _ = write!(
+                &mut s,
                 " PUSH_PROMISE {{push_id={push_id}, headers={headers:?}}}"
             );
         },
         Http3Frame::Goaway { id, .. } => {
-            s += &format!(" GOAWAY {{id={id}}}");
+            let _ = write!(&mut s, " GOAWAY {{id={id}}}");
         },
         Http3Frame::MaxPushId { push_id, .. } => {
-            s += &format!(" MAX_PUSH_ID {{id={push_id}}}");
+            let _ = write!(&mut s, " MAX_PUSH_ID {{id={push_id}}}");
         },
         Http3Frame::PriorityUpdate {
             stream_id,
@@ -275,17 +289,17 @@ fn http_frame_to_string(frame: &Http3Frame) -> String {
             priority_field_value,
             ..
         } => {
-            s += &format!(" PRIORITY_UPDATE {{stream_id={stream_id:?}, push_id={push_id:?}, priority={priority_field_value:?}}}");
+            let _ = write!(&mut s, " PRIORITY_UPDATE {{stream_id={stream_id:?}, push_id={push_id:?}, priority={priority_field_value:?}}}");
         },
         Http3Frame::Reserved {
             frame_type_bytes, ..
         } => {
-            s += &format!(" GREASE {{ty={frame_type_bytes}}}");
+            let _ = write!(&mut s, " GREASE {{ty={frame_type_bytes}}}");
         },
         Http3Frame::Unknown {
             frame_type_bytes, ..
         } => {
-            s += &format!(" UNKNOWN {{ty={frame_type_bytes}}}");
+            let _ = write!(&mut s, " UNKNOWN {{ty={frame_type_bytes}}}");
         },
     }
 
