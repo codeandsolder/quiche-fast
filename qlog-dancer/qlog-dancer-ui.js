@@ -24,10 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-import  {new_qlog_dancer} from './pkg/qlog_dancer.js';
+import { new_qlog_dancer } from './pkg/qlog_dancer.js';
+import { canvasToPlotCoords, formatPlotCoordinate } from './canvas-math.mjs';
 
 let qlog_dancer = null;
-let currentRectangle = null;
+const wiredCanvasInteractions = new WeakSet();
 
 const OVERVIEW_CANVAS = "overview_canvas";
 const CC_CANVAS = "cc_canvas";
@@ -590,138 +591,99 @@ canvasMap.forEach((value, key) => {
     setupCanvasResizer(key);
 });
 
-function canvasToPlotCoords(canvasX, canvasY, chartBounds, plotRanges) {
-    const plotPixelX = canvasX - chartBounds.left;
-    const plotPixelY = canvasY - chartBounds.top;
-
-    if (plotPixelX < 0 || plotPixelX > chartBounds.width ||
-        plotPixelY < 0 || plotPixelY > chartBounds.height) {
-        return null;
-    }
-
-    const normalizedX = plotPixelX / chartBounds.width;
-    const normalizedY = plotPixelY / chartBounds.height;
-
-    const plotX = plotRanges.x_min + normalizedX * (plotRanges.x_max - plotRanges.x_min);
-    const plotY = plotRanges.y_max - normalizedY * (plotRanges.y_max - plotRanges.y_min);
-
-    return { x: plotX, y: plotY };
-}
-
 function setupCanvasInteraction(canvasId) {
     const canvas = document.getElementById(canvasId);
+    if (wiredCanvasInteractions.has(canvas)) return;
+    wiredCanvasInteractions.add(canvas);
+
     const container = canvas.parentElement;
     const tooltip = document.getElementById('tooltip');
-    let [chartBounds, plotRanges] = qlog_dancer.get_chart_info(canvasId);
-    let isMouseOverCanvas = false;
-    let isDrawingRect = false;
-    let startX, startY, startXPlot, startYPlot;
+    let currentRectangle = null;
+    let startPixel = null;
+    let startPlot = null;
 
-    function tidyCurrentRectangle() {
-        isDrawingRect = false;
-        if (currentRectangle) {
-        currentRectangle.remove();
-        }
+    function clearRectangle() {
+        if (currentRectangle) currentRectangle.remove();
         currentRectangle = null;
+        startPixel = null;
+        startPlot = null;
     }
 
-    canvas.addEventListener('mousedown', (e) => {
-        isDrawingRect = true;
+    function plotPosition(event) {
+        const info = qlog_dancer?.get_chart_info(canvasId);
+        if (!info) return null;
+        const [chartBounds, plotRanges] = info;
         const rect = canvas.getBoundingClientRect();
-        startX = e.clientX - rect.left;
-        startY = e.clientY - rect.top;
+        const pixel = {
+            x: event.clientX - rect.left,
+            y: event.clientY - rect.top,
+        };
+        const plot = canvasToPlotCoords(pixel.x, pixel.y, chartBounds, plotRanges);
+        return plot ? { pixel, plot } : null;
+    }
 
-        let [chartBounds, plotRanges] = qlog_dancer.get_chart_info(canvasId);
-        const plotCoords = canvasToPlotCoords(startX, startY, chartBounds, plotRanges);
-        if (plotCoords) {
-        startXPlot = plotCoords.x;
-        startYPlot = plotCoords.y;
+    canvas.addEventListener('mousedown', (event) => {
+        const position = plotPosition(event);
+        if (!position) return;
 
-        // Create a new rectangle div
+        clearRectangle();
+        startPixel = position.pixel;
+        startPlot = position.plot;
         currentRectangle = document.createElement('div');
         currentRectangle.className = 'rectangle';
-        currentRectangle.style.left = startX + 'px';
-        currentRectangle.style.top = startY + 'px';
+        currentRectangle.style.left = startPixel.x + 'px';
+        currentRectangle.style.top = startPixel.y + 'px';
         currentRectangle.style.width = '0px';
         currentRectangle.style.height = '0px';
         container.appendChild(currentRectangle);
+    });
+
+    canvas.addEventListener('mousemove', (event) => {
+        const position = plotPosition(event);
+        if (!position) {
+            hideTooltip(tooltip);
+            return;
+        }
+        updateTooltip(event, position.plot, tooltip);
+
+        if (currentRectangle) {
+            const { x, y } = position.pixel;
+            currentRectangle.style.left = Math.min(startPixel.x, x) + 'px';
+            currentRectangle.style.top = Math.min(startPixel.y, y) + 'px';
+            currentRectangle.style.width = Math.abs(x - startPixel.x) + 'px';
+            currentRectangle.style.height = Math.abs(y - startPixel.y) + 'px';
         }
     });
 
-        // Mouse move handler for live tooltip
-        canvas.addEventListener('mousemove', function(event) {
-            const rect = canvas.getBoundingClientRect();
-            const canvasX = event.clientX - rect.left;
-            const canvasY = event.clientY - rect.top;
+    canvas.addEventListener('mouseleave', () => {
+        hideTooltip(tooltip);
+        clearRectangle();
+    });
 
-            let [chartBounds, plotRanges] = qlog_dancer.get_chart_info(canvasId);
-            const plotCoords = canvasToPlotCoords(canvasX, canvasY, chartBounds, plotRanges);
+    canvas.addEventListener('mouseup', (event) => {
+        const position = plotPosition(event);
+        const start = startPlot;
+        clearRectangle();
+        if (!position || !start) return;
 
-            if (plotCoords) {
-                isMouseOverCanvas = true;
-                updateTooltip(event, plotCoords, tooltip);
-            } else {
-                hideTooltip(tooltip);
-                isMouseOverCanvas = false;
-            }
+        const canvasData = canvasMap.get(canvasId);
+        if (!canvasData) return;
+        // The WASM zoom API accepts f64; preserve full u64 precision in
+        // metadata and tooltips, narrowing only at this float zoom boundary.
+        canvasData.x_start = Number(start.x);
+        canvasData.x_end = Number(position.plot.x);
+        redrawByCanvasId(canvasId);
 
-            if (isDrawingRect && currentRectangle) {
-                // Calculate rectangle dimensions
-                const width = Math.abs(canvasX - startX);
-                const height = Math.abs(canvasY - startY);
-
-                // Update rectangle position and size
-                currentRectangle.style.left = Math.min(startX, canvasX) + 'px';
-                currentRectangle.style.top = Math.min(startY, canvasY) + 'px';
-                currentRectangle.style.width = width + 'px';
-                currentRectangle.style.height = height + 'px';
-            }
-        });
-
-        // Hide tooltip when mouse leaves canvas
-        canvas.addEventListener('mouseleave', function() {
-            hideTooltip(tooltip);
-            isMouseOverCanvas = false;
-            tidyCurrentRectangle();
-
-        });
-
-        canvas.addEventListener('mouseup', function() {
-            const rect = canvas.getBoundingClientRect();
-            const canvasX = event.clientX - rect.left;
-            const canvasY = event.clientY - rect.top;
-
-            let [chartBounds, plotRanges] = qlog_dancer.get_chart_info(canvasId);
-            const plotCoords = canvasToPlotCoords(canvasX, canvasY, chartBounds, plotRanges);
-
-            if (plotCoords) {
-                let canvas_data = canvasMap.get(canvas.id);
-                canvas_data.x_start = startXPlot.toFixed(1);
-                canvas_data.x_end = plotCoords.x.toFixed(1);
-
-                redrawByCanvasId(canvas.id);
-
-                console.log(`Start at: (${startXPlot.toFixed(1)}, ${startYPlot.toFixed(1)}), end at (${plotCoords.x.toFixed(1)}, ${plotCoords.y.toFixed(1)})`);
-            }
-
-            isDrawingRect = false;
-            tidyCurrentRectangle();
-
-
-        });
-
-        // Show tooltip when mouse enters canvas
-        canvas.addEventListener('mouseenter', function() {
-            isMouseOverCanvas = true;
-        });
+        console.log(`Start at: (${formatPlotCoordinate(start.x, 1)}, ${formatPlotCoordinate(start.y, 1)}), end at (${formatPlotCoordinate(position.plot.x, 1)}, ${formatPlotCoordinate(position.plot.y, 1)})`);
+    });
 }
 
 function updateTooltip(event, plotCoords, tooltip) {
     // Update tooltip content
     tooltip.innerHTML = `
         <div class="tooltip-content">
-            <div class="coord-line">X: <span class="coord-value">${plotCoords.x.toFixed(0)}</span></div>
-            <div class="coord-line">Y: <span class="coord-value">${plotCoords.y.toFixed(0)}</span></div>
+            <div class="coord-line">X: <span class="coord-value">${formatPlotCoordinate(plotCoords.x)}</span></div>
+            <div class="coord-line">Y: <span class="coord-value">${formatPlotCoordinate(plotCoords.y)}</span></div>
         </div>
     `;
 

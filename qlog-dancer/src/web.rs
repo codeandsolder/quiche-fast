@@ -138,15 +138,22 @@ impl<T, U> ChartInfo<T, U> {
     }
 }
 
-impl<T, U> Into<JsValue> for ChartInfo<T, U>
+/// Serialize chart metadata without panicking if a value cannot be encoded.
+fn chart_info_js<T, U>(chart: Option<ChartInfo<T, U>>) -> Result<JsValue, JsValue>
 where
-    T: serde::Serialize,
-    U: serde::Serialize,
+    T: Serialize,
+    U: Serialize,
 {
-    fn into(self) -> JsValue {
-        serde_wasm_bindgen::to_value(&(self.chart_bounds, self.plot_ranges))
-            .unwrap()
-    }
+    let Some(info) = chart else {
+        return Ok(JsValue::null());
+    };
+    // Preserve the full u64 plot range. The default serializer rejects
+    // integers above JS MAX_SAFE_INTEGER, which previously caused a WASM panic.
+    let serializer = serde_wasm_bindgen::Serializer::new()
+        .serialize_large_number_types_as_bigints(true);
+    (info.chart_bounds, info.plot_ranges)
+        .serialize(&serializer)
+        .map_err(|error| JsValue::from_str(&error.to_string()))
 }
 
 #[wasm_bindgen]
@@ -296,29 +303,25 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    pub fn get_chart_info(&self, canvas_id: &str) -> JsValue {
+    /// Return plot bounds and ranges for a rendered canvas, or null if the
+    /// plot has not been rendered yet.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart bounds cannot be serialized.
+    pub fn get_chart_info(&self, canvas_id: &str) -> Result<JsValue, JsValue> {
         match canvas_id {
-            "overview_canvas" =>
-                self.mp_chart_info.map_or(JsValue::null(), Into::into),
-            "rtt_canvas" =>
-                self.rtt_chart_info.map_or(JsValue::null(), Into::into),
-            "cc_canvas" => self.cc_chart_info.map_or(JsValue::null(), Into::into),
-            "flow_control_canvas" =>
-                self.fc_chart_info.map_or(JsValue::null(), Into::into),
-            "pkt-rx-canvas" =>
-                self.pkt_rx_chart_info.map_or(JsValue::null(), Into::into),
-            "pkt-tx-canvas" =>
-                self.pkt_tx_chart_info.map_or(JsValue::null(), Into::into),
-            "pkt-tx-counts-canvas" => self
-                .pkt_tx_counts_chart_info
-                .map_or(JsValue::null(), Into::into),
-            "pkt-tx-delta-canvas" => self
-                .pkt_tx_delta_chart_info
-                .map_or(JsValue::null(), Into::into),
-            "pkt-tx-pacing-canvas" => self
-                .pkt_tx_pacing_chart_info
-                .map_or(JsValue::null(), Into::into),
-            _ => JsValue::null(),
+            "overview_canvas" => chart_info_js(self.mp_chart_info),
+            "rtt_canvas" => chart_info_js(self.rtt_chart_info),
+            "cc_canvas" => chart_info_js(self.cc_chart_info),
+            "flow_control_canvas" => chart_info_js(self.fc_chart_info),
+            "pkt-rx-canvas" => chart_info_js(self.pkt_rx_chart_info),
+            "pkt-tx-canvas" => chart_info_js(self.pkt_tx_chart_info),
+            "pkt-tx-counts-canvas" =>
+                chart_info_js(self.pkt_tx_counts_chart_info),
+            "pkt-tx-delta-canvas" => chart_info_js(self.pkt_tx_delta_chart_info),
+            "pkt-tx-pacing-canvas" =>
+                chart_info_js(self.pkt_tx_pacing_chart_info),
+            _ => Ok(JsValue::null()),
         }
     }
 

@@ -141,6 +141,12 @@ jobs:
       - name: Check qlog-dancer browser library
         run: cargo +1.100.0 check --locked --target wasm32-unknown-unknown -p qlog-dancer --lib
 
+      - name: Test browser JavaScript and exact 64-bit chart coordinates
+        run: |
+          node --input-type=module --check < qlog-dancer/qlog-dancer-ui.js
+          node --check qlog-dancer/canvas-math.mjs
+          node --test qlog-dancer/tests/canvas_math.test.mjs
+
       - name: Finalize mandatory sccache
         if: always()
         uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@77dd7bb7dcbb8450e335bbbd1c47591733dc79a4 # main
