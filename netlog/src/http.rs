@@ -124,21 +124,10 @@ pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
     let mut ret = BTreeMap::new();
 
     for hdr in hdrs {
-        let mut split = hdr.split(": ");
-        let name = split.next();
-        let val = split.next();
-
-        match (name, val) {
-            (Some(k), Some(v)) => {
-                ret.insert(k.to_string(), v.to_string());
-            },
-
-            (Some(k), None) => {
-                ret.insert(k.to_string(), String::new());
-            },
-
-            _ => (),
-        }
+        // Only the first ": " belongs to the header delimiter; values can
+        // contain the same sequence (e.g. a Location URL or error message).
+        let (name, value) = hdr.split_once(": ").unwrap_or((hdr, ""));
+        ret.insert(name.to_owned(), value.to_owned());
     }
 
     ret
@@ -223,4 +212,34 @@ pub fn parse_event(
     }
 
     None
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::headers_to_map;
+
+    #[test]
+    fn header_values_keep_embedded_delimiters() {
+        let headers = [
+            ":method: GET",
+            ":authority: example.test: 443",
+            "location: https://example.test/path: detail",
+            "x-error: reason: detail: suffix",
+            "x-empty: ",
+            "value-less",
+            "x-repeat: earlier",
+            "x-repeat: latest",
+        ]
+        .map(str::to_string);
+
+        let mapped = headers_to_map(&headers);
+        assert_eq!(mapped.len(), 7);
+        assert_eq!(mapped[":method"], "GET");
+        assert_eq!(mapped[":authority"], "example.test: 443");
+        assert_eq!(mapped["location"], "https://example.test/path: detail");
+        assert_eq!(mapped["x-error"], "reason: detail: suffix");
+        assert_eq!(mapped["x-empty"], "");
+        assert_eq!(mapped["value-less"], "");
+        assert_eq!(mapped["x-repeat"], "latest");
+    }
 }
