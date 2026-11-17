@@ -359,7 +359,7 @@ impl HttpRequestStub {
         self.path = NaOption::new(find_header_value(hdrs, ":path"));
         self.client_pri_hdr = NaOption::new(find_header_value(hdrs, "priority"));
         self.client_content_length =
-            NaOption::new(find_header_value(hdrs, "content-lengt"));
+            NaOption::new(find_header_value(hdrs, "content-length"));
     }
 
     pub fn set_response_info_from_qlog(&mut self, hdrs: &[HttpHeader]) {

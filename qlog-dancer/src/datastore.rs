@@ -42,7 +42,6 @@ use qlog::events::RawInfo;
 
 use tabled::Tabled;
 
-use crate::request_stub::find_header_value;
 use crate::request_stub::HttpRequestStub;
 use crate::request_stub::NaOption;
 use crate::trackers::StreamBufferTracker;
@@ -553,6 +552,13 @@ enum NetlogQuicTermination {
 enum NetlogH2Direction {
     Sent,
     Received,
+}
+
+/// Whether an HTTP/3 frame was written by this endpoint or read from its peer.
+#[derive(Clone, Copy)]
+enum QlogH3Direction {
+    Created,
+    Parsed,
 }
 
 impl Datastore {
@@ -1344,19 +1350,21 @@ impl Datastore {
             EventData::QuicCongestionStateUpdated(v) =>
                 self.consume_qlog_congestion_state_updated(v, ev_time),
 
-            EventData::Http3FrameCreated(v) => match self.vantage_point {
-                VantagePoint::Client =>
-                    self.consume_qlog_h3_frame_created_client(v, ev_time),
-                VantagePoint::Server =>
-                    self.consume_qlog_h3_frame_created_server(v, ev_time),
-            },
+            EventData::Http3FrameCreated(v) => self.consume_qlog_h3_frame(
+                v.stream_id,
+                &v.frame,
+                v.length,
+                ev_time,
+                QlogH3Direction::Created,
+            ),
 
-            EventData::Http3FrameParsed(v) => match self.vantage_point {
-                VantagePoint::Client =>
-                    self.consume_qlog_h3_frame_parsed_client(v, ev_time),
-                VantagePoint::Server =>
-                    self.consume_qlog_h3_frame_parsed_server(v, ev_time),
-            },
+            EventData::Http3FrameParsed(v) => self.consume_qlog_h3_frame(
+                v.stream_id,
+                &v.frame,
+                v.length,
+                ev_time,
+                QlogH3Direction::Parsed,
+            ),
 
             _ => (), // trace!("skipping {:?}", event.data),
         }
@@ -1761,150 +1769,79 @@ impl Datastore {
             })
     }
 
-    fn consume_qlog_h3_frame_created_client(
-        &mut self, fc: &qlog::events::http3::FrameCreated, ev_time: f64,
+    /// Record an HTTP/3 frame with the same semantics regardless of source
+    /// endpoint. Client/server vantage determines which headers represent
+    /// requests and responses; only the client records parsed DATA in the
+    /// received-frame series.
+    fn consume_qlog_h3_frame(
+        &mut self, stream_id: u64, frame: &Http3Frame, length: Option<u64>,
+        ev_time: f64, direction: QlogH3Direction,
     ) {
-        match &fc.frame {
+        match frame {
             Http3Frame::Headers { headers, .. } => {
-                let req = self.get_or_insert_http_req(fc.stream_id);
-                req.time_first_headers_tx.get_or_insert(ev_time);
-                req.set_request_info_from_qlog(headers);
+                let vantage = self.vantage_point;
+                let req = self.get_or_insert_http_req(stream_id);
+                match direction {
+                    QlogH3Direction::Created => {
+                        req.time_first_headers_tx.get_or_insert(ev_time);
+                    },
+                    QlogH3Direction::Parsed => {
+                        req.time_first_headers_rx.get_or_insert(ev_time);
+                    },
+                }
+                match (direction, vantage) {
+                    (QlogH3Direction::Created, VantagePoint::Client) |
+                    (QlogH3Direction::Parsed, VantagePoint::Server) =>
+                        req.set_request_info_from_qlog(headers),
+                    (QlogH3Direction::Created, VantagePoint::Server) |
+                    (QlogH3Direction::Parsed, VantagePoint::Client) =>
+                        req.set_response_info_from_qlog(headers),
+                }
             },
 
             Http3Frame::Data { .. } => {
-                let req = self.get_or_insert_http_req(fc.stream_id);
-
-                req.time_first_data_tx.get_or_insert(ev_time);
-
-                let _ = req.time_last_data_tx.insert(ev_time);
-
-                let length = fc.length.unwrap_or_default();
-                req.time_data_tx_set.push((ev_time, length));
-                self.largest_data_frame_tx_length_global = std::cmp::max(
-                    self.largest_data_frame_tx_length_global,
-                    length,
-                );
+                let length = length.unwrap_or_default();
+                let req = self.get_or_insert_http_req(stream_id);
+                match direction {
+                    QlogH3Direction::Created => {
+                        req.time_first_data_tx.get_or_insert(ev_time);
+                        req.time_last_data_tx = Some(ev_time);
+                        req.time_data_tx_set.push((ev_time, length));
+                        self.largest_data_frame_tx_length_global =
+                            self.largest_data_frame_tx_length_global.max(length);
+                    },
+                    QlogH3Direction::Parsed => {
+                        req.time_first_data_rx.get_or_insert(ev_time);
+                        req.time_last_data_rx = Some(ev_time);
+                        req.time_data_rx_set.push((ev_time, length));
+                        self.largest_data_frame_rx_length_global =
+                            self.largest_data_frame_rx_length_global.max(length);
+                        if let VantagePoint::Client = self.vantage_point {
+                            self.received_data_frames
+                                .entry(stream_id)
+                                .or_default()
+                                .push((ev_time, length));
+                        }
+                    },
+                }
             },
 
             Http3Frame::PriorityUpdate {
-                stream_id: Some(stream_id),
+                stream_id: Some(priority_stream_id),
                 priority_field_value,
                 ..
             } => {
-                let req: &mut HttpRequestStub =
-                    self.get_or_insert_http_req(*stream_id);
-                req.priority_updates.push(priority_field_value.clone());
+                if matches!(
+                    (direction, self.vantage_point),
+                    (QlogH3Direction::Created, VantagePoint::Client) |
+                        (QlogH3Direction::Parsed, VantagePoint::Server)
+                ) {
+                    self.get_or_insert_http_req(*priority_stream_id)
+                        .priority_updates
+                        .push(priority_field_value.clone());
+                }
             },
 
-            // ignore other frames
-            _ => (),
-        }
-    }
-
-    fn consume_qlog_h3_frame_created_server(
-        &mut self, fc: &qlog::events::http3::FrameCreated, ev_time: f64,
-    ) {
-        match &fc.frame {
-            Http3Frame::Headers { headers, .. } => {
-                let req = self.get_or_insert_http_req(fc.stream_id);
-                req.time_first_headers_tx.get_or_insert(ev_time);
-                req.set_response_info_from_qlog(headers);
-            },
-
-            Http3Frame::Data { .. } => {
-                let req = self.get_or_insert_http_req(fc.stream_id);
-
-                req.time_first_data_tx.get_or_insert(ev_time);
-
-                let _ = req.time_last_data_tx.insert(ev_time);
-
-                let length = fc.length.unwrap_or_default();
-                req.time_data_tx_set.push((ev_time, length));
-                self.largest_data_frame_tx_length_global = std::cmp::max(
-                    self.largest_data_frame_tx_length_global,
-                    length,
-                );
-            },
-
-            // ignore other frames
-            _ => (),
-        }
-    }
-
-    fn consume_qlog_h3_frame_parsed_client(
-        &mut self, fp: &qlog::events::http3::FrameParsed, ev_time: f64,
-    ) {
-        match &fp.frame {
-            Http3Frame::Headers { headers, .. } => {
-                let req = self.get_or_insert_http_req(fp.stream_id);
-                req.time_first_headers_rx.get_or_insert(ev_time);
-
-                req.set_response_info_from_qlog(headers);
-            },
-
-            Http3Frame::Data { .. } => {
-                let req = self.get_or_insert_http_req(fp.stream_id);
-
-                req.time_first_data_rx.get_or_insert(ev_time);
-
-                let _ = req.time_last_data_rx.insert(ev_time);
-
-                // TODO: is default length sensible here?
-                let length = fp.length.unwrap_or_default();
-                req.time_data_rx_set.push((ev_time, length));
-                self.largest_data_frame_rx_length_global = std::cmp::max(
-                    self.largest_data_frame_rx_length_global,
-                    length,
-                );
-
-                let s =
-                    self.received_data_frames.entry(fp.stream_id).or_default();
-
-                s.push((ev_time, length));
-            },
-
-            // ignore other frames
-            _ => (),
-        }
-    }
-
-    fn consume_qlog_h3_frame_parsed_server(
-        &mut self, fp: &qlog::events::http3::FrameParsed, ev_time: f64,
-    ) {
-        match &fp.frame {
-            Http3Frame::Headers { headers, .. } => {
-                let req = self.get_or_insert_http_req(fp.stream_id);
-                req.time_first_headers_rx.get_or_insert(ev_time);
-                req.path = NaOption::new(find_header_value(headers, ":path"));
-                req.client_pri_hdr =
-                    NaOption::new(find_header_value(headers, "priority"));
-            },
-
-            Http3Frame::Data { .. } => {
-                let req = self.get_or_insert_http_req(fp.stream_id);
-
-                req.time_first_data_rx.get_or_insert(ev_time);
-
-                let _ = req.time_last_data_rx.insert(ev_time);
-
-                let length = fp.length.unwrap_or_default();
-                req.time_data_rx_set.push((ev_time, length));
-                self.largest_data_frame_rx_length_global = std::cmp::max(
-                    self.largest_data_frame_rx_length_global,
-                    length,
-                );
-            },
-
-            Http3Frame::PriorityUpdate {
-                stream_id: Some(stream_id),
-                priority_field_value,
-                ..
-            } => {
-                let req = self.get_or_insert_http_req(*stream_id);
-                req.priority_updates.push(priority_field_value.clone());
-            },
-
-            // ignore other frames
             _ => (),
         }
     }
@@ -3504,5 +3441,130 @@ mod netlog_tests {
             })
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod qlog_h3_direction_tests {
+    use super::Datastore;
+    use qlog::events::http3::FrameCreated;
+    use qlog::events::http3::FrameParsed;
+    use qlog::events::http3::Http3Frame;
+    use qlog::events::http3::HttpHeader;
+    use qlog::events::Event;
+    use qlog::events::EventData;
+    use qlog::VantagePointType;
+
+    fn headers(values: &[(&str, &str)]) -> Http3Frame {
+        Http3Frame::Headers {
+            headers: values
+                .iter()
+                .map(|&(name, value)| HttpHeader {
+                    name: Some(name.into()),
+                    name_bytes: None,
+                    value: Some(value.into()),
+                    value_bytes: None,
+                })
+                .collect(),
+            raw: None,
+        }
+    }
+
+    fn data() -> Http3Frame {
+        Http3Frame::Data { raw: None }
+    }
+
+    fn priority(value: &str) -> Http3Frame {
+        Http3Frame::PriorityUpdate {
+            stream_id: Some(12),
+            push_id: None,
+            priority_field_value: value.into(),
+            raw: None,
+        }
+    }
+
+    fn event(
+        time: f64, created: bool, frame: Http3Frame, length: Option<u64>,
+    ) -> Event {
+        let data = if created {
+            EventData::Http3FrameCreated(FrameCreated {
+                stream_id: 8,
+                length,
+                frame,
+                raw: None,
+            })
+        } else {
+            EventData::Http3FrameParsed(FrameParsed {
+                stream_id: 8,
+                length,
+                frame,
+                raw: None,
+            })
+        };
+        Event::with_time(time, data)
+    }
+
+    #[test]
+    fn h3_frames_preserve_direction_and_complete_request_response_metadata() {
+        for (vantage, request_created) in [
+            (VantagePointType::Client, true),
+            (VantagePointType::Server, false),
+        ] {
+            let events = vec![
+                event(
+                    1.0,
+                    request_created,
+                    headers(&[
+                        (":method", "POST"),
+                        (":authority", "example.test"),
+                        (":path", "/upload"),
+                        ("priority", "u=3"),
+                        ("content-length", "11"),
+                    ]),
+                    None,
+                ),
+                event(
+                    2.0,
+                    !request_created,
+                    headers(&[(":status", "201"), ("content-length", "17")]),
+                    None,
+                ),
+                event(3.0, true, data(), Some(11)),
+                event(4.0, false, data(), Some(17)),
+                event(5.0, request_created, priority("u=2"), None),
+                event(6.0, !request_created, priority("ignored"), None),
+            ];
+
+            let ds =
+                Datastore::with_qlog_events(&events, &vantage, false).unwrap();
+            let req = ds.http_requests.get(&8).unwrap();
+            assert_eq!(req.method.inner.as_deref(), Some("POST"));
+            assert_eq!(req.host.inner.as_deref(), Some("example.test"));
+            assert_eq!(req.path.inner.as_deref(), Some("/upload"));
+            assert_eq!(req.client_pri_hdr.inner.as_deref(), Some("u=3"));
+            assert_eq!(req.client_content_length.inner.as_deref(), Some("11"));
+            assert_eq!(req.status.inner.as_deref(), Some("201"));
+            assert_eq!(req.server_content_length.inner.as_deref(), Some("17"));
+
+            assert_eq!(req.time_first_data_tx, Some(3.0));
+            assert_eq!(req.time_last_data_tx, Some(3.0));
+            assert_eq!(req.time_data_tx_set, vec![(3.0, 11)]);
+            assert_eq!(req.time_first_data_rx, Some(4.0));
+            assert_eq!(req.time_last_data_rx, Some(4.0));
+            assert_eq!(req.time_data_rx_set, vec![(4.0, 17)]);
+            assert_eq!(ds.largest_data_frame_tx_length_global, 11);
+            assert_eq!(ds.largest_data_frame_rx_length_global, 17);
+
+            let priority_req = ds.http_requests.get(&12).unwrap();
+            assert_eq!(priority_req.priority_updates, vec!["u=2"]);
+
+            let observed = ds.received_data_frames.get(&8);
+            match vantage {
+                VantagePointType::Client =>
+                    assert_eq!(observed, Some(&vec![(4.0, 17)])),
+                VantagePointType::Server => assert!(observed.is_none()),
+                _ => unreachable!(),
+            }
+        }
     }
 }
