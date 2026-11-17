@@ -54,6 +54,72 @@ use crate::request_stub::HttpRequestStub;
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
 
+#[derive(Debug, Clone, Copy)]
+struct SparkDirections<T> {
+    download: T,
+    upload: T,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SparkPair<T> {
+    pub absolute: T,
+    pub relative: T,
+}
+
+/// Direction and time-domain are distinct: an upload-only stream has no
+/// download data, but still occupies one cell in all four output charts.
+#[derive(Debug, Clone, Copy)]
+pub struct SparkOutputs<T> {
+    pub download: SparkPair<T>,
+    pub upload: SparkPair<T>,
+}
+
+impl<T: Clone> SparkOutputs<T> {
+    /// Use one output type (typically a PNG directory) for all four charts.
+    #[must_use]
+    pub fn all(output: T) -> Self {
+        Self {
+            download: SparkPair {
+                absolute: output.clone(),
+                relative: output.clone(),
+            },
+            upload: SparkPair {
+                absolute: output.clone(),
+                relative: output,
+            },
+        }
+    }
+}
+
+impl<T> SparkOutputs<T> {
+    fn map<U>(self, mut f: impl FnMut(T) -> U) -> SparkOutputs<U> {
+        SparkOutputs {
+            download: SparkPair {
+                absolute: f(self.download.absolute),
+                relative: f(self.download.relative),
+            },
+            upload: SparkPair {
+                absolute: f(self.upload.absolute),
+                relative: f(self.upload.relative),
+            },
+        }
+    }
+
+    fn as_ref(&self) -> SparkOutputs<&T> {
+        SparkOutputs {
+            download: SparkPair {
+                absolute: &self.download.absolute,
+                relative: &self.download.relative,
+            },
+            upload: SparkPair {
+                absolute: &self.upload.absolute,
+                relative: &self.upload.relative,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransmissionType {
     Upload,
     Download,
@@ -700,20 +766,37 @@ fn spark_canvas_area(
     Ok(area.margin(margin.top, margin.bottom, margin.left, margin.right))
 }
 
+/// Pick the data direction by transport and capture vantage, independently
+/// of the output chart's absolute/relative time coordinate system.
+fn frame_series_for_vantage<'a>(
+    ss: &'a SeriesStore, ds: &Datastore,
+) -> SparkDirections<&'a BTreeMap<u64, Vec<(f64, u64)>>> {
+    let (download, upload) = match (ds.application_proto, ds.vantage_point) {
+        (ApplicationProto::Http3, VantagePoint::Client) => (
+            &ss.received_stream_frames_series,
+            &ss.sent_stream_frames_series,
+        ),
+        (ApplicationProto::Http3, VantagePoint::Server) => (
+            &ss.sent_stream_frames_series,
+            &ss.received_stream_frames_series,
+        ),
+        (ApplicationProto::Http2, VantagePoint::Client) =>
+            (&ss.received_data_frames_series, &ss.sent_data_frames_series),
+        (ApplicationProto::Http2, VantagePoint::Server) =>
+            (&ss.sent_data_frames_series, &ss.received_data_frames_series),
+    };
+    SparkDirections { download, upload }
+}
+
 /// Renders stream spark charts for the supported application protocols and
 /// vantages.
 ///
 /// # Errors
 /// Returns an error on invalid layout sizes, output-directory/PNG I/O failures,
 /// missing canvases, or drawing backend failures.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The signature mirrors protocol state and grouping would obscure call sites"
-)]
 pub fn plot_sparks(
-    params: &SparkPlotsParams, _filename: &str, ss: &SeriesStore, ds: &Datastore,
-    abs_dl_ty: &ChartOutputType, rel_dl_ty: &ChartOutputType,
-    abs_ul_ty: &ChartOutputType, rel_ul_ty: &ChartOutputType,
+    params: &SparkPlotsParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
+    outputs: SparkOutputs<&ChartOutputType>,
 ) -> Result<(), Box<dyn Error>> {
     if params.sparks_per_row == 0 ||
         params.spark_dimension_x == 0 ||
@@ -726,29 +809,11 @@ pub fn plot_sparks(
         .into());
     }
 
-    let (stream_frame_dl_series_to_plot, stream_frame_ul_series_to_plot) =
-        match ds.application_proto {
-            ApplicationProto::Http3 => match ds.vantage_point {
-                VantagePoint::Client => (
-                    &ss.received_stream_frames_series,
-                    &ss.sent_stream_frames_series,
-                ),
-                VantagePoint::Server => (
-                    &ss.sent_stream_frames_series,
-                    &ss.received_stream_frames_series,
-                ),
-            },
-            ApplicationProto::Http2 => match ds.vantage_point {
-                VantagePoint::Client =>
-                    (&ss.received_data_frames_series, &ss.sent_data_frames_series),
-                VantagePoint::Server =>
-                    (&ss.sent_data_frames_series, &ss.received_data_frames_series),
-            },
-        };
+    let frame_series = frame_series_for_vantage(ss, ds);
 
     let visible_streams = visible_stream_ids(
-        stream_frame_dl_series_to_plot,
-        stream_frame_ul_series_to_plot,
+        frame_series.download,
+        frame_series.upload,
         ds.application_proto,
         params.bidi_only,
     );
@@ -814,10 +879,11 @@ pub fn plot_sparks(
 
     let absolute_time_range = time_range(
         visible_streams.iter().flat_map(|stream_id| {
-            stream_frame_dl_series_to_plot
+            frame_series
+                .download
                 .get(stream_id)
                 .into_iter()
-                .chain(stream_frame_ul_series_to_plot.get(stream_id))
+                .chain(frame_series.upload.get(stream_id))
                 .flat_map(|series| series.iter().map(|point| point.0))
         }),
         params.clamp.start,
@@ -826,44 +892,47 @@ pub fn plot_sparks(
     let x_min = absolute_time_range.start;
     let x_max = absolute_time_range.end;
 
-    let abs_dl_chart_config = ChartConfig::new(
-        "stream-spark-dl-absolute",
-        _filename,
-        &params.clamp,
-        ds,
-        abs_dl_ty,
-    );
-
-    let rel_dl_chart_config = ChartConfig::new(
-        "stream-spark-dl-relative",
-        _filename,
-        &params.clamp,
-        ds,
-        rel_dl_ty,
-    );
-
-    let abs_ul_chart_config = ChartConfig::new(
-        "stream-spark-ul-absolute",
-        _filename,
-        &params.clamp,
-        ds,
-        abs_ul_ty,
-    );
-
-    let rel_ul_chart_config = ChartConfig::new(
-        "stream-spark-ul-relative",
-        _filename,
-        &params.clamp,
-        ds,
-        rel_ul_ty,
-    );
+    let configs = SparkOutputs {
+        download: SparkPair {
+            absolute: ChartConfig::new(
+                "stream-spark-dl-absolute",
+                filename,
+                &params.clamp,
+                ds,
+                outputs.download.absolute,
+            ),
+            relative: ChartConfig::new(
+                "stream-spark-dl-relative",
+                filename,
+                &params.clamp,
+                ds,
+                outputs.download.relative,
+            ),
+        },
+        upload: SparkPair {
+            absolute: ChartConfig::new(
+                "stream-spark-ul-absolute",
+                filename,
+                &params.clamp,
+                ds,
+                outputs.upload.absolute,
+            ),
+            relative: ChartConfig::new(
+                "stream-spark-ul-relative",
+                filename,
+                &params.clamp,
+                ds,
+                outputs.upload.relative,
+            ),
+        },
+    };
 
     #[cfg(not(target_arch = "wasm32"))]
     for config in [
-        &abs_dl_chart_config,
-        &rel_dl_chart_config,
-        &abs_ul_chart_config,
-        &rel_ul_chart_config,
+        &configs.download.absolute,
+        &configs.download.relative,
+        &configs.upload.absolute,
+        &configs.upload.relative,
     ] {
         if matches!(config.ty, ChartOutputType::Png { .. }) {
             if let Some(dir) =
@@ -882,61 +951,91 @@ pub fn plot_sparks(
     let margin = ChartMargin::default();
 
     #[cfg(not(target_arch = "wasm32"))]
-    let abs_dl_chart_path = abs_dl_chart_config.chart_filepath();
+    let paths = configs.as_ref().map(ChartConfig::chart_filepath);
 
     #[cfg(not(target_arch = "wasm32"))]
-    let rel_dl_chart_path = rel_dl_chart_config.chart_filepath();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let abs_ul_chart_path = abs_ul_chart_config.chart_filepath();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let rel_ul_chart_path = rel_ul_chart_config.chart_filepath();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let abs_dl_root =
-        spark_bitmap_area(&abs_dl_chart_path, size, params.colors, margin)?;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let rel_dl_root =
-        spark_bitmap_area(&rel_dl_chart_path, size, params.colors, margin)?;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let abs_ul_root =
-        spark_bitmap_area(&abs_ul_chart_path, size, params.colors, margin)?;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let rel_ul_root =
-        spark_bitmap_area(&rel_ul_chart_path, size, params.colors, margin)?;
-
-    #[cfg(target_arch = "wasm32")]
-    let abs_dl_canvas_id =
-        required_canvas_id(&abs_dl_chart_config, "download-absolute")?;
-
-    #[cfg(target_arch = "wasm32")]
-    let rel_dl_canvas_id =
-        required_canvas_id(&rel_dl_chart_config, "download-relative")?;
-
-    #[cfg(target_arch = "wasm32")]
-    let abs_ul_canvas_id =
-        required_canvas_id(&abs_ul_chart_config, "upload-absolute")?;
+    let roots = SparkOutputs {
+        download: SparkPair {
+            absolute: spark_bitmap_area(
+                &paths.download.absolute,
+                size,
+                params.colors,
+                margin,
+            )?,
+            relative: spark_bitmap_area(
+                &paths.download.relative,
+                size,
+                params.colors,
+                margin,
+            )?,
+        },
+        upload: SparkPair {
+            absolute: spark_bitmap_area(
+                &paths.upload.absolute,
+                size,
+                params.colors,
+                margin,
+            )?,
+            relative: spark_bitmap_area(
+                &paths.upload.relative,
+                size,
+                params.colors,
+                margin,
+            )?,
+        },
+    };
 
     #[cfg(target_arch = "wasm32")]
-    let rel_ul_canvas_id =
-        required_canvas_id(&rel_ul_chart_config, "upload-relative")?;
+    let canvas_ids = SparkOutputs {
+        download: SparkPair {
+            absolute: required_canvas_id(
+                &configs.download.absolute,
+                "download-absolute",
+            )?,
+            relative: required_canvas_id(
+                &configs.download.relative,
+                "download-relative",
+            )?,
+        },
+        upload: SparkPair {
+            absolute: required_canvas_id(
+                &configs.upload.absolute,
+                "upload-absolute",
+            )?,
+            relative: required_canvas_id(
+                &configs.upload.relative,
+                "upload-relative",
+            )?,
+        },
+    };
 
     #[cfg(target_arch = "wasm32")]
-    let abs_dl_root =
-        spark_canvas_area(&abs_dl_canvas_id, params.colors, margin)?;
-    #[cfg(target_arch = "wasm32")]
-    let rel_dl_root =
-        spark_canvas_area(&rel_dl_canvas_id, params.colors, margin)?;
-    #[cfg(target_arch = "wasm32")]
-    let abs_ul_root =
-        spark_canvas_area(&abs_ul_canvas_id, params.colors, margin)?;
-    #[cfg(target_arch = "wasm32")]
-    let rel_ul_root =
-        spark_canvas_area(&rel_ul_canvas_id, params.colors, margin)?;
+    let roots = SparkOutputs {
+        download: SparkPair {
+            absolute: spark_canvas_area(
+                &canvas_ids.download.absolute,
+                params.colors,
+                margin,
+            )?,
+            relative: spark_canvas_area(
+                &canvas_ids.download.relative,
+                params.colors,
+                margin,
+            )?,
+        },
+        upload: SparkPair {
+            absolute: spark_canvas_area(
+                &canvas_ids.upload.absolute,
+                params.colors,
+                margin,
+            )?,
+            relative: spark_canvas_area(
+                &canvas_ids.upload.relative,
+                params.colors,
+                margin,
+            )?,
+        },
+    };
 
     let legend_x = chart_coord(
         u64::from(params.spark_offset_x) +
@@ -945,10 +1044,10 @@ pub fn plot_sparks(
     )?;
     let legend_y = chart_coord(u64::from(params.spark_offset_y))?;
     for (root, transmission) in [
-        (&abs_dl_root, TransmissionType::Download),
-        (&rel_dl_root, TransmissionType::Download),
-        (&abs_ul_root, TransmissionType::Upload),
-        (&rel_ul_root, TransmissionType::Upload),
+        (&roots.download.absolute, TransmissionType::Download),
+        (&roots.download.relative, TransmissionType::Download),
+        (&roots.upload.absolute, TransmissionType::Upload),
+        (&roots.upload.relative, TransmissionType::Upload),
     ] {
         plot_legend(
             &params.colors.caption,
@@ -981,56 +1080,50 @@ pub fn plot_sparks(
                 invalid_plot_range("spark chart row origin overflow")
             })?;
         chart_coord(u64::from(area_y) + u64::from(params.spark_dimension_y))?;
-        let dl_stream_frames = stream_frame_dl_series_to_plot
+        let dl_stream_frames = frame_series
+            .download
             .get(&stream_id)
             .map_or(&[][..], Vec::as_slice);
 
-        let abs_dl_small_area = abs_dl_root.clone().shrink(
-            (upper_x, area_y),
-            (params.spark_dimension_x, params.spark_dimension_y),
-        );
+        let areas = roots.as_ref().map(|root| {
+            (*root).clone().shrink(
+                (upper_x, area_y),
+                (params.spark_dimension_x, params.spark_dimension_y),
+            )
+        });
 
-        let rel_dl_small_area = rel_dl_root.clone().shrink(
-            (upper_x, area_y),
-            (params.spark_dimension_x, params.spark_dimension_y),
-        );
-
-        let abs_ul_small_area = abs_ul_root.clone().shrink(
-            (upper_x, area_y),
-            (params.spark_dimension_x, params.spark_dimension_y),
-        );
-
-        let rel_ul_small_area = rel_ul_root.clone().shrink(
-            (upper_x, area_y),
-            (params.spark_dimension_x, params.spark_dimension_y),
-        );
-
-        let dl_relative_range =
+        let download_range =
             time_range(dl_stream_frames.iter().map(|point| point.0), None, None)?;
-        let dl_zoom_x_min = dl_relative_range.start;
-        let dl_zoom_x_max = dl_relative_range.end;
-        let dl_zoom_y_max =
+        let download_y_max =
             stream_y_max(dl_stream_frames, params.clamp.stream_y_max)?;
 
-        let mut abs_dl_chart = ChartBuilder::on(&abs_dl_small_area)
-            .set_label_area_size(LabelAreaPosition::Left, params.label_area_width)
-            .set_label_area_size(
-                LabelAreaPosition::Bottom,
-                params.label_area_height,
-            )
-            .build_cartesian_2d(x_min..x_max, 0..dl_zoom_y_max)?;
-        draw_mesh(&params.colors, &mut abs_dl_chart)?;
+        let mut download_charts = SparkPair {
+            absolute: ChartBuilder::on(&areas.download.absolute)
+                .set_label_area_size(
+                    LabelAreaPosition::Left,
+                    params.label_area_width,
+                )
+                .set_label_area_size(
+                    LabelAreaPosition::Bottom,
+                    params.label_area_height,
+                )
+                .build_cartesian_2d(x_min..x_max, 0..download_y_max)?,
+            relative: ChartBuilder::on(&areas.download.relative)
+                .set_label_area_size(
+                    LabelAreaPosition::Left,
+                    params.label_area_width,
+                )
+                .set_label_area_size(
+                    LabelAreaPosition::Bottom,
+                    params.label_area_height,
+                )
+                .build_cartesian_2d(download_range, 0..download_y_max)?,
+        };
+        draw_mesh(&params.colors, &mut download_charts.absolute)?;
+        draw_mesh(&params.colors, &mut download_charts.relative)?;
 
-        let mut rel_dl_chart = ChartBuilder::on(&rel_dl_small_area)
-            .set_label_area_size(LabelAreaPosition::Left, params.label_area_width)
-            .set_label_area_size(
-                LabelAreaPosition::Bottom,
-                params.label_area_height,
-            )
-            .build_cartesian_2d(dl_zoom_x_min..dl_zoom_x_max, 0..dl_zoom_y_max)?;
-        draw_mesh(&params.colors, &mut rel_dl_chart)?;
-
-        let ul_stream_frames = stream_frame_ul_series_to_plot
+        let ul_stream_frames = frame_series
+            .upload
             .get(&stream_id)
             .filter(|frames| !frames.is_empty());
 
@@ -1043,7 +1136,7 @@ pub fn plot_sparks(
         let ul_h2_send_window_min =
             h2_stream_id.and_then(|id| ss.h2_send_window_balanced_min.get(&id));
 
-        let (abs_ul_chart, rel_ul_chart) = match ul_stream_frames {
+        let upload_charts = match ul_stream_frames {
             Some(frames) => {
                 let ul_relative_range =
                     time_range(frames.iter().map(|point| point.0), None, None)?;
@@ -1058,7 +1151,7 @@ pub fn plot_sparks(
                 let ul_h2_send_window_y_max = ul_h2_send_window_max.unwrap_or(&0);
                 let ul_h2_send_window_y_min = ul_h2_send_window_min.unwrap_or(&0);
 
-                let mut abs_ul_chart = ChartBuilder::on(&abs_ul_small_area)
+                let mut abs_ul_chart = ChartBuilder::on(&areas.upload.absolute)
                     .set_label_area_size(
                         LabelAreaPosition::Left,
                         params.label_area_width,
@@ -1079,7 +1172,7 @@ pub fn plot_sparks(
                     abs_ul_chart.configure_secondary_axes().draw()?;
                 }
 
-                let mut rel_ul_chart = ChartBuilder::on(&rel_ul_small_area)
+                let mut rel_ul_chart = ChartBuilder::on(&areas.upload.relative)
                     .set_label_area_size(
                         LabelAreaPosition::Left,
                         params.label_area_width,
@@ -1103,10 +1196,13 @@ pub fn plot_sparks(
                     rel_ul_chart.configure_secondary_axes().y_labels(5).draw()?;
                 }
 
-                (Some(abs_ul_chart), Some(rel_ul_chart))
+                Some(SparkPair {
+                    absolute: abs_ul_chart,
+                    relative: rel_ul_chart,
+                })
             },
 
-            None => (None, None),
+            None => None,
         };
 
         let caption_offset = if params.captions_on_top {
@@ -1119,10 +1215,7 @@ pub fn plot_sparks(
         let caption_x = chart_coord(u64::from(upper_x) + caption_offset)?;
         let caption_y = chart_coord(u64::from(upper_y))?;
         draw_captions(
-            &abs_dl_root,
-            &rel_dl_root,
-            &abs_ul_root,
-            &rel_ul_root,
+            &roots,
             params,
             ds,
             stream_id,
@@ -1133,20 +1226,20 @@ pub fn plot_sparks(
 
         draw_stream_frames_line(
             dl_stream_frames,
-            &mut abs_dl_chart,
-            &mut rel_dl_chart,
+            &mut download_charts.absolute,
+            &mut download_charts.relative,
         )?;
 
-        if let (Some(mut abs), Some(mut rel), Some(frames)) =
-            (abs_ul_chart, rel_ul_chart, ul_stream_frames)
+        if let (Some(mut charts), Some(frames)) =
+            (upload_charts, ul_stream_frames)
         {
             if let Some(v) = ul_h2_send_window {
-                abs.draw_secondary_series(LineSeries::new(
+                charts.absolute.draw_secondary_series(LineSeries::new(
                     v.iter().copied(),
                     ORANGE,
                 ))?;
 
-                rel.draw_secondary_series(LineSeries::new(
+                charts.relative.draw_secondary_series(LineSeries::new(
                     v.iter().copied(),
                     ORANGE,
                 ))?;
@@ -1156,20 +1249,24 @@ pub fn plot_sparks(
                     ss,
                     &ds.vantage_point,
                     TransmissionType::Upload,
-                    &mut abs,
-                    &mut rel,
+                    &mut charts.absolute,
+                    &mut charts.relative,
                 )?;
             }
 
-            draw_stream_frames_line(frames, &mut abs, &mut rel)?;
+            draw_stream_frames_line(
+                frames,
+                &mut charts.absolute,
+                &mut charts.relative,
+            )?;
         }
 
         draw_buffered_data_line(
             stream_id,
             ss,
             &ds.vantage_point,
-            &mut abs_dl_chart,
-            &mut rel_dl_chart,
+            &mut download_charts.absolute,
+            &mut download_charts.relative,
         )?;
 
         draw_stream_max_line(
@@ -1177,8 +1274,8 @@ pub fn plot_sparks(
             ss,
             &ds.vantage_point,
             TransmissionType::Download,
-            &mut abs_dl_chart,
-            &mut rel_dl_chart,
+            &mut download_charts.absolute,
+            &mut download_charts.relative,
         )?;
 
         let y_max = match ds.vantage_point {
@@ -1190,15 +1287,15 @@ pub fn plot_sparks(
             ds,
             stream_id,
             y_max,
-            &mut abs_dl_chart,
-            &mut rel_dl_chart,
+            &mut download_charts.absolute,
+            &mut download_charts.relative,
         )?;
     }
 
-    abs_dl_root.present()?;
-    rel_dl_root.present()?;
-    abs_ul_root.present()?;
-    rel_ul_root.present()?;
+    roots.download.absolute.present()?;
+    roots.download.relative.present()?;
+    roots.upload.absolute.present()?;
+    roots.upload.relative.present()?;
     Ok(())
 }
 fn draw_mesh<XT, YT, X, Y, DB: DrawingBackend>(
@@ -1219,45 +1316,24 @@ where
     Ok(())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The signature mirrors protocol state and grouping would obscure call sites"
-)]
 fn draw_captions<DB: DrawingBackend>(
-    abs_dl_root: &DrawingArea<DB, plotters::coord::Shift>,
-    rel_dl_root: &DrawingArea<DB, plotters::coord::Shift>,
-    abs_ul_root: &DrawingArea<DB, plotters::coord::Shift>,
-    rel_ul_root: &DrawingArea<DB, plotters::coord::Shift>,
+    roots: &SparkOutputs<DrawingArea<DB, plotters::coord::Shift>>,
     params: &SparkPlotsParams, ds: &Datastore, stream_id: u64, upload_data: bool,
     caption_x: i32, caption_y: i32,
 ) -> SparkDrawingResult<DB> {
-    if let Some(captions) = SparkCaption::from_data_store(ds, stream_id) {
-        captions.draw(
-            &params.colors.caption,
-            abs_dl_root,
-            caption_x,
-            caption_y,
-        )?;
-        captions.draw(
-            &params.colors.caption,
-            rel_dl_root,
-            caption_x,
-            caption_y,
-        )?;
-
+    if let Some(caption) = SparkCaption::from_data_store(ds, stream_id) {
+        for root in [&roots.download.absolute, &roots.download.relative] {
+            caption.draw(&params.colors.caption, root, caption_x, caption_y)?;
+        }
         if upload_data {
-            captions.draw(
-                &params.colors.caption,
-                abs_ul_root,
-                caption_x,
-                caption_y,
-            )?;
-            captions.draw(
-                &params.colors.caption,
-                rel_ul_root,
-                caption_x,
-                caption_y,
-            )?;
+            for root in [&roots.upload.absolute, &roots.upload.relative] {
+                caption.draw(
+                    &params.colors.caption,
+                    root,
+                    caption_x,
+                    caption_y,
+                )?;
+            }
         }
     }
     Ok(())
@@ -1442,10 +1518,7 @@ mod tests {
             "spark-regression",
             series,
             datastore,
-            output,
-            output,
-            output,
-            output,
+            super::SparkOutputs::all(output),
         )
     }
 
@@ -1523,6 +1596,70 @@ mod tests {
         ] {
             assert!(render(&params, &series, &datastore, &output).is_err());
         }
+    }
+
+    #[test]
+    fn frame_series_selection_preserves_transport_and_vantage() {
+        let mut series = SeriesStore::default();
+        series
+            .received_stream_frames_series
+            .insert(0, vec![(1.0, 11)]);
+        series.sent_stream_frames_series.insert(0, vec![(2.0, 22)]);
+        series
+            .received_data_frames_series
+            .insert(0, vec![(3.0, 33)]);
+        series.sent_data_frames_series.insert(0, vec![(4.0, 44)]);
+
+        for (protocol, vantage, expected_download, expected_upload) in [
+            (ApplicationProto::Http3, VantagePoint::Client, 11, 22),
+            (ApplicationProto::Http3, VantagePoint::Server, 22, 11),
+            (ApplicationProto::Http2, VantagePoint::Client, 33, 44),
+            (ApplicationProto::Http2, VantagePoint::Server, 44, 33),
+        ] {
+            let datastore = Datastore {
+                application_proto: protocol,
+                vantage_point: vantage,
+                ..Datastore::default()
+            };
+            let selected = super::frame_series_for_vantage(&series, &datastore);
+            assert_eq!(
+                selected.download.get(&0).map(|points| points[0].1),
+                Some(expected_download),
+            );
+            assert_eq!(
+                selected.upload.get(&0).map(|points| points[0].1),
+                Some(expected_upload),
+            );
+        }
+    }
+
+    #[test]
+    fn spark_output_coordinates_are_not_interchanged() {
+        let outputs = super::SparkOutputs {
+            download: super::SparkPair {
+                absolute: "download-absolute",
+                relative: "download-relative",
+            },
+            upload: super::SparkPair {
+                absolute: "upload-absolute",
+                relative: "upload-relative",
+            },
+        };
+        let mut visited = Vec::new();
+        let mapped = outputs.map(|name| {
+            visited.push(name);
+            name.len()
+        });
+        assert_eq!(visited, [
+            "download-absolute",
+            "download-relative",
+            "upload-absolute",
+            "upload-relative",
+        ]);
+        assert_eq!(mapped.download.absolute, "download-absolute".len());
+        assert_eq!(mapped.download.relative, "download-relative".len());
+        assert_eq!(mapped.upload.absolute, "upload-absolute".len());
+        assert_eq!(mapped.upload.relative, "upload-relative".len());
     }
 
     #[test]

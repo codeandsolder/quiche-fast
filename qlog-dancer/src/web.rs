@@ -504,17 +504,23 @@ impl QlogDancerWeb {
                 &self.display_name,
                 ss,
                 &self.ds,
-                &ChartOutputType::Canvas {
-                    canvas_id: abs_dl_canvas_id.to_string(),
-                },
-                &ChartOutputType::Canvas {
-                    canvas_id: rel_dl_canvas_id.to_string(),
-                },
-                &ChartOutputType::Canvas {
-                    canvas_id: abs_ul_canvas_id.to_string(),
-                },
-                &ChartOutputType::Canvas {
-                    canvas_id: rel_ul_canvas_id.to_string(),
+                crate::plots::stream_sparks::SparkOutputs {
+                    download: crate::plots::stream_sparks::SparkPair {
+                        absolute: &ChartOutputType::Canvas {
+                            canvas_id: abs_dl_canvas_id.to_owned(),
+                        },
+                        relative: &ChartOutputType::Canvas {
+                            canvas_id: rel_dl_canvas_id.to_owned(),
+                        },
+                    },
+                    upload: crate::plots::stream_sparks::SparkPair {
+                        absolute: &ChartOutputType::Canvas {
+                            canvas_id: abs_ul_canvas_id.to_owned(),
+                        },
+                        relative: &ChartOutputType::Canvas {
+                            canvas_id: rel_ul_canvas_id.to_owned(),
+                        },
+                    },
                 },
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
