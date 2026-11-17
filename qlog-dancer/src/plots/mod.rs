@@ -24,6 +24,9 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[cfg(not(target_arch = "wasm32"))]
+use std::fmt::Write;
+
 use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
 use colors::PlotColors;
@@ -89,22 +92,27 @@ impl ChartConfig {
     /// canvas output type, and constructing the configuration is identical
     /// across all plotters.
     fn new(
-        _title: &str, _filename: &str, _clamp: &ClampParams, _ds: &Datastore,
+        title: &str, filename: &str, clamp: &ClampParams, ds: &Datastore,
         ty: &ChartOutputType,
     ) -> Self {
+        // Canvas only needs its output ID. These inputs are used for native
+        // PNG filenames, so keep one consistent constructor on both targets.
+        #[cfg(target_arch = "wasm32")]
+        let _ = (title, filename, clamp, ds);
+
         Self {
             #[cfg(not(target_arch = "wasm32"))]
-            title: _title.to_owned(),
+            title: title.to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
-            input_filename: _filename.to_owned(),
+            input_filename: filename.to_owned(),
             #[cfg(not(target_arch = "wasm32"))]
-            clamp: _clamp.clone(),
+            clamp: clamp.clone(),
             #[cfg(not(target_arch = "wasm32"))]
-            app_proto: _ds.application_proto,
+            app_proto: ds.application_proto,
             #[cfg(not(target_arch = "wasm32"))]
-            host: _ds.host.clone(),
+            host: ds.host.clone(),
             #[cfg(not(target_arch = "wasm32"))]
-            session_id: _ds.session_id,
+            session_id: ds.session_id,
             ty: ty.clone(),
         }
     }
@@ -117,82 +125,56 @@ impl ChartConfig {
         };
 
         let host = match (&self.host, &self.ty) {
-            (Some(h), ChartOutputType::Png { .. }) => {
-                // Hosts might include a port number and putting a colon in
-                // filenames might upset some systems.
-                format!("-{}", chart_filename_component(h))
+            (Some(host), ChartOutputType::Png { .. }) => {
+                // Keep the established separator for native PNG files.
+                let encoded = chart_filename_component(host);
+                format!("-{encoded}")
             },
-
-            (Some(h), ChartOutputType::Canvas { .. }) =>
-                chart_filename_component(h),
-
-            _ => "".to_string(),
+            (Some(host), ChartOutputType::Canvas { .. }) =>
+                chart_filename_component(host),
+            _ => String::new(),
         };
+        let session = self
+            .session_id
+            .map_or_else(String::new, |id| format!("-session{id}"));
+        let start = self
+            .clamp
+            .start
+            .map_or_else(String::new, |value| format!("-s{value}"));
+        let end = self
+            .clamp
+            .end
+            .map_or_else(String::new, |value| format!("-e{value}"));
 
-        let session = if let Some(s) = self.session_id {
-            format!("-session{}", s)
-        } else {
-            "".to_string()
-        };
+        let input_filename = chart_filename_component(&self.input_filename);
+        let title = chart_filename_component(&self.title);
+        let mut name = format!(
+            "{input_filename}-{proto}{host}{session}-{title}{start}{end}"
+        );
 
-        let start = if let Some(s) = self.clamp.start {
-            format!("-s{}", s)
-        } else {
-            "".to_string()
-        };
-
-        let end = if let Some(e) = self.clamp.end {
-            format!("-e{}", e)
-        } else {
-            "".to_string()
-        };
-
-        match self.ty {
-            ChartOutputType::Png {
-                cwnd_y_max,
-                stream_y_max,
-                ..
-            } => {
-                let mut name = format!(
-                    "{}-{}{}{}-{}{}{}",
-                    chart_filename_component(&self.input_filename),
-                    proto,
-                    host,
-                    session,
-                    chart_filename_component(&self.title),
-                    start,
-                    end,
-                );
-
-                if let Some(y_max) = stream_y_max {
-                    name.push_str(&format!("-stream_max_y{}", y_max));
-                }
-
-                if let Some(y_max) = cwnd_y_max {
-                    name.push_str(&format!("-cwnd_max_y{}", y_max));
-                }
-
-                name
-            },
-
-            ChartOutputType::Canvas { .. } => format!(
-                "{}-{}{}{}-{}{}{}",
-                chart_filename_component(&self.input_filename),
-                proto,
-                host,
-                session,
-                chart_filename_component(&self.title),
-                start,
-                end
-            ),
+        if let ChartOutputType::Png {
+            cwnd_y_max,
+            stream_y_max,
+            ..
+        } = &self.ty
+        {
+            if let Some(maximum) = stream_y_max {
+                let _ = write!(&mut name, "-stream_max_y{maximum}");
+            }
+            if let Some(maximum) = cwnd_y_max {
+                let _ = write!(&mut name, "-cwnd_max_y{maximum}");
+            }
         }
+
+        name
     }
 
     #[cfg(not(target_arch = "wasm32"))]
     pub fn chart_filepath(&self) -> String {
         match &self.ty {
             ChartOutputType::Png { output_dir, .. } => {
-                format!("{}/{}.png", output_dir, self.chart_name())
+                let name = self.chart_name();
+                format!("{output_dir}/{name}.png")
             },
 
             // Canvas doesn't have a file
@@ -209,14 +191,17 @@ impl ChartConfig {
     }
 }
 
+#[must_use]
 pub fn chart_title_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 40).into_font()).color(color)
 }
 
+#[must_use]
 pub fn chart_subtitle_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 20).into_font()).color(color)
 }
 
+#[must_use]
 pub fn chart_label_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 15).into_font()).color(color)
 }
@@ -295,6 +280,55 @@ mod tests {
     use super::*;
     use std::error::Error;
     use std::path::Path;
+
+    #[test]
+    fn chart_names_preserve_metadata_across_png_and_canvas() {
+        let ds = Datastore {
+            application_proto: ApplicationProto::Http2,
+            host: Some("api.example:443".into()),
+            session_id: Some(42),
+            ..Datastore::default()
+        };
+        let clamp = ClampParams {
+            start: Some(1.5),
+            end: Some(3.25),
+            stream_y_max: None,
+        };
+        let png = ChartOutputType::Png {
+            output_dir: "/tmp/charts".into(),
+            cwnd_y_max: Some(80),
+            stream_y_max: Some(40),
+        };
+        let chart =
+            ChartConfig::new("overview", "logs/input.qlog", &clamp, &ds, &png);
+        let expected = "logs~2Finput.qlog-h2-api.example~3A443-session42-overview-s1.5-e3.25-stream_max_y40-cwnd_max_y80";
+        assert_eq!(chart.chart_name(), expected);
+        assert_eq!(
+            chart.chart_filepath(),
+            format!("/tmp/charts/{expected}.png")
+        );
+
+        let canvas = ChartOutputType::Canvas {
+            canvas_id: "main".into(),
+        };
+        let chart =
+            ChartConfig::new("overview", "logs/input.qlog", &clamp, &ds, &canvas);
+        assert_eq!(
+            chart.chart_name(),
+            "logs~2Finput.qlog-h2api.example~3A443-session42-overview-s1.5-e3.25"
+        );
+        assert_eq!(chart.chart_filepath(), chart.chart_name());
+
+        let default_ds = Datastore::default();
+        let chart = ChartConfig::new(
+            "overview",
+            "input.qlog",
+            &ClampParams::default(),
+            &default_ds,
+            &canvas,
+        );
+        assert_eq!(chart.chart_name(), "input.qlog-h3-overview");
+    }
 
     #[test]
     fn chart_filenames_escape_untrusted_components() -> Result<(), Box<dyn Error>>
