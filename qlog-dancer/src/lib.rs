@@ -144,28 +144,28 @@ impl SerializationFormat {
     }
 }
 
-pub struct VantagePointTypeShim {
-    pub inner: qlog::VantagePointType,
+/// Identity of one independent qlog trace. Indices are zero-based and
+/// correspond to the trace's position in the source document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QlogTraceIdentity {
+    pub index: usize,
+    pub title: Option<String>,
+    pub vantage_point: qlog::VantagePointType,
 }
 
-impl Default for VantagePointTypeShim {
-    fn default() -> Self {
-        VantagePointTypeShim {
-            inner: qlog::VantagePointType::Unknown,
-        }
-    }
-}
-
-impl std::fmt::Display for VantagePointTypeShim {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self.inner)
+impl QlogTraceIdentity {
+    #[must_use]
+    pub fn label(&self) -> String {
+        let prefix = format!("trace {}", self.index + 1);
+        self.title
+            .as_deref()
+            .map_or(prefix.clone(), |title| format!("{prefix}: {title}"))
     }
 }
 
 pub struct LogFileDetails {
     pub file_schema: String,
     pub serialization_format: String,
-    pub qlog_vantage_point_type: VantagePointTypeShim,
     pub sessions: BTreeMap<i64, NetlogSession>,
 }
 
@@ -185,6 +185,8 @@ pub enum RawLogEvents {
 pub struct LogFileData {
     pub datastore: Datastore,
     pub raw: RawLogEvents,
+    /// None for Chrome netlog sessions; Some for each JSON or JSON-SEQ trace.
+    pub trace: Option<QlogTraceIdentity>,
 }
 
 pub struct LogFileParseResult {
@@ -197,42 +199,53 @@ pub fn parse_log_file(
 ) -> Result<LogFileParseResult, Box<dyn Error>> {
     match config.log_format {
         SerializationFormat::QlogJson => {
-            println!("parsing qlog as JSON...");
             let mark = std::time::Instant::now();
-            let qlog = read_qlog_from_file(config.file.clone())?;
-            let trace = qlog.traces.first().ok_or_else(|| {
-                std::io::Error::new(
+            let qlog = read_qlog_from_file(&config.file)?;
+            if qlog.traces.is_empty() {
+                return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
                     "qlog file contains no traces",
                 )
-            })?;
-            let vp = trace.vantage_point.clone().unwrap_or_default().ty;
+                .into());
+            }
+            debug!("parsed qlog JSON in {:?}", mark.elapsed());
 
-            let details = LogFileDetails {
-                file_schema: qlog.file_schema.clone(),
-                serialization_format: qlog.serialization_format.clone(),
-                qlog_vantage_point_type: VantagePointTypeShim { inner: vp },
-                sessions: BTreeMap::new(),
-            };
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            println!("populating datastore...");
             let mark = std::time::Instant::now();
-            // TODO: support more than one trace in a file
-            let datastore = Datastore::with_qlog_events(
-                &trace.events,
-                &details.qlog_vantage_point_type.inner,
-                !config.ignore_acks,
-            )?;
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            let raw = RawLogEvents::QlogJson {
-                events: trace.events.clone(),
-            };
-
+            let mut data = Vec::with_capacity(qlog.traces.len());
+            for (index, trace) in qlog.traces.into_iter().enumerate() {
+                let vantage_point = trace
+                    .vantage_point
+                    .as_ref()
+                    .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone());
+                let datastore = Datastore::with_qlog_events(
+                    &trace.events,
+                    &vantage_point,
+                    !config.ignore_acks,
+                )?;
+                data.push(LogFileData {
+                    datastore,
+                    raw: RawLogEvents::QlogJson {
+                        events: trace.events,
+                    },
+                    trace: Some(QlogTraceIdentity {
+                        index,
+                        title: trace.title,
+                        vantage_point,
+                    }),
+                });
+            }
+            debug!(
+                "populated {} independent qlog datastores in {:?}",
+                data.len(),
+                mark.elapsed()
+            );
             Ok(LogFileParseResult {
-                details,
-                data: vec![LogFileData { datastore, raw }],
+                details: LogFileDetails {
+                    file_schema: qlog.file_schema,
+                    serialization_format: qlog.serialization_format,
+                    sessions: BTreeMap::new(),
+                },
+                data,
             })
         },
 
@@ -246,6 +259,16 @@ pub fn parse_log_file(
 
             println!("populating datastore...");
             let mark = std::time::Instant::now();
+            let trace = QlogTraceIdentity {
+                index: 0,
+                title: qlog_reader.qlog.trace.title.clone(),
+                vantage_point: qlog_reader
+                    .qlog
+                    .trace
+                    .vantage_point
+                    .as_ref()
+                    .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone()),
+            };
             let events: Vec<qlog::reader::Event> =
                 qlog_reader.into_iter().collect();
             let events = if let Some(filter) = &config.qlog_wirefilter {
@@ -256,7 +279,7 @@ pub fn parse_log_file(
             // Keep plot series, stats, and raw event exports in agreement.
             let datastore: Datastore = Datastore::with_sqlog_reader_events(
                 &events,
-                &details.qlog_vantage_point_type.inner,
+                &trace.vantage_point,
                 !config.ignore_acks,
             )?;
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
@@ -265,7 +288,11 @@ pub fn parse_log_file(
 
             Ok(LogFileParseResult {
                 details,
-                data: vec![LogFileData { datastore, raw }],
+                data: vec![LogFileData {
+                    datastore,
+                    raw,
+                    trace: Some(trace),
+                }],
             })
         },
 
@@ -295,9 +322,6 @@ pub fn parse_log_file(
             let details = LogFileDetails {
                 file_schema: constants.log_format_version.to_string(),
                 serialization_format: "Chrome netlog".to_string(),
-                qlog_vantage_point_type: VantagePointTypeShim {
-                    inner: qlog::VantagePointType::Client,
-                },
                 sessions,
             };
 
@@ -330,17 +354,9 @@ pub fn qlog_seq_reader(
             std::io::Error::other(format!("problem reading file! {}", e))
         })?;
 
-    let vp = qlog_reader
-        .qlog
-        .trace
-        .vantage_point
-        .clone()
-        .unwrap_or_default()
-        .ty;
     let log_file_details = LogFileDetails {
         file_schema: qlog_reader.qlog.file_schema.clone(),
         serialization_format: qlog_reader.qlog.serialization_format.clone(),
-        qlog_vantage_point_type: VantagePointTypeShim { inner: vp },
         sessions: BTreeMap::new(),
     };
 
@@ -379,25 +395,36 @@ fn create_file_recursive(filename: &str) -> std::io::Result<File> {
     File::create(filename)
 }
 
+/// Split the category at the first separator, preserving arbitrary colons
+/// within custom event names.
+#[must_use]
 pub fn category_and_type_from_name(name: &str) -> (String, String) {
-    let mut category = "".to_string();
-    let mut ty = "".to_string();
-
-    let split: Vec<&str> = name.split(':').collect();
-    if let Some(cat) = split.first() {
-        category = cat.to_string();
+    match name.split_once(':') {
+        Some((category, event_name)) =>
+            (category.to_owned(), event_name.to_owned()),
+        None => (name.to_owned(), String::new()),
     }
-    if let Some(t) = split.get(1) {
-        ty = t.to_string();
-    }
-
-    (category, ty)
 }
-pub fn category_and_type_from_event<T: Serialize>(ev: &T) -> (String, String) {
-    let name = serde_json::to_value(ev).unwrap()["name"]
-        .to_string()
-        .replace("\"", "");
-    category_and_type_from_name(&name)
+
+/// Derive the category and full event name from a serializable log record.
+///
+/// # Errors
+/// Returns the serialization error (or a descriptive missing-name error)
+/// rather than panicking when an event cannot be serialized.
+pub fn category_and_type_from_event<T: Serialize>(
+    ev: &T,
+) -> Result<(String, String), serde_json::Error> {
+    let encoded = serde_json::to_value(ev)?;
+    let name = encoded
+        .get("name")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            serde_json::Error::io(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "serialized qlog event has no string name",
+            ))
+        })?;
+    Ok(category_and_type_from_name(name))
 }
 
 pub mod config;
@@ -506,6 +533,39 @@ mod input_tests {
         }
 
         Ok(())
+    }
+
+    #[test]
+    fn event_name_preserves_colons_and_serialization_errors_are_returned() {
+        use serde::Serialize;
+        struct BrokenEvent;
+        impl Serialize for BrokenEvent {
+            fn serialize<S: serde::Serializer>(
+                &self, _serializer: S,
+            ) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("event serializer failure"))
+            }
+        }
+        assert!(
+            super::category_and_type_from_event(&BrokenEvent).is_err_and(
+                |error| error.to_string().contains("event serializer failure")
+            )
+        );
+        assert_eq!(
+            super::category_and_type_from_name("quic:some:future:event"),
+            ("quic".to_owned(), "some:future:event".to_owned()),
+        );
+        assert_eq!(
+            super::category_and_type_from_event(&serde_json::json!({
+                "name": "custom:event:type", "data": {"x": 1}
+            }))
+            .ok(),
+            Some(("custom".to_owned(), "event:type".to_owned())),
+        );
+        assert!(super::category_and_type_from_event(
+            &serde_json::json!({"x": 1})
+        )
+        .is_err());
     }
 
     #[test]

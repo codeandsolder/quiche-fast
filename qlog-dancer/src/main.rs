@@ -121,10 +121,15 @@ fn run() -> i32 {
     println!("== Log details ==");
     println!("  Format: {}", log_file.details.serialization_format);
     println!("  Version: {}", log_file.details.file_schema);
-    println!(
-        "  Vantage point type: {}",
-        log_file.details.qlog_vantage_point_type
-    );
+    for data in &log_file.data {
+        if let Some(trace) = &data.trace {
+            println!(
+                "  {} — vantage point: {:?}",
+                trace.label(),
+                trace.vantage_point
+            );
+        }
+    }
     println!();
 
     if config.plot_conn_overview ||
@@ -190,13 +195,43 @@ fn run() -> i32 {
             stream_y_max: plot_params.clamp.stream_y_max,
         };
 
+        let multiple_entries = log_file.data.len() > 1;
         let zipper = log_file.data.iter().zip(series_store.iter());
         for (data, ss) in zipper {
-            let label = format!(
-                "session ID: {:?}, app proto: {:?} host: {:?}",
-                data.datastore.session_id,
-                data.datastore.application_proto,
-                data.datastore.host
+            // Per-entry identity is required for all multi-connection logs:
+            // duplicate qlog trace titles and multiple Chrome netlog sessions
+            // must never overwrite each other's chart files.
+            let chart_filename = if multiple_entries {
+                data.trace.as_ref().map_or_else(
+                    || {
+                        data.datastore.session_id.map_or_else(
+                            || config.filename.clone(),
+                            |session| {
+                                format!("{}-session-{session}", config.filename)
+                            },
+                        )
+                    },
+                    |trace| {
+                        format!(
+                            "{}-trace-{:04}",
+                            config.filename,
+                            trace.index + 1
+                        )
+                    },
+                )
+            } else {
+                config.filename.clone()
+            };
+            let label = data.trace.as_ref().map_or_else(
+                || {
+                    format!(
+                        "session ID: {:?}, app proto: {:?}, host: {:?}",
+                        data.datastore.session_id,
+                        data.datastore.application_proto,
+                        data.datastore.host
+                    )
+                },
+                |trace| format!("{} ({:?})", trace.label(), trace.vantage_point),
             );
 
             if config.plot_conn_overview {
@@ -205,7 +240,7 @@ fn run() -> i32 {
 
                 if let Err(error) = conn_overview::plot_connection_overview(
                     &plot_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &overview_chart_config,
@@ -222,7 +257,7 @@ fn run() -> i32 {
                 info!("drawing packet sent chart for {}...", label);
                 if let Err(error) = packet_sent::plot_packet_sent(
                     &plot_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,
@@ -241,7 +276,7 @@ fn run() -> i32 {
                 info!("drawing packet received chart for {}...", label);
                 if let Err(error) = packet_received::plot_packet_received(
                     &plot_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,
@@ -258,7 +293,7 @@ fn run() -> i32 {
                 info!("drawing connection flow control chart for {}...", label);
                 if let Err(error) = conn_flow_control::plot_conn_flow_control(
                     &plot_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,
@@ -277,7 +312,7 @@ fn run() -> i32 {
 
                 if let Err(error) = stream_sparks::plot_sparks(
                     &config.sparks_layout,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,
@@ -308,7 +343,7 @@ fn run() -> i32 {
                 info!("drawing multiplex for {}...", label);
                 if let Err(error) = stream_multiplex::plot_stream_multiplexing(
                     &multiplex_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,
@@ -339,7 +374,7 @@ fn run() -> i32 {
 
                 if let Err(error) = plots::pending::plot_pending(
                     &pending_params,
-                    &config.filename,
+                    &chart_filename,
                     ss,
                     &data.datastore,
                     &chart_config,

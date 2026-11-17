@@ -2169,6 +2169,7 @@ pub fn with_netlog_reader<R: std::io::BufRead, S: std::hash::BuildHasher>(
             log_file_data.push(LogFileData {
                 datastore: ds,
                 raw: Netlog { events },
+                trace: None,
             });
         }
     }
