@@ -840,6 +840,131 @@ impl Datastore {
         Ok(())
     }
 
+    /// Record received HTTP/2 or HTTP/3 DATA with the same per-stream
+    /// semantics. Only HTTP/2 additionally maintains a connection-wide total.
+    ///
+    /// Validate every fallible counter first: a rejected frame must not leave
+    /// updated request timing or any partial stream history behind.
+    fn record_netlog_received_data(
+        &mut self, proto: ApplicationProto, stream_id: u64, length: u64,
+        event_time: f64,
+    ) -> Result<(), DatastoreError> {
+        let next_count = checked_netlog_sum(
+            self.total_received_data_frame_count,
+            1,
+            "total_received_data_frame_count",
+        )?;
+        let cumulative = cumulative_total(
+            self.received_data_cumulative
+                .get(&stream_id)
+                .map_or(&[], Vec::as_slice),
+            length,
+            "received_data_cumulative",
+        )?;
+        let connection_total = match proto {
+            ApplicationProto::Http2 => Some(cumulative_total(
+                &self.netlog_h2_stream_received_connection_cumulative,
+                length,
+                "netlog_h2_stream_received_connection_cumulative",
+            )?),
+            ApplicationProto::Http3 => None,
+        };
+
+        let previous_count = self.total_received_data_frame_count;
+        let req = self.get_or_insert_http_req(stream_id);
+        req.time_first_data_rx.get_or_insert(event_time);
+        req.time_last_data_rx = Some(event_time);
+        req.time_data_rx_set.push((event_time, length));
+        req.server_transferred_bytes = std::cmp::max(
+            req.server_transferred_bytes,
+            NaOption::new(Some(cumulative)),
+        );
+
+        self.largest_data_frame_rx_length_global =
+            self.largest_data_frame_rx_length_global.max(length);
+        self.received_data_frames
+            .entry(stream_id)
+            .or_default()
+            .push((event_time, length));
+        self.received_data_frames_count_based
+            .entry(stream_id)
+            .or_default()
+            .push((previous_count, length));
+        self.total_received_data_frame_count = next_count;
+        self.received_data_cumulative
+            .entry(stream_id)
+            .or_default()
+            .push((event_time, cumulative));
+        let maximum = self
+            .received_data_cumulative_max
+            .entry(stream_id)
+            .or_default();
+        *maximum = (*maximum).max(cumulative);
+
+        if let Some(total) = connection_total {
+            self.netlog_h2_stream_received_connection_cumulative
+                .push((event_time, total));
+        }
+        Ok(())
+    }
+
+    /// HTTP/2 outbound DATA contributes to the local upload stream counters
+    /// and consumes send-window credit, unlike a received DATA frame.
+    fn record_netlog_sent_h2_data(
+        &mut self, stream_id: u32, size: u32, event_time: f64,
+    ) -> Result<(), DatastoreError> {
+        let stream_id_u64 = u64::from(stream_id);
+        let length = u64::from(size);
+        let next_count = checked_netlog_sum(
+            self.total_sent_data_frame_count,
+            1,
+            "total_sent_data_frame_count",
+        )?;
+        let cumulative = cumulative_total(
+            self.sent_data_cumulative
+                .get(&stream_id_u64)
+                .map_or(&[], Vec::as_slice),
+            length,
+            "sent_data_cumulative",
+        )?;
+
+        let previous_count = self.total_sent_data_frame_count;
+        let req = self.get_or_insert_http_req(stream_id_u64);
+        req.time_first_data_tx.get_or_insert(event_time);
+        req.time_last_data_tx = Some(event_time);
+        req.time_data_tx_set.push((event_time, length));
+        req.client_transferred_bytes = std::cmp::max(
+            req.client_transferred_bytes,
+            NaOption::new(Some(cumulative)),
+        );
+
+        self.largest_data_frame_tx_length_global =
+            self.largest_data_frame_tx_length_global.max(length);
+        self.sent_data_frames
+            .entry(stream_id_u64)
+            .or_default()
+            .push((event_time, length));
+        self.sent_data_frames_count_based
+            .entry(stream_id_u64)
+            .or_default()
+            .push((previous_count, length));
+        self.total_sent_data_frame_count = next_count;
+        self.h2_send_window_updates_balanced
+            .entry(stream_id)
+            .or_default()
+            .push((event_time, -i64::from(size)));
+        self.sent_data_cumulative
+            .entry(stream_id_u64)
+            .or_default()
+            .push((event_time, cumulative));
+        let maximum = self
+            .sent_data_cumulative_max
+            .entry(stream_id_u64)
+            .or_default();
+        *maximum = (*maximum).max(cumulative);
+        Ok(())
+    }
+
     fn consume_netlog_h3(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &h3::Event, h3_session_requests: Option<&[ReqOverH3]>,
@@ -887,76 +1012,15 @@ impl Datastore {
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http3DataFrameReceived(e) => {
-                let length = e.params.payload_length;
-                let next_count = checked_netlog_sum(
-                    self.total_received_data_frame_count,
-                    1,
-                    "total_received_data_frame_count",
-                )?;
-                let next_cumulative = cumulative_total(
-                    self.received_data_cumulative
-                        .get(&e.params.stream_id)
-                        .map_or(&[], Vec::as_slice),
-                    length,
-                    "received_data_cumulative",
-                )?;
+            Http3DataFrameReceived(e) => self.record_netlog_received_data(
+                ApplicationProto::Http3,
+                e.params.stream_id,
+                e.params.payload_length,
+                rel_event_time,
+            )?,
 
-                let req = self.get_or_insert_http_req(e.params.stream_id);
-
-                req.time_first_data_rx.get_or_insert(rel_event_time);
-
-                let _ = req.time_last_data_rx.insert(rel_event_time);
-
-                req.time_data_rx_set.push((rel_event_time, length));
-                self.largest_data_frame_rx_length_global = std::cmp::max(
-                    self.largest_data_frame_rx_length_global,
-                    length,
-                );
-
-                let s = self
-                    .received_data_frames
-                    .entry(e.params.stream_id)
-                    .or_default();
-
-                s.push((rel_event_time, e.params.payload_length));
-
-                let s = self
-                    .received_data_frames_count_based
-                    .entry(e.params.stream_id)
-                    .or_default();
-                s.push((
-                    self.total_received_data_frame_count,
-                    e.params.payload_length,
-                ));
-
-                self.total_received_data_frame_count = next_count;
-
-                let s = self
-                    .received_data_cumulative
-                    .entry(e.params.stream_id)
-                    .or_default();
-
-                let received_data_cumulative = next_cumulative;
-
-                s.push((rel_event_time, received_data_cumulative));
-
-                let s = self
-                    .received_data_cumulative_max
-                    .entry(e.params.stream_id)
-                    .or_default();
-
-                *s = std::cmp::max(*s, received_data_cumulative);
-
-                let s = self.http_requests.entry(e.params.stream_id).or_default();
-
-                s.server_transferred_bytes = std::cmp::max(
-                    s.server_transferred_bytes,
-                    NaOption::new(Some(received_data_cumulative)),
-                )
-            },
-
-            // TODO: add support for logging HTTP/2 sending
+            // TODO: track outbound HTTP/3 DATA once netlog exposes the needed
+            // accounting.
             Http3DataSent(_) => (),
         }
         Ok(())
@@ -1009,168 +1073,18 @@ impl Datastore {
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http2SessionRecvData(e) => {
-                let length = u64::from(e.params.size);
-                let next_count = checked_netlog_sum(
-                    self.total_received_data_frame_count,
-                    1,
-                    "total_received_data_frame_count",
-                )?;
-                let next_stream_cumulative = cumulative_total(
-                    self.received_data_cumulative
-                        .get(&u64::from(e.params.stream_id))
-                        .map_or(&[], Vec::as_slice),
-                    length,
-                    "received_data_cumulative",
-                )?;
-                let next_connection_cumulative = cumulative_total(
-                    &self.netlog_h2_stream_received_connection_cumulative,
-                    length,
-                    "netlog_h2_stream_received_connection_cumulative",
-                )?;
+            Http2SessionRecvData(e) => self.record_netlog_received_data(
+                ApplicationProto::Http2,
+                u64::from(e.params.stream_id),
+                u64::from(e.params.size),
+                rel_event_time,
+            )?,
 
-                let req =
-                    self.get_or_insert_http_req(u64::from(e.params.stream_id));
-
-                req.time_first_data_rx.get_or_insert(rel_event_time);
-
-                let _ = req.time_last_data_rx.insert(rel_event_time);
-
-                req.time_data_rx_set.push((rel_event_time, length));
-                self.largest_data_frame_rx_length_global = std::cmp::max(
-                    self.largest_data_frame_rx_length_global,
-                    length,
-                );
-
-                let s = self
-                    .received_data_frames
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                s.push((rel_event_time, u64::from(e.params.size)));
-
-                let s = self
-                    .received_data_frames_count_based
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-                s.push((
-                    self.total_received_data_frame_count,
-                    u64::from(e.params.size),
-                ));
-
-                self.total_received_data_frame_count = next_count;
-
-                let s = self
-                    .received_data_cumulative
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                let received_data_cumulative = next_stream_cumulative;
-
-                s.push((rel_event_time, received_data_cumulative));
-
-                let s = self
-                    .received_data_cumulative_max
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                *s = std::cmp::max(*s, received_data_cumulative);
-
-                let s = self
-                    .http_requests
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                s.server_transferred_bytes = std::cmp::max(
-                    s.server_transferred_bytes,
-                    NaOption::new(Some(received_data_cumulative)),
-                );
-
-                let cumulative = next_connection_cumulative;
-
-                self.netlog_h2_stream_received_connection_cumulative
-                    .push((rel_event_time, cumulative));
-            },
-
-            Http2SessionSendData(e) => {
-                let length = u64::from(e.params.size);
-                let next_count = checked_netlog_sum(
-                    self.total_sent_data_frame_count,
-                    1,
-                    "total_sent_data_frame_count",
-                )?;
-                let next_cumulative = cumulative_total(
-                    self.sent_data_cumulative
-                        .get(&u64::from(e.params.stream_id))
-                        .map_or(&[], Vec::as_slice),
-                    length,
-                    "sent_data_cumulative",
-                )?;
-
-                let req =
-                    self.get_or_insert_http_req(u64::from(e.params.stream_id));
-
-                req.time_first_data_tx.get_or_insert(rel_event_time);
-
-                let _ = req.time_last_data_tx.insert(rel_event_time);
-
-                req.time_data_tx_set.push((rel_event_time, length));
-                self.largest_data_frame_tx_length_global = std::cmp::max(
-                    self.largest_data_frame_tx_length_global,
-                    length,
-                );
-
-                let s = self
-                    .sent_data_frames
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                s.push((rel_event_time, u64::from(e.params.size)));
-
-                let s = self
-                    .sent_data_frames_count_based
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-                s.push((
-                    self.total_sent_data_frame_count,
-                    u64::from(e.params.size),
-                ));
-
-                self.total_sent_data_frame_count = next_count;
-
-                // counterintuitively, reduces our local send window
-                let s = self
-                    .h2_send_window_updates_balanced
-                    .entry(e.params.stream_id)
-                    .or_default();
-                s.push((rel_event_time, -i64::from(e.params.size)));
-
-                let s = self
-                    .sent_data_cumulative
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                let sent_data_cumulative = next_cumulative;
-
-                s.push((rel_event_time, sent_data_cumulative));
-
-                let s = self
-                    .sent_data_cumulative_max
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                *s = std::cmp::max(*s, sent_data_cumulative);
-
-                let s = self
-                    .http_requests
-                    .entry(u64::from(e.params.stream_id))
-                    .or_default();
-
-                s.client_transferred_bytes = std::cmp::max(
-                    s.client_transferred_bytes,
-                    NaOption::new(Some(sent_data_cumulative)),
-                );
-            },
+            Http2SessionSendData(e) => self.record_netlog_sent_h2_data(
+                e.params.stream_id,
+                e.params.size,
+                rel_event_time,
+            )?,
 
             // A WINDOW_UPDATE from the peer grants us additional send credit.
             Http2SessionRecvWindowUpdate(e) => {
@@ -2517,6 +2431,146 @@ mod netlog_tests {
                 },
             },
         ))
+    }
+
+    fn h3_received(stream_id: u64, size: u64) -> netlog::Event {
+        netlog::Event::H3(h3::Event::Http3DataFrameReceived(
+            h3::Http3DataFrameReceivedEvent {
+                params: h3::Http3DataFrameReceivedParams {
+                    stream_id,
+                    payload_length: size,
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn netlog_h2_h3_received_data_record_identical_per_stream_histories() {
+        let mut h2 = Datastore::default();
+        let mut h3 = Datastore::default();
+
+        for (time, length) in [(102, 5), (104, 7), (106, 0)] {
+            consume(&mut h2, time, &h2_received(9, length))
+                .expect("valid HTTP/2 DATA");
+            consume(&mut h3, time, &h3_received(9, u64::from(length)))
+                .expect("valid HTTP/3 DATA");
+        }
+
+        for ds in [&h2, &h3] {
+            assert_eq!(ds.total_received_data_frame_count, 3);
+            assert_eq!(ds.received_data_frames[&9], vec![
+                (2.0, 5),
+                (4.0, 7),
+                (6.0, 0)
+            ]);
+            assert_eq!(ds.received_data_frames_count_based[&9], vec![
+                (0, 5),
+                (1, 7),
+                (2, 0)
+            ]);
+            assert_eq!(ds.received_data_cumulative[&9], vec![
+                (2.0, 5),
+                (4.0, 12),
+                (6.0, 12)
+            ]);
+            assert_eq!(ds.received_data_cumulative_max[&9], 12);
+            assert_eq!(ds.largest_data_frame_rx_length_global, 7);
+
+            let request = &ds.http_requests[&9];
+            assert_eq!(request.time_first_data_rx, Some(2.0));
+            assert_eq!(request.time_last_data_rx, Some(6.0));
+            assert_eq!(request.time_data_rx_set, vec![
+                (2.0, 5),
+                (4.0, 7),
+                (6.0, 0)
+            ]);
+            assert_eq!(request.server_transferred_bytes.inner, Some(12));
+        }
+
+        // Only HTTP/2 records connection-wide received DATA. HTTP/3 uses
+        // QUIC STREAM frames for its separate connection aggregate.
+        assert_eq!(h2.netlog_h2_stream_received_connection_cumulative, vec![
+            (2.0, 5),
+            (4.0, 12),
+            (6.0, 12)
+        ]);
+        assert!(h3
+            .netlog_h2_stream_received_connection_cumulative
+            .is_empty());
+    }
+
+    #[test]
+    fn netlog_h2_sent_data_updates_upload_histories_and_send_credit() {
+        let mut datastore = Datastore::default();
+        for (time, length) in [(101, 4), (105, 9), (108, 0)] {
+            consume(&mut datastore, time, &h2_sent(5, length))
+                .expect("valid HTTP/2 outbound DATA");
+        }
+
+        assert_eq!(datastore.total_sent_data_frame_count, 3);
+        assert_eq!(datastore.sent_data_frames[&5], vec![
+            (1.0, 4),
+            (5.0, 9),
+            (8.0, 0)
+        ]);
+        assert_eq!(datastore.sent_data_frames_count_based[&5], vec![
+            (0, 4),
+            (1, 9),
+            (2, 0)
+        ]);
+        assert_eq!(datastore.sent_data_cumulative[&5], vec![
+            (1.0, 4),
+            (5.0, 13),
+            (8.0, 13)
+        ]);
+        assert_eq!(datastore.sent_data_cumulative_max[&5], 13);
+        assert_eq!(datastore.largest_data_frame_tx_length_global, 9);
+        assert_eq!(datastore.h2_send_window_updates_balanced[&5], vec![
+            (1.0, -4),
+            (5.0, -9),
+            (8.0, 0)
+        ]);
+        let request = &datastore.http_requests[&5];
+        assert_eq!(request.time_first_data_tx, Some(1.0));
+        assert_eq!(request.time_last_data_tx, Some(8.0));
+        assert_eq!(request.client_transferred_bytes.inner, Some(13));
+        assert_eq!(request.time_data_tx_set, vec![(1.0, 4), (5.0, 9), (8.0, 0)]);
+        assert!(datastore.received_data_frames.is_empty());
+    }
+
+    #[test]
+    fn netlog_data_counter_overflow_does_not_mutate_request_state() {
+        for event in [h2_received(5, 1), h3_received(5, 1)] {
+            let mut datastore = Datastore {
+                total_received_data_frame_count: u64::MAX,
+                ..Default::default()
+            };
+            assert!(matches!(
+                consume(&mut datastore, 105, &event),
+                Err(DatastoreError::NetlogCounterOverflow {
+                    field: "total_received_data_frame_count"
+                })
+            ));
+            assert!(datastore.http_requests.is_empty());
+            assert!(datastore.received_data_frames.is_empty());
+            assert!(datastore.received_data_cumulative.is_empty());
+            assert!(datastore.received_data_frames_count_based.is_empty());
+        }
+
+        let mut datastore = Datastore {
+            total_sent_data_frame_count: u64::MAX,
+            ..Default::default()
+        };
+        assert!(matches!(
+            consume(&mut datastore, 105, &h2_sent(5, 1)),
+            Err(DatastoreError::NetlogCounterOverflow {
+                field: "total_sent_data_frame_count"
+            })
+        ));
+        assert!(datastore.http_requests.is_empty());
+        assert!(datastore.sent_data_frames.is_empty());
+        assert!(datastore.sent_data_cumulative.is_empty());
+        assert!(datastore.h2_send_window_updates_balanced.is_empty());
     }
 
     #[test]

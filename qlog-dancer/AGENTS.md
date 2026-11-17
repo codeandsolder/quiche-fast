@@ -49,7 +49,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 |------|------|
 | Add new plot type | `src/plots/` -- add module, wire into `main.rs` + `web.rs`; `plots/mod.rs::ChartConfig::chart_name()` centrally builds PNG/canvas metadata and optional PNG axis-limit suffixes |
 | Update stream sparks | `src/plots/stream_sparks.rs`: `SparkOutputs<T>` is a typed 2×2 direction (download/upload) × domain (absolute/relative) grid; `frame_series_for_vantage()` selects HTTP/2/HTTP/3 client/server streams. Keep shared row slots for upload-only and download-only streams, and preserve the HTTP/2 upload secondary send-window axis. `SparkCaption::for_each_row()` is the allocation-free source for client/server caption row offsets and propagates drawing errors |
-| Change parsed fields | `src/datastore.rs` -- all log-to-struct extraction |
+| Change parsed fields | `src/datastore.rs` -- all log-to-struct extraction. HTTP/2 + HTTP/3 inbound DATA share `record_netlog_received_data()` (only H2 adds connection cumulative); HTTP/2 outbound DATA uses `record_netlog_sent_h2_data()` and updates send-window credit. All checked counts and cumulative totals must be validated before any event-state mutation; see `netlog_tests` |
 | Change log dispatch/parsing | `src/lib.rs` -- `parse_log_file()` routes to `parse_qlog_json()`, `parse_qlog_json_seq()`, `parse_netlog_json()`; each preserves format-specific trace identity and raw events |
 | Add series for plotting | `src/seriesstore.rs` |
 | Modify event filters | `src/wirefilter.rs` (wirefilter-engine DSL) |
