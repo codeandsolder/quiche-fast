@@ -495,7 +495,67 @@ const fn is_bidi(stream_id: u64) -> bool {
     (stream_id & 0x2) == 0
 }
 
+/// Whether Chrome recorded an ACK frame we transmitted or received.
+#[derive(Clone, Copy)]
+enum NetlogAckDirection {
+    Sent,
+    Received,
+}
+
 impl Datastore {
+    /// Track missing ACK numbers while retaining their best-known packet
+    /// space. If a received ACK has no preceding packet header, preserve its
+    /// gaps in Unknown instead of discarding observations.
+    fn record_netlog_ack_gaps(
+        &mut self, direction: NetlogAckDirection, missing_packets: &[u64],
+        event_time: f64,
+    ) -> Result<(), DatastoreError> {
+        match direction {
+            NetlogAckDirection::Sent => {
+                let count =
+                    checked_netlog_count(self.total_tx_ack, "total_tx_ack")?;
+                self.total_tx_ack = count;
+                self.max_ack_sent_missing_packets_size = self
+                    .max_ack_sent_missing_packets_size
+                    .max(missing_packets.len());
+
+                if !missing_packets.is_empty() {
+                    self.netlog_ack_sent_missing_packets_raw
+                        .push((event_time, missing_packets.to_vec()));
+                    // The sent packet header is logged after its ACK frame,
+                    // so its packet space is not known at this point.
+                    self.netlog_ack_sent_missing_packet
+                        .entry(PacketType::Unknown)
+                        .or_default()
+                        .extend(missing_packets.iter().copied());
+                }
+            },
+            NetlogAckDirection::Received => {
+                let count =
+                    checked_netlog_count(self.total_rx_ack, "total_rx_ack")?;
+                self.total_rx_ack = count;
+                self.max_ack_received_missing_packets_size = self
+                    .max_ack_received_missing_packets_size
+                    .max(missing_packets.len());
+
+                if !missing_packets.is_empty() {
+                    // Chrome associates a received ACK with the last observed
+                    // packet header. Missing header metadata must not cause
+                    // the ACK gaps themselves to disappear.
+                    let packet_type = self
+                        .received_packets_netlog
+                        .last()
+                        .map_or(PacketType::Unknown, |(_, packet)| packet.ty);
+                    self.netlog_ack_received_missing_packet
+                        .entry(packet_type)
+                        .or_default()
+                        .extend(missing_packets.iter().copied());
+                }
+            },
+        }
+        Ok(())
+    }
+
     /// Update the datastore from a parsed Chrome netlog event.
     ///
     /// # Errors
@@ -649,77 +709,31 @@ impl Datastore {
 
                 s.insert(e.params.packet_number, packet_info);
 
-                // Go back and update the Ack frame type if there was one
-                if let Some(pkts) = self
+                // Resolve any ACK gaps logged before their packet metadata.
+                if let Some(pending) = self
                     .netlog_ack_sent_missing_packet
-                    .get_mut(&PacketType::Unknown)
+                    .remove(&PacketType::Unknown)
                 {
-                    if !pkts.is_empty() {
-                        let old = std::mem::take(pkts);
-
-                        let s = self
-                            .netlog_ack_sent_missing_packet
+                    if !pending.is_empty() {
+                        self.netlog_ack_sent_missing_packet
                             .entry(packet_type)
-                            .or_default();
-
-                        for num in old {
-                            s.insert(num);
-                        }
+                            .or_default()
+                            .extend(pending);
                     }
                 }
             },
 
-            QuicSessionAckFrameSent(e) => {
-                self.total_tx_ack =
-                    checked_netlog_count(self.total_tx_ack, "total_tx_ack")?;
-                self.max_ack_sent_missing_packets_size = std::cmp::max(
-                    e.params.missing_packets.len(),
-                    self.max_ack_sent_missing_packets_size,
-                );
+            QuicSessionAckFrameSent(e) => self.record_netlog_ack_gaps(
+                NetlogAckDirection::Sent,
+                &e.params.missing_packets,
+                rel_event_time,
+            )?,
 
-                if !e.params.missing_packets.is_empty() {
-                    self.netlog_ack_sent_missing_packets_raw
-                        .push((rel_event_time, e.params.missing_packets.clone()));
-                }
-
-                let s = self
-                    .netlog_ack_sent_missing_packet
-                    .entry(PacketType::Unknown)
-                    .or_default();
-
-                for pn in &e.params.missing_packets {
-                    // At this stage, we don't know the packet type we sent the
-                    // ACK in, because it comes later in the netlog. Insert with
-                    // a placeholder now, and we'll update later in
-                    // QuicSessionPacketSent handler. Ugly but functional.
-                    s.insert(*pn);
-                }
-            },
-
-            QuicSessionAckFrameReceived(e) => {
-                self.total_rx_ack =
-                    checked_netlog_count(self.total_rx_ack, "total_rx_ack")?;
-                self.max_ack_received_missing_packets_size = std::cmp::max(
-                    e.params.missing_packets.len(),
-                    self.max_ack_received_missing_packets_size,
-                );
-
-                if !e.params.missing_packets.is_empty() {
-                    // For netlogs, it is assumed that the last packet received
-                    // relates to this event.
-                    let parent_packet = self.received_packets_netlog.last();
-                    if let Some((_, pkt_info)) = parent_packet {
-                        let s = self
-                            .netlog_ack_received_missing_packet
-                            .entry(pkt_info.ty)
-                            .or_default();
-
-                        for missing in &e.params.missing_packets {
-                            s.insert(*missing);
-                        }
-                    }
-                }
-            },
+            QuicSessionAckFrameReceived(e) => self.record_netlog_ack_gaps(
+                NetlogAckDirection::Received,
+                &e.params.missing_packets,
+                rel_event_time,
+            )?,
 
             QuicSessionClosed(e) => {
                 self.quic_session_close = Some(QuicSessionClose {
@@ -2680,6 +2694,147 @@ mod netlog_tests {
         ));
         assert!(!h2.http_requests.contains_key(&11));
         assert_eq!(h2.total_sent_data_frame_count, 0);
+    }
+
+    fn quic_ack_received(missing_packets: Vec<u64>) -> netlog::Event {
+        netlog::Event::Quic(quic::Event::QuicSessionAckFrameReceived(
+            quic::QuicSessionAckFrameReceived {
+                params: quic::QuicSessionAckFrameReceivedParams {
+                    missing_packets,
+                    ..Default::default()
+                },
+            },
+        ))
+    }
+
+    fn quic_ack_sent(missing_packets: Vec<u64>) -> netlog::Event {
+        netlog::Event::Quic(quic::Event::QuicSessionAckFrameSent(
+            quic::QuicSessionAckFrameSent {
+                params: quic::QuicSessionAckFrameSentParams {
+                    missing_packets,
+                    ..Default::default()
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn netlog_received_ack_without_packet_header_keeps_unknown_space_gaps() {
+        let mut datastore = Datastore::default();
+        consume(&mut datastore, 105, &quic_ack_received(vec![3, 4, 4]))
+            .expect("ACK event");
+        assert_eq!(datastore.total_rx_ack, 1);
+        assert_eq!(datastore.max_ack_received_missing_packets_size, 3);
+        assert_eq!(
+            datastore.netlog_ack_received_missing_packet[&PacketType::Unknown],
+            BTreeSet::from([3, 4])
+        );
+        assert!(datastore.netlog_ack_sent_missing_packet.is_empty());
+
+        // Later packet observations cannot retroactively classify this ACK:
+        // Unknown is intentional and must remain visible in the text report.
+        let header = netlog::Event::Quic(
+            quic::Event::QuicSessionUnauthenticatedPacketHeaderReceived(
+                quic::QuicSessionUnauthenticatedPacketHeaderReceived {
+                    params: quic::QuicSessionUnauthenticatedPacketHeaderReceivedParams {
+                        packet_number: 7,
+                        header_format: "IETF_QUIC_SHORT_HEADER_PACKET".to_owned(),
+                        ..Default::default()
+                    },
+                },
+            ),
+        );
+        consume(&mut datastore, 106, &header).expect("packet header");
+        consume(&mut datastore, 107, &quic_ack_received(vec![8]))
+            .expect("ACK with known parent packet");
+        assert_eq!(
+            datastore.netlog_ack_received_missing_packet[&PacketType::OneRtt],
+            BTreeSet::from([8])
+        );
+        assert_eq!(
+            datastore.netlog_ack_received_missing_packet[&PacketType::Unknown],
+            BTreeSet::from([3, 4])
+        );
+    }
+
+    #[test]
+    fn netlog_sent_ack_gaps_reclassify_when_packet_header_follows() {
+        let mut datastore = Datastore::default();
+        consume(&mut datastore, 101, &quic_ack_sent(vec![9, 11]))
+            .expect("sent ACK");
+        consume(&mut datastore, 102, &quic_ack_sent(vec![11, 12]))
+            .expect("second sent ACK");
+        assert_eq!(datastore.total_tx_ack, 2);
+        assert_eq!(datastore.max_ack_sent_missing_packets_size, 2);
+        assert_eq!(
+            datastore.netlog_ack_sent_missing_packet[&PacketType::Unknown],
+            BTreeSet::from([9, 11, 12])
+        );
+        assert_eq!(datastore.netlog_ack_sent_missing_packets_raw, vec![
+            (1.0, vec![9, 11]),
+            (2.0, vec![11, 12])
+        ]);
+
+        // The event has a private transmission_type field: construct the
+        // packet with the same serde path used by the netlog parser.
+        let packet: quic::QuicSessionPacketSent =
+            serde_json::from_value(serde_json::json!({
+                "params": {
+                    "encryption_level": "ENCRYPTION_HANDSHAKE",
+                    "packet_number": 17,
+                    "sent_time_us": 0,
+                    "transmission_type": "NOT_RETRANSMISSION"
+                }
+            }))
+            .expect("valid Chrome QUIC packet event");
+        consume(
+            &mut datastore,
+            103,
+            &netlog::Event::Quic(quic::Event::QuicSessionPacketSent(packet)),
+        )
+        .expect("sent packet following ACK");
+        assert_eq!(
+            datastore.netlog_ack_sent_missing_packet[&PacketType::Handshake],
+            BTreeSet::from([9, 11, 12])
+        );
+        assert!(!datastore
+            .netlog_ack_sent_missing_packet
+            .contains_key(&PacketType::Unknown));
+        assert_eq!(
+            datastore.packet_sent[&PacketType::Handshake][&17].number,
+            17
+        );
+
+        // An empty ACK does not create a misleading empty packet-space entry.
+        consume(&mut datastore, 104, &quic_ack_sent(vec![]))
+            .expect("empty sent ACK");
+        assert_eq!(datastore.total_tx_ack, 3);
+        assert_eq!(datastore.netlog_ack_sent_missing_packet.len(), 1);
+    }
+
+    #[test]
+    fn netlog_ack_count_overflow_does_not_change_gap_histories() {
+        let mut datastore = Datastore {
+            total_rx_ack: usize::MAX,
+            total_tx_ack: usize::MAX,
+            ..Default::default()
+        };
+        for (event, field) in [
+            (quic_ack_received(vec![5, 6]), "total_rx_ack"),
+            (quic_ack_sent(vec![2, 3]), "total_tx_ack"),
+        ] {
+            assert!(matches!(
+                consume(&mut datastore, 120, &event),
+                Err(DatastoreError::NetlogCounterOverflow {
+                    field: actual
+                }) if actual == field
+            ));
+        }
+        assert!(datastore.netlog_ack_received_missing_packet.is_empty());
+        assert!(datastore.netlog_ack_sent_missing_packet.is_empty());
+        assert!(datastore.netlog_ack_sent_missing_packets_raw.is_empty());
+        assert_eq!(datastore.max_ack_sent_missing_packets_size, 0);
+        assert_eq!(datastore.max_ack_received_missing_packets_size, 0);
     }
 
     #[test]
