@@ -27,7 +27,6 @@
 use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
 use colors::PlotColors;
-use plotters::coord::ranged1d::ValueFormatter;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::prelude::*;
@@ -49,19 +48,68 @@ pub enum ChartOutputType {
 
 #[derive(Clone, Debug)]
 struct ChartConfig {
+    #[cfg(not(target_arch = "wasm32"))]
     pub title: String,
+    #[cfg(not(target_arch = "wasm32"))]
     pub input_filename: String,
     // pub size: ChartSize,
     // pub margin: ChartMargin,
     // pub colors: PlotColors,
+    #[cfg(not(target_arch = "wasm32"))]
     pub clamp: ClampParams,
     pub ty: ChartOutputType,
+    #[cfg(not(target_arch = "wasm32"))]
     pub app_proto: ApplicationProto,
+    #[cfg(not(target_arch = "wasm32"))]
     pub host: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     pub session_id: Option<i64>,
 }
 
+/// Encode user-controlled names as single path components without losing
+/// information or creating collisions between escaped and literal strings.
+#[cfg(not(target_arch = "wasm32"))]
+fn chart_filename_component(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    let mut safe = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            safe.push(char::from(byte));
+        } else {
+            safe.push('~');
+            safe.push(char::from(HEX[usize::from(byte >> 4)]));
+            safe.push(char::from(HEX[usize::from(byte & 0x0F)]));
+        }
+    }
+    safe
+}
+
 impl ChartConfig {
+    /// Keep PNG filename metadata native-only. Browser plots need only their
+    /// canvas output type, and constructing the configuration is identical
+    /// across all plotters.
+    fn new(
+        _title: &str, _filename: &str, _clamp: &ClampParams, _ds: &Datastore,
+        ty: &ChartOutputType,
+    ) -> Self {
+        Self {
+            #[cfg(not(target_arch = "wasm32"))]
+            title: _title.to_owned(),
+            #[cfg(not(target_arch = "wasm32"))]
+            input_filename: _filename.to_owned(),
+            #[cfg(not(target_arch = "wasm32"))]
+            clamp: _clamp.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            app_proto: _ds.application_proto,
+            #[cfg(not(target_arch = "wasm32"))]
+            host: _ds.host.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            session_id: _ds.session_id,
+            ty: ty.clone(),
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn chart_name(&self) -> String {
         let proto = match self.app_proto {
             ApplicationProto::Http2 => "h2",
@@ -72,10 +120,11 @@ impl ChartConfig {
             (Some(h), ChartOutputType::Png { .. }) => {
                 // Hosts might include a port number and putting a colon in
                 // filenames might upset some systems.
-                format!("-{}", h.replace(":", "_"))
+                format!("-{}", chart_filename_component(h))
             },
 
-            (Some(h), ChartOutputType::Canvas { .. }) => h.to_string(),
+            (Some(h), ChartOutputType::Canvas { .. }) =>
+                chart_filename_component(h),
 
             _ => "".to_string(),
         };
@@ -106,11 +155,11 @@ impl ChartConfig {
             } => {
                 let mut name = format!(
                     "{}-{}{}{}-{}{}{}",
-                    self.input_filename,
+                    chart_filename_component(&self.input_filename),
                     proto,
                     host,
                     session,
-                    self.title,
+                    chart_filename_component(&self.title),
                     start,
                     end,
                 );
@@ -128,11 +177,18 @@ impl ChartConfig {
 
             ChartOutputType::Canvas { .. } => format!(
                 "{}-{}{}{}-{}{}{}",
-                self.input_filename, proto, host, session, self.title, start, end
+                chart_filename_component(&self.input_filename),
+                proto,
+                host,
+                session,
+                chart_filename_component(&self.title),
+                start,
+                end
             ),
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn chart_filepath(&self) -> String {
         match &self.ty {
             ChartOutputType::Png { output_dir, .. } => {
@@ -144,21 +200,6 @@ impl ChartConfig {
         }
     }
 
-    fn init_chart_dir(&self) {
-        match &self.ty {
-            ChartOutputType::Png { .. } => {
-                let output_filename = self.chart_filepath();
-                let path = std::path::Path::new(&output_filename);
-                if let Some(dir) = path.parent() {
-                    std::fs::create_dir_all(dir).unwrap();
-                }
-            },
-
-            // Canvas doesn't have a file
-            ChartOutputType::Canvas { .. } => (),
-        }
-    }
-
     #[cfg(target_arch = "wasm32")]
     fn canvas_id(&self) -> Option<String> {
         match &self.ty {
@@ -166,46 +207,6 @@ impl ChartConfig {
             ChartOutputType::Png { .. } => None,
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn make_chart_bitmap_area(
-    path: &str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
-) -> DrawingArea<plotters::prelude::BitMapBackend<'_>, plotters::coord::Shift> {
-    let backend = BitMapBackend::new(path, (size.width, size.height));
-    let area = backend.into_drawing_area();
-    area.fill(&colors.fill).unwrap();
-    area.margin(margin.top, margin.bottom, margin.left, margin.right)
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn make_chart_canvas_area(
-    canvas_id: &str, colors: PlotColors, margin: ChartMargin,
-) -> plotters::drawing::DrawingArea<CanvasBackend, plotters::coord::Shift> {
-    let backend = CanvasBackend::new(canvas_id)
-        .unwrap_or_else(|| panic!("cannot find canvas {}", canvas_id));
-    let area = backend.into_drawing_area();
-    area.fill(&colors.fill).unwrap();
-    area.margin(margin.top, margin.bottom, margin.left, margin.right)
-}
-
-fn make_chart_config(
-    title: &str, params: &PlotParameters, filename: &str, ds: &Datastore,
-    ty: &ChartOutputType,
-) -> ChartConfig {
-    let chart_config = ChartConfig {
-        title: title.into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: ty.clone(),
-    };
-
-    chart_config.init_chart_dir();
-
-    chart_config
 }
 
 pub fn chart_title_style(color: &RGBColor) -> TextStyle<'_> {
@@ -220,35 +221,7 @@ pub fn chart_label_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 15).into_font()).color(color)
 }
 
-fn draw_mesh<XT, YT, X, Y, DB: DrawingBackend>(
-    colors: &PlotColors, x_desc: &str, y_desc: &str, draw_minor_lines: bool,
-    chart: &mut ChartContext<DB, Cartesian2d<X, Y>>,
-) where
-    X: Ranged<ValueType = XT> + ValueFormatter<XT>,
-    Y: Ranged<ValueType = YT> + ValueFormatter<YT>,
-{
-    let mut mesh = chart.configure_mesh();
-
-    mesh.axis_style(colors.axis)
-        .x_desc(x_desc)
-        .y_desc(y_desc)
-        .bold_line_style(colors.bold_line.mix(0.5));
-
-    // TODO: bizarre! From the docs, state the correct way to do this is to set
-    // number of light lines to zero. However, that causes the drawing to spin
-    // indefinatly. Perhaps some bug in plotters...
-    if !draw_minor_lines {
-        mesh.light_line_style(colors.bold_line.mix(0.0));
-        // mesh.x_max_light_lines(0);
-        // mesh.y_max_light_lines(0);
-    } else {
-        mesh.light_line_style(colors.light_line.mix(0.2));
-    }
-
-    mesh.label_style(chart_label_style(&colors.caption))
-        .draw()
-        .unwrap();
-}
+use fallible::draw_mesh;
 
 #[derive(Clone, Default, Debug)]
 pub struct ClampParams {
@@ -292,16 +265,15 @@ pub struct PlotParameters {
 fn draw_line<DB: DrawingBackend>(
     data: &[(f64, u64)], label: Option<&str>, colour: RGBColor,
     chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
-    let c = chart
-        .draw_series(LineSeries::new(data.to_vec(), colour))
-        .unwrap();
-
-    if let Some(l) = label {
-        c.label(l).legend(move |(x, y)| {
+) -> Result<(), plotters::drawing::DrawingAreaErrorKind<DB::ErrorType>> {
+    let drawn =
+        chart.draw_series(LineSeries::new(data.iter().copied(), colour))?;
+    if let Some(label) = label {
+        drawn.label(label).legend(move |(x, y)| {
             PathElement::new(vec![(x, y), (x + 20, y)], colour)
         });
     }
+    Ok(())
 }
 
 mod fallible;
@@ -317,3 +289,46 @@ pub mod pending;
 pub mod rtt;
 pub mod stream_multiplex;
 pub mod stream_sparks;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+    use std::path::Path;
+
+    #[test]
+    fn chart_filenames_escape_untrusted_components() -> Result<(), Box<dyn Error>>
+    {
+        assert_eq!(chart_filename_component("a/b"), "a~2Fb");
+        assert_eq!(chart_filename_component("a~2Fb"), "a~7E2Fb");
+        assert_eq!(chart_filename_component(r"../\evil:"), "..~2F~5Cevil~3A");
+        assert_eq!(chart_filename_component("é"), "~C3~A9");
+        let ds = Datastore {
+            host: Some("../../outside:443/".into()),
+            ..Datastore::default()
+        };
+        let output_dir = "/tmp/qlog-test-chart-destination";
+        let ty = ChartOutputType::Png {
+            output_dir: output_dir.into(),
+            cwnd_y_max: None,
+            stream_y_max: None,
+        };
+        let config = ChartConfig::new(
+            "conn-overview",
+            "../sample.qlog",
+            &ClampParams::default(),
+            &ds,
+            &ty,
+        );
+        let path = config.chart_filepath();
+        assert_eq!(Path::new(&path).parent(), Some(Path::new(output_dir)));
+        let component = Path::new(&path)
+            .file_name()
+            .ok_or("missing chart filename")?
+            .to_string_lossy();
+        assert!(component.contains("~2F"));
+        assert!(!component.contains('/'));
+        assert!(!component.contains('\\'));
+        Ok(())
+    }
+}

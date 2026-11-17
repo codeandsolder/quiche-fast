@@ -132,7 +132,8 @@ fn run() -> i32 {
         config.plot_pkt_received ||
         config.plot_sparks ||
         config.plot_multiplex ||
-        config.plot_pending
+        config.plot_pending ||
+        config.plot_conn_flow_control
     {
         if log_file.data.is_empty() {
             error!("File exists but trace information was empty or invalid. If you used a netlog-filter, check it exactly matched session host in the file.");
@@ -202,13 +203,16 @@ fn run() -> i32 {
                 let mark = std::time::Instant::now();
                 info!("drawing overview for {}...", label);
 
-                conn_overview::plot_connection_overview(
+                if let Err(error) = conn_overview::plot_connection_overview(
                     &plot_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &overview_chart_config,
-                );
+                ) {
+                    error!("Unable to draw connection overview chart for {label}: {error}");
+                    return 1;
+                }
 
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
@@ -252,13 +256,16 @@ fn run() -> i32 {
             if config.plot_conn_flow_control {
                 let mark = std::time::Instant::now();
                 info!("drawing connection flow control chart for {}...", label);
-                conn_flow_control::plot_conn_flow_control(
+                if let Err(error) = conn_flow_control::plot_conn_flow_control(
                     &plot_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &chart_config,
-                );
+                ) {
+                    error!("Unable to draw connection flow control chart for {label}: {error}");
+                    return 1;
+                }
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
@@ -330,13 +337,16 @@ fn run() -> i32 {
                 info!("drawing pending chart for {}...", label);
                 let mark = std::time::Instant::now();
 
-                plots::pending::plot_pending(
+                if let Err(error) = plots::pending::plot_pending(
                     &pending_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &chart_config,
-                );
+                ) {
+                    error!("Unable to draw pending chart for {label}: {error}");
+                    return 1;
+                }
 
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }

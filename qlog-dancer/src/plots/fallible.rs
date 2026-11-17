@@ -154,6 +154,24 @@ pub(in crate::plots) mod test_support {
 
     static NEXT_ID: AtomicU64 = AtomicU64::new(0);
 
+    pub(in crate::plots) fn chart_params() -> super::super::PlotParameters {
+        use super::super::*;
+        PlotParameters {
+            clamp: ClampParams::default(),
+            cwnd_y_max: None,
+            chart_size: ChartSize {
+                width: 1000,
+                height: 900,
+            },
+            colors: PlotColors::default(),
+            chart_margin: ChartMargin::default(),
+            area_margin: AreaMargin { x: 35, y: 45 },
+            display_chart_title: false,
+            display_legend: true,
+            display_minor_lines: false,
+        }
+    }
+
     pub(in crate::plots) struct TempCharts(pub(in crate::plots) PathBuf);
 
     impl TempCharts {

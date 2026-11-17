@@ -24,10 +24,15 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[cfg(target_arch = "wasm32")]
+use crate::plots::fallible::canvas_area;
+use crate::plots::fallible::checked_time_range;
+use crate::plots::fallible::invalid_chart;
 use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
+use std::error::Error;
 
 use crate::plots::colors::*;
 use crate::plots::*;
@@ -37,167 +42,142 @@ use crate::seriesstore::SeriesStore;
 
 use super::minmax::XYMinMax;
 
+/// Render congestion-control state transitions and quantitative series.
+///
+/// # Errors
+/// Returns invalid ranges, malformed labels and backend drawing errors.
 pub fn draw_congestion_plot<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters, axis: &XYMinMax<u64>, ss: &SeriesStore,
     ds: &Datastore, plot: &plotters::drawing::DrawingArea<DB, Shift>,
-) -> ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>> {
+) -> Result<
+    ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+    Box<dyn Error>,
+>
+where
+    DB::ErrorType: 'static,
+{
+    let range = checked_time_range(axis.x.min, axis.x.max, &params.clamp)?;
+    let original_max = axis.y_range.end.max(1);
+    let extended_max = original_max.saturating_add(original_max / 2);
+    let y_range = 0..original_max;
+    let extended_y = 0..extended_max;
     let mut builder = ChartBuilder::on(plot);
-
     builder
         .x_label_area_size(params.area_margin.x)
         .y_label_area_size(params.area_margin.y);
-
     if params.display_chart_title {
         builder
             .caption("Congestion", chart_subtitle_style(&params.colors.caption));
     }
-
-    let extended_y =
-        axis.y_range.start..axis.y_range.end + (axis.y_range.end / 10) * 5;
-
-    let mut plot = builder
-        .build_cartesian_2d(axis.x.range(), extended_y.clone())
-        .unwrap();
-
+    let mut chart = builder.build_cartesian_2d(range, extended_y.clone())?;
     draw_mesh(
         &params.colors,
         "Relative time (ms)",
         "Data (bytes)",
         false,
-        &mut plot,
-    );
-
+        &mut chart,
+    )?;
     draw_cc_updates(
         &ds.congestion_state_updates,
-        axis.y_range.clone(),
+        y_range,
         extended_y,
-        &mut plot,
-    );
-    draw_bytes_in_flight(&ss.local_bytes_in_flight, &mut plot);
-    draw_cwnd(&ss.local_cwnd, &mut plot);
-    draw_ssthresh(&ss.local_ssthresh, &mut plot);
-
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.local_bytes_in_flight,
+        Some("bytes in flight"),
+        TAUPE,
+        &mut chart,
+    )?;
+    draw_line(&ss.local_cwnd, Some("cwnd"), PURPLE_500, &mut chart)?;
+    draw_line(&ss.local_ssthresh, Some("ssthresh"), ORANGE, &mut chart)?;
     if params.display_legend {
-        plot.configure_series_labels()
+        chart
+            .configure_series_labels()
             .label_font(chart_label_style(&params.colors.caption))
             .background_style(params.colors.fill.mix(0.8))
             .border_style(params.colors.axis)
             .position(SeriesLabelPosition::UpperLeft)
-            .draw()
-            .unwrap();
+            .draw()?;
     }
-
-    plot
+    Ok(chart)
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Render a browser congestion-control chart.
+///
+/// # Errors
+/// Returns missing canvas, invalid axes or Plotters failures.
 pub fn plot_cc_plot<'a>(
     params: &PlotParameters, ss: &SeriesStore, ds: &Datastore, canvas_id: &str,
-) -> ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>
-{
-    let root =
-        make_chart_canvas_area(&canvas_id, params.colors, params.chart_margin);
-
-    let cwnd_y_max = if let Some(y_max) = params.cwnd_y_max {
-        y_max
-    } else {
-        // add a bit of margin
-        ss.y_max_congestion_plot + ss.y_max_congestion_plot / 10
-    };
-
-    // TODO set minimum
+) -> Result<
+    ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+    Box<dyn Error>,
+> {
+    let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
+    let cwnd_max = params
+        .cwnd_y_max
+        .unwrap_or_else(|| {
+            let maximum = ss.y_max_congestion_plot;
+            maximum.saturating_add(maximum / 10)
+        })
+        .max(1);
     let axis = super::minmax::XYMinMax::init(
-        ss.sent_x_min..ss.sent_x_max,
-        params.clamp.start,
-        params.clamp.end,
-        0..cwnd_y_max,
+        checked_time_range(ss.sent_x_min, ss.sent_x_max, &params.clamp)?,
+        None,
+        None,
+        0..cwnd_max,
     );
-
     draw_congestion_plot(params, &axis, ss, ds, &root)
 }
 
 fn draw_cc_updates<DB: DrawingBackend>(
     data: &[(f64, u64, String)], y_range: std::ops::Range<u64>,
     y_range_extended: std::ops::Range<u64>,
-    congestion_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) {
-    let my_label = |x: f64, y: u64, name: &str| {
+    chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+) -> Result<(), Box<dyn Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let positions = [0, 1, 2, 3, 4].map(|index| {
+        y_range
+            .end
+            .saturating_add(y_range.end.saturating_mul(index) / 10)
+    });
+    // Reverse event order to retain labels on top of earlier vertical lines.
+    for (index, event) in data.iter().rev().enumerate() {
+        let (time, _, name) = event;
+        if !time.is_finite() {
+            return Err(invalid_chart(
+                "congestion state timestamps must be finite",
+            )
+            .into());
+        }
         let color = cc_state_to_color(name);
-        let text_width = name.len() as i32 * 6; // Rough estimate
-        let text_height = 12;
-
-        return EmptyElement::at((x, y))
-            //+ Circle::new((0, 0), 1, ShapeStyle::from(color).filled())
-            + Rectangle::new([(1, -2), (1 + text_width, text_height)],
-                        WHITE.mix(0.7).filled()) // 0.7 alpha for transparency
-            + Text::new(
-                name.to_owned(),
+        let text_width = i32::try_from(name.len())
+            .ok()
+            .and_then(|width| width.checked_mul(6))
+            .ok_or_else(|| invalid_chart("congestion state label is too wide"))?;
+        chart.draw_series(LineSeries::new(
+            [
+                (*time, y_range_extended.start),
+                (*time, y_range_extended.end),
+            ],
+            color,
+        ))?;
+        let label = EmptyElement::at((*time, positions[index % positions.len()])) +
+            Rectangle::new(
+                [(1, -2), (1 + text_width, 12)],
+                WHITE.mix(0.7).filled(),
+            ) +
+            Text::new(
+                name.clone(),
                 (1, 0),
                 ("sans-serif", 12.0).into_font().color(&color),
             );
-    };
-
-    let mut woggle = vec![0];
-
-    for i in 1..5 {
-        woggle.push((y_range.end / 10) * i);
+        chart.plotting_area().draw(&label)?;
     }
-
-    // Add labels from right to left, to ensure the z-ordering doesn't add lines
-    // over the labels
-    let iter = data.iter().rev();
-    for cc_state in iter {
-        let color = cc_state_to_color(&cc_state.2);
-        let x = cc_state.0;
-
-        let line_coords =
-            [(x, y_range_extended.start), (x, y_range_extended.end)];
-
-        congestion_chart
-            .draw_series(LineSeries::new(line_coords, color))
-            .unwrap();
-
-        let area = congestion_chart.plotting_area();
-
-        // control the vertical position of the text label to avoid overlaps.
-        let y = y_range.end + woggle[0];
-        area.draw(&my_label(x, y, &cc_state.2)).unwrap();
-
-        woggle.rotate_left(1);
-    }
-}
-
-fn draw_bytes_in_flight<DB: DrawingBackend>(
-    data: &[(f64, u64)],
-    congestion_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) {
-    draw_line(data, Some("bytes in flight"), TAUPE, congestion_chart);
-}
-
-fn draw_cwnd<DB: DrawingBackend>(
-    data: &[(f64, u64)],
-    congestion_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) {
-    draw_line(data, Some("cwnd"), PURPLE_500, congestion_chart);
-}
-
-fn draw_ssthresh<DB: DrawingBackend>(
-    data: &[(f64, u64)],
-    congestion_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) {
-    draw_line(data, Some("ssthresh"), ORANGE, congestion_chart);
+    Ok(())
 }
 
 // Colors from ColorCycle list
@@ -215,5 +195,34 @@ fn cc_state_to_color(cc_state: &str) -> RGBColor {
         "bbr_probe_rtt" => RGBColor(51, 127, 127),
 
         _ => BLACK,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plots::fallible::test_support::chart_params;
+
+    #[test]
+    fn empty_congestion_renders_and_invalid_timestamps_fail(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut buffer = vec![0_u8; 1000 * 900 * 3];
+        let area = BitMapBackend::with_buffer(&mut buffer, (1000, 900))
+            .into_drawing_area();
+        let params = chart_params();
+        let ss = SeriesStore::default();
+        let axis = XYMinMax::init(0.0..1.0, None, None, 0..1);
+        let ds = Datastore::default();
+        assert!(draw_congestion_plot(&params, &axis, &ss, &ds, &area).is_ok());
+        let mut invalid = Datastore::default();
+        invalid.congestion_state_updates.push((
+            f64::NAN,
+            0,
+            "slow_start".to_string(),
+        ));
+        assert!(
+            draw_congestion_plot(&params, &axis, &ss, &invalid, &area).is_err()
+        );
+        Ok(())
     }
 }

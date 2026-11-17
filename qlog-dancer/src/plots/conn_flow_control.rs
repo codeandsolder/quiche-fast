@@ -24,11 +24,21 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use minmax::XMinMax;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::bitmap_area;
+#[cfg(target_arch = "wasm32")]
+use crate::plots::fallible::canvas_area;
+use crate::plots::fallible::checked_time_range;
+use crate::plots::fallible::invalid_chart;
 use plotters::chart::ChartContext;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
+use plotters::coord::Shift;
+use plotters::drawing::DrawingAreaErrorKind;
 use plotters::prelude::Cartesian2d;
+use std::error::Error;
+use std::io;
+use std::ops::Range;
 
 use crate::plots::colors::*;
 use crate::plots::*;
@@ -36,229 +46,267 @@ use crate::plots::*;
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
 
-const Y_WIGGLE: f64 = 1.2;
-
 struct XYMinMax {
-    pub x: XMinMax,
+    pub x: Range<f64>,
     pub y_min: u64,
     pub y_max: u64,
 }
 
 impl XYMinMax {
-    fn init(params: &PlotParameters, ss: &SeriesStore, ds: &Datastore) -> Self {
-        let x = XMinMax::new(
+    fn init(
+        params: &PlotParameters, ss: &SeriesStore, ds: &Datastore,
+    ) -> io::Result<Self> {
+        let x = checked_time_range(
             ss.received_x_min,
             ss.received_x_max,
-            params.clamp.start,
-            params.clamp.end,
-        );
-
-        Self {
+            &params.clamp,
+        )?;
+        Ok(Self {
             x,
             y_min: 0,
             y_max: Self::y_max(ss, &ds.application_proto),
-        }
+        })
     }
 
-    fn y_range(&self) -> std::ops::Range<u64> {
+    fn y_range(&self) -> Range<u64> {
         self.y_min..self.y_max
     }
 
     fn y_max(ss: &SeriesStore, proto: &ApplicationProto) -> u64 {
-        let y = match proto {
-            ApplicationProto::Http2 =>
-                *(ss.h2_send_window_absolute_max.get(&0).unwrap_or(&0)),
-            ApplicationProto::Http3 =>
-                ss.netlog_quic_stream_received_connection_cumulative
-                    .last()
-                    .unwrap_or(&(0.0, 0))
-                    .1,
+        let max_series = match proto {
+            ApplicationProto::Http2 => ss
+                .netlog_h2_stream_received_connection_cumulative
+                .iter()
+                .map(|(_, count)| *count)
+                .max()
+                .unwrap_or(0),
+            ApplicationProto::Http3 => ss
+                .netlog_quic_stream_received_connection_cumulative
+                .iter()
+                .map(|(_, count)| *count)
+                .max()
+                .unwrap_or(0),
         };
-
-        (y as f64 * Y_WIGGLE) as u64
+        let max_window = match proto {
+            ApplicationProto::Http2 =>
+                ss.h2_send_window_absolute_max.get(&0).copied().unwrap_or(0),
+            ApplicationProto::Http3 => ss
+                .netlog_quic_client_side_window_updates
+                .get(&-1)
+                .into_iter()
+                .flatten()
+                .map(|(_, maximum)| *maximum)
+                .max()
+                .unwrap_or(0),
+        };
+        let max_value = max_series.max(max_window);
+        max_value.saturating_add(max_value.div_ceil(5)).max(1)
     }
 }
 
 fn blocked_lines<DB: DrawingBackend>(
     ds: &Datastore, y_max: u64,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
-    if let Some(blocked) = ds.netlog_quic_server_window_blocked.get(&-1).cloned()
-    {
-        let blocked_lines = blocked
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    if let Some(blocked) = ds.netlog_quic_server_window_blocked.get(&-1) {
+        let lines = blocked
             .iter()
-            .map(|t| PathElement::new([(*t, 0), (*t, y_max)], GREEN));
-
+            .map(|time| PathElement::new([(*time, 0), (*time, y_max)], GREEN));
         chart
-            .draw_series(blocked_lines)
-            .unwrap()
+            .draw_series(lines)?
             .label("server conn blocked")
             .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN));
     }
+    Ok(())
 }
 
 fn received_data<DB: DrawingBackend>(
     ss: &SeriesStore, proto: &ApplicationProto,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     let points = match proto {
         ApplicationProto::Http2 =>
-            ss.netlog_h2_stream_received_connection_cumulative.clone(),
+            &ss.netlog_h2_stream_received_connection_cumulative,
         ApplicationProto::Http3 =>
-            ss.netlog_quic_stream_received_connection_cumulative.clone(),
+            &ss.netlog_quic_stream_received_connection_cumulative,
     };
-
     chart
-        .draw_series(LineSeries::new(points, ORANGE))
-        .unwrap()
+        .draw_series(LineSeries::new(points.iter().copied(), ORANGE))?
         .label("cumulative received stream data")
         .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], ORANGE));
+    Ok(())
 }
 
 fn window_updates<DB: DrawingBackend>(
     ss: &SeriesStore, ds: &Datastore,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-) {
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     let points = match ds.application_proto {
-        ApplicationProto::Http2 => {
-            if let Some(conn_win_updates) =
-                ss.h2_send_window_series_absolute.get(&0).cloned()
-            {
-                conn_win_updates
-            } else {
-                return;
-            }
-        },
-
-        ApplicationProto::Http3 => {
-            if let Some(conn_win_updates) =
-                ss.netlog_quic_client_side_window_updates.get(&-1).cloned()
-            {
-                conn_win_updates
-            } else {
-                return;
-            }
-        },
+        ApplicationProto::Http2 => ss.h2_send_window_series_absolute.get(&0),
+        ApplicationProto::Http3 =>
+            ss.netlog_quic_client_side_window_updates.get(&-1),
     };
-
-    // Help us see the exact time a window update happened.
-    let circles: Vec<Circle<(f64, u64), i32>> = points
-        .iter()
-        .map(|point| Circle::new(*point, 2, BLUE))
-        .collect();
-
-    chart
-        .draw_series(LineSeries::new(points, BLUE))
-        .unwrap()
-        .label("sent window updates")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
-
-    chart.draw_series(circles).unwrap();
+    if let Some(points) = points {
+        chart
+            .draw_series(LineSeries::new(points.iter().copied(), BLUE))?
+            .label("sent window updates")
+            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
+        chart.draw_series(
+            points.iter().map(|point| Circle::new(*point, 2, BLUE)),
+        )?;
+    }
+    Ok(())
 }
 
 fn draw_series<'a, DB: DrawingBackend + 'a>(
     chart: &mut ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-    params: &PlotParameters, ss: &SeriesStore, ds: &Datastore, axis: XYMinMax,
-) {
+    params: &PlotParameters, ss: &SeriesStore, ds: &Datastore, y_max: u64,
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     draw_mesh(
         &params.colors,
         "Relative time (ms)",
         "Bytes",
         params.display_minor_lines,
         chart,
-    );
-
-    // Draw the series
-    blocked_lines(ds, axis.y_max, chart);
-    received_data(ss, &ds.application_proto, chart);
-    window_updates(ss, ds, chart);
-
+    )?;
+    blocked_lines(ds, y_max, chart)?;
+    received_data(ss, &ds.application_proto, chart)?;
+    window_updates(ss, ds, chart)?;
     if params.display_legend {
-        // Draw the series legend
         chart
             .configure_series_labels()
             .label_font(chart_label_style(&params.colors.caption))
             .background_style(params.colors.fill.mix(0.8))
             .border_style(params.colors.axis)
             .position(SeriesLabelPosition::LowerRight)
-            .draw()
-            .unwrap();
+            .draw()?;
     }
+    Ok(())
+}
+
+fn draw_flow_control<'a, DB: DrawingBackend + 'a>(
+    params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
+    area: &plotters::drawing::DrawingArea<DB, Shift>,
+) -> Result<
+    ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+    Box<dyn Error>,
+>
+where
+    DB::ErrorType: 'static,
+{
+    let axis = XYMinMax::init(params, ss, ds)?;
+    let mut builder = ChartBuilder::on(area);
+    builder
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y);
+    if params.display_chart_title {
+        builder.caption(
+            format!("{filename} Connection Flow Control timeline"),
+            chart_title_style(&params.colors.caption),
+        );
+    }
+    let mut chart = builder.build_cartesian_2d(axis.x.clone(), axis.y_range())?;
+    draw_series(&mut chart, params, ss, ds, axis.y_max)?;
+    Ok(chart)
 }
 
 #[cfg(target_arch = "wasm32")]
+/// Render flow-control series to a browser canvas.
+///
+/// # Errors
+/// Returns missing canvas, invalid timestamp or Plotters backend errors.
 pub fn plot_conn_flow_control_canvas<'a>(
     params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
-) -> ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>
-{
-    let chart_config =
-        make_chart_config("flow_control", params, filename, ds, ty);
-
-    let canvas_id: String = chart_config.canvas_id().unwrap_or_default();
-    let root =
-        make_chart_canvas_area(&canvas_id, params.colors, params.chart_margin);
-
-    let axis = XYMinMax::init(params, ss, ds);
-
-    let mut builder = ChartBuilder::on(&root);
-    builder
-        .x_label_area_size(params.area_margin.x)
-        .y_label_area_size(params.area_margin.y);
-
-    if params.display_chart_title {
-        let caption = format!("{} Connection Flow Control timeline", filename);
-        builder.caption(caption, chart_title_style(&params.colors.caption));
-    }
-
-    let mut fc_chart = builder
-        .build_cartesian_2d(axis.x.range(), axis.y_range())
-        .unwrap();
-
-    draw_series(&mut fc_chart, params, ss, ds, axis);
-
-    fc_chart
+) -> Result<
+    ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+    Box<dyn Error>,
+> {
+    let canvas_id = match ty {
+        ChartOutputType::Canvas { canvas_id } => canvas_id.as_str(),
+        ChartOutputType::Png { .. } =>
+            return Err(invalid_chart(
+                "browser flow-control plot requires canvas output",
+            )
+            .into()),
+    };
+    let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
+    draw_flow_control(params, filename, ss, ds, &root)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+/// Render flow-control series to PNG.
+///
+/// # Errors
+/// Returns invalid filename, timestamp or Plotters backend errors.
 pub fn plot_conn_flow_control(
     params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
-) {
-    let chart_config =
-        make_chart_config("flow_control", params, filename, ds, ty);
-    let chart_path = chart_config.chart_filepath();
-
-    let root = make_chart_bitmap_area(
-        &chart_path,
+) -> Result<(), Box<dyn Error>> {
+    let config =
+        ChartConfig::new("flow_control", filename, &params.clamp, ds, ty);
+    if !matches!(ty, ChartOutputType::Png { .. }) {
+        return Err(invalid_chart(
+            "native flow-control plot requires PNG output",
+        )
+        .into());
+    }
+    let path = config.chart_filepath();
+    let root = bitmap_area(
+        &path,
         params.chart_size,
         params.colors,
         params.chart_margin,
-    );
+    )?;
+    draw_flow_control(params, filename, ss, ds, &root)?;
+    root.present()?;
+    Ok(())
+}
 
-    let axis = XYMinMax::init(params, ss, ds);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plots::fallible::test_support::chart_params;
+    use crate::plots::fallible::test_support::TempCharts;
 
-    let mut builder = ChartBuilder::on(&root);
-    builder
-        .x_label_area_size(params.area_margin.x)
-        .y_label_area_size(params.area_margin.y);
-
-    if params.display_chart_title {
-        let caption = format!("{} Connection Flow Control timeline", filename);
-        builder.caption(caption, chart_title_style(&params.colors.caption));
+    #[test]
+    fn flow_control_max_follows_all_samples_and_saturates_large_values() {
+        let mut series = SeriesStore {
+            netlog_quic_stream_received_connection_cumulative: vec![
+                (2.0, 1000),
+                (4.0, 1),
+            ],
+            ..SeriesStore::default()
+        };
+        assert_eq!(XYMinMax::y_max(&series, &ApplicationProto::Http3), 1200);
+        series.netlog_quic_stream_received_connection_cumulative[0].1 = u64::MAX;
+        assert_eq!(XYMinMax::y_max(&series, &ApplicationProto::Http3), u64::MAX);
+        assert_eq!(
+            XYMinMax::y_max(&SeriesStore::default(), &ApplicationProto::Http2),
+            1
+        );
     }
 
-    let mut fc_chart = builder
-        .build_cartesian_2d(axis.x.range(), axis.y_range())
-        .unwrap();
-
-    draw_mesh(
-        &params.colors,
-        "Relative time (ms)",
-        "Bytes",
-        params.display_minor_lines,
-        &mut fc_chart,
-    );
-
-    draw_series(&mut fc_chart, params, ss, ds, axis);
+    #[test]
+    fn empty_flow_chart_renders_and_blocked_output_returns_error(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = chart_params();
+        let ss = SeriesStore::default();
+        let ds = Datastore::default();
+        let out = TempCharts::new()?;
+        plot_conn_flow_control(&params, "empty", &ss, &ds, &out.output())?;
+        assert_eq!(image::image_dimensions(out.only_file()?)?, (1000, 900));
+        let blocked = TempCharts::new()?;
+        let obstacle = blocked.0.join("not-directory");
+        std::fs::write(&obstacle, b"block")?;
+        let ty = ChartOutputType::Png {
+            output_dir: obstacle.to_string_lossy().into_owned(),
+            cwnd_y_max: None,
+            stream_y_max: None,
+        };
+        assert!(
+            plot_conn_flow_control(&params, "blocked", &ss, &ds, &ty).is_err()
+        );
+        Ok(())
+    }
 }
