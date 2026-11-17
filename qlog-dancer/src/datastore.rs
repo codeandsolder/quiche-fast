@@ -539,6 +539,15 @@ enum NetlogAckDirection {
     Received,
 }
 
+/// Direction and kind of netlog QUIC stream termination. All variants share
+/// the same error-code lookup but update distinct request fields.
+#[derive(Clone, Copy)]
+enum NetlogQuicTermination {
+    ResetReceived { offset: u64 },
+    ResetSent { offset: u64 },
+    StopSendingSent,
+}
+
 impl Datastore {
     /// Track missing ACK numbers while retaining their best-known packet
     /// space. If a received ACK has no preceding packet header, preserve its
@@ -631,6 +640,176 @@ impl Datastore {
         Ok(())
     }
 
+    fn record_netlog_received_quic_stream_frame(
+        &mut self, params: &quic::QuicSessionStreamFrameReceivedParams,
+        event_time: f64,
+    ) -> Result<(), DatastoreError> {
+        // Validate all counters before mutating any of this event's
+        // state.
+        let next_count = checked_netlog_sum(
+            self.total_received_stream_frame_count,
+            1,
+            "total_received_stream_frame_count",
+        )?;
+        let cumulative = cumulative_total(
+            &self.netlog_quic_stream_received_connection_cumulative,
+            params.length,
+            "netlog_quic_stream_received_connection_cumulative",
+        )?;
+
+        let s = self
+            .received_stream_frames
+            .entry(params.stream_id)
+            .or_default();
+        s.push((event_time, StreamDatapoint {
+            offset: params.offset,
+            length: params.length,
+        }));
+
+        let s = self
+            .received_stream_frames_count_based
+            .entry(params.stream_id)
+            .or_default();
+        s.push((self.total_received_stream_frame_count, StreamDatapoint {
+            offset: params.offset,
+            length: params.length,
+        }));
+
+        self.total_received_stream_frame_count = next_count;
+
+        if params.fin {
+            if let Some(req) = self.http_requests.get_mut(&params.stream_id) {
+                req.time_fin_rx = Some(event_time);
+            }
+        }
+
+        self.netlog_quic_stream_received_connection_cumulative
+            .push((event_time, cumulative));
+        Ok(())
+    }
+
+    fn record_netlog_received_packet_header(
+        &mut self,
+        params: &quic::QuicSessionUnauthenticatedPacketHeaderReceivedParams,
+        event_time: f64,
+    ) -> Result<(), DatastoreError> {
+        let packet_type = PacketType::from_netlog_packet_header(
+            &params.header_format,
+            params.long_header_type.as_deref(),
+        );
+
+        // The most recently logged packet might be in a different
+        // QUIC packet-number space. Compare only consecutive
+        // observations in the *same* space to avoid false gaps.
+        if let Some(previous) =
+            self.received_netlog_packet_numbers.previous(packet_type)
+        {
+            if previous.abs_diff(params.packet_number) > 1 {
+                self.discontinuous_packet_number_count = checked_netlog_sum(
+                    self.discontinuous_packet_number_count,
+                    1,
+                    "discontinuous_packet_number_count",
+                )?;
+            }
+        }
+
+        // Record the latest number only after validating overflow;
+        // rejected events must not alter progress or packet maps.
+        self.received_netlog_packet_numbers
+            .observe(packet_type, params.packet_number);
+
+        let packet_info = PacketInfoStub {
+            acked: None,
+            raw: None,
+            created_time: event_time,
+            send_at_time: None,
+            ty: packet_type,
+            number: params.packet_number,
+        };
+
+        self.received_packets_netlog
+            .push((event_time, packet_info.clone()));
+
+        let s = self.packet_received.entry(packet_type).or_default();
+
+        s.insert(params.packet_number, packet_info);
+        Ok(())
+    }
+
+    fn record_netlog_sent_packet(
+        &mut self, params: &quic::QuicSessionPacketSentParams, event_time: f64,
+    ) {
+        let packet_type =
+            PacketType::from_netlog_encryption_level(&params.encryption_level);
+
+        let packet_info = PacketInfoStub {
+            acked: None,
+            raw: None,
+            created_time: event_time,
+            send_at_time: None,
+            ty: packet_type,
+            number: params.packet_number,
+        };
+
+        let s = self.packet_sent.entry(packet_type).or_default();
+
+        s.insert(params.packet_number, packet_info);
+
+        // Resolve any ACK gaps logged before their packet metadata.
+        if let Some(pending) = self
+            .netlog_ack_sent_missing_packet
+            .remove(&PacketType::Unknown)
+        {
+            if !pending.is_empty() {
+                self.netlog_ack_sent_missing_packet
+                    .entry(packet_type)
+                    .or_default()
+                    .extend(pending);
+            }
+        }
+    }
+
+    /// QUIC resets and `STOP_SENDING` are meaningful only for request streams
+    /// already discovered by the headers parser. Preserve that invariant.
+    fn record_netlog_quic_stream_termination(
+        &mut self, stream_id: u64, error_code: u64,
+        termination: NetlogQuicTermination,
+        constants: &netlog::constants::Constants,
+    ) {
+        let Some(req) = self.http_requests.get_mut(&stream_id) else {
+            return;
+        };
+
+        // Chromium records the unsigned code, whereas the constants table
+        // uses i64. Large codes still survive intact without bogus labels.
+        let friendly = i64::try_from(error_code)
+            .ok()
+            .and_then(|code| constants.quic_rst_stream_error_id_keyed.get(&code))
+            .cloned();
+        match termination {
+            NetlogQuicTermination::ResetReceived { offset } => {
+                req.quic_stream_reset_received = Some(QuicStreamReset {
+                    offset,
+                    quic_rst_stream_error: error_code,
+                    quic_rst_stream_error_friendly: friendly,
+                });
+            },
+            NetlogQuicTermination::ResetSent { offset } => {
+                req.quic_stream_reset_sent = Some(QuicStreamReset {
+                    offset,
+                    quic_rst_stream_error: error_code,
+                    quic_rst_stream_error_friendly: friendly,
+                });
+            },
+            NetlogQuicTermination::StopSendingSent => {
+                req.quic_stream_stop_sending_sent = Some(QuicStreamStopSending {
+                    quic_rst_stream_error: error_code,
+                    quic_rst_stream_error_friendly: friendly,
+                });
+            },
+        }
+    }
+
     fn consume_netlog_quic(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &quic::Event, constants: &netlog::constants::Constants,
@@ -639,130 +818,20 @@ impl Datastore {
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            QuicSessionStreamFrameReceived(e) => {
-                // Validate all counters before mutating any of this event's
-                // state.
-                let next_count = checked_netlog_sum(
-                    self.total_received_stream_frame_count,
-                    1,
-                    "total_received_stream_frame_count",
-                )?;
-                let cumulative = cumulative_total(
-                    &self.netlog_quic_stream_received_connection_cumulative,
-                    e.params.length,
-                    "netlog_quic_stream_received_connection_cumulative",
-                )?;
+            QuicSessionStreamFrameReceived(e) => self
+                .record_netlog_received_quic_stream_frame(
+                    &e.params,
+                    rel_event_time,
+                )?,
 
-                let s = self
-                    .received_stream_frames
-                    .entry(e.params.stream_id)
-                    .or_default();
-                s.push((rel_event_time, StreamDatapoint {
-                    offset: e.params.offset,
-                    length: e.params.length,
-                }));
+            QuicSessionUnauthenticatedPacketHeaderReceived(e) => self
+                .record_netlog_received_packet_header(
+                    &e.params,
+                    rel_event_time,
+                )?,
 
-                let s = self
-                    .received_stream_frames_count_based
-                    .entry(e.params.stream_id)
-                    .or_default();
-                s.push((
-                    self.total_received_stream_frame_count,
-                    StreamDatapoint {
-                        offset: e.params.offset,
-                        length: e.params.length,
-                    },
-                ));
-
-                self.total_received_stream_frame_count = next_count;
-
-                if e.params.fin {
-                    if let Some(req) =
-                        self.http_requests.get_mut(&e.params.stream_id)
-                    {
-                        req.time_fin_rx = Some(rel_event_time);
-                    }
-                }
-
-                self.netlog_quic_stream_received_connection_cumulative
-                    .push((rel_event_time, cumulative));
-            },
-
-            QuicSessionUnauthenticatedPacketHeaderReceived(e) => {
-                let packet_type = PacketType::from_netlog_packet_header(
-                    &e.params.header_format,
-                    e.params.long_header_type.as_deref(),
-                );
-
-                // The most recently logged packet might be in a different
-                // QUIC packet-number space. Compare only consecutive
-                // observations in the *same* space to avoid false gaps.
-                if let Some(previous) =
-                    self.received_netlog_packet_numbers.previous(packet_type)
-                {
-                    if previous.abs_diff(e.params.packet_number) > 1 {
-                        self.discontinuous_packet_number_count =
-                            checked_netlog_sum(
-                                self.discontinuous_packet_number_count,
-                                1,
-                                "discontinuous_packet_number_count",
-                            )?;
-                    }
-                }
-
-                // Record the latest number only after validating overflow;
-                // rejected events must not alter progress or packet maps.
-                self.received_netlog_packet_numbers
-                    .observe(packet_type, e.params.packet_number);
-
-                let packet_info = PacketInfoStub {
-                    acked: None,
-                    raw: None,
-                    created_time: rel_event_time,
-                    send_at_time: None,
-                    ty: packet_type,
-                    number: e.params.packet_number,
-                };
-
-                self.received_packets_netlog
-                    .push((rel_event_time, packet_info.clone()));
-
-                let s = self.packet_received.entry(packet_type).or_default();
-
-                s.insert(e.params.packet_number, packet_info);
-            },
-
-            QuicSessionPacketSent(e) => {
-                let packet_type = PacketType::from_netlog_encryption_level(
-                    &e.params.encryption_level,
-                );
-
-                let packet_info = PacketInfoStub {
-                    acked: None,
-                    raw: None,
-                    created_time: rel_event_time,
-                    send_at_time: None,
-                    ty: packet_type,
-                    number: e.params.packet_number,
-                };
-
-                let s = self.packet_sent.entry(packet_type).or_default();
-
-                s.insert(e.params.packet_number, packet_info);
-
-                // Resolve any ACK gaps logged before their packet metadata.
-                if let Some(pending) = self
-                    .netlog_ack_sent_missing_packet
-                    .remove(&PacketType::Unknown)
-                {
-                    if !pending.is_empty() {
-                        self.netlog_ack_sent_missing_packet
-                            .entry(packet_type)
-                            .or_default()
-                            .extend(pending);
-                    }
-                }
-            },
+            QuicSessionPacketSent(e) =>
+                self.record_netlog_sent_packet(&e.params, rel_event_time),
 
             QuicSessionAckFrameSent(e) => self.record_netlog_ack_gaps(
                 NetlogAckDirection::Sent,
@@ -795,67 +864,33 @@ impl Datastore {
                 });
             },
 
-            QuicSessionRstStreamFrameReceived(e) => {
-                // Non-request streams can be reset, we don't care about them
-                // right now
-                if let Some(req) = self.http_requests.get_mut(&e.params.stream_id)
-                {
-                    req.quic_stream_reset_received = Some(QuicStreamReset {
+            QuicSessionRstStreamFrameReceived(e) => self
+                .record_netlog_quic_stream_termination(
+                    e.params.stream_id,
+                    e.params.quic_rst_stream_error,
+                    NetlogQuicTermination::ResetReceived {
                         offset: e.params.offset,
-                        quic_rst_stream_error: e.params.quic_rst_stream_error,
-                        quic_rst_stream_error_friendly: i64::try_from(
-                            e.params.quic_rst_stream_error,
-                        )
-                        .ok()
-                        .and_then(|code| {
-                            constants.quic_rst_stream_error_id_keyed.get(&code)
-                        })
-                        .cloned(),
-                    });
-                }
-            },
+                    },
+                    constants,
+                ),
 
-            QuicSessionRstStreamFrameSent(e) => {
-                // Non-request streams can be reset, we don't care about them
-                // right now
-                if let Some(req) = self.http_requests.get_mut(&e.params.stream_id)
-                {
-                    req.quic_stream_reset_sent = Some(QuicStreamReset {
+            QuicSessionRstStreamFrameSent(e) => self
+                .record_netlog_quic_stream_termination(
+                    e.params.stream_id,
+                    e.params.quic_rst_stream_error,
+                    NetlogQuicTermination::ResetSent {
                         offset: e.params.offset,
-                        quic_rst_stream_error: e.params.quic_rst_stream_error,
-                        quic_rst_stream_error_friendly: i64::try_from(
-                            e.params.quic_rst_stream_error,
-                        )
-                        .ok()
-                        .and_then(|code| {
-                            constants.quic_rst_stream_error_id_keyed.get(&code)
-                        })
-                        .cloned(),
-                    });
-                }
-            },
+                    },
+                    constants,
+                ),
 
-            QuicSessionStopSendingFrameSent(e) => {
-                // Non-request streams can be stopped, we don't care about them
-                // right now
-                if let Some(req) = self.http_requests.get_mut(&e.params.stream_id)
-                {
-                    req.quic_stream_stop_sending_sent =
-                        Some(QuicStreamStopSending {
-                            quic_rst_stream_error: e.params.quic_rst_stream_error,
-                            quic_rst_stream_error_friendly: i64::try_from(
-                                e.params.quic_rst_stream_error,
-                            )
-                            .ok()
-                            .and_then(|code| {
-                                constants
-                                    .quic_rst_stream_error_id_keyed
-                                    .get(&code)
-                            })
-                            .cloned(),
-                        });
-                }
-            },
+            QuicSessionStopSendingFrameSent(e) => self
+                .record_netlog_quic_stream_termination(
+                    e.params.stream_id,
+                    e.params.quic_rst_stream_error,
+                    NetlogQuicTermination::StopSendingSent,
+                    constants,
+                ),
 
             QuicSessionBlockedFrameReceived(e) => {
                 let s = self
@@ -2426,7 +2461,7 @@ mod netlog_tests {
                 "logSourceType": {},
                 "netError": {},
                 "quicError": {},
-                "quicRstStreamError": {},
+                "quicRstStreamError": {"STREAM_CANCELLED": 42},
                 "secureDnsMode": {},
                 "timeTickOffset": 0
             }))
@@ -2626,6 +2661,161 @@ mod netlog_tests {
         assert!(datastore.sent_data_frames.is_empty());
         assert!(datastore.sent_data_cumulative.is_empty());
         assert!(datastore.h2_send_window_updates_balanced.is_empty());
+    }
+
+    #[test]
+    fn netlog_quic_reset_and_stop_sending_preserve_direction_and_error_names() {
+        let mut datastore = Datastore::default();
+
+        let reset_received =
+            netlog::Event::Quic(quic::Event::QuicSessionRstStreamFrameReceived(
+                quic::QuicSessionRstStreamFrameReceivedEvent {
+                    params: quic::QuicSessionRstStreamFrameReceivedParams {
+                        stream_id: 7,
+                        offset: 11,
+                        quic_rst_stream_error: 42,
+                    },
+                },
+            ));
+        let reset_sent =
+            netlog::Event::Quic(quic::Event::QuicSessionRstStreamFrameSent(
+                quic::QuicSessionRstStreamFrameSentEvent {
+                    params: quic::QuicSessionRstStreamFrameSentParams {
+                        stream_id: 7,
+                        offset: 29,
+                        quic_rst_stream_error: 42,
+                    },
+                },
+            ));
+        let stop =
+            netlog::Event::Quic(quic::Event::QuicSessionStopSendingFrameSent(
+                quic::QuicSessionStopSendingFrameSentEvent {
+                    params: quic::QuicSessionStopSendingFrameSentParams {
+                        stream_id: 7,
+                        quic_rst_stream_error: 42,
+                    },
+                },
+            ));
+
+        // A termination frame on a non-request stream is ignored.
+        consume(&mut datastore, 101, &reset_received)
+            .expect("non-request reset event");
+        consume(&mut datastore, 102, &reset_sent)
+            .expect("non-request reset-sent event");
+        consume(&mut datastore, 103, &stop)
+            .expect("non-request stop-sending event");
+        assert!(datastore.http_requests.is_empty());
+
+        datastore.get_or_insert_http_req(7);
+        for event in [&reset_received, &reset_sent, &stop] {
+            consume(&mut datastore, 104, event)
+                .expect("known request stream termination");
+        }
+        let request = &datastore.http_requests[&7];
+        let received = request
+            .quic_stream_reset_received
+            .as_ref()
+            .expect("received reset recorded");
+        let sent = request
+            .quic_stream_reset_sent
+            .as_ref()
+            .expect("sent reset recorded");
+        let stopped = request
+            .quic_stream_stop_sending_sent
+            .as_ref()
+            .expect("sent stop-sending recorded");
+        assert_eq!((received.offset, received.quic_rst_stream_error), (11, 42));
+        assert_eq!((sent.offset, sent.quic_rst_stream_error), (29, 42));
+        assert_eq!(stopped.quic_rst_stream_error, 42);
+        assert_eq!(
+            received.quic_rst_stream_error_friendly.as_deref(),
+            Some("STREAM_CANCELLED")
+        );
+        assert_eq!(
+            sent.quic_rst_stream_error_friendly.as_deref(),
+            Some("STREAM_CANCELLED")
+        );
+        assert_eq!(
+            stopped.quic_rst_stream_error_friendly.as_deref(),
+            Some("STREAM_CANCELLED")
+        );
+        assert!(request.quic_stream_stop_sending_received.is_none());
+
+        // Chrome can record u64 errors larger than i64::MAX. They must
+        // survive exactly and must not produce a bogus friendly label.
+        let huge =
+            netlog::Event::Quic(quic::Event::QuicSessionRstStreamFrameReceived(
+                quic::QuicSessionRstStreamFrameReceivedEvent {
+                    params: quic::QuicSessionRstStreamFrameReceivedParams {
+                        stream_id: 7,
+                        offset: u64::MAX,
+                        quic_rst_stream_error: u64::MAX,
+                    },
+                },
+            ));
+        consume(&mut datastore, 105, &huge).expect("large-code reset event");
+        let request = &datastore.http_requests[&7];
+        let received = request
+            .quic_stream_reset_received
+            .as_ref()
+            .expect("large-code received reset recorded");
+        assert_eq!(received.offset, u64::MAX);
+        assert_eq!(received.quic_rst_stream_error, u64::MAX);
+        assert!(received.quic_rst_stream_error_friendly.is_none());
+        assert_eq!(
+            request
+                .quic_stream_reset_sent
+                .as_ref()
+                .expect("sent reset preserved")
+                .offset,
+            29
+        );
+    }
+
+    #[test]
+    fn netlog_quic_stream_fin_only_updates_existing_request_after_validation() {
+        let mut datastore = Datastore::default();
+        let fin =
+            netlog::Event::Quic(quic::Event::QuicSessionStreamFrameReceived(
+                quic::QuicSessionStreamFrameReceivedEvent {
+                    params: quic::QuicSessionStreamFrameReceivedParams {
+                        stream_id: 7,
+                        offset: 10,
+                        length: 0,
+                        fin: true,
+                    },
+                },
+            ));
+        consume(&mut datastore, 111, &fin)
+            .expect("first FIN without discovered request");
+        assert!(datastore.http_requests.is_empty());
+        assert_eq!(datastore.total_received_stream_frame_count, 1);
+        datastore.get_or_insert_http_req(7);
+        consume(&mut datastore, 115, &fin).expect("FIN with discovered request");
+        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
+        assert_eq!(datastore.total_received_stream_frame_count, 2);
+        assert_eq!(datastore.received_stream_frames[&7].len(), 2);
+        assert_eq!(
+            datastore.received_stream_frames_count_based[&7]
+                .iter()
+                .map(|(count, _)| *count)
+                .collect::<Vec<_>>(),
+            vec![0, 1]
+        );
+        assert_eq!(
+            datastore.netlog_quic_stream_received_connection_cumulative,
+            vec![(11.0, 0), (15.0, 0)]
+        );
+
+        datastore.total_received_stream_frame_count = u64::MAX;
+        assert!(matches!(
+            consume(&mut datastore, 120, &fin),
+            Err(DatastoreError::NetlogCounterOverflow {
+                field: "total_received_stream_frame_count"
+            })
+        ));
+        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
+        assert_eq!(datastore.received_stream_frames[&7].len(), 2);
     }
 
     #[test]
