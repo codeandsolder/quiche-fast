@@ -2823,13 +2823,44 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
 fn std_time_to_c(time: &Instant, out: &mut timespec) {
-    const INSTANT_ZERO: Instant =
-        unsafe { std::mem::transmute(std::time::UNIX_EPOCH) };
-
-    let raw_time = time.duration_since(INSTANT_ZERO);
-
-    out.tv_sec = raw_time.as_secs() as libc::time_t;
-    out.tv_nsec = raw_time.subsec_nanos() as libc::c_long;
+    // Pair the opaque Rust Instant with the monotonic clock used by the C API.
+    // Do not depend on the standard library's private Instant representation.
+    let now = Instant::now();
+    let mut clock = std::mem::MaybeUninit::<timespec>::uninit();
+    // SAFETY: clock_gettime writes a timespec when it succeeds.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, clock.as_mut_ptr()) } !=
+        0
+    {
+        *out = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        return;
+    }
+    // SAFETY: clock_gettime succeeded and initialized clock.
+    let clock = unsafe { clock.assume_init() };
+    let base =
+        i128::from(clock.tv_sec) * 1_000_000_000 + i128::from(clock.tv_nsec);
+    let offset = if *time >= now {
+        i128::try_from(time.duration_since(now).as_nanos()).ok()
+    } else {
+        i128::try_from(now.duration_since(*time).as_nanos())
+            .ok()
+            .and_then(|n| n.checked_neg())
+    };
+    let result = offset.and_then(|offset| base.checked_add(offset));
+    let converted = result.and_then(|n| {
+        let secs = libc::time_t::try_from(n.div_euclid(1_000_000_000)).ok()?;
+        let nanos = libc::c_long::try_from(n.rem_euclid(1_000_000_000)).ok()?;
+        Some(timespec {
+            tv_sec: secs,
+            tv_nsec: nanos,
+        })
+    });
+    *out = converted.unwrap_or(timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    });
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
@@ -2846,6 +2877,32 @@ mod tests {
     use libc::c_void;
     #[cfg(windows)]
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
+
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
+    #[test]
+    fn ffi_monotonic_timestamp_preserves_deadline_spacing() {
+        let now = Instant::now();
+        let mut first = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let mut second = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        std_time_to_c(&now, &mut first);
+        std_time_to_c(&(now + std::time::Duration::from_millis(50)), &mut second);
+        let first_ns =
+            i128::from(first.tv_sec) * 1_000_000_000 + i128::from(first.tv_nsec);
+        let second_ns = i128::from(second.tv_sec) * 1_000_000_000 +
+            i128::from(second.tv_nsec);
+        assert!(first_ns > 0);
+        assert!((second_ns - first_ns - 50_000_000).abs() < 10_000_000);
+    }
 
     #[test]
     fn invalid_utf8_ffi_string_returns_invalid_argument() {
