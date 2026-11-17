@@ -85,8 +85,12 @@ impl AppConfig {
         }
     }
 
-    pub fn from_clap() -> std::result::Result<Self, String> {
-        let mut matches = Command::new("qlog-dancer")
+    pub fn from_clap() -> Result<Self, String> {
+        Self::from_matches(Self::command().get_matches())
+    }
+
+    fn command() -> Command {
+        Command::new("qlog-dancer")
         .version("v0.1.0")
         .about("dances with qlog (and more!)")
         .arg(
@@ -126,21 +130,27 @@ impl AppConfig {
         .arg(
             Arg::new("start")
                 .short('s')
+                .long("start")
+                .value_parser(clap::value_parser!(f64))
                 .help("Relative start time for plots")
         )
         .arg(
             Arg::new("end")
                 .short('e')
+                .long("end")
+                .value_parser(clap::value_parser!(f64))
                 .help("Relative end time for plots")
         )
         .arg(
             Arg::new("stream_y_axis_max")
-                .long("stream-y-axis_max")
+                .long("stream-y-axis-max")
+                .value_parser(clap::value_parser!(u64))
                 .help("Maximum value of Y axis on stream-related charts")
         )
         .arg(
             Arg::new("cwnd_y_axis_max")
                 .long("cwnd-y-axis-max")
+                .value_parser(clap::value_parser!(u64))
                 .help("Maximum value of Y axis on cwnd-related charts")
         )
         .arg(
@@ -155,7 +165,7 @@ impl AppConfig {
         )
         .arg(
             Arg::new("dark_mode")
-                .long("dark_mode")
+                .long("dark-mode")
                 .help("Generate outputs in a dark mode style")
                 .action(ArgAction::SetTrue),
         )
@@ -196,57 +206,47 @@ impl AppConfig {
                 .help("Tables printed in a CSV-compatible format")
                 .action(ArgAction::SetTrue),
         )
-        .get_matches();
+    }
 
-        let file = matches.remove_one::<String>("LOG FILE").unwrap();
+    fn from_matches(mut matches: clap::ArgMatches) -> Result<Self, String> {
+        let file = matches
+            .remove_one::<String>("LOG FILE")
+            .ok_or("input log file is required")?;
         let filename = std::path::Path::new(&file)
             .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap();
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or("input log path must end in a UTF-8 filename")?
+            .to_owned();
 
         let charts_dir = matches
             .remove_one::<String>("charts_directory")
-            .unwrap_or(format!("{filename}-charts"));
+            .unwrap_or_else(|| format!("{filename}-charts"));
 
         let start = matches.remove_one::<f64>("start");
         let end = matches.remove_one::<f64>("end");
 
-        if end.is_some() && end < start {
+        for (label, value) in [("Start", start), ("End", end)] {
+            if value.is_some_and(|value| !value.is_finite() || value < 0.0) {
+                return Err(format!(
+                    "{label} time must be finite and nonnegative."
+                ));
+            }
+        }
+        if end.zip(start).is_some_and(|(end, start)| end < start) {
             return Err("End time cannot be earlier than start time.".into());
         }
 
-        if let Some(start) = start {
-            if start < 0.0 {
-                return Err("Start time cannot be less than 0.0.".into());
-            }
+        let stream_y_max = matches.remove_one::<u64>("stream_y_axis_max");
+        let cwnd_y_max = matches.remove_one::<u64>("cwnd_y_axis_max");
+        if stream_y_max == Some(0) || cwnd_y_max == Some(0) {
+            return Err("Chart Y-axis maxima must be positive.".into());
         }
-
-        if let Some(end) = end {
-            if end < 0.0 {
-                return Err("End time cannot be less than 0.0.".into());
-            }
-        }
-
-        let stream_y_max =
-            matches.remove_one::<i64>("stream_y_axis_max").unwrap_or(-1);
-        let stream_y_max = if stream_y_max == -1 {
-            None
-        } else {
-            Some(stream_y_max as u64)
-        };
-
-        let cwnd_y_max =
-            matches.remove_one::<i64>("cwnd_y_axis_max").unwrap_or(-1);
-        let cwnd_y_max = if cwnd_y_max == -1 {
-            None
-        } else {
-            Some(cwnd_y_max as u64)
-        };
 
         let dark_mode = matches.get_flag("dark_mode");
 
-        let charts = matches.remove_one::<String>("charts").unwrap();
+        let charts = matches
+            .remove_one::<String>("charts")
+            .ok_or("missing chart selection")?;
         let (
             plot_conn_overview,
             plot_pkt_sent,
@@ -272,11 +272,12 @@ impl AppConfig {
 
             "none" => (false, false, false, false, false, false, false),
 
-            _ => unreachable!(),
+            _ => return Err(format!("unknown chart selection: {charts}")),
         };
 
-        let sparks_layout =
-            matches.remove_one::<String>("sparks_layout").unwrap();
+        let sparks_layout = matches
+            .remove_one::<String>("sparks_layout")
+            .ok_or("missing spark layout")?;
         let sparks_layout = if sparks_layout == "grid" {
             SparkPlotsParams {
                 clamp: ClampParams {
@@ -321,7 +322,9 @@ impl AppConfig {
         let report_text_csv = matches.get_flag("report_text_csv");
         let report_html = matches.get_flag("report_html");
 
-        let print_stats = matches.remove_one::<String>("print_stats").unwrap();
+        let print_stats = matches
+            .remove_one::<String>("print_stats")
+            .ok_or("missing stats selection")?;
         let stats_config = match print_stats.as_str() {
             "all" => PrintStatsConfig {
                 rx_flow_control: true,
@@ -359,7 +362,7 @@ impl AppConfig {
                 packet_stats: false,
             },
 
-            _ => unreachable!(),
+            _ => return Err(format!("unknown stats selection: {print_stats}")),
         };
 
         let ignore_acks = false;
@@ -367,9 +370,9 @@ impl AppConfig {
         let log_format = SerializationFormat::from_filename(&file);
 
         let config = Self {
-            file: file.to_string(),
-            filename: filename.to_string(),
-            charts_dir: charts_dir.to_string(),
+            file,
+            filename,
+            charts_dir,
             plot_conn_overview,
             plot_pkt_sent,
             plot_pkt_received,
@@ -396,5 +399,87 @@ impl AppConfig {
         };
 
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    fn parse(args: &[&str]) -> Result<AppConfig, String> {
+        let matches = AppConfig::command()
+            .try_get_matches_from(args)
+            .map_err(|err| err.to_string())?;
+        AppConfig::from_matches(matches)
+    }
+
+    #[test]
+    fn numeric_cli_options_are_typed_and_preserve_values() -> Result<(), String> {
+        let config = parse(&[
+            "qlog-dancer",
+            "logs/capture.qlog",
+            "--start",
+            "1.25",
+            "--end",
+            "4.75",
+            "--stream-y-axis-max",
+            "4294967296",
+            "--cwnd-y-axis-max",
+            "18446744073709551615",
+            "--charts",
+            "sparks",
+            "--sparks-layout",
+            "grid",
+            "--dark-mode",
+        ])?;
+        assert_eq!(config.filename, "capture.qlog");
+        assert_eq!(config.charts_dir, "capture.qlog-charts");
+        assert_eq!(config.start, Some(1.25));
+        assert_eq!(config.end, Some(4.75));
+        assert_eq!(config.stream_y_max, Some(4_294_967_296));
+        assert_eq!(config.cwnd_y_max, Some(u64::MAX));
+        assert!(config.dark_mode);
+        assert!(config.plot_sparks);
+        assert_eq!(config.sparks_layout.clamp.start, config.start);
+        assert_eq!(config.sparks_layout.clamp.stream_y_max, config.stream_y_max);
+
+        let defaults = parse(&["qlog-dancer", "capture.sqlog"])?;
+        assert_eq!(defaults.start, None);
+        assert_eq!(defaults.end, None);
+        assert_eq!(defaults.stream_y_max, None);
+        assert_eq!(defaults.cwnd_y_max, None);
+        assert!(!defaults.plot_sparks);
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_numeric_inputs_and_paths_are_reported_as_errors() {
+        for (flag, value) in [
+            ("--start", "NaN"),
+            ("--start", "inf"),
+            ("--start", "-0.25"),
+            ("--start", "invalid"),
+            ("--end", "-1"),
+            ("--end", "Infinity"),
+            ("--stream-y-axis-max", "-1"),
+            ("--stream-y-axis-max", "0"),
+            ("--stream-y-axis-max", "1.5"),
+            ("--stream-y-axis-max", "18446744073709551616"),
+            ("--cwnd-y-axis-max", "-2"),
+            ("--cwnd-y-axis-max", "0"),
+        ] {
+            let input = ["qlog-dancer", "trace.qlog", flag, value];
+            assert!(parse(&input).is_err(), "{flag}={value} must be rejected");
+        }
+        assert!(parse(&[
+            "qlog-dancer",
+            "trace.qlog",
+            "--start",
+            "4",
+            "--end",
+            "2"
+        ])
+        .is_err());
+        assert!(parse(&["qlog-dancer", "/"]).is_err());
     }
 }
