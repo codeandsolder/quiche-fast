@@ -548,6 +548,13 @@ enum NetlogQuicTermination {
     StopSendingSent,
 }
 
+/// `WINDOW_UPDATE` and `RST_STREAM` have opposite local/peer directions.
+#[derive(Clone, Copy)]
+enum NetlogH2Direction {
+    Sent,
+    Received,
+}
+
 impl Datastore {
     /// Track missing ACK numbers while retaining their best-known packet
     /// space. If a received ACK has no preceding packet header, preserve its
@@ -1116,6 +1123,86 @@ impl Datastore {
         Ok(())
     }
 
+    /// `WINDOW_UPDATE` received from the peer increases our send credit;
+    /// `WINDOW_UPDATE` we sent increases the peer's send credit instead.
+    /// Neither invalid nor zero deltas are valid protocol increments.
+    fn record_netlog_h2_window_update(
+        &mut self, direction: NetlogH2Direction, stream_id: u32, delta: i32,
+        event_time: f64,
+    ) {
+        let Some(increment) =
+            u64::try_from(delta).ok().filter(|increment| *increment > 0)
+        else {
+            let direction_label = match direction {
+                NetlogH2Direction::Received => "received",
+                NetlogH2Direction::Sent => "sent",
+            };
+            error!(
+                "ignoring nonpositive HTTP/2 {direction_label} WINDOW_UPDATE increment: {delta}"
+            );
+            return;
+        };
+
+        match direction {
+            NetlogH2Direction::Received => {
+                self.h2_send_window_updates_balanced
+                    .entry(stream_id)
+                    .or_default()
+                    .push((event_time, i64::from(delta)));
+                self.h2_send_window_updates_absolute
+                    .entry(stream_id)
+                    .or_default()
+                    .push((event_time, increment));
+            },
+            NetlogH2Direction::Sent => {
+                self.h2_recv_window_updates
+                    .entry(stream_id)
+                    .or_default()
+                    .push((event_time, delta));
+            },
+        }
+    }
+
+    /// Netlog request resets are recorded only for known request streams.
+    /// The received `RESET_STREAM` event provides no description text.
+    fn record_netlog_h2_stream_reset(
+        &mut self, direction: NetlogH2Direction, stream_id: u32,
+        error_code: &str, description: Option<&str>,
+    ) {
+        let Some(req) = self.http_requests.get_mut(&u64::from(stream_id)) else {
+            return;
+        };
+        let reset = H2StreamReset {
+            error: error_code.to_owned(),
+            description: description.unwrap_or_default().to_owned(),
+        };
+        match direction {
+            NetlogH2Direction::Sent => req.h2_stream_reset_sent = Some(reset),
+            NetlogH2Direction::Received =>
+                req.h2_stream_reset_receive = Some(reset),
+        }
+    }
+
+    /// The netlog close record carries the native net error and, when
+    /// available, a human-readable Chromium error name.
+    fn record_netlog_h2_session_close(
+        &mut self, params: &h2::Http2SessionCloseParams,
+        constants: &netlog::constants::Constants,
+    ) {
+        self.h2_session_close = Some(H2SessionClose {
+            session_id: self.session_id.unwrap_or(-1),
+            sni: self
+                .host
+                .clone()
+                .unwrap_or_else(|| "ERROR UNKNOWN".to_owned()),
+            details: params.description.clone(),
+            net_err: params.net_error,
+            net_err_pretty: NaOption::new(
+                constants.net_error_id_keyed.get(&params.net_error).cloned(),
+            ),
+        });
+    }
+
     fn consume_netlog_h2(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &h2::Event, constants: &netlog::constants::Constants,
@@ -1176,82 +1263,38 @@ impl Datastore {
                 rel_event_time,
             )?,
 
-            // A WINDOW_UPDATE from the peer grants us additional send credit.
-            Http2SessionRecvWindowUpdate(e) => {
-                if let Some(delta) = u64::try_from(e.params.delta)
-                    .ok()
-                    .filter(|increment| *increment > 0)
-                {
-                    self.h2_send_window_updates_balanced
-                        .entry(e.params.stream_id)
-                        .or_default()
-                        .push((rel_event_time, i64::from(e.params.delta)));
-                    self.h2_send_window_updates_absolute
-                        .entry(e.params.stream_id)
-                        .or_default()
-                        .push((rel_event_time, delta));
-                } else {
-                    error!(
-                        "ignoring nonpositive HTTP/2 received WINDOW_UPDATE increment: {}",
-                        e.params.delta,
-                    );
-                }
-            },
+            Http2SessionRecvWindowUpdate(e) => self
+                .record_netlog_h2_window_update(
+                    NetlogH2Direction::Received,
+                    e.params.stream_id,
+                    e.params.delta,
+                    rel_event_time,
+                ),
 
-            // A WINDOW_UPDATE sent to the peer grants *their* send credit,
-            // not ours. Keep local receive-window updates in their own series.
-            Http2SessionSendWindowUpdate(e) =>
-                if e.params.delta > 0 {
-                    self.h2_recv_window_updates
-                        .entry(e.params.stream_id)
-                        .or_default()
-                        .push((rel_event_time, e.params.delta));
-                } else {
-                    error!(
-                        "ignoring nonpositive HTTP/2 sent WINDOW_UPDATE increment: {}",
-                        e.params.delta,
-                    );
-                },
+            Http2SessionSendWindowUpdate(e) => self
+                .record_netlog_h2_window_update(
+                    NetlogH2Direction::Sent,
+                    e.params.stream_id,
+                    e.params.delta,
+                    rel_event_time,
+                ),
 
-            Http2SessionClose(e) => {
-                self.h2_session_close = Some(H2SessionClose {
-                    session_id: self.session_id.unwrap_or(-1),
-                    sni: self
-                        .host
-                        .clone()
-                        .unwrap_or_else(|| "ERROR UNKNOWN".to_owned()),
-                    details: e.params.description.clone(),
-                    net_err: e.params.net_error,
-                    net_err_pretty: NaOption::new(
-                        constants
-                            .net_error_id_keyed
-                            .get(&e.params.net_error)
-                            .cloned(),
-                    ),
-                });
-            },
+            Http2SessionClose(e) =>
+                self.record_netlog_h2_session_close(&e.params, constants),
 
-            Http2SessionSendRstStream(e) => {
-                if let Some(req) =
-                    self.http_requests.get_mut(&(u64::from(e.params.stream_id)))
-                {
-                    req.h2_stream_reset_sent = Some(H2StreamReset {
-                        error: e.params.error_code.clone(),
-                        description: e.params.description.clone(),
-                    });
-                }
-            },
+            Http2SessionSendRstStream(e) => self.record_netlog_h2_stream_reset(
+                NetlogH2Direction::Sent,
+                e.params.stream_id,
+                &e.params.error_code,
+                Some(&e.params.description),
+            ),
 
-            Http2SessionRecvRstStream(e) => {
-                if let Some(req) =
-                    self.http_requests.get_mut(&(u64::from(e.params.stream_id)))
-                {
-                    req.h2_stream_reset_receive = Some(H2StreamReset {
-                        error: e.params.error_code.clone(),
-                        description: "".to_string(),
-                    });
-                }
-            },
+            Http2SessionRecvRstStream(e) => self.record_netlog_h2_stream_reset(
+                NetlogH2Direction::Received,
+                e.params.stream_id,
+                &e.params.error_code,
+                None,
+            ),
 
             // ignore the other events for now
             Http2Session(_) => (),
@@ -2459,7 +2502,7 @@ mod netlog_tests {
                 },
                 "logFormatVersion": 123,
                 "logSourceType": {},
-                "netError": {},
+                "netError": {"ERR_HTTP2_PROTOCOL_ERROR": -337},
                 "quicError": {},
                 "quicRstStreamError": {"STREAM_CANCELLED": 42},
                 "secureDnsMode": {},
@@ -3234,33 +3277,155 @@ mod netlog_tests {
         ));
     }
 
+    fn h2_window_received(stream_id: u32, delta: i32) -> netlog::Event {
+        netlog::Event::H2(h2::Event::Http2SessionRecvWindowUpdate(
+            h2::Http2SessionRecvWindowUpdateEvent {
+                params: h2::Http2SessionRecvWindowUpdateParams {
+                    stream_id,
+                    delta,
+                },
+            },
+        ))
+    }
+
+    fn h2_window_sent(stream_id: u32, delta: i32) -> netlog::Event {
+        netlog::Event::H2(h2::Event::Http2SessionSendWindowUpdate(
+            h2::Http2SessionSendWindowUpdateEvent {
+                params: h2::Http2SessionSendWindowUpdateParams {
+                    stream_id,
+                    delta,
+                },
+            },
+        ))
+    }
+
+    #[test]
+    fn netlog_h2_close_preserves_error_label_and_session_metadata() {
+        let event = netlog::Event::H2(h2::Event::Http2SessionClose(
+            h2::Http2SessionCloseEvent {
+                params: h2::Http2SessionCloseParams {
+                    net_error: -337,
+                    description: "protocol error".to_owned(),
+                },
+            },
+        ));
+        let mut datastore = Datastore::default();
+        consume(&mut datastore, 120, &event).expect("H2 close event");
+        let close = datastore.h2_session_close.as_ref().expect("close record");
+        assert_eq!(close.session_id, -1);
+        assert_eq!(close.sni, "ERROR UNKNOWN");
+        assert_eq!(close.details, "protocol error");
+        assert_eq!(close.net_err, -337);
+        assert_eq!(
+            close.net_err_pretty.inner.as_deref(),
+            Some("ERR_HTTP2_PROTOCOL_ERROR")
+        );
+
+        datastore.session_id = Some(42);
+        datastore.host = Some("server.example.test".to_owned());
+        consume(&mut datastore, 121, &event).expect("close with known host");
+        let close = datastore.h2_session_close.as_ref().expect("close record");
+        assert_eq!(close.session_id, 42);
+        assert_eq!(close.sni, "server.example.test");
+        assert_eq!(close.details, "protocol error");
+    }
+
+    #[test]
+    fn netlog_h2_stream_reset_preserves_direction_and_missing_description() {
+        let mut datastore = Datastore::default();
+        let sent = netlog::Event::H2(h2::Event::Http2SessionSendRstStream(
+            h2::Http2SessionSendRstStreamEvent {
+                params: h2::Http2SessionSendRstStreamParams {
+                    stream_id: 23,
+                    error_code: "CANCEL".to_owned(),
+                    description: "peer cancelled".to_owned(),
+                },
+            },
+        ));
+        let received = netlog::Event::H2(h2::Event::Http2SessionRecvRstStream(
+            h2::Http2SessionRecvRstStreamEvent {
+                params: h2::Http2SessionRecvRstStreamParams {
+                    stream_id: 23,
+                    error_code: "REFUSED_STREAM".to_owned(),
+                },
+            },
+        ));
+
+        // Reset events do not create a request for non-request streams.
+        consume(&mut datastore, 102, &received).expect("unknown recv reset");
+        consume(&mut datastore, 103, &sent).expect("unknown sent reset");
+        assert!(datastore.http_requests.is_empty());
+
+        datastore.get_or_insert_http_req(23);
+        consume(&mut datastore, 104, &sent).expect("sent H2 reset");
+        consume(&mut datastore, 105, &received).expect("received H2 reset");
+        let request = &datastore.http_requests[&23];
+        let sent_reset = request
+            .h2_stream_reset_sent
+            .as_ref()
+            .expect("sent reset retained");
+        assert_eq!(sent_reset.error, "CANCEL");
+        assert_eq!(sent_reset.description, "peer cancelled");
+        let received_reset = request
+            .h2_stream_reset_receive
+            .as_ref()
+            .expect("received reset retained");
+        assert_eq!(received_reset.error, "REFUSED_STREAM");
+        assert!(received_reset.description.is_empty());
+
+        // Sending a later reset must not erase the received direction.
+        consume(&mut datastore, 106, &sent).expect("repeat sent reset");
+        assert_eq!(
+            datastore.http_requests[&23]
+                .h2_stream_reset_receive
+                .as_ref()
+                .expect("received direction preserved")
+                .error,
+            "REFUSED_STREAM"
+        );
+    }
+
+    #[test]
+    fn netlog_h2_window_update_keeps_independent_stream_and_direction_series() {
+        let mut datastore = Datastore::default();
+        for (time, event) in [
+            (101, h2_window_received(1, 50)),
+            (102, h2_window_sent(1, 7)),
+            (103, h2_window_received(3, 8)),
+            (104, h2_window_sent(3, 11)),
+            (105, h2_window_received(1, -1)),
+            (106, h2_window_sent(3, 0)),
+            (107, h2_window_received(1, 0)),
+            (108, h2_window_sent(3, -9)),
+        ] {
+            consume(&mut datastore, time, &event)
+                .expect("H2 WINDOW_UPDATE event");
+        }
+        assert_eq!(datastore.h2_send_window_updates_balanced[&1], vec![(
+            1.0, 50
+        )]);
+        assert_eq!(datastore.h2_send_window_updates_absolute[&1], vec![(
+            1.0, 50
+        )]);
+        assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
+            3.0, 8
+        )]);
+        assert_eq!(datastore.h2_send_window_updates_absolute[&3], vec![(
+            3.0, 8
+        )]);
+        assert_eq!(datastore.h2_recv_window_updates[&1], vec![(2.0, 7)]);
+        assert_eq!(datastore.h2_recv_window_updates[&3], vec![(4.0, 11)]);
+        assert_eq!(datastore.h2_send_window_updates_balanced.len(), 2);
+        assert_eq!(datastore.h2_recv_window_updates.len(), 2);
+    }
+
     #[test]
     fn http2_window_updates_separate_peer_send_credit_and_our_receive_credit() {
         let mut datastore = Datastore::default();
-        let received = |delta: i32| {
-            netlog::Event::H2(h2::Event::Http2SessionRecvWindowUpdate(
-                h2::Http2SessionRecvWindowUpdateEvent {
-                    params: h2::Http2SessionRecvWindowUpdateParams {
-                        stream_id: 3,
-                        delta,
-                    },
-                },
-            ))
-        };
-        let sent = |delta: i32| {
-            netlog::Event::H2(h2::Event::Http2SessionSendWindowUpdate(
-                h2::Http2SessionSendWindowUpdateEvent {
-                    params: h2::Http2SessionSendWindowUpdateParams {
-                        stream_id: 3,
-                        delta,
-                    },
-                },
-            ))
-        };
-        assert!(consume(&mut datastore, 110, &received(10)).is_ok());
-        assert!(consume(&mut datastore, 120, &sent(20)).is_ok());
-        assert!(consume(&mut datastore, 130, &sent(-1)).is_ok());
-        assert!(consume(&mut datastore, 140, &received(0)).is_ok());
+        assert!(consume(&mut datastore, 110, &h2_window_received(3, 10)).is_ok());
+        assert!(consume(&mut datastore, 120, &h2_window_sent(3, 20)).is_ok());
+        assert!(consume(&mut datastore, 130, &h2_window_sent(3, -1)).is_ok());
+        assert!(consume(&mut datastore, 140, &h2_window_received(3, 0)).is_ok());
         assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
             10.0, 10
         )]);
