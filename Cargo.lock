@@ -2682,6 +2682,7 @@ dependencies = [
  "env_logger",
  "futures-util",
  "getrandom 0.4.3",
+ "image",
  "js-sys",
  "log",
  "netlog",
