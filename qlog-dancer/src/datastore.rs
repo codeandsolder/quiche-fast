@@ -40,7 +40,6 @@ use qlog::events::quic::TransportInitiator;
 use qlog::events::EventData;
 use qlog::events::RawInfo;
 
-use regex::Regex;
 use tabled::Tabled;
 
 use crate::request_stub::find_header_value;
@@ -373,7 +372,7 @@ pub struct Datastore {
     pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, i32)>>,
 
     // Balance against incoming data to make it easier to plot in some cases
-    pub h2_send_window_updates_balanced: BTreeMap<u32, Vec<(f64, i32)>>,
+    pub h2_send_window_updates_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
 
     // Just store raw updates for clear absolute values
     pub h2_send_window_updates_absolute: BTreeMap<u32, Vec<(f64, u64)>>,
@@ -397,8 +396,6 @@ pub struct Datastore {
 
     pub quic_session_close: Option<QuicSessionClose>,
     pub h2_session_close: Option<H2SessionClose>,
-
-    pub h2_concurrent_requests: u64,
 }
 
 fn is_bidi(stream_id: u64) -> bool {
@@ -844,16 +841,8 @@ impl Datastore {
             },
 
             Http2SessionRecvSetting(e) => {
-                let re = Regex::new(H2_RECV_SETTING_PATTERN).unwrap();
-
-                if let Some(m) =
-                    re.captures(&e.params.id).and_then(|caps| caps.get(1))
-                {
-                    if let Ok(id) = m.as_str().parse::<u16>() {
-                        self.h2_server_settings.set_from_wire(id, e.params.value);
-                    } else {
-                        error!("parsing H2 setting {:?}", e.params);
-                    }
+                if let Some(id) = h2::parse_recv_setting_id(&e.params.id) {
+                    self.h2_server_settings.set_from_wire(id, e.params.value);
                 } else {
                     error!("parsing H2 setting {:?}", e.params);
                 }
@@ -873,18 +862,12 @@ impl Datastore {
                             as i64) as f64,
                     );
                 }
-
-                self.h2_concurrent_requests += 1;
             },
 
             Http2SessionRecvHeaders(e) => {
                 let req = self.get_or_insert_http_req(e.params.stream_id as u64);
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
-
-                if e.params.fin {
-                    self.h2_concurrent_requests -= 1;
-                }
             },
 
             Http2SessionRecvData(e) => {
@@ -950,10 +933,6 @@ impl Datastore {
                     NaOption::new(Some(received_data_cumulative)),
                 );
 
-                if e.params.fin {
-                    self.h2_concurrent_requests -= 1;
-                }
-
                 let cumulative = if let Some(last) =
                     self.netlog_h2_stream_received_connection_cumulative.last()
                 {
@@ -1001,7 +980,7 @@ impl Datastore {
                     .h2_send_window_updates_balanced
                     .entry(e.params.stream_id)
                     .or_default();
-                s.push((rel_event_time, -(e.params.size as i32)));
+                s.push((rel_event_time, -i64::from(e.params.size)));
 
                 let s = self
                     .sent_data_cumulative
@@ -1041,7 +1020,7 @@ impl Datastore {
                     .h2_send_window_updates_balanced
                     .entry(e.params.stream_id)
                     .or_default();
-                s.push((rel_event_time, e.params.delta));
+                s.push((rel_event_time, i64::from(e.params.delta)));
             },
 
             // counterintuitively, updates our local receive window
@@ -1050,14 +1029,25 @@ impl Datastore {
                     .h2_send_window_updates_balanced
                     .entry(e.params.stream_id)
                     .or_default();
-                s.push((rel_event_time, e.params.delta));
+                s.push((rel_event_time, i64::from(e.params.delta)));
 
-                let s = self
-                    .h2_send_window_updates_absolute
-                    .entry(e.params.stream_id)
-                    .or_default();
-                // Window updates always have a positive delta, so this is fine.
-                s.push((rel_event_time, e.params.delta as u64));
+                // A WINDOW_UPDATE increment must be positive; the unsigned
+                // grant history must not turn a negative log value into an
+                // enormous u64 grant.
+                if let Some(delta) = u64::try_from(e.params.delta)
+                    .ok()
+                    .filter(|delta| *delta > 0)
+                {
+                    self.h2_send_window_updates_absolute
+                        .entry(e.params.stream_id)
+                        .or_default()
+                        .push((rel_event_time, delta));
+                } else {
+                    error!(
+                        "ignoring nonpositive HTTP/2 WINDOW_UPDATE increment: {}",
+                        e.params.delta
+                    );
+                }
             },
 
             Http2SessionClose(e) => {
@@ -1095,7 +1085,6 @@ impl Datastore {
                         description: "".to_string(),
                     });
                 }
-                self.h2_concurrent_requests -= 1;
             },
 
             // ignore the other events for now
@@ -1246,7 +1235,9 @@ impl Datastore {
                 }
             },
 
-            _ => unimplemented!(),
+            // This is optional in qlog. Without an initiator we cannot
+            // attribute limits to the local or peer transport parameters.
+            None => trace!("ignoring transport parameters with no initiator"),
         }
     }
 
@@ -2006,6 +1997,10 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
 mod input_tests {
     use super::Datastore;
     use super::VantagePoint;
+    use qlog::events::quic::ParametersSet;
+    use qlog::events::quic::TransportInitiator;
+    use qlog::events::Event;
+    use qlog::events::EventData;
     use qlog::VantagePointType;
 
     #[test]
@@ -2035,5 +2030,62 @@ mod input_tests {
         assert!(matches!(client.vantage_point, VantagePoint::Client));
         assert!(matches!(server.vantage_point, VantagePoint::Server));
         Ok(())
+    }
+
+    #[test]
+    fn missing_transport_parameter_initiator_is_ignored_without_a_panic() {
+        let mut datastore = Datastore::default();
+        let limits = ParametersSet {
+            initiator: None,
+            initial_max_data: Some(123),
+            initial_max_stream_data_bidi_local: Some(456),
+            ..ParametersSet::default()
+        };
+        datastore.consume_qlog_event(
+            &Event::with_time(
+                1.0,
+                EventData::QuicParametersSet(Box::new(limits)),
+            ),
+            false,
+        );
+        assert!(datastore.sent_max_data.is_empty());
+        assert!(datastore.received_max_data.is_empty());
+        assert_eq!(datastore.local_init_max_stream_data_bidi_local, 0);
+        assert_eq!(datastore.peer_init_max_stream_data_bidi_local, 0);
+
+        for (initiator, expected_local) in [
+            (TransportInitiator::Local, true),
+            (TransportInitiator::Remote, false),
+        ] {
+            let mut datastore = Datastore::default();
+            let limits = ParametersSet {
+                initiator: Some(initiator),
+                initial_max_data: Some(123),
+                ..ParametersSet::default()
+            };
+            datastore.consume_qlog_event(
+                &Event::with_time(
+                    1.0,
+                    EventData::QuicParametersSet(Box::new(limits)),
+                ),
+                false,
+            );
+            assert_eq!(
+                datastore.sent_max_data,
+                if expected_local {
+                    vec![(0.0, 123)]
+                } else {
+                    Vec::new()
+                }
+            );
+            assert_eq!(
+                datastore.received_max_data,
+                if expected_local {
+                    Vec::new()
+                } else {
+                    vec![(0.0, 123)]
+                }
+            );
+        }
     }
 }

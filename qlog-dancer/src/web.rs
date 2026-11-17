@@ -309,8 +309,12 @@ impl QlogDancerWeb {
     ///
     /// Some use cases don't need plots, so you can avoid calling this function
     /// if that's the case.
-    pub fn populate_seriesstore(&mut self) {
-        self.ss = Some(SeriesStore::from_datastore(&self.ds));
+    pub fn populate_seriesstore(&mut self) -> Result<(), JsValue> {
+        self.ss = None;
+        let series = SeriesStore::from_datastore(&self.ds)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        self.ss = Some(series);
+        Ok(())
     }
 
     #[wasm_bindgen]

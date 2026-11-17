@@ -950,6 +950,8 @@ pub fn plot_sparks(
             .and_then(|id| ss.h2_send_window_series_balanced.get(&id));
         let ul_h2_send_window_max =
             h2_stream_id.and_then(|id| ss.h2_send_window_balanced_max.get(&id));
+        let ul_h2_send_window_min =
+            h2_stream_id.and_then(|id| ss.h2_send_window_balanced_min.get(&id));
 
         let (abs_ul_chart, rel_ul_chart) = match ul_stream_frames {
             Some(frames) => {
@@ -967,6 +969,7 @@ pub fn plot_sparks(
                 // it hard to support optional secondary axis. And that axis
                 // only makes sense for HTTP/2.
                 let ul_h2_send_window_y_max = ul_h2_send_window_max.unwrap_or(&0);
+                let ul_h2_send_window_y_min = ul_h2_send_window_min.unwrap_or(&0);
 
                 let mut abs_ul_chart = ChartBuilder::on(&abs_ul_small_area)
                     .set_label_area_size(
@@ -980,7 +983,7 @@ pub fn plot_sparks(
                     .build_cartesian_2d(x_min..x_max, 0..ul_zoom_y_max)?
                     .set_secondary_coord(
                         x_min..x_max,
-                        0i32..*ul_h2_send_window_y_max,
+                        *ul_h2_send_window_y_min..*ul_h2_send_window_y_max,
                     );
 
                 draw_mesh(&params.colors, &mut abs_ul_chart)?;
@@ -1005,7 +1008,7 @@ pub fn plot_sparks(
                     )?
                     .set_secondary_coord(
                         ul_zoom_x_min..ul_zoom_x_max,
-                        0i32..*ul_h2_send_window_y_max,
+                        *ul_h2_send_window_y_min..*ul_h2_send_window_y_max,
                     );
                 draw_mesh(&params.colors, &mut rel_ul_chart)?;
 
