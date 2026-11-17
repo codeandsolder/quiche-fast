@@ -109,6 +109,7 @@ pub struct SeriesStore {
     pub sent_data_max: BTreeMap<u64, u64>,
 
     pub h2_send_window_series_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
+    pub h2_send_window_balanced_min: BTreeMap<u32, i64>,
     pub h2_send_window_balanced_max: BTreeMap<u32, i64>,
     pub h2_send_window_series_absolute: BTreeMap<u32, Vec<(f64, u64)>>,
     pub h2_send_window_absolute_max: BTreeMap<u32, u64>,
@@ -684,6 +685,7 @@ impl SeriesStore {
             let initial_window =
                 i64::from(Self::initial_h2_fc_value(*stream, data_store));
             let mut y_max = initial_window.max(0);
+            let mut y_min = 0_i64;
 
             // insert a dummy 0'th point at the first incidence time
             if let Some(first) = points.first() {
@@ -702,6 +704,7 @@ impl SeriesStore {
                     })?;
                 self.update_sent_x_axis_max(point.0);
                 y_max = y_max.max(new_y);
+                y_min = y_min.min(new_y);
 
                 push_interp(&mut series_points, (point.0, new_y));
                 last_y = new_y;
@@ -709,6 +712,7 @@ impl SeriesStore {
 
             self.h2_send_window_series_balanced
                 .insert(*stream, series_points);
+            self.h2_send_window_balanced_min.insert(*stream, y_min);
             self.h2_send_window_balanced_max.insert(*stream, y_max);
         }
         Ok(())
@@ -976,6 +980,7 @@ mod tests {
         assert!(result.is_ok());
         if let Ok(series) = result {
             assert_eq!(series.h2_send_window_balanced_max.get(&1), Some(&65535));
+            assert_eq!(series.h2_send_window_balanced_min.get(&1), Some(&0));
             assert_eq!(series.h2_send_window_absolute_max.get(&0), Some(&65542));
         }
 
@@ -1025,6 +1030,10 @@ mod tests {
                     .and_then(|v| v.last())
                     .map(|v| v.1),
                 Some(i64::from(65535_u32) - i64::from(u32::MAX))
+            );
+            assert_eq!(
+                series.h2_send_window_balanced_min.get(&1),
+                Some(&(i64::from(65535_u32) - i64::from(u32::MAX)))
             );
         }
     }

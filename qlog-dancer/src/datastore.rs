@@ -1034,7 +1034,7 @@ impl Datastore {
                 // A WINDOW_UPDATE increment must be positive; the unsigned
                 // grant history must not turn a negative log value into an
                 // enormous u64 grant.
-                if let Ok(delta) = u64::try_from(e.params.delta)
+                if let Some(delta) = u64::try_from(e.params.delta)
                     .ok()
                     .filter(|delta| *delta > 0)
                 {
