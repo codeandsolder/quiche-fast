@@ -49,6 +49,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 |------|------|
 | Add new plot type | `src/plots/` -- add module, wire into `main.rs` + `web.rs` |
 | Change parsed fields | `src/datastore.rs` -- all log-to-struct extraction |
+| Change log dispatch/parsing | `src/lib.rs` -- `parse_log_file()` routes to `parse_qlog_json()`, `parse_qlog_json_seq()`, `parse_netlog_json()`; each preserves format-specific trace identity and raw events |
 | Add series for plotting | `src/seriesstore.rs` |
 | Modify event filters | `src/wirefilter.rs` (wirefilter-engine DSL) |
 | CLI args / config | `src/config.rs` (AppConfig, clap) |

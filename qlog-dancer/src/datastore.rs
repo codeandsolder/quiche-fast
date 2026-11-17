@@ -611,7 +611,7 @@ impl Datastore {
 
                 let packet_type = PacketType::from_netlog_packet_header(
                     &e.params.header_format,
-                    &e.params.long_header_type,
+                    e.params.long_header_type.as_deref(),
                 );
 
                 let packet_info = PacketInfoStub {
