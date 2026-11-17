@@ -26,6 +26,11 @@
 
 //! Reporting (tables etc.)
 
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
 use qlog::events::quic::QuicFrame;
 use tabled::settings::location::ByColumnName;
 use tabled::settings::object::Segment;
@@ -37,6 +42,7 @@ use tabled::Table;
 
 use crate::config::AppConfig;
 use crate::datastore::Datastore;
+use crate::datastore::PacketInfoStub;
 use crate::datastore::PrintStatsConfig;
 use crate::request_stub::*;
 use crate::stringify_last;
@@ -368,100 +374,109 @@ pub fn print_flow_control(data: &[LogFileData]) {
     }
 }
 
-pub fn print_packet_loss(data: &[LogFileData]) {
-    // TODO make this a proper table
-    println!("================");
-    println!("QUIC packet loss");
-    println!("================");
-    for lf in data {
-        let is_received_some = lf
-            .datastore
-            .netlog_ack_sent_missing_packet
-            .contains_key(&crate::PacketType::Handshake) ||
-            lf.datastore
-                .netlog_ack_sent_missing_packet
-                .contains_key(&crate::PacketType::Initial) ||
-            lf.datastore
-                .netlog_ack_sent_missing_packet
-                .contains_key(&crate::PacketType::OneRtt) ||
-            lf.datastore
-                .netlog_ack_sent_missing_packet
-                .contains_key(&crate::PacketType::ZeroRtt) ||
-            lf.datastore
-                .netlog_ack_sent_missing_packet
-                .contains_key(&crate::PacketType::Retry) ||
-            lf.datastore
-                .netlog_ack_sent_missing_packet
-                .contains_key(&crate::PacketType::VersionNegotiation);
-
-        if !lf.datastore.netlog_ack_received_missing_packet.is_empty() ||
-            is_received_some
-        {
-            println!(
-                "Session={}, host={}",
-                lf.datastore.session_id.unwrap_or(-1),
-                lf.datastore
-                    .host
-                    .clone()
-                    .unwrap_or("ERROR UNKNOWN".to_string())
-            );
-        }
-
-        if !lf.datastore.netlog_ack_received_missing_packet.is_empty() {
-            println!("  Packets sent and lost");
-            println!("    Packet Type, Packet tx count, Packet lost count, Packet loss %, Packets lost");
-
-            for (pkt_type, pkt_nums) in
-                &lf.datastore.netlog_ack_received_missing_packet
-            {
-                if let Some(pkts) = lf.datastore.packet_received.get(pkt_type) {
-                    let total_pkts_tx = pkts.len();
-                    let pkt_loss = pkt_nums.len() as f64 / total_pkts_tx as f64;
-
-                    if !pkt_nums.is_empty() {
-                        println!(
-                            "    {:?}, {}, {}, {:.2}, {:?}",
-                            pkt_type,
-                            total_pkts_tx,
-                            pkt_nums.len(),
-                            pkt_loss * 100f64,
-                            pkt_nums
-                        );
-                    }
-                }
-            }
-
-            println!();
-        }
-
-        if is_received_some {
-            println!("  Packet lost and not received");
-            println!("    Packet Type, Packet rx count, Packet lost count, Packet loss %, Packets lost");
-
-            for (pkt_type, pkt_nums) in
-                &lf.datastore.netlog_ack_sent_missing_packet
-            {
-                if let Some(pkts) = lf.datastore.packet_received.get(pkt_type) {
-                    let total_pkts_tx = pkts.len();
-                    let pkt_loss = pkt_nums.len() as f64 / total_pkts_tx as f64;
-
-                    if !pkt_nums.is_empty() {
-                        println!(
-                            "    {:?}, {}, {}, {:.2}, {:?}",
-                            pkt_type,
-                            total_pkts_tx,
-                            pkt_nums.len(),
-                            pkt_loss * 100f64,
-                            pkt_nums
-                        );
-                    }
-                }
-            }
-
-            println!();
-        }
+/// Percentage of ACK-gap observations relative to the number of logged
+/// packets in the corresponding direction. This is not a loss probability.
+///
+/// Use integer basis points so the value is exact even for counts above the
+/// 53-bit floating-point integer range; round half up to two decimals.
+fn ack_gap_percentage(gaps: usize, observed: usize) -> String {
+    if observed == 0 {
+        return "n/a".to_owned();
     }
 
+    let denominator = observed as u128;
+    let hundredths = ((gaps as u128) * 10_000 + denominator / 2) / denominator;
+    format!("{}.{:02}", hundredths / 100, hundredths % 100)
+}
+
+fn append_ack_gap_section(
+    report: &mut String, heading: &str,
+    missing: &BTreeMap<crate::PacketType, BTreeSet<u64>>,
+    observed: &HashMap<crate::PacketType, BTreeMap<u64, PacketInfoStub>>,
+) {
+    if !missing.values().any(|numbers| !numbers.is_empty()) {
+        return;
+    }
+
+    let _ = writeln!(report, "  {heading}");
+    let _ = writeln!(
+        report,
+        "    Packet type, Observed packets, ACK gaps, ACK gaps / observed (%), Missing packet numbers"
+    );
+
+    for (packet_type, missing_numbers) in missing {
+        if missing_numbers.is_empty() {
+            continue;
+        }
+
+        // No packet-map entry is different from zero missing ACK numbers:
+        // preserve the observation, but report an undefined ratio.
+        let observed_count = observed.get(packet_type).map_or(0, BTreeMap::len);
+        let percentage =
+            ack_gap_percentage(missing_numbers.len(), observed_count);
+        let _ = writeln!(
+            report,
+            "    {packet_type:?}, {observed_count}, {}, {percentage}, {missing_numbers:?}",
+            missing_numbers.len(),
+        );
+    }
+    let _ = writeln!(report);
+}
+
+/// Format one session so the report and its edge cases are testable without
+/// intercepting process-wide stdout.
+fn packet_loss_session_report(data: &Datastore) -> String {
+    let sent_gaps = &data.netlog_ack_received_missing_packet;
+    let received_gaps = &data.netlog_ack_sent_missing_packet;
+
+    if !sent_gaps.values().any(|numbers| !numbers.is_empty()) &&
+        !received_gaps.values().any(|numbers| !numbers.is_empty())
+    {
+        return String::new();
+    }
+
+    let mut report = String::new();
+    let _ = writeln!(
+        report,
+        "Session={}, host={}",
+        data.session_id.unwrap_or(-1),
+        data.host.as_deref().unwrap_or("ERROR UNKNOWN")
+    );
+    let _ = writeln!(
+        report,
+        "  ACK gaps are not confirmed loss; netlog packet-space attribution may be approximate."
+    );
+
+    // ACKs from the peer describe the packets we transmitted, *not* packets
+    // received from the peer. ACKs we sent describe peer transmissions.
+    append_ack_gap_section(
+        &mut report,
+        "Packets sent, missing from received ACKs",
+        sent_gaps,
+        &data.packet_sent,
+    );
+    append_ack_gap_section(
+        &mut report,
+        "Packets received, missing from sent ACKs",
+        received_gaps,
+        &data.packet_received,
+    );
+    report
+}
+
+/// Print the Chrome netlog ACK-gap report across all parsed sessions.
+///
+/// ACK gaps may reflect delayed ACKs, reordering, or incomplete logging rather
+/// than confirmed packet loss. The percentage is relative to logged packets
+/// in the respective direction, not an estimate of true connection loss.
+pub fn print_packet_loss(data: &[LogFileData]) {
+    println!("================");
+    println!("QUIC ACK gaps");
+    println!("================");
+
+    for session in data {
+        print!("{}", packet_loss_session_report(&session.datastore));
+    }
     println!();
 }
 
@@ -480,6 +495,105 @@ mod report_safety_tests {
                 ..Default::default()
             })),
         }
+    }
+
+    fn observed_packet(
+        packet_type: crate::PacketType, number: u64,
+    ) -> PacketInfoStub {
+        PacketInfoStub {
+            acked: None,
+            raw: None,
+            created_time: 0.0,
+            send_at_time: None,
+            ty: packet_type,
+            number,
+        }
+    }
+
+    #[test]
+    fn ack_gap_percentages_are_exact_and_handle_empty_denominators() {
+        assert_eq!(ack_gap_percentage(1, 0), "n/a");
+        assert_eq!(ack_gap_percentage(0, 0), "n/a");
+        assert_eq!(ack_gap_percentage(0, 8), "0.00");
+        assert_eq!(ack_gap_percentage(1, 3), "33.33");
+        assert_eq!(ack_gap_percentage(2, 3), "66.67");
+        assert_eq!(ack_gap_percentage(1, 6), "16.67");
+        assert_eq!(ack_gap_percentage(1, 20_000), "0.01");
+        assert_eq!(ack_gap_percentage(1, 30_000), "0.00");
+        assert_eq!(ack_gap_percentage(3, 2), "150.00");
+        // Neither multiplication nor rounding should go through f64.
+        assert_eq!(ack_gap_percentage(usize::MAX, usize::MAX), "100.00");
+        assert_eq!(ack_gap_percentage(usize::MAX - 1, usize::MAX), "100.00");
+    }
+
+    #[test]
+    fn report_uses_sent_packets_for_received_acks_and_received_for_sent_acks() {
+        let packet_type = crate::PacketType::OneRtt;
+        let mut datastore = Datastore {
+            session_id: Some(7),
+            host: Some("example.test".to_owned()),
+            ..Default::default()
+        };
+        datastore.packet_sent.insert(
+            packet_type,
+            (0..8)
+                .map(|number| (number, observed_packet(packet_type, number)))
+                .collect(),
+        );
+        datastore.packet_received.insert(
+            packet_type,
+            (0..2)
+                .map(|number| (number, observed_packet(packet_type, number)))
+                .collect(),
+        );
+        datastore
+            .netlog_ack_received_missing_packet
+            .insert(packet_type, BTreeSet::from([2, 3]));
+        datastore
+            .netlog_ack_sent_missing_packet
+            .insert(packet_type, BTreeSet::from([1]));
+
+        let report = packet_loss_session_report(&datastore);
+        assert!(report.contains("Session=7, host=example.test"));
+        assert!(report.contains("Packets sent, missing from received ACKs"));
+        assert!(report.contains("    OneRtt, 8, 2, 25.00, {2, 3}"));
+        assert!(report.contains("Packets received, missing from sent ACKs"));
+        assert!(report.contains("    OneRtt, 2, 1, 50.00, {1}"));
+        assert!(report.contains("not confirmed loss"));
+    }
+
+    #[test]
+    fn report_retains_unknown_gap_spaces_even_without_observed_packets() {
+        let mut datastore = Datastore::default();
+        datastore
+            .netlog_ack_sent_missing_packet
+            .insert(crate::PacketType::Unknown, BTreeSet::from([u64::MAX]));
+
+        let report = packet_loss_session_report(&datastore);
+        assert!(report.contains("Session=-1, host=ERROR UNKNOWN"));
+        assert!(report.contains("Packets received, missing from sent ACKs"));
+        assert!(
+            report.contains(&format!("    Unknown, 0, 1, n/a, {{{}}}", u64::MAX))
+        );
+        assert!(!report.contains("Packets sent, missing from received ACKs"));
+        assert!(!report.contains("NaN"));
+        assert!(!report.contains("inf"));
+    }
+
+    #[test]
+    fn report_suppresses_only_empty_ack_gap_sets() {
+        let mut datastore = Datastore::default();
+        datastore
+            .netlog_ack_received_missing_packet
+            .insert(crate::PacketType::Initial, BTreeSet::new());
+        assert_eq!(packet_loss_session_report(&datastore), "");
+
+        datastore
+            .netlog_ack_received_missing_packet
+            .insert(crate::PacketType::Handshake, BTreeSet::from([99]));
+        let report = packet_loss_session_report(&datastore);
+        assert!(report.contains("    Handshake, 0, 1, n/a, {99}"));
+        assert!(!report.contains("    Initial,"));
     }
 
     #[test]
