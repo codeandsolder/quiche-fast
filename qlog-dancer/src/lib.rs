@@ -287,9 +287,9 @@ pub fn parse_log_file(
 
             let (data, sessions) = datastore::with_netlog_reader(
                 &mut reader,
-                config.netlog_filter.clone(),
+                &config.netlog_filter,
                 &constants,
-            );
+            )?;
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
             let details = LogFileDetails {
@@ -485,9 +485,9 @@ mod input_tests {
         let constants = netlog::read_netlog_constants(&mut reader)?;
         let (logs, sessions) = crate::datastore::with_netlog_reader(
             &mut reader,
-            HashSet::new(),
+            &HashSet::new(),
             &constants,
-        );
+        )?;
         assert_eq!(sessions.len(), 1);
         assert!(sessions.contains_key(&6));
         assert_eq!(logs.len(), 1);
