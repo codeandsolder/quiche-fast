@@ -66,7 +66,7 @@ fn send_to_gso_pacing(
     let cmsg_gso = ControlMessage::UdpGsoSegments(&segment_size);
 
     // Pacing option.
-    let send_time = std_time_to_u64(&send_info.at);
+    let send_time = std_time_to_u64(&send_info.at)?;
     let cmsg_txtime = ControlMessage::TxTime(&send_time);
 
     match sendmsg(
@@ -129,16 +129,50 @@ pub fn send_to(
 }
 
 #[cfg(target_os = "linux")]
-fn std_time_to_u64(time: &std::time::Instant) -> u64 {
-    const NANOS_PER_SEC: u64 = 1_000_000_000;
+fn std_time_to_u64(deadline: &std::time::Instant) -> io::Result<u64> {
+    let now = std::time::Instant::now();
+    let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: clock_gettime initializes the timespec on success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: clock_gettime returned success.
+    let ts = unsafe { ts.assume_init() };
+    let secs =
+        u64::try_from(ts.tv_sec).map_err(|_| io::ErrorKind::InvalidData)?;
+    let nanos =
+        u64::try_from(ts.tv_nsec).map_err(|_| io::ErrorKind::InvalidData)?;
+    if nanos >= 1_000_000_000 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let base = secs
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(nanos))
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let result = if *deadline >= now {
+        u64::try_from(deadline.duration_since(now).as_nanos())
+            .ok()
+            .and_then(|delta| base.checked_add(delta))
+    } else {
+        u64::try_from(now.duration_since(*deadline).as_nanos())
+            .ok()
+            .and_then(|delta| base.checked_sub(delta))
+    };
+    result.ok_or_else(|| io::ErrorKind::InvalidInput.into())
+}
 
-    const INSTANT_ZERO: std::time::Instant =
-        unsafe { std::mem::transmute(std::time::UNIX_EPOCH) };
-
-    let raw_time = time.duration_since(INSTANT_ZERO);
-
-    let sec = raw_time.as_secs();
-    let nsec = raw_time.subsec_nanos();
-
-    sec * NANOS_PER_SEC + nsec as u64
+#[cfg(all(test, target_os = "linux"))]
+mod pacing_tests {
+    use super::*;
+    #[test]
+    fn monotonic_deadlines_are_ordered() {
+        let now = std::time::Instant::now();
+        let earlier = std_time_to_u64(&now).unwrap();
+        let later =
+            std_time_to_u64(&(now + std::time::Duration::from_millis(50)))
+                .unwrap();
+        assert!(later > earlier);
+        assert!(later.abs_diff(earlier).abs_diff(50_000_000) < 10_000_000);
+    }
 }
