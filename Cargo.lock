@@ -2688,7 +2688,6 @@ dependencies = [
  "plotters",
  "plotters-canvas",
  "qlog",
- "regex",
  "serde",
  "serde-wasm-bindgen",
  "serde_json",

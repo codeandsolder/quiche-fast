@@ -980,7 +980,7 @@ pub fn plot_sparks(
                     .build_cartesian_2d(x_min..x_max, 0..ul_zoom_y_max)?
                     .set_secondary_coord(
                         x_min..x_max,
-                        0i32..*ul_h2_send_window_y_max,
+                        0i64..*ul_h2_send_window_y_max,
                     );
 
                 draw_mesh(&params.colors, &mut abs_ul_chart)?;
@@ -1005,7 +1005,7 @@ pub fn plot_sparks(
                     )?
                     .set_secondary_coord(
                         ul_zoom_x_min..ul_zoom_x_max,
-                        0i32..*ul_h2_send_window_y_max,
+                        0i64..*ul_h2_send_window_y_max,
                     );
                 draw_mesh(&params.colors, &mut rel_ul_chart)?;
 

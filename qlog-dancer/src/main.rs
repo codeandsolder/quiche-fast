@@ -143,8 +143,13 @@ fn run() -> i32 {
         info!("populating plot series data...");
         let mark = std::time::Instant::now();
         for data in log_file.data.iter_mut() {
-            let ss = SeriesStore::from_datastore(&data.datastore);
-            series_store.push(ss);
+            match SeriesStore::from_datastore(&data.datastore) {
+                Ok(ss) => series_store.push(ss),
+                Err(error) => {
+                    error!("Unable to construct plotting series: {error}");
+                    return 1;
+                },
+            }
         }
         debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 

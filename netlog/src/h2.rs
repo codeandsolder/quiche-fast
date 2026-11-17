@@ -103,8 +103,28 @@ pub struct Http2SessionSendSettingsEvent {
     pub params: Http2SessionSendSettingsParams,
 }
 
-// Example: "3 (SETTINGS_MAX_CONCURRENT_STREAMS)"
-pub const H2_RECV_SETTING_PATTERN: &str = r"^(\d+) \(\w+\)";
+// Example: "3 (SETTINGS_MAX_CONCURRENT_STREAMS)".
+/// Parses Chrome's received HTTP/2 SETTINGS identifier and descriptive name.
+///
+/// Unknown but syntactically valid setting names are accepted; interpretation
+/// of the numeric identifier belongs to `Http2Settings::set_from_wire`.
+pub fn parse_recv_setting_id(value: &str) -> Option<u16> {
+    let (id, description) = value.split_once(" (")?;
+    let name = description.strip_suffix(')')?;
+    if name.is_empty() ||
+        !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
+        return None;
+    }
+    // Reject Unicode digits and signed numeric values instead of treating
+    // anything that parses loosely as a valid wire-format identifier.
+    if id.is_empty() || !id.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    id.parse().ok()
+}
 #[derive(Deserialize, Debug, Default)]
 pub struct Http2SessionRecvSettingParams {
     pub id: String,
@@ -617,4 +637,30 @@ pub fn parse_event(
     }
 
     None
+}
+
+#[cfg(test)]
+mod recv_setting_tests {
+    use super::parse_recv_setting_id;
+
+    #[test]
+    fn parses_received_settings_and_rejects_malformed_ids() {
+        for (value, expected) in [
+            ("3 (SETTINGS_MAX_CONCURRENT_STREAMS)", Some(3)),
+            ("4 (SETTINGS_INITIAL_WINDOW_SIZE)", Some(4)),
+            ("65535 (UNKNOWN_VENDOR_SETTING)", Some(65535)),
+            ("65536 (UNKNOWN_VENDOR_SETTING)", None),
+            ("-1 (SETTINGS_ENABLE_PUSH)", None),
+            ("+1 (SETTINGS_ENABLE_PUSH)", None),
+            ("1 (SETTINGS_ENABLE_PUSH) trailing", None),
+            ("1 (SETTINGS ENABLE PUSH)", None),
+            ("1 (SETTINGS_ENABLE_PUSH", None),
+            ("1 ()", None),
+            ("x (SETTINGS_ENABLE_PUSH)", None),
+            ("1 (SETTINGS_ENABLE_PUSH) (extra)", None),
+            ("", None),
+        ] {
+            assert_eq!(parse_recv_setting_id(value), expected, "{value:?}");
+        }
+    }
 }
