@@ -58,51 +58,51 @@ pub enum PacketType {
 }
 
 impl PacketType {
-    pub fn from_qlog_packet_type(ty: &qlog::events::quic::PacketType) -> Self {
+    /// Classify a typed qlog packet, mapping unknown and stateless-reset
+    /// packets to the generic bucket used by the plots.
+    #[must_use]
+    pub const fn from_qlog_packet_type(
+        ty: &qlog::events::quic::PacketType,
+    ) -> Self {
+        use qlog::events::quic::PacketType as QlogPacketType;
+
         match ty {
-            qlog::events::quic::PacketType::Initial => PacketType::Initial,
-            qlog::events::quic::PacketType::Handshake => PacketType::Handshake,
-            qlog::events::quic::PacketType::ZeroRtt => PacketType::ZeroRtt,
-            qlog::events::quic::PacketType::OneRtt => PacketType::OneRtt,
-            qlog::events::quic::PacketType::Retry => PacketType::Retry,
-            qlog::events::quic::PacketType::VersionNegotiation =>
-                PacketType::VersionNegotiation,
-            qlog::events::quic::PacketType::StatelessReset => PacketType::Unknown,
-            qlog::events::quic::PacketType::Unknown => PacketType::Unknown,
+            QlogPacketType::Initial => Self::Initial,
+            QlogPacketType::Handshake => Self::Handshake,
+            QlogPacketType::ZeroRtt => Self::ZeroRtt,
+            QlogPacketType::OneRtt => Self::OneRtt,
+            QlogPacketType::Retry => Self::Retry,
+            QlogPacketType::VersionNegotiation => Self::VersionNegotiation,
+            QlogPacketType::StatelessReset | QlogPacketType::Unknown =>
+                Self::Unknown,
         }
     }
 
+    /// Classify a packet from Chrome netlog header metadata.
+    #[must_use]
     pub fn from_netlog_packet_header(
-        header_format: &str, long_header_type: &Option<String>,
+        header_format: &str, long_header_type: Option<&str>,
     ) -> Self {
         match header_format {
             "IETF_QUIC_LONG_HEADER_PACKET" => match long_header_type {
-                Some(v) => match v.as_str() {
-                    "INITIAL" => PacketType::Initial,
-                    "HANDSHAKE" => PacketType::Handshake,
-                    _ => PacketType::Unknown,
-                },
-
-                None => PacketType::Unknown,
+                Some("INITIAL") => Self::Initial,
+                Some("HANDSHAKE") => Self::Handshake,
+                _ => Self::Unknown,
             },
-
-            "IETF_QUIC_SHORT_HEADER_PACKET" => PacketType::OneRtt,
-
-            _ => PacketType::Unknown,
+            "IETF_QUIC_SHORT_HEADER_PACKET" => Self::OneRtt,
+            _ => Self::Unknown,
         }
     }
 
+    /// Classify a packet from Chrome netlog's encryption level.
+    #[must_use]
     pub fn from_netlog_encryption_level(encryption_level: &str) -> Self {
         match encryption_level {
-            "ENCRYPTION_INITIAL" => PacketType::Initial,
-
-            "ENCRYPTION_HANDSHAKE" => PacketType::Handshake,
-
-            "ENCRYPTION_ZERO_RTT" => PacketType::ZeroRtt,
-
-            "ENCRYPTION_FORWARD_SECURE" => PacketType::OneRtt,
-
-            _ => PacketType::Unknown,
+            "ENCRYPTION_INITIAL" => Self::Initial,
+            "ENCRYPTION_HANDSHAKE" => Self::Handshake,
+            "ENCRYPTION_ZERO_RTT" => Self::ZeroRtt,
+            "ENCRYPTION_FORWARD_SECURE" => Self::OneRtt,
+            _ => Self::Unknown,
         }
     }
 }
@@ -154,7 +154,7 @@ impl QlogTraceIdentity {
         let prefix = format!("trace {}", self.index + 1);
         self.title
             .as_deref()
-            .map_or(prefix.clone(), |title| format!("{prefix}: {title}"))
+            .map_or_else(|| prefix.clone(), |title| format!("{prefix}: {title}"))
     }
 }
 
@@ -189,147 +189,160 @@ pub struct LogFileParseResult {
     pub data: Vec<LogFileData>,
 }
 
+/// Parse the configured qlog JSON, JSON-SEQ or Chrome netlog input.
+///
+/// # Errors
+/// Returns an error for an unknown format, malformed input, unsupported
+/// vantage points, invalid filters or datastore processing failures.
 pub fn parse_log_file(
     config: &AppConfig,
 ) -> Result<LogFileParseResult, Box<dyn Error>> {
     match config.log_format {
-        SerializationFormat::QlogJson => {
-            let mark = std::time::Instant::now();
-            let qlog = read_qlog_from_file(&config.file)?;
-            if qlog.traces.is_empty() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "qlog file contains no traces",
-                )
-                .into());
-            }
-            debug!("parsed qlog JSON in {:?}", mark.elapsed());
-
-            let mark = std::time::Instant::now();
-            let mut data = Vec::with_capacity(qlog.traces.len());
-            for (index, trace) in qlog.traces.into_iter().enumerate() {
-                let vantage_point = trace
-                    .vantage_point
-                    .as_ref()
-                    .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone());
-                let datastore = Datastore::with_qlog_events(
-                    &trace.events,
-                    &vantage_point,
-                    !config.ignore_acks,
-                )?;
-                data.push(LogFileData {
-                    datastore,
-                    raw: RawLogEvents::QlogJson {
-                        events: trace.events,
-                    },
-                    trace: Some(QlogTraceIdentity {
-                        index,
-                        title: trace.title,
-                        vantage_point,
-                    }),
-                });
-            }
-            debug!(
-                "populated {} independent qlog datastores in {:?}",
-                data.len(),
-                mark.elapsed()
-            );
-            Ok(LogFileParseResult {
-                details: LogFileDetails {
-                    file_schema: qlog.file_schema,
-                    serialization_format: qlog.serialization_format,
-                    sessions: BTreeMap::new(),
-                },
-                data,
-            })
-        },
-
-        SerializationFormat::QlogJsonSeq => {
-            println!("parsing qlog as JSON-SEQ...");
-            let mark = std::time::Instant::now();
-
-            let (qlog_reader, details) = qlog_seq_reader(config)?;
-
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            println!("populating datastore...");
-            let mark = std::time::Instant::now();
-            let trace = QlogTraceIdentity {
-                index: 0,
-                title: qlog_reader.qlog.trace.title.clone(),
-                vantage_point: qlog_reader
-                    .qlog
-                    .trace
-                    .vantage_point
-                    .as_ref()
-                    .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone()),
-            };
-            let events: Vec<qlog::reader::Event> =
-                qlog_reader.into_iter().collect();
-            let events = if let Some(filter) = &config.qlog_wirefilter {
-                filter_sqlog_events(events, filter)?
-            } else {
-                events
-            };
-            // Keep plot series, stats, and raw event exports in agreement.
-            let datastore: Datastore = Datastore::with_sqlog_reader_events(
-                &events,
-                &trace.vantage_point,
-                !config.ignore_acks,
-            )?;
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            let raw = RawLogEvents::QlogJsonSeq { events };
-
-            Ok(LogFileParseResult {
-                details,
-                data: vec![LogFileData {
-                    datastore,
-                    raw,
-                    trace: Some(trace),
-                }],
-            })
-        },
-
-        SerializationFormat::NetlogJson => {
-            println!("setting up parsing file as netlog...");
-            let mark = std::time::Instant::now();
-
-            let file = std::fs::File::open(config.file.clone())?;
-            let mut reader = BufReader::new(file);
-
-            let constants = netlog::read_netlog_constants(&mut reader)?;
-
-            // trace!("{:?}", constants);
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            println!("parsing file ...");
-            println!("Filtering on hostnames: {:#?}", config.netlog_filter);
-            let mark = std::time::Instant::now();
-
-            let (data, sessions) = datastore::with_netlog_reader(
-                &mut reader,
-                &config.netlog_filter,
-                &constants,
-            )?;
-            debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
-
-            let details = LogFileDetails {
-                file_schema: constants.log_format_version.to_string(),
-                serialization_format: "Chrome netlog".to_string(),
-                sessions,
-            };
-
-            Ok(LogFileParseResult { details, data })
-        },
-
-        _ => {
+        SerializationFormat::QlogJson => parse_qlog_json(config),
+        SerializationFormat::QlogJsonSeq => parse_qlog_json_seq(config),
+        SerializationFormat::NetlogJson => parse_netlog_json(config),
+        SerializationFormat::Unknown => {
             error!("Unknown log file format for {}", config.filename);
-            Err("total fail".into())
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("unknown log file format for {}", config.filename),
+            )
+            .into())
         },
     }
 }
 
+fn parse_qlog_json(
+    config: &AppConfig,
+) -> Result<LogFileParseResult, Box<dyn Error>> {
+    let started = std::time::Instant::now();
+    let qlog = read_qlog_from_file(&config.file)?;
+    if qlog.traces.is_empty() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "qlog file contains no traces",
+        )
+        .into());
+    }
+    debug!("parsed qlog JSON in {:?}", started.elapsed());
+
+    let started = std::time::Instant::now();
+    let mut data = Vec::with_capacity(qlog.traces.len());
+    for (index, trace) in qlog.traces.into_iter().enumerate() {
+        let vantage_point = trace
+            .vantage_point
+            .as_ref()
+            .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone());
+        let datastore = Datastore::with_qlog_events(
+            &trace.events,
+            &vantage_point,
+            !config.ignore_acks,
+        )?;
+        data.push(LogFileData {
+            datastore,
+            raw: RawLogEvents::QlogJson {
+                events: trace.events,
+            },
+            trace: Some(QlogTraceIdentity {
+                index,
+                title: trace.title,
+                vantage_point,
+            }),
+        });
+    }
+    debug!(
+        "populated {} independent qlog datastores in {:?}",
+        data.len(),
+        started.elapsed()
+    );
+    Ok(LogFileParseResult {
+        details: LogFileDetails {
+            file_schema: qlog.file_schema,
+            serialization_format: qlog.serialization_format,
+            sessions: BTreeMap::new(),
+        },
+        data,
+    })
+}
+
+fn parse_qlog_json_seq(
+    config: &AppConfig,
+) -> Result<LogFileParseResult, Box<dyn Error>> {
+    println!("parsing qlog as JSON-SEQ...");
+    let started = std::time::Instant::now();
+    let (qlog_reader, details) = qlog_seq_reader(config)?;
+    debug!("	complete in {:?}", started.elapsed());
+
+    println!("populating datastore...");
+    let started = std::time::Instant::now();
+    let trace = QlogTraceIdentity {
+        index: 0,
+        title: qlog_reader.qlog.trace.title.clone(),
+        vantage_point: qlog_reader
+            .qlog
+            .trace
+            .vantage_point
+            .as_ref()
+            .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone()),
+    };
+    let events: Vec<qlog::reader::Event> = qlog_reader.into_iter().collect();
+    let events = if let Some(filter) = &config.qlog_wirefilter {
+        filter_sqlog_events(events, filter)?
+    } else {
+        events
+    };
+    // Keep plot series, stats, and raw event exports in agreement.
+    let datastore = Datastore::with_sqlog_reader_events(
+        &events,
+        &trace.vantage_point,
+        !config.ignore_acks,
+    )?;
+    debug!("	complete in {:?}", started.elapsed());
+
+    Ok(LogFileParseResult {
+        details,
+        data: vec![LogFileData {
+            datastore,
+            raw: RawLogEvents::QlogJsonSeq { events },
+            trace: Some(trace),
+        }],
+    })
+}
+
+fn parse_netlog_json(
+    config: &AppConfig,
+) -> Result<LogFileParseResult, Box<dyn Error>> {
+    println!("setting up parsing file as netlog...");
+    let started = std::time::Instant::now();
+    let file = File::open(&config.file)?;
+    let mut reader = BufReader::new(file);
+    let constants = netlog::read_netlog_constants(&mut reader)?;
+    debug!("	complete in {:?}", started.elapsed());
+
+    println!("parsing file ...");
+    println!("Filtering on hostnames: {:#?}", config.netlog_filter);
+    let started = std::time::Instant::now();
+    let (data, sessions) = datastore::with_netlog_reader(
+        &mut reader,
+        &config.netlog_filter,
+        &constants,
+    )?;
+    debug!("	complete in {:?}", started.elapsed());
+
+    Ok(LogFileParseResult {
+        details: LogFileDetails {
+            file_schema: constants.log_format_version.to_string(),
+            serialization_format: "Chrome netlog".to_string(),
+            sessions,
+        },
+        data,
+    })
+}
+
+/// Read a qlog JSON document from disk.
+///
+/// # Errors
+/// Returns an error if the file cannot be opened or decoded as qlog JSON.
 pub fn read_qlog_from_file<P: AsRef<Path>>(
     path: P,
 ) -> Result<Qlog, Box<dyn Error>> {
@@ -341,12 +354,17 @@ pub fn read_qlog_from_file<P: AsRef<Path>>(
     Ok(qlog)
 }
 
+/// Open a sequential qlog file, including supported compressed formats.
+///
+/// # Errors
+/// Returns an error for an unsupported file extension, invalid header,
+/// unavailable decompressor, or an I/O failure.
 pub fn qlog_seq_reader(
     config: &AppConfig,
 ) -> Result<(QlogSeqReader<'static>, LogFileDetails), Box<dyn Error>> {
     let qlog_reader =
         QlogSeqReader::with_file(config.file.clone()).map_err(|e| {
-            std::io::Error::other(format!("problem reading file! {}", e))
+            std::io::Error::other(format!("problem reading qlog file: {e}"))
         })?;
 
     let log_file_details = LogFileDetails {
@@ -378,7 +396,7 @@ fn push_interp<X: Clone, Y: Clone>(collection: &mut Vec<(X, Y)>, value: (X, Y)) 
         collection.push((new_time, y));
     }
 
-    collection.push(value)
+    collection.push(value);
 }
 
 fn create_file_recursive(filename: &str) -> std::io::Result<File> {
@@ -440,6 +458,99 @@ mod input_tests {
     use super::stringify_last;
     use super::SerializationFormat;
     use std::io::Cursor;
+
+    #[test]
+    fn packet_types_map_without_conflating_known_quic_packets() {
+        use qlog::events::quic::PacketType as QlogPacketType;
+
+        for (input, expected) in [
+            (QlogPacketType::Initial, super::PacketType::Initial),
+            (QlogPacketType::Handshake, super::PacketType::Handshake),
+            (QlogPacketType::ZeroRtt, super::PacketType::ZeroRtt),
+            (QlogPacketType::OneRtt, super::PacketType::OneRtt),
+            (QlogPacketType::Retry, super::PacketType::Retry),
+            (
+                QlogPacketType::VersionNegotiation,
+                super::PacketType::VersionNegotiation,
+            ),
+            (QlogPacketType::StatelessReset, super::PacketType::Unknown),
+            (QlogPacketType::Unknown, super::PacketType::Unknown),
+        ] {
+            assert_eq!(
+                super::PacketType::from_qlog_packet_type(&input),
+                expected,
+                "{input:?}"
+            );
+        }
+
+        for (header, long_type, expected) in [
+            (
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                Some("INITIAL"),
+                super::PacketType::Initial,
+            ),
+            (
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                Some("HANDSHAKE"),
+                super::PacketType::Handshake,
+            ),
+            (
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                Some("OTHER"),
+                super::PacketType::Unknown,
+            ),
+            (
+                "IETF_QUIC_LONG_HEADER_PACKET",
+                None,
+                super::PacketType::Unknown,
+            ),
+            (
+                "IETF_QUIC_SHORT_HEADER_PACKET",
+                None,
+                super::PacketType::OneRtt,
+            ),
+            (
+                "IETF_QUIC_SHORT_HEADER_PACKET",
+                Some("INITIAL"),
+                super::PacketType::OneRtt,
+            ),
+            ("NOT_A_PACKET", Some("INITIAL"), super::PacketType::Unknown),
+        ] {
+            assert_eq!(
+                super::PacketType::from_netlog_packet_header(header, long_type),
+                expected,
+                "{header:?} {long_type:?}"
+            );
+        }
+        for (level, expected) in [
+            ("ENCRYPTION_INITIAL", super::PacketType::Initial),
+            ("ENCRYPTION_HANDSHAKE", super::PacketType::Handshake),
+            ("ENCRYPTION_ZERO_RTT", super::PacketType::ZeroRtt),
+            ("ENCRYPTION_FORWARD_SECURE", super::PacketType::OneRtt),
+            ("UNRECOGNIZED", super::PacketType::Unknown),
+        ] {
+            assert_eq!(
+                super::PacketType::from_netlog_encryption_level(level),
+                expected,
+                "{level:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_labels_cover_titled_and_untitled_sessions() {
+        let trace = super::QlogTraceIdentity {
+            index: 2,
+            title: Some("handshake".to_string()),
+            vantage_point: qlog::VantagePointType::Client,
+        };
+        assert_eq!(trace.label(), "trace 3: handshake");
+        let untitled = super::QlogTraceIdentity {
+            title: None,
+            ..trace
+        };
+        assert_eq!(untitled.label(), "trace 3");
+    }
 
     #[test]
     fn serialization_format_recognizes_case_insensitive_extensions() {
