@@ -411,7 +411,9 @@ fn escape_html_cell(value: &str) -> String {
     escaped
 }
 
-fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
+/// Render escaped event-list HTML from a previously populated row builder.
+#[must_use]
+pub fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
     let mut rows = Vec::<Vec<String>>::from(table);
     for row in &mut rows {
         for cell in row {
