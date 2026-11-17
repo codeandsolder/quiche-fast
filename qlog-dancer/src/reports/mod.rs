@@ -26,13 +26,19 @@
 
 //! Reporting (tables etc.)
 
-use events::sqlog_event_list;
+use events::event_list;
 use tabled::settings::Style;
 
 use crate::config::AppConfig;
 use crate::LogFileParseResult;
 
-pub fn report(log_file: &LogFileParseResult, config: &AppConfig) {
+/// Write requested text and HTML reports.
+///
+/// # Errors
+/// Returns an I/O error if an event list report cannot be written.
+pub fn report(
+    log_file: &LogFileParseResult, config: &AppConfig,
+) -> std::io::Result<()> {
     if config.report_text {
         for data in &log_file.data {
             if let Some(table) = text::request_timing_table(data, config) {
@@ -52,16 +58,10 @@ pub fn report(log_file: &LogFileParseResult, config: &AppConfig) {
             text::print_stats(&data.datastore, &config.stats_config);
             println!();
 
-            match &data.raw {
-                crate::RawLogEvents::QlogJson { events: _ } => todo!(),
-                crate::RawLogEvents::QlogJsonSeq { events } => {
-                    let mut table = sqlog_event_list(events).build();
-                    table.with(Style::sharp());
-                    println!("Qlog events");
-                    println!("{}", table);
-                },
-                crate::RawLogEvents::Netlog => todo!(),
-            }
+            let mut table = event_list(&data.raw).build();
+            table.with(Style::sharp());
+            println!("Recognized log events");
+            println!("{table}");
         }
 
         // TODO: make this more configurable
@@ -73,8 +73,9 @@ pub fn report(log_file: &LogFileParseResult, config: &AppConfig) {
         html::overview(log_file, config);
         html::closures(log_file, config);
         html::requests(log_file, config);
-        html::event_list(log_file, config);
+        html::event_list(log_file, config)?;
     }
+    Ok(())
 }
 
 mod events;

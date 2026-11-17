@@ -335,6 +335,14 @@ pub struct Datastore {
     /// running sum.
     pub stream_buffer_dropped_tracker: StreamBufferTracker,
 
+    /// Records qlog stream bytes delivered to the user (distinct from the
+    /// application).
+    pub stream_buffer_user_tracker: StreamBufferTracker,
+
+    /// Records qlog stream bytes delivered to the network (distinct from
+    /// transport).
+    pub stream_buffer_network_tracker: StreamBufferTracker,
+
     pub received_reset_stream: BTreeMap<u64, Vec<QuicFrame>>,
     pub sent_reset_stream: BTreeMap<u64, Vec<QuicFrame>>,
 
@@ -1445,7 +1453,10 @@ impl Datastore {
                     &mut self.stream_buffer_writes_tracker,
                 qlog::events::DataRecipient::Dropped =>
                     &mut self.stream_buffer_dropped_tracker,
-                _ => todo!(),
+                qlog::events::DataRecipient::User =>
+                    &mut self.stream_buffer_user_tracker,
+                qlog::events::DataRecipient::Network =>
+                    &mut self.stream_buffer_network_tracker,
             };
 
             if let Some(stream_id) = dm.stream_id {
@@ -1961,7 +1972,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
     let mut log_file_data = Vec::new();
 
     for (session_id, details) in &sessions {
-        if let Some(events) = session_events.get(session_id) {
+        if let Some(events) = session_events.remove(session_id) {
             let mut ds = Datastore {
                 session_id: Some(*session_id),
                 application_proto: details.application_proto,
@@ -1970,7 +1981,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
                 ..Default::default()
             };
 
-            for (ev_hdr, event) in events {
+            for (ev_hdr, event) in &events {
                 ds.consume_netlog_event(
                     details.start_time,
                     ev_hdr,
@@ -1985,7 +1996,7 @@ pub fn with_netlog_reader<R: std::io::BufRead>(
             ds.finalize();
             log_file_data.push(LogFileData {
                 datastore: ds,
-                raw: Netlog,
+                raw: Netlog { events },
             });
         }
     }
@@ -2030,6 +2041,64 @@ mod input_tests {
         assert!(matches!(client.vantage_point, VantagePoint::Client));
         assert!(matches!(server.vantage_point, VantagePoint::Server));
         Ok(())
+    }
+
+    #[test]
+    fn every_qlog_data_recipient_has_a_distinct_tracking_destination() {
+        use qlog::events::quic::StreamDataMoved;
+        use qlog::events::DataRecipient;
+
+        for recipient in [
+            DataRecipient::User,
+            DataRecipient::Application,
+            DataRecipient::Transport,
+            DataRecipient::Network,
+            DataRecipient::Dropped,
+        ] {
+            let mut datastore = Datastore::default();
+            let moved = StreamDataMoved {
+                stream_id: Some(13),
+                offset: Some(3),
+                to: Some(recipient.clone()),
+                raw: Some(qlog::events::RawInfo {
+                    length: Some(7),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            datastore.consume_qlog_event(
+                &Event::with_time(2.0, EventData::QuicStreamDataMoved(moved)),
+                false,
+            );
+            let trackers = [
+                (&DataRecipient::User, &datastore.stream_buffer_user_tracker),
+                (
+                    &DataRecipient::Application,
+                    &datastore.stream_buffer_reads_tracker,
+                ),
+                (
+                    &DataRecipient::Transport,
+                    &datastore.stream_buffer_writes_tracker,
+                ),
+                (
+                    &DataRecipient::Network,
+                    &datastore.stream_buffer_network_tracker,
+                ),
+                (
+                    &DataRecipient::Dropped,
+                    &datastore.stream_buffer_dropped_tracker,
+                ),
+            ];
+            for (target, tracker) in trackers {
+                if target == &recipient {
+                    assert_eq!(tracker.get_stream_max(13), Some(10));
+                    assert_eq!(tracker.sum_series, vec![(2.0, 10)]);
+                } else {
+                    assert_eq!(tracker.get_stream_max(13), None);
+                    assert!(tracker.sum_series.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

@@ -170,9 +170,16 @@ pub struct LogFileDetails {
 }
 
 pub enum RawLogEvents {
-    QlogJson { events: Vec<qlog::events::Event> },
-    QlogJsonSeq { events: Vec<qlog::reader::Event> },
-    Netlog,
+    QlogJson {
+        events: Vec<qlog::events::Event>,
+    },
+    QlogJsonSeq {
+        events: Vec<qlog::reader::Event>,
+    },
+    /// Parsed events belonging to each selected Chrome netlog session.
+    Netlog {
+        events: Vec<(netlog::EventHeader, netlog::Event)>,
+    },
 }
 
 pub struct LogFileData {
@@ -485,6 +492,19 @@ mod input_tests {
         assert!(sessions.contains_key(&6));
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].datastore.host.as_deref(), Some("example.test"));
+        match &logs[0].raw {
+            super::RawLogEvents::Netlog { events } => {
+                assert_eq!(events.len(), 1);
+                assert_eq!(events[0].0.ty_string, "HTTP2_SESSION");
+                assert_eq!(events[0].0.time, "5");
+            },
+            _ =>
+                return Err(
+                    "parsed Chrome netlog must retain selected session events"
+                        .into(),
+                ),
+        }
+
         Ok(())
     }
 
