@@ -106,6 +106,11 @@ fn text_and_html_event_reports_work_for_all_log_formats(
             let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
                 .arg(&path)
                 .arg(report)
+                .args(if report == "--report-text" {
+                    vec!["--print-stats", "stream"]
+                } else {
+                    Vec::new()
+                })
                 .current_dir(&run.0)
                 .env("RUST_LOG", "error")
                 .output()?;
@@ -126,6 +131,15 @@ fn text_and_html_event_reports_work_for_all_log_formats(
                     "{extension}: {stdout}"
                 );
                 assert!(stdout.contains(expected_event), "{extension}: {stdout}");
+                assert!(
+                    stdout.contains("### sent MAX_DATA frames ###"),
+                    "{extension}: {stdout}"
+                );
+                assert!(
+                    stdout.contains("### received MAX_DATA frames ###"),
+                    "{extension}: {stdout}"
+                );
+                assert!(stdout.contains("    None"), "{extension}: {stdout}");
             } else {
                 let html = fs::read_to_string(
                     run.0.join(format!("{filename}-reports/event-list.html")),
@@ -133,6 +147,31 @@ fn text_and_html_event_reports_work_for_all_log_formats(
                 assert!(html.contains(expected_event), "{extension}: {html}");
                 assert!(html.contains("Recognized log events"));
                 if extension == "json" {
+                    let output_dir = run.0.join(format!("{filename}-reports"));
+                    for report_file in
+                        ["overview.html", "requests.html", "closures.html"]
+                    {
+                        let additional_html =
+                            fs::read_to_string(output_dir.join(report_file))?;
+                        assert!(!additional_html.contains("<script>alert(1)</script>"),
+                                "unsanitized log content in {report_file}: {additional_html}");
+                    }
+                    let overview =
+                        fs::read_to_string(output_dir.join("overview.html"))?;
+                    let requests =
+                        fs::read_to_string(output_dir.join("requests.html"))?;
+                    assert!(
+                        overview.contains(
+                            "&lt;script&gt;alert(1)&lt;/script&gt;&amp;"
+                        ),
+                        "{overview}"
+                    );
+                    assert!(
+                        requests.contains(
+                            "&lt;script&gt;alert(1)&lt;/script&gt;&amp;"
+                        ),
+                        "{requests}"
+                    );
                     assert!(html.contains("12345678901234567890"));
                     assert!(html
                         .contains("&lt;script&gt;alert(1)&lt;/script&gt;&amp;"));
@@ -140,6 +179,39 @@ fn text_and_html_event_reports_work_for_all_log_formats(
                 }
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn every_html_report_file_failure_is_returned_not_panicked(
+) -> Result<(), Box<dyn std::error::Error>> {
+    for target in [
+        "overview.html",
+        "closures.html",
+        "requests.html",
+        "event-list.html",
+    ] {
+        let run = RunDir::new()?;
+        let filename = "sample.qlog";
+        let input = run.0.join(filename);
+        fs::write(&input, native_qlog())?;
+        let output_path = run.0.join(format!("{filename}-reports")).join(target);
+        fs::create_dir_all(&output_path)?; // A directory at the output-file
+                                           // path makes File::create fail.
+        let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+            .arg(&input)
+            .arg("--report-html")
+            .current_dir(&run.0)
+            .env("RUST_LOG", "error")
+            .output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{target}: {stderr}");
+        assert!(
+            stderr.contains("Unable to write log report"),
+            "{target}: {stderr}"
+        );
+        assert!(!stderr.contains("panicked at"), "{target}: {stderr}");
     }
     Ok(())
 }

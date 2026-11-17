@@ -35,25 +35,21 @@ use crate::LogFileParseResult;
 /// Write requested text and HTML reports.
 ///
 /// # Errors
-/// Returns an I/O error if an event list report cannot be written.
+/// Returns an I/O error if any HTML report file cannot be created or written.
 pub fn report(
     log_file: &LogFileParseResult, config: &AppConfig,
 ) -> std::io::Result<()> {
     if config.report_text {
         for data in &log_file.data {
-            if let Some(table) = text::request_timing_table(data, config) {
-                println!(
-                    "Request timing table for session ID: {:?}, app proto: {:?}, host: {:?}",
-                    data.datastore.session_id.unwrap_or(-1),
-                    data.datastore.application_proto,
-                    data.datastore
-                        .host
-                        .clone()
-                        .unwrap_or("ERROR UNKNOWN".to_string())
-                );
-                println!("{}", table);
-                println!();
-            }
+            let table = text::request_timing_table(data, config);
+            println!(
+                "Request timing table for session ID: {:?}, app proto: {:?}, host: {:?}",
+                data.datastore.session_id.unwrap_or(-1),
+                data.datastore.application_proto,
+                data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
+            );
+            println!("{}", table);
+            println!();
 
             text::print_stats(&data.datastore, &config.stats_config);
             println!();
@@ -70,9 +66,9 @@ pub fn report(
     }
 
     if config.report_html {
-        html::overview(log_file, config);
-        html::closures(log_file, config);
-        html::requests(log_file, config);
+        html::overview(log_file, config)?;
+        html::closures(log_file, config)?;
+        html::requests(log_file, config)?;
         html::event_list(log_file, config)?;
     }
     Ok(())
