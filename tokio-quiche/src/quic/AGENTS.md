@@ -51,7 +51,7 @@ router/
 - **`InitialQuicConnection` is `#[must_use]`** -- dropping silently discards connection. Always call `.start()`, `.handshake()`, or `.handshake_fut()`.
 - **`handshake()` spawns with `AbortOnDropHandle`** -- dropping the future kills the handshake task. Hold the handle.
 - **`fill_available_scids` sends `ConnectionMapCommand::MapCid` to router** -- silently fails if router channel dropped. Don't assume CID registration succeeded.
-- **`transmute` of `Instant` in `gso.rs`** -- fragile platform-dependent hack. Do not extend or replicate.
+- **Linux `SO_TXTIME` in `io/gso.rs`** -- the socket uses `CLOCK_MONOTONIC`; convert opaque `Instant` deadlines against a sampled monotonic clock, with checked nanosecond arithmetic. Never transmute an `Instant` or silently truncate UDP GSO segment sizes. The conversion's boundary tests must be deterministic even on loaded CI hosts.
 - **One client connection per socket** -- `connect()` docs explicitly warn. Sharing socket loses packets.
 - **`#[cfg(feature = "zero-copy")]` gates `QuicheConnection` type alias** -- `quiche::Connection<BufFactory>` vs `quiche::Connection`. Check both paths when modifying connection creation.
 - **`wait_for_quiche` returns `TlsFail` on gather error** -- misleading sentinel error, don't propagate this pattern.

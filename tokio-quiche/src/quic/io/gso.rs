@@ -117,6 +117,70 @@ impl PktInfo {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+fn monotonic_timespec_ns(ts: libc::timespec) -> io::Result<u64> {
+    const NANOS_PER_SECOND: u64 = 1_000_000_000;
+
+    let seconds =
+        u64::try_from(ts.tv_sec).map_err(|_| io::ErrorKind::InvalidData)?;
+    let nanos =
+        u64::try_from(ts.tv_nsec).map_err(|_| io::ErrorKind::InvalidData)?;
+    if nanos >= NANOS_PER_SECOND {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    seconds
+        .checked_mul(NANOS_PER_SECOND)
+        .and_then(|seconds| seconds.checked_add(nanos))
+        .ok_or_else(|| io::ErrorKind::InvalidData.into())
+}
+
+/// Translate an opaque Rust Instant relative to a sampled CLOCK_MONOTONIC
+/// value, without relying on Instant's private layout.
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+fn tx_time_from_anchor(
+    deadline: Instant, anchor: Instant, anchor_ns: u64,
+) -> io::Result<u64> {
+    let (forward, difference) = if deadline >= anchor {
+        (true, deadline.duration_since(anchor))
+    } else {
+        (false, anchor.duration_since(deadline))
+    };
+    let delta = u64::try_from(difference.as_nanos())
+        .map_err(|_| io::ErrorKind::InvalidInput)?;
+
+    if forward {
+        anchor_ns.checked_add(delta)
+    } else {
+        anchor_ns.checked_sub(delta)
+    }
+    .ok_or_else(|| io::ErrorKind::InvalidInput.into())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+fn monotonic_tx_time(deadline: Instant) -> io::Result<u64> {
+    // SO_TXTIME uses CLOCK_MONOTONIC, as does Instant::now() on Linux.
+    // Bracket the kernel sample with Rust Instant readings and use their
+    // midpoint to bound sampling skew, including under preemption.
+    let before = Instant::now();
+    let mut ts = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: ts is a valid writable timespec; clock_gettime fills it on
+    // success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &raw mut ts) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let after = Instant::now();
+    let span = after
+        .checked_duration_since(before)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let anchor = before
+        .checked_add(span / 2)
+        .ok_or(io::ErrorKind::InvalidData)?;
+    tx_time_from_anchor(deadline, anchor, monotonic_timespec_ns(ts)?)
+}
+
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 #[expect(
     clippy::too_many_arguments,
     reason = "The signature mirrors protocol state and grouping would obscure call sites"
@@ -127,18 +191,26 @@ pub async fn send_to(
     dscp: Option<Dscp>, would_block_metric: Counter,
     send_to_wouldblock_duration_s: TimeHistogram,
 ) -> io::Result<usize> {
-    // SAFETY: This Linux-only code assumes `Instant` uses the same layout as a
-    // zero-valid timespec. The zero instant allows raw time extraction.
-    const INSTANT_ZERO: Instant = unsafe { std::mem::transmute(0u128) };
+    let raw_time = tx_time.map(monotonic_tx_time).transpose()?.unwrap_or(0);
+    // UDP_SEGMENT is a nonzero u16 on the wire. Truncating a usize here
+    // silently changes the segment size and can even turn it into zero.
+    let segment_size_u16 = segment_size
+        .map(|size| {
+            u16::try_from(size)
+                .ok()
+                .filter(|size| *size != 0)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "UDP GSO segment size must be in 1..=65535",
+                    )
+                })
+        })
+        .transpose()?;
 
     let mut sendmsg_retry_timer = None;
     loop {
         let iov = [std::io::IoSlice::new(send_buf)];
-        let segment_size_u16 = segment_size.map(|size| size as u16);
-
-        let raw_time = tx_time
-            .map(|t| t.duration_since(INSTANT_ZERO).as_nanos() as u64)
-            .unwrap_or(0);
 
         let pkt_info = from.map(PktInfo::from_socket_addr);
         let tos = dscp.map(Dscp::tos);
@@ -438,28 +510,108 @@ pub(crate) mod test {
     }
 
     #[test]
-    /// If this test begins to fail, it means the implementation of [`Instant`]
-    /// has changed in the std library.
-    fn instant_zero() {
-        use std::time::Instant;
+    fn monotonic_tx_time_checked_arithmetic() {
+        let anchor = Instant::now();
+        let ahead = anchor.checked_add(Duration::from_nanos(5)).unwrap();
+        let behind = anchor.checked_sub(Duration::from_nanos(5)).unwrap();
 
-        const INSTANT_ZERO: Instant = unsafe { std::mem::transmute(0u128) };
-        const NANOS_PER_SEC: u128 = 1_000_000_000;
+        assert_eq!(tx_time_from_anchor(anchor, anchor, 42).unwrap(), 42);
+        assert_eq!(tx_time_from_anchor(ahead, anchor, 42).unwrap(), 47);
+        assert_eq!(tx_time_from_anchor(behind, anchor, 42).unwrap(), 37);
+        assert_eq!(
+            tx_time_from_anchor(ahead, anchor, u64::MAX - 5).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(tx_time_from_anchor(behind, anchor, 5).unwrap(), 0);
 
-        // Define a [`Timespec`] similar to the one backing [`Instant`]
-        #[derive(Debug)]
-        struct Timespec {
-            tv_sec: i64,
-            tv_nsec: u32,
+        assert_eq!(
+            tx_time_from_anchor(ahead, anchor, u64::MAX - 4)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        assert_eq!(
+            tx_time_from_anchor(behind, anchor, 4).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+
+        // Exercise the real CLOCK_MONOTONIC sampling path too; no timing
+        // assertions that can fail under CI scheduling delays.
+        assert!(monotonic_tx_time(anchor).unwrap() > 0);
+    }
+
+    #[test]
+    fn monotonic_timespec_checks_kernel_values() {
+        let ts = |sec, nsec| libc::timespec {
+            tv_sec: sec,
+            tv_nsec: nsec,
+        };
+        assert_eq!(
+            monotonic_timespec_ns(ts(2, 999_999_999)).unwrap(),
+            2_999_999_999
+        );
+        for invalid in [ts(-1, 0), ts(0, -1), ts(0, 1_000_000_000)] {
+            assert_eq!(
+                monotonic_timespec_ns(invalid).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
         }
+        if let Ok(seconds) = libc::time_t::try_from(u64::MAX / 1_000_000_000 + 1)
+        {
+            assert_eq!(
+                monotonic_timespec_ns(ts(seconds, 0)).unwrap_err().kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+    }
 
-        let now = Instant::now();
-        let now_timespec: Timespec = unsafe { std::mem::transmute(now) };
+    #[tokio::test]
+    async fn invalid_udp_segment_sizes_are_errors_not_truncations() {
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let metrics = DefaultMetrics;
+        for size in [0, usize::from(u16::MAX) + 1, usize::MAX] {
+            let err = send_to(
+                &sender,
+                receiver.local_addr().unwrap(),
+                None,
+                b"segment",
+                Some(size),
+                None,
+                None,
+                metrics.write_errors(QuicWriteError::WouldBlock),
+                metrics.send_to_wouldblock_duration_s(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "size={size}");
+        }
+    }
 
-        let ref_elapsed = now.duration_since(INSTANT_ZERO).as_nanos();
-        let raw_elapsed = now_timespec.tv_sec as u128 * NANOS_PER_SEC +
-            now_timespec.tv_nsec as u128;
+    #[tokio::test]
+    async fn txtime_control_message_is_accepted_by_linux_socket() {
+        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let cfg = libc::sock_txtime {
+            clockid: libc::CLOCK_MONOTONIC,
+            flags: 0,
+        };
+        setsockopt(&sender, sockopt::TxTime, &cfg).unwrap();
 
-        assert_eq!(ref_elapsed, raw_elapsed);
+        let metrics = DefaultMetrics;
+        let sent = send_to(
+            &sender,
+            receiver.local_addr().unwrap(),
+            None,
+            b"deadline",
+            None,
+            Some(Instant::now() + Duration::from_millis(100)),
+            None,
+            metrics.write_errors(QuicWriteError::WouldBlock),
+            metrics.send_to_wouldblock_duration_s(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(sent, b"deadline".len());
     }
 }
