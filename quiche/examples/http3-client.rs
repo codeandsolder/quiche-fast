@@ -30,6 +30,7 @@ extern crate log;
 use quiche::h3::NameValue;
 
 use ring::rand::*;
+use std::io::Write;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -253,9 +254,7 @@ fn main() {
                                 "got {read} bytes of response data on stream {stream_id}"
                             );
 
-                            print!("{}", unsafe {
-                                std::str::from_utf8_unchecked(&buf[..read])
-                            });
+                            std::io::stdout().write_all(&buf[..read]).unwrap();
                         }
                     },
 
