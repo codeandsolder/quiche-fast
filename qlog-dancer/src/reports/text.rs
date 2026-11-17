@@ -134,22 +134,48 @@ pub fn print_stats(data_store: &Datastore, config: &PrintStatsConfig) {
     }
 }
 
+/// An absent ACK observation is unknown, not evidence that the packet was lost.
+const fn ack_status_label(acked: Option<bool>) -> &'static str {
+    match acked {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+/// Formatting directly to stdout retains constant additional memory even
+/// when the datastore contains millions of sent packets.
+struct SentPacketLine<'a> {
+    number: u64,
+    packet: &'a PacketInfoStub,
+}
+
+impl std::fmt::Display for SentPacketLine<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (length, payload_length) = self
+            .packet
+            .raw
+            .as_ref()
+            .map_or((None, None), |raw| (raw.length, raw.payload_length));
+        let acked = ack_status_label(self.packet.acked);
+        write!(
+            formatter,
+            "\tpkt_num={}, acked={acked}, length={length:?}, payload_length={payload_length:?}, ",
+            self.number,
+        )
+    }
+}
+
 fn print_sent_packet_stats(data_store: &Datastore) {
     println!("### sent packets ###");
-    for (pkt_space, pkts) in &data_store.packet_sent {
-        println!("\t# packet space={:?}", pkt_space);
+    for (packet_space, packets) in &data_store.packet_sent {
+        println!("\t# packet space={packet_space:?}");
 
-        for (pkt_num, pkt_info) in pkts {
-            let (length, payload_length) = match &pkt_info.raw {
-                Some(raw) => (raw.length, raw.payload_length),
-
-                None => (None, None),
-            };
-
-            println!(
-                "\tpkt_num={}, acked=TODO-unknown, length={:?}, payload_length={:?}, ",
-                pkt_num, length, payload_length
-            );
+        for (number, packet) in packets {
+            println!("{}", SentPacketLine {
+                number: *number,
+                packet
+            });
         }
         println!();
     }
@@ -508,6 +534,51 @@ mod report_safety_tests {
             ty: packet_type,
             number,
         }
+    }
+
+    #[test]
+    fn sent_packet_stats_use_the_recorded_ack_state() {
+        let mut datastore = Datastore::default();
+        let packet_type = crate::PacketType::OneRtt;
+        let mut packets = BTreeMap::new();
+
+        for (number, acked) in [(10, Some(true)), (11, None), (12, Some(false))] {
+            let mut packet = observed_packet(packet_type, number);
+            packet.acked = acked;
+            if number == 10 {
+                packet.raw = Some(qlog::events::RawInfo {
+                    length: Some(128),
+                    payload_length: Some(100),
+                    ..Default::default()
+                });
+            }
+            packets.insert(number, packet);
+        }
+        datastore.packet_sent.insert(packet_type, packets);
+
+        let lines: Vec<_> = datastore.packet_sent[&packet_type]
+            .iter()
+            .map(|(number, packet)| {
+                SentPacketLine {
+                    number: *number,
+                    packet,
+                }
+                .to_string()
+            })
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(
+            lines[0],
+            "\tpkt_num=10, acked=yes, length=Some(128), payload_length=Some(100), "
+        );
+        assert_eq!(
+            lines[1],
+            "\tpkt_num=11, acked=unknown, length=None, payload_length=None, "
+        );
+        assert_eq!(
+            lines[2],
+            "\tpkt_num=12, acked=no, length=None, payload_length=None, "
+        );
     }
 
     #[test]
