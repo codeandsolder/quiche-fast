@@ -114,39 +114,49 @@ async function loadLog(event) {
     var loading = document.getElementById("loading");
     loading.style.display = "block";
 
-    qlog_dancer = new_qlog_dancer(file.name);
+    const errorBox = document.getElementById("load-error");
+    const complete = document.getElementById("load-complete");
+    errorBox.style.display = "none";
+    complete.style.display = "none";
 
-    const start = Date.now();
-    const reader = file.stream().getReader();
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        qlog_dancer.process_chunk(value);
+    try {
+        qlog_dancer = new_qlog_dancer(file.name);
+
+        const start = Date.now();
+        const reader = file.stream().getReader();
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                qlog_dancer.process_chunk(value);
+            }
+        } finally {
+            reader.releaseLock();
+        }
+        // JSON-SEQ events are committed only after the next RS or EOF.
+        qlog_dancer.finish_stream();
+        console.log(`Log read duration: ${Date.now() - start} ms`);
+
+        const ds_pop_start = Date.now();
+        qlog_dancer.populate_datastore();
+        console.log(`populate datastore duration: ${Date.now() - ds_pop_start} ms`);
+
+        console.log(`packet sent events total = ${qlog_dancer.total_packets_sent()}`);
+
+        const start_pop = Date.now();
+        qlog_dancer.populate_seriesstore();
+        console.log(`data processing of charts duration: ${Date.now() - start_pop} ms`);
+
+        // Default to drawing the connection overview.
+        toggleOverview();
+        complete.style.display = "block";
+    } catch (error) {
+        console.error("Cannot load qlog JSON-SEQ file", error);
+        errorBox.textContent = `Could not load ${file.name}: ${String(error)}`;
+        errorBox.style.display = "block";
+    } finally {
+        loading.style.display = "none";
     }
-    const end = Date.now();
-    console.log(`Log read duration: ${end - start} ms`);
-
-    const ds_pop_start = Date.now();
-    qlog_dancer.populate_datastore();
-    const ds_pop_end = Date.now();
-    console.log(`populate datastore duration: ${ds_pop_end - ds_pop_start} ms`);
-
-    const packets_sent = qlog_dancer.total_packets_sent();
-    console.log(`packet sent events total = ${packets_sent}`);
-
-    const start_pop = Date.now();
-    qlog_dancer.populate_seriesstore();
-    const end_pop = Date.now();
-    console.log(`data processing of charts duration: ${end_pop - start_pop} ms`);
-
-    //setupCanvas("overview_container", "overview_canvas")
-
-    // Default to draw overview page
-    toggleOverview()
-
-    var comp = document.getElementById("load-complete");
-    loading.style.display = "none";
-    comp.style.display = "block";
 }
 
 function toggleElem(e) {

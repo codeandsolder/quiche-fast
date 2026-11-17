@@ -59,6 +59,7 @@ use plotters_canvas::CanvasBackend;
 use wasm_bindgen::prelude::*;
 
 use crate::seriesstore::SeriesStore;
+use crate::sqlog_stream::SqlogStream;
 
 use serde::Deserialize;
 use serde::Serialize;
@@ -163,9 +164,7 @@ pub fn new_qlog_dancer(display_name: &str) -> QlogDancerWeb {
         ds,
         ss: None,
         display_name: display_name.into(),
-        partial: vec![],
-        log_info: None,
-        qlog_events: vec![],
+        sqlog_stream: SqlogStream::default(),
 
         mp_chart_info: None,
         cc_chart_info: None,
@@ -184,9 +183,7 @@ pub struct QlogDancerWeb {
     display_name: String,
     ds: Datastore,
     ss: Option<SeriesStore>,
-    partial: Vec<u8>,
-    log_info: Option<Vec<u8>>,
-    qlog_events: Vec<qlog::reader::Event>,
+    sqlog_stream: SqlogStream,
 
     mp_chart_info: Option<ChartInfo<f64, u64>>,
     cc_chart_info: Option<ChartInfo<f64, u64>>,
@@ -202,74 +199,46 @@ pub struct QlogDancerWeb {
 #[wasm_bindgen]
 impl QlogDancerWeb {
     #[wasm_bindgen]
-    pub fn process_chunk(&mut self, chunk: &[u8]) {
-        let mut s = chunk.split(|f| *f == b'');
+    /// Add bytes to a JSON-SEQ stream. Records are not parsed until the
+    /// following record separator, so arbitrary file and network chunks work.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if framing, the header, or an event is
+    /// invalid.
+    pub fn process_chunk(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
+        self.sqlog_stream
+            .push_chunk(chunk)
+            .map_err(|err| JsValue::from_str(&err))
+    }
 
-        if self.log_info.is_none() {
-            // null value, ignore it
-            s.next();
-
-            if let Some(info) = s.next() {
-                self.log_info = Some(info.to_vec());
-            }
-        }
-
-        for obj in s {
-            if !self.partial.is_empty() {
-                self.partial.extend_from_slice(obj);
-
-                // ignore result as we'll give up either way.
-                // TODO: clone needed to appease borrow checker
-                let _ = self.try_read_event(&self.partial.clone());
-
-                self.partial.clear();
-            } else {
-                // Try to parse the bytes we have. This might fail because
-                // the event is unknown, or because the reader only gave us
-                // a partial string. Always try to recover from partial
-                // strings by storing it and retrying later when we have
-                // more data available.
-                if self.try_read_event(obj).is_err() && !obj.ends_with(b"}}") {
-                    self.partial = obj.to_vec();
-                };
-            }
-        }
+    /// Finalize the stream and decode the last record at EOF.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error for a missing header or malformed final
+    /// record.
+    pub fn finish_stream(&mut self) -> Result<(), JsValue> {
+        self.sqlog_stream
+            .finish()
+            .map_err(|err| JsValue::from_str(&err))
     }
 
     #[wasm_bindgen]
-    /// Consume a ReadableStream as if it were a sqlog file.
-    /// TODO: support other log formats
-    pub async fn read_stream(&mut self, readable: web_sys::ReadableStream) {
+    /// Consume a ReadableStream as a qlog JSON-SEQ input.
+    ///
+    /// # Errors
+    /// Propagates stream read failures and malformed/truncated qlog records.
+    pub async fn read_stream(
+        &mut self, readable: web_sys::ReadableStream,
+    ) -> Result<(), JsValue> {
         use futures_util::StreamExt;
 
-        let mut a =
+        let mut stream =
             wasm_streams::ReadableStream::from_raw(readable).into_stream();
-
-        while let Some(Ok(chunk)) = a.next().await {
-            let b = js_sys::Uint8Array::new(&chunk).to_vec();
-
-            self.process_chunk(&b);
+        while let Some(chunk) = stream.next().await {
+            let bytes = js_sys::Uint8Array::new(&chunk?).to_vec();
+            self.process_chunk(&bytes)?;
         }
-    }
-
-    pub fn try_read_event(&mut self, buf: &[u8]) -> Result<(), String> {
-        let r: serde_json::Result<qlog::events::Event> =
-            serde_json::from_slice(buf);
-
-        if let Ok(event) = r {
-            self.qlog_events.push(qlog::reader::Event::Qlog(event));
-            return Ok(());
-        }
-
-        let r: serde_json::Result<qlog::events::JsonEvent> =
-            serde_json::from_slice(buf);
-
-        if let Ok(event) = r {
-            self.qlog_events.push(qlog::reader::Event::Json(event));
-            return Ok(());
-        }
-
-        Err("not read".to_string())
+        self.finish_stream()
     }
 
     #[wasm_bindgen]
@@ -287,27 +256,28 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
+    /// Construct plot data from the completed JSON-SEQ stream.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if the input is incomplete or if the qlog
+    /// vantage point or event data is unsupported.
     pub fn populate_datastore(&mut self) -> Result<(), JsValue> {
-        // Construct the dataset separately so a rejected event does not
-        // expose partially updated stream stats or stale plot data.
+        self.finish_stream()?;
+        let vantage_point = self
+            .sqlog_stream
+            .header()
+            .and_then(|header| header.trace.vantage_point.as_ref())
+            .map_or(qlog::VantagePointType::Unknown, |point| point.ty.clone());
+
+        // Construct the datastore separately so a rejected event never exposes
+        // partially updated stream stats or stale plot data.
         self.ss = None;
-        let mut ds = Datastore {
-            vantage_point: self.ds.vantage_point,
-            ..Datastore::default()
-        };
-        for event in &self.qlog_events {
-            match event {
-                qlog::reader::Event::Qlog(ev) => ds
-                    .consume_qlog_event(ev, true)
-                    .map_err(|error| JsValue::from_str(&error.to_string()))?,
-                qlog::reader::Event::Json(_) => {
-                    // Extensible events are not mapped to typed datastore
-                    // fields.
-                },
-            }
-        }
-        ds.hydrate_http_requests();
-        ds.finalize();
+        let ds = Datastore::with_sqlog_reader_events(
+            self.sqlog_stream.events(),
+            &vantage_point,
+            true,
+        )
+        .map_err(|err| JsValue::from_str(&err.to_string()))?;
         self.ds = ds;
         Ok(())
     }
@@ -829,7 +799,7 @@ impl QlogDancerWeb {
             })?;
 
         let event_table = event_list_html_from_table(
-            sqlog_event_list(&self.qlog_events)
+            sqlog_event_list(self.sqlog_stream.events())
                 .map_err(|error| JsValue::from_str(&error.to_string()))?,
         );
         target_div.set_inner_html(&event_table);
