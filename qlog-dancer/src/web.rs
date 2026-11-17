@@ -359,7 +359,7 @@ impl QlogDancerWeb {
     pub fn draw_connection_overview(
         &mut self, mp_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -380,11 +380,14 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
+            self.mp_chart_info = None;
             let chart =
-                plot_main_plot(&params, &self.display_name, ss, &mp_canvas_id);
+                plot_main_plot(&params, &self.display_name, ss, &mp_canvas_id)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.mp_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -393,7 +396,7 @@ impl QlogDancerWeb {
     pub fn draw_cc_plot(
         &mut self, cc_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -414,10 +417,13 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
-            let chart = plot_cc_plot(&params, ss, &self.ds, &cc_canvas_id);
+            self.cc_chart_info = None;
+            let chart = plot_cc_plot(&params, ss, &self.ds, &cc_canvas_id)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.cc_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -426,7 +432,7 @@ impl QlogDancerWeb {
     pub fn draw_rtt_plot(
         &mut self, rtt_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -447,14 +453,19 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
-            let chart = plot_rtt_plot(&params, ss, &rtt_canvas_id);
+            self.rtt_chart_info = None;
+            let chart = plot_rtt_plot(&params, ss, &rtt_canvas_id)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?;
             self.rtt_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
     /// Draws the flow control plot into the provided canvas_id.
-    pub fn draw_flow_control(&mut self, canvas_id: &str, display_legend: bool) {
+    pub fn draw_flow_control(
+        &mut self, canvas_id: &str, display_legend: bool,
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -479,15 +490,18 @@ impl QlogDancerWeb {
                 canvas_id: canvas_id.to_string(),
             };
 
+            self.fc_chart_info = None;
             let chart = plot_conn_flow_control_canvas(
                 &params,
                 &self.display_name,
                 ss,
                 &self.ds,
                 &chart_type,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
             self.fc_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -578,7 +592,7 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     /// Draws the stream pending plot into the provided canvas_id.
-    pub fn draw_pending(&mut self, canvas_id: &str) {
+    pub fn draw_pending(&mut self, canvas_id: &str) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let pending_params = PendingPlotParams {
                 clamp: ClampParams {
@@ -604,8 +618,10 @@ impl QlogDancerWeb {
                 ss,
                 &self.ds,
                 &chart_type,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
+        Ok(())
     }
 
     #[wasm_bindgen]

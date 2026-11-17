@@ -184,7 +184,7 @@ impl MultiplexLayout {
 /// Returns invalid layout, nonfinite times, output filesystem/canvas, and
 /// backend/drawing failures as errors rather than panicking.
 pub fn plot_stream_multiplexing(
-    params: &MultiplexPlotsParams, filename: &str, ss: &SeriesStore,
+    params: &MultiplexPlotsParams, _filename: &str, ss: &SeriesStore,
     ds: &Datastore, ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
     let requests: Vec<_> = ds
@@ -253,15 +253,8 @@ pub fn plot_stream_multiplexing(
     }
     let x_range = checked_time_range(start, end, &params.clamp)?;
 
-    let config = ChartConfig {
-        title: "stream-multiplexing".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: ty.clone(),
-    };
+    let config =
+        ChartConfig::new("stream-multiplexing", _filename, &params.clamp, ds, ty);
     let margin = ChartMargin {
         top: 20,
         bottom: 20,

@@ -42,18 +42,11 @@ use crate::seriesstore::SeriesStore;
 /// # Errors
 /// Propagates validation, output and drawing failures to callers.
 pub fn plot_packet_received(
-    params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
+    params: &PlotParameters, filename: &str, ss: &SeriesStore, _ds: &Datastore,
     ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
-    let chart_config = ChartConfig {
-        title: "packet-received".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: ty.clone(),
-    };
+    let chart_config =
+        ChartConfig::new("packet-received", filename, &params.clamp, _ds, ty);
 
     #[cfg(not(target_arch = "wasm32"))]
     let chart_path = match ty {

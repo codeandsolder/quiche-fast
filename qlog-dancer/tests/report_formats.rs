@@ -245,3 +245,64 @@ fn packet_received_and_multiplex_cli_report_output_errors_without_panicking(
     }
     Ok(())
 }
+
+#[test]
+fn overview_flow_and_pending_cli_fail_cleanly_when_output_is_blocked(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let input = run.0.join("sample.qlog");
+    fs::write(&input, native_qlog())?;
+    let blocked = run.0.join("occupied-chart-directory");
+    fs::write(&blocked, b"a file cannot contain PNG outputs")?;
+    for (chart, error_label) in [
+        ("overview", "Unable to draw connection overview chart"),
+        ("conn-flow", "Unable to draw connection flow control chart"),
+        ("pending", "Unable to draw pending chart"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+            .arg(&input)
+            .args(["--charts", chart, "--charts-directory"])
+            .arg(&blocked)
+            .current_dir(&run.0)
+            .env("RUST_LOG", "error")
+            .output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{chart}: {stderr}");
+        assert!(
+            stderr.contains(error_label),
+            "{chart} missing diagnostic: {stderr}"
+        );
+        assert!(
+            !stderr.contains("panicked at"),
+            "{chart} panicked: {stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn conn_flow_cli_actually_creates_png_when_selected(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let input = run.0.join("sample.qlog");
+    fs::write(&input, native_qlog())?;
+    let output_dir = run.0.join("flow-control-images");
+    let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+        .arg(&input)
+        .args(["--charts", "conn-flow", "--charts-directory"])
+        .arg(&output_dir)
+        .current_dir(&run.0)
+        .env("RUST_LOG", "error")
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let images = fs::read_dir(&output_dir)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(
+        images.len(),
+        1,
+        "--charts conn-flow must generate exactly one PNG"
+    );
+    let bytes = fs::read(images[0].path())?;
+    assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+    Ok(())
+}

@@ -30,6 +30,7 @@
 //! at a glance.
 
 use full_palette::PURPLE_500;
+use plotters::coord::ranged1d::ValueFormatter;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::drawing::DrawingAreaErrorKind;
@@ -673,11 +674,13 @@ fn spark_bitmap_area<'a>(
 }
 
 #[cfg(target_arch = "wasm32")]
-fn required_canvas_id(config: &ChartConfig) -> Result<String, std::io::Error> {
+fn required_canvas_id(
+    config: &ChartConfig, chart: &str,
+) -> Result<String, std::io::Error> {
     config.canvas_id().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("spark chart {:?} requires a canvas output", config.title),
+            format!("spark chart {chart:?} requires a canvas output"),
         )
     })
 }
@@ -708,7 +711,7 @@ fn spark_canvas_area(
     reason = "The signature mirrors protocol state and grouping would obscure call sites"
 )]
 pub fn plot_sparks(
-    params: &SparkPlotsParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
+    params: &SparkPlotsParams, _filename: &str, ss: &SeriesStore, ds: &Datastore,
     abs_dl_ty: &ChartOutputType, rel_dl_ty: &ChartOutputType,
     abs_ul_ty: &ChartOutputType, rel_ul_ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
@@ -823,45 +826,37 @@ pub fn plot_sparks(
     let x_min = absolute_time_range.start;
     let x_max = absolute_time_range.end;
 
-    let abs_dl_chart_config = ChartConfig {
-        title: "stream-spark-dl-absolute".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: abs_dl_ty.clone(),
-    };
+    let abs_dl_chart_config = ChartConfig::new(
+        "stream-spark-dl-absolute",
+        _filename,
+        &params.clamp,
+        ds,
+        abs_dl_ty,
+    );
 
-    let rel_dl_chart_config = ChartConfig {
-        title: "stream-spark-dl-relative".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: rel_dl_ty.clone(),
-    };
+    let rel_dl_chart_config = ChartConfig::new(
+        "stream-spark-dl-relative",
+        _filename,
+        &params.clamp,
+        ds,
+        rel_dl_ty,
+    );
 
-    let abs_ul_chart_config = ChartConfig {
-        title: "stream-spark-ul-absolute".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: abs_ul_ty.clone(),
-    };
+    let abs_ul_chart_config = ChartConfig::new(
+        "stream-spark-ul-absolute",
+        _filename,
+        &params.clamp,
+        ds,
+        abs_ul_ty,
+    );
 
-    let rel_ul_chart_config = ChartConfig {
-        title: "stream-spark-ul-relative".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: rel_ul_ty.clone(),
-    };
+    let rel_ul_chart_config = ChartConfig::new(
+        "stream-spark-ul-relative",
+        _filename,
+        &params.clamp,
+        ds,
+        rel_ul_ty,
+    );
 
     #[cfg(not(target_arch = "wasm32"))]
     for config in [
@@ -915,16 +910,20 @@ pub fn plot_sparks(
         spark_bitmap_area(&rel_ul_chart_path, size, params.colors, margin)?;
 
     #[cfg(target_arch = "wasm32")]
-    let abs_dl_canvas_id = required_canvas_id(&abs_dl_chart_config)?;
+    let abs_dl_canvas_id =
+        required_canvas_id(&abs_dl_chart_config, "download-absolute")?;
 
     #[cfg(target_arch = "wasm32")]
-    let rel_dl_canvas_id = required_canvas_id(&rel_dl_chart_config)?;
+    let rel_dl_canvas_id =
+        required_canvas_id(&rel_dl_chart_config, "download-relative")?;
 
     #[cfg(target_arch = "wasm32")]
-    let abs_ul_canvas_id = required_canvas_id(&abs_ul_chart_config)?;
+    let abs_ul_canvas_id =
+        required_canvas_id(&abs_ul_chart_config, "upload-absolute")?;
 
     #[cfg(target_arch = "wasm32")]
-    let rel_ul_canvas_id = required_canvas_id(&rel_ul_chart_config)?;
+    let rel_ul_canvas_id =
+        required_canvas_id(&rel_ul_chart_config, "upload-relative")?;
 
     #[cfg(target_arch = "wasm32")]
     let abs_dl_root =

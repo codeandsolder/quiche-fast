@@ -410,15 +410,8 @@ pub fn plot_packet_sent(
     params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
-    let chart_config = ChartConfig {
-        title: "packet-sent".into(),
-        input_filename: filename.into(),
-        clamp: params.clamp.clone(),
-        app_proto: ds.application_proto,
-        host: ds.host.clone(),
-        session_id: ds.session_id,
-        ty: ty.clone(),
-    };
+    let chart_config =
+        ChartConfig::new("packet-sent", filename, &params.clamp, ds, ty);
 
     #[cfg(not(target_arch = "wasm32"))]
     let chart_path = match ty {
