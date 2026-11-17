@@ -2895,7 +2895,7 @@ mod tests {
             tv_nsec: 0,
         };
         std_time_to_c(&now, &mut first);
-        std_time_to_c(&(now + std::time::Duration::from_millis(50)), &mut second);
+        std_time_to_c(&(now + Duration::from_millis(50)), &mut second);
         let first_ns =
             i128::from(first.tv_sec) * 1_000_000_000 + i128::from(first.tv_nsec);
         let second_ns = i128::from(second.tv_sec) * 1_000_000_000 +
