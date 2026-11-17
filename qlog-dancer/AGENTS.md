@@ -18,7 +18,7 @@ src/
   datastore.rs         Datastore struct, log event handlers and netlog session reader
   seriesstore.rs       SeriesStore: extracts plot-ready time-series from Datastore
   wirefilter.rs        Event filtering via cloudflare/wirefilter-engine DSL
-  request_stub.rs      Stub types for request-level data
+  request_stub.rs      Stub types for request-level data; preserves initial metadata across trailing HEADERS
   plots/               Chart rendering (plotters crate)
     mod.rs             PlotParameters, ChartSize, ClampParams, output type enums
     conn_overview.rs   Multi-panel connection overview (cwnd, bytes, rtt, streams)

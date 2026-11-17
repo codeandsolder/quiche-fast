@@ -60,6 +60,13 @@ impl<T> NaOption<T> {
     pub fn new(value: Option<T>) -> Self {
         Self { inner: value }
     }
+
+    /// Preserve an earlier value when a later header block omits this field.
+    fn update_if_present(&mut self, value: Option<T>) {
+        if let Some(value) = value {
+            self.inner = Some(value);
+        }
+    }
 }
 
 impl<T: std::fmt::Display> Display for NaOption<T> {
@@ -335,38 +342,49 @@ impl HttpRequestStub {
         // TODO: case-sensitivity for HTTP/1.1
         let headers = headers_to_map(hdrs);
 
-        self.method = NaOption::new(headers.get(":method").cloned());
-        self.host = NaOption::new(headers.get(":authority").cloned());
-        self.path = NaOption::new(headers.get(":path").cloned());
-        self.client_pri_hdr = NaOption::new(headers.get("priority").cloned());
-        self.client_content_length =
-            NaOption::new(headers.get("content-length").cloned());
+        self.method
+            .update_if_present(headers.get(":method").cloned());
+        self.host
+            .update_if_present(headers.get(":authority").cloned());
+        self.path.update_if_present(headers.get(":path").cloned());
+        self.client_pri_hdr
+            .update_if_present(headers.get("priority").cloned());
+        self.client_content_length
+            .update_if_present(headers.get("content-length").cloned());
     }
 
     pub fn set_response_info_from_netlog(&mut self, hdrs: &[String]) {
         // TODO: case-sensitivity for HTTP/1.1
         let headers = headers_to_map(hdrs);
 
-        self.status = NaOption::new(headers.get(":status").cloned());
-        self.server_pri_hdr = NaOption::new(headers.get("priority").cloned());
-        self.server_content_length =
-            NaOption::new(headers.get("content-length").cloned());
+        self.status
+            .update_if_present(headers.get(":status").cloned());
+        self.server_pri_hdr
+            .update_if_present(headers.get("priority").cloned());
+        self.server_content_length
+            .update_if_present(headers.get("content-length").cloned());
     }
 
     pub fn set_request_info_from_qlog(&mut self, hdrs: &[HttpHeader]) {
-        self.method = NaOption::new(find_header_value(hdrs, ":method"));
-        self.host = NaOption::new(find_header_value(hdrs, ":authority"));
-        self.path = NaOption::new(find_header_value(hdrs, ":path"));
-        self.client_pri_hdr = NaOption::new(find_header_value(hdrs, "priority"));
-        self.client_content_length =
-            NaOption::new(find_header_value(hdrs, "content-length"));
+        self.method
+            .update_if_present(find_header_value(hdrs, ":method"));
+        self.host
+            .update_if_present(find_header_value(hdrs, ":authority"));
+        self.path
+            .update_if_present(find_header_value(hdrs, ":path"));
+        self.client_pri_hdr
+            .update_if_present(find_header_value(hdrs, "priority"));
+        self.client_content_length
+            .update_if_present(find_header_value(hdrs, "content-length"));
     }
 
     pub fn set_response_info_from_qlog(&mut self, hdrs: &[HttpHeader]) {
-        self.status = NaOption::new(find_header_value(hdrs, ":status"));
-        self.server_pri_hdr = NaOption::new(find_header_value(hdrs, "priority"));
-        self.server_content_length =
-            NaOption::new(find_header_value(hdrs, "content-length"));
+        self.status
+            .update_if_present(find_header_value(hdrs, ":status"));
+        self.server_pri_hdr
+            .update_if_present(find_header_value(hdrs, "priority"));
+        self.server_content_length
+            .update_if_present(find_header_value(hdrs, "content-length"));
     }
 
     // input times in milliseconds
@@ -531,6 +549,98 @@ impl HttpRequestStub {
                     tx_first_data_tx_last_data,
                 });
             },
+        }
+    }
+}
+
+#[cfg(test)]
+mod header_metadata_tests {
+    use super::HttpRequestStub;
+    use super::NaOption;
+    use qlog::events::http3::HttpHeader;
+
+    #[test]
+    fn trailers_preserve_request_response_metadata_for_qlog_and_netlog() {
+        for qlog_format in [false, true] {
+            let apply = |req: &mut HttpRequestStub,
+                         request: bool,
+                         fields: &[(&str, &str)]| {
+                if qlog_format {
+                    let headers: Vec<_> = fields
+                        .iter()
+                        .map(|&(name, value)| HttpHeader {
+                            name: Some(name.into()),
+                            name_bytes: None,
+                            value: Some(value.into()),
+                            value_bytes: None,
+                        })
+                        .collect();
+                    if request {
+                        req.set_request_info_from_qlog(&headers);
+                    } else {
+                        req.set_response_info_from_qlog(&headers);
+                    }
+                } else {
+                    let headers: Vec<_> = fields
+                        .iter()
+                        .map(|(name, value)| format!("{name}: {value}"))
+                        .collect();
+                    if request {
+                        req.set_request_info_from_netlog(&headers);
+                    } else {
+                        req.set_response_info_from_netlog(&headers);
+                    }
+                }
+            };
+
+            let mut req = HttpRequestStub::default();
+            apply(&mut req, true, &[
+                (":method", "POST"),
+                (":authority", "example.test"),
+                (":path", "/resource"),
+                ("priority", "u=3"),
+                ("content-length", "12"),
+            ]);
+            apply(&mut req, true, &[("grpc-status", "0")]);
+            assert_eq!(
+                (
+                    req.method.inner.as_deref(),
+                    req.host.inner.as_deref(),
+                    req.path.inner.as_deref(),
+                    req.client_pri_hdr.inner.as_deref(),
+                    req.client_content_length.inner.as_deref(),
+                ),
+                (
+                    Some("POST"),
+                    Some("example.test"),
+                    Some("/resource"),
+                    Some("u=3"),
+                    Some("12"),
+                )
+            );
+            apply(&mut req, true, &[("priority", "u=1")]);
+            assert_eq!(req.client_pri_hdr.inner.as_deref(), Some("u=1"));
+
+            let mut response = HttpRequestStub::default();
+            apply(&mut response, false, &[
+                (":status", "200"),
+                ("priority", "u=4"),
+                ("content-length", "120"),
+            ]);
+            apply(&mut response, false, &[("grpc-status", "0")]);
+            assert_eq!(response.status.inner.as_deref(), Some("200"));
+            assert_eq!(response.server_pri_hdr.inner.as_deref(), Some("u=4"));
+            assert_eq!(
+                response.server_content_length.inner.as_deref(),
+                Some("120")
+            );
+
+            apply(&mut response, false, &[("priority", "")]);
+            assert_eq!(
+                response.server_pri_hdr,
+                NaOption::new(Some(String::new()))
+            );
+            assert_eq!(response.status.inner.as_deref(), Some("200"));
         }
     }
 }
