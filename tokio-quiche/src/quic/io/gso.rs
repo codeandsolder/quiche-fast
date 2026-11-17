@@ -117,6 +117,43 @@ impl PktInfo {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+fn monotonic_tx_time(deadline: Instant) -> io::Result<u64> {
+    // Anchor the opaque Rust Instant clock to the kernel clock used by
+    // SO_TXTIME. No assumptions about Instant's private representation are
+    // necessary.
+    let instant_now = Instant::now();
+    let mut ts = std::mem::MaybeUninit::<libc::timespec>::uninit();
+    // SAFETY: clock_gettime initializes the supplied timespec on success.
+    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, ts.as_mut_ptr()) } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: clock_gettime succeeded and initialized the timespec.
+    let ts = unsafe { ts.assume_init() };
+    let seconds = u64::try_from(ts.tv_sec)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    let nanos = u64::try_from(ts.tv_nsec)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+    if nanos >= 1_000_000_000 {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let now = seconds
+        .checked_mul(1_000_000_000)
+        .and_then(|n| n.checked_add(nanos))
+        .ok_or(io::ErrorKind::InvalidData)?;
+    let delta = if deadline >= instant_now {
+        u64::try_from(deadline.duration_since(instant_now).as_nanos())
+            .ok()
+            .and_then(|n| now.checked_add(n))
+    } else {
+        u64::try_from(instant_now.duration_since(deadline).as_nanos())
+            .ok()
+            .and_then(|n| now.checked_sub(n))
+    };
+    delta.ok_or_else(|| io::ErrorKind::InvalidInput.into())
+}
+
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 #[expect(
     clippy::too_many_arguments,
     reason = "The signature mirrors protocol state and grouping would obscure call sites"
@@ -127,18 +164,12 @@ pub async fn send_to(
     dscp: Option<Dscp>, would_block_metric: Counter,
     send_to_wouldblock_duration_s: TimeHistogram,
 ) -> io::Result<usize> {
-    // SAFETY: This Linux-only code assumes `Instant` uses the same layout as a
-    // zero-valid timespec. The zero instant allows raw time extraction.
-    const INSTANT_ZERO: Instant = unsafe { std::mem::transmute(0u128) };
+    let raw_time = tx_time.map(monotonic_tx_time).transpose()?.unwrap_or(0);
 
     let mut sendmsg_retry_timer = None;
     loop {
         let iov = [std::io::IoSlice::new(send_buf)];
         let segment_size_u16 = segment_size.map(|size| size as u16);
-
-        let raw_time = tx_time
-            .map(|t| t.duration_since(INSTANT_ZERO).as_nanos() as u64)
-            .unwrap_or(0);
 
         let pkt_info = from.map(PktInfo::from_socket_addr);
         let tos = dscp.map(Dscp::tos);
@@ -438,28 +469,12 @@ pub(crate) mod test {
     }
 
     #[test]
-    /// If this test begins to fail, it means the implementation of [`Instant`]
-    /// has changed in the std library.
-    fn instant_zero() {
-        use std::time::Instant;
-
-        const INSTANT_ZERO: Instant = unsafe { std::mem::transmute(0u128) };
-        const NANOS_PER_SEC: u128 = 1_000_000_000;
-
-        // Define a [`Timespec`] similar to the one backing [`Instant`]
-        #[derive(Debug)]
-        struct Timespec {
-            tv_sec: i64,
-            tv_nsec: u32,
-        }
-
+    fn monotonic_tx_time_tracks_deadlines() {
         let now = Instant::now();
-        let now_timespec: Timespec = unsafe { std::mem::transmute(now) };
-
-        let ref_elapsed = now.duration_since(INSTANT_ZERO).as_nanos();
-        let raw_elapsed = now_timespec.tv_sec as u128 * NANOS_PER_SEC +
-            now_timespec.tv_nsec as u128;
-
-        assert_eq!(ref_elapsed, raw_elapsed);
+        let before = monotonic_tx_time(now).unwrap();
+        let after = monotonic_tx_time(now + std::time::Duration::from_millis(50))
+            .unwrap();
+        assert!(after > before);
+        assert!((after - before).abs_diff(50_000_000) < 10_000_000);
     }
 }
