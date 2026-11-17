@@ -59,6 +59,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 - Native build requires system libs: **libexpat, freetype, fontconfig** (plotters SVG/bitmap backends).
 - Wasm uses `plotters-canvas` backend -- canvas rendering, no system deps.
 - `wirefilter-engine` pinned to specific git rev, not on crates.io.
-- Log format auto-detection: tries qlog JSON, falls back to JSON-SEQ (sqlog), and vice versa.
+- Log format detection is case-insensitive on the filename's final extension; parsing can retry between qlog JSON and JSON-SEQ where applicable.
+- Native CLI numeric arguments are typed in `AppConfig::command()` and validated in `AppConfig::from_matches()`: `-s`/`--start`, `-e`/`--end` accept finite nonnegative `f64` with end >= start; `--stream-y-axis-max` and `--cwnd-y-axis-max` accept positive `u64`. The canonical dark-mode flag is `--dark-mode`; old underscore spellings are not retained.
 - `getrandom/wasm_js` feature + `.cargo/config.toml` needed for wasm randomness.
 - Web assets (`index.html`, `qlog-dancer-ui.js`, `qlog-dancer.css`) live in crate root, not `src/`.
