@@ -28,6 +28,7 @@
 extern crate log;
 
 use ring::rand::*;
+use std::io::Write;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
@@ -219,9 +220,7 @@ fn main() {
                     fin
                 );
 
-                print!("{}", unsafe {
-                    std::str::from_utf8_unchecked(stream_buf)
-                });
+                std::io::stdout().write_all(stream_buf).unwrap();
 
                 // The server reported that it has no more data to send, which
                 // we got the full response. Close the connection.
