@@ -216,13 +216,18 @@ fn run() -> i32 {
             if config.plot_pkt_sent {
                 let mark = std::time::Instant::now();
                 info!("drawing packet sent chart for {}...", label);
-                packet_sent::plot_packet_sent(
+                if let Err(error) = packet_sent::plot_packet_sent(
                     &plot_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &chart_config,
-                );
+                ) {
+                    error!(
+                        "Unable to draw packet sent chart for {label}: {error}"
+                    );
+                    return 1;
+                }
 
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
@@ -230,13 +235,16 @@ fn run() -> i32 {
             if config.plot_pkt_received {
                 let mark = std::time::Instant::now();
                 info!("drawing packet received chart for {}...", label);
-                packet_received::plot_packet_received(
+                if let Err(error) = packet_received::plot_packet_received(
                     &plot_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &chart_config,
-                );
+                ) {
+                    error!("Unable to draw packet received chart for {label}: {error}");
+                    return 1;
+                }
 
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
@@ -291,13 +299,16 @@ fn run() -> i32 {
                 };
                 let mark = std::time::Instant::now();
                 info!("drawing multiplex for {}...", label);
-                stream_multiplex::plot_stream_multiplexing(
+                if let Err(error) = stream_multiplex::plot_stream_multiplexing(
                     &multiplex_params,
                     &config.filename,
                     ss,
                     &data.datastore,
                     &chart_config,
-                );
+                ) {
+                    error!("Unable to draw stream multiplexing chart for {label}: {error}");
+                    return 1;
+                }
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 

@@ -215,3 +215,33 @@ fn every_html_report_file_failure_is_returned_not_panicked(
     }
     Ok(())
 }
+
+#[test]
+fn packet_received_and_multiplex_cli_report_output_errors_without_panicking(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let input = run.0.join("sample.qlog");
+    fs::write(&input, native_qlog())?;
+    let blocked = run.0.join("blocked-chart-directory");
+    fs::write(&blocked, b"an output directory cannot be a file")?;
+    for (plot, expected) in [
+        ("pkt-rx", "Unable to draw packet received chart"),
+        ("multiplex", "Unable to draw stream multiplexing chart"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+            .arg(&input)
+            .args(["--charts", plot, "--charts-directory"])
+            .arg(&blocked)
+            .current_dir(&run.0)
+            .env("RUST_LOG", "error")
+            .output()?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "{plot}: {stderr}");
+        assert!(
+            stderr.contains(expected),
+            "{plot} missing diagnostic: {stderr}"
+        );
+        assert!(!stderr.contains("panicked at"), "{plot} panicked: {stderr}");
+    }
+    Ok(())
+}

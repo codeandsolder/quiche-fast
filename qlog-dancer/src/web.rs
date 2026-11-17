@@ -329,21 +329,25 @@ impl QlogDancerWeb {
     pub fn get_chart_info(&self, canvas_id: &str) -> JsValue {
         match canvas_id {
             "overview_canvas" =>
-                self.mp_chart_info.expect("canvas exists").into(),
-            "rtt_canvas" => self.rtt_chart_info.expect("canvas exists").into(),
-            "cc_canvas" => self.cc_chart_info.expect("canvas exists").into(),
+                self.mp_chart_info.map_or(JsValue::null(), Into::into),
+            "rtt_canvas" =>
+                self.rtt_chart_info.map_or(JsValue::null(), Into::into),
+            "cc_canvas" => self.cc_chart_info.map_or(JsValue::null(), Into::into),
             "flow_control_canvas" =>
-                self.fc_chart_info.expect("canvas exists").into(),
+                self.fc_chart_info.map_or(JsValue::null(), Into::into),
             "pkt-rx-canvas" =>
-                self.pkt_rx_chart_info.expect("canvas exists").into(),
+                self.pkt_rx_chart_info.map_or(JsValue::null(), Into::into),
             "pkt-tx-canvas" =>
-                self.pkt_tx_chart_info.expect("canvas exists").into(),
-            "pkt-tx-counts-canvas" =>
-                self.pkt_tx_chart_info.expect("canvas exists").into(),
-            "pkt-tx-delta-canvas" =>
-                self.pkt_tx_delta_chart_info.expect("canvas exists").into(),
-            "pkt-tx-pacing-canvas" =>
-                self.pkt_tx_pacing_chart_info.expect("canvas exists").into(),
+                self.pkt_tx_chart_info.map_or(JsValue::null(), Into::into),
+            "pkt-tx-counts-canvas" => self
+                .pkt_tx_counts_chart_info
+                .map_or(JsValue::null(), Into::into),
+            "pkt-tx-delta-canvas" => self
+                .pkt_tx_delta_chart_info
+                .map_or(JsValue::null(), Into::into),
+            "pkt-tx-pacing-canvas" => self
+                .pkt_tx_pacing_chart_info
+                .map_or(JsValue::null(), Into::into),
             _ => JsValue::null(),
         }
     }
@@ -535,7 +539,7 @@ impl QlogDancerWeb {
     /// Draws the packet received plot into the provided canvas_id.
     pub fn draw_packet_received(
         &mut self, canvas_id: &str, display_legend: bool,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -566,8 +570,10 @@ impl QlogDancerWeb {
                 ss,
                 &self.ds,
                 &chart_type,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -607,7 +613,7 @@ impl QlogDancerWeb {
     pub fn draw_packet_sent_plot(
         &mut self, pkt_tx_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -628,15 +634,18 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
+            self.pkt_tx_chart_info = None;
             let chart = plot_packet_sent_plot_canvas(
                 &params,
                 &self.display_name,
                 ss,
                 pkt_tx_canvas_id,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.pkt_tx_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -644,7 +653,7 @@ impl QlogDancerWeb {
     pub fn draw_packet_sent_lost_delivered_count_plot(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -665,12 +674,15 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
+            self.pkt_tx_counts_chart_info = None;
             let chart = plot_packet_sent_lost_delivered_count_plot(
                 &params, ss, canvas_id,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.pkt_tx_counts_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -678,7 +690,7 @@ impl QlogDancerWeb {
     pub fn draw_packet_sent_delta_plot(
         &mut self, pkt_tx_delta_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -699,14 +711,17 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
+            self.pkt_tx_delta_chart_info = None;
             let chart = plot_packet_sent_delta_plot_canvas(
                 &params,
                 ss,
                 pkt_tx_delta_canvas_id,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.pkt_tx_delta_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
@@ -714,7 +729,7 @@ impl QlogDancerWeb {
     pub fn draw_packet_sent_pacing_plot(
         &mut self, pkt_tx_pacing_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
-    ) {
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let params = PlotParameters {
                 clamp: ClampParams {
@@ -735,20 +750,25 @@ impl QlogDancerWeb {
                 display_minor_lines: false,
             };
 
+            self.pkt_tx_pacing_chart_info = None;
             let chart = plot_packet_sent_pacing_rate_plot_canvas(
                 &params,
                 ss,
                 &self.ds,
                 pkt_tx_pacing_canvas_id,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.pkt_tx_pacing_chart_info = Some(ChartInfo::from_chart(&chart));
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
     /// Draws the stream multiplexing plot into the provided canvas_id.
-    pub fn draw_stream_multiplexing(&mut self, canvas_id: &str) {
+    pub fn draw_stream_multiplexing(
+        &mut self, canvas_id: &str,
+    ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let multiplex_params = MultiplexPlotsParams {
                 clamp: ClampParams {
@@ -770,8 +790,10 @@ impl QlogDancerWeb {
                 ss,
                 &self.ds,
                 &chart_type,
-            );
+            )
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
+        Ok(())
     }
 
     #[wasm_bindgen]
