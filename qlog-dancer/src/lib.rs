@@ -428,6 +428,8 @@ pub mod plots;
 pub mod reports;
 pub mod request_stub;
 pub mod seriesstore;
+#[cfg(any(target_arch = "wasm32", test))]
+mod sqlog_stream;
 pub mod trackers;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

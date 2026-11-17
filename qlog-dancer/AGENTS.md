@@ -12,7 +12,8 @@ Dual-target: native CLI binary (`main.rs`) + wasm-bindgen web UI (`web.rs`, `#[c
 src/
   main.rs              CLI entry: parse args via AppConfig, render selected plots, emit report
   lib.rs               Public API: parse_log_file(), PacketType, type aliases
-  web.rs               wasm-bindgen exports (851 lines), canvas rendering, JS interop
+  web.rs               wasm-bindgen exports, canvas rendering, JS interop
+  sqlog_stream.rs      Incremental JSON-SEQ framing/decoding shared by wasm and native tests
   config.rs            AppConfig (clap CLI + wasm config), plot toggles, colors
   datastore.rs         Datastore struct (~1985 lines) -- central parsed-log representation
   seriesstore.rs       SeriesStore: extracts plot-ready time-series from Datastore
@@ -61,5 +62,7 @@ index.html, *.js, *.css   Web UI assets (crate root, non-standard location)
 - `wirefilter-engine` pinned to specific git rev, not on crates.io.
 - Log format detection is case-insensitive on the filename's final extension; parsing can retry between qlog JSON and JSON-SEQ where applicable.
 - Native CLI numeric arguments are typed in `AppConfig::command()` and validated in `AppConfig::from_matches()`: `-s`/`--start`, `-e`/`--end` accept finite nonnegative `f64` with end >= start; `--stream-y-axis-max` and `--cwnd-y-axis-max` accept positive `u64`. The canonical dark-mode flag is `--dark-mode`; old underscore spellings are not retained.
+- Browser JSON-SEQ parsing lives in `sqlog_stream.rs`: ASCII record separators delimit records (not network/file chunks). `process_chunk()` accepts arbitrary fragments, `finish_stream()` commits the EOF record, and errors propagate. `read_stream()` finishes automatically. Always add native tests for every-byte split positions and malformed/truncated data when changing this path.
+- Browser datastore vantage point comes from the JSON-SEQ header, not a hard-coded server default. Reuse `Datastore::with_sqlog_reader_events` for consistent native and web interpretation.
 - `getrandom/wasm_js` feature + `.cargo/config.toml` needed for wasm randomness.
 - Web assets (`index.html`, `qlog-dancer-ui.js`, `qlog-dancer.css`) live in crate root, not `src/`.
