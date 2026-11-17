@@ -42,9 +42,7 @@ use crate::request_stub::*;
 use crate::stringify_last;
 use crate::LogFileData;
 
-pub fn request_timing_table(
-    lf: &LogFileData, config: &AppConfig,
-) -> Option<Table> {
+pub fn request_timing_table(lf: &LogFileData, config: &AppConfig) -> Table {
     let mut table = Table::new(lf.datastore.http_requests.values());
     table.with(Modify::new(Segment::all()).with(Alignment::right()));
 
@@ -88,7 +86,7 @@ pub fn request_timing_table(
         table.with(style);
     }
 
-    Some(table)
+    table
 }
 
 pub fn print_stats(data_store: &Datastore, config: &PrintStatsConfig) {
@@ -115,6 +113,14 @@ pub fn print_stats(data_store: &Datastore, config: &PrintStatsConfig) {
         print_local_stream_buffer_reads(data_store);
         print_local_stream_buffer_writes(data_store);
         print_local_stream_buffer_dropped(data_store);
+        print_stream_buffer(
+            "local stream buffer user",
+            &data_store.stream_buffer_user_tracker,
+        );
+        print_stream_buffer(
+            "local stream buffer network",
+            &data_store.stream_buffer_network_tracker,
+        );
     }
 
     if config.packet_stats {
@@ -143,31 +149,23 @@ fn print_sent_packet_stats(data_store: &Datastore) {
     }
 }
 
-fn print_rx_max_data_frames(data_store: &Datastore) {
-    println!("### received MAX_DATA frames ###");
-    if data_store
-        .received_stream_max_data_tracker
-        .per_stream
-        .is_empty()
-    {
-        println!("    None")
-    } else {
-        println!(
-            "    first={:?}, last={:?}",
-            data_store.received_max_data.first().unwrap(),
-            data_store.received_max_data.last().unwrap()
-        );
+fn print_max_data_frames(label: &str, values: &[(f64, u64)]) {
+    println!("### {label} MAX_DATA frames ###");
+    match (values.first(), values.last()) {
+        (Some(first), Some(last)) => println!(
+            "    total_count={}, first={first:?}, last={last:?}",
+            values.len(),
+        ),
+        _ => println!("    None"),
     }
 }
 
+fn print_rx_max_data_frames(data_store: &Datastore) {
+    print_max_data_frames("received", &data_store.received_max_data);
+}
+
 fn print_tx_max_data_frames(data_store: &Datastore) {
-    println!("### sent MAX_DATA frames ###");
-    println!(
-        "   total_count={}, first={:?}, last={:?}",
-        data_store.sent_max_data.len(),
-        data_store.sent_max_data.first().unwrap(),
-        data_store.sent_max_data.last().unwrap()
-    );
+    print_max_data_frames("sent", &data_store.sent_max_data);
 }
 
 fn print_rx_max_stream_data_frames(data_store: &Datastore) {
@@ -205,8 +203,8 @@ fn print_tx_max_stream_data_frames(data_store: &Datastore) {
                 "    stream={}, total_count={}, first={:?}, last={:?}",
                 entry.0,
                 entry.1.len(),
-                entry.1.first().unwrap(),
-                entry.1.last().unwrap()
+                entry.1.first(),
+                entry.1.last()
             );
         }
     }
@@ -246,101 +244,87 @@ fn print_rx_reset_stream_frames(data_store: &Datastore) {
     }
 }
 
-fn print_local_stream_buffer_reads(data_store: &Datastore) {
-    println!("### local stream buffer reads ###");
-    if data_store.stream_buffer_reads_tracker.per_stream.is_empty() {
-        println!("    None")
-    } else {
-        for entry in &data_store.stream_buffer_reads_tracker.per_stream {
-            println!(
-                "    stream={}, total_count={}, first=(offset={}, length={}), last=(offset={}, length={}), total_length={}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first().unwrap().1.offset,
-                entry.1.first().unwrap().1.length,
-                entry.1.last().unwrap().1.offset,
-                entry.1.last().unwrap().1.length,
-                entry.1.last().unwrap().1.offset + entry.1.last().unwrap().1.length,
-            );
+fn print_stream_buffer(
+    label: &str, tracker: &crate::trackers::StreamBufferTracker,
+) {
+    println!("### {label} ###");
+    if tracker.per_stream.is_empty() {
+        println!("    None");
+        return;
+    }
+    for (stream_id, accesses) in &tracker.per_stream {
+        match (accesses.first(), accesses.last()) {
+            (Some((_, first)), Some((_, last))) => {
+                println!(
+                    "    stream={stream_id}, total_count={}, first=(offset={}, length={}), last=(offset={}, length={}), max_end={}",
+                    accesses.len(),
+                    first.offset,
+                    first.length,
+                    last.offset,
+                    last.length,
+                    tracker.get_stream_max(*stream_id).map_or_else(|| "n/a".to_string(), |maximum| maximum.to_string()),
+                );
+            },
+            _ => println!("    stream={stream_id}, total_count=0, max_end=n/a"),
         }
     }
+}
+
+fn print_local_stream_buffer_reads(data_store: &Datastore) {
+    print_stream_buffer(
+        "local stream buffer reads",
+        &data_store.stream_buffer_reads_tracker,
+    );
 }
 
 fn print_local_stream_buffer_writes(data_store: &Datastore) {
-    println!("### local stream buffer writes ###");
-    if data_store
-        .stream_buffer_writes_tracker
-        .per_stream
-        .is_empty()
-    {
-        println!("    None")
-    } else {
-        for entry in &data_store.stream_buffer_writes_tracker.per_stream {
-            println!(
-                "    stream={}, total_count={}, first=(offset={}, length={}), last=(offset={}, length={}), total_length={}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first().unwrap().1.offset,
-                entry.1.first().unwrap().1.length,
-                entry.1.last().unwrap().1.offset,
-                entry.1.last().unwrap().1.length,
-                entry.1.last().unwrap().1.offset + entry.1.last().unwrap().1.length,
-            );
-        }
-    }
+    print_stream_buffer(
+        "local stream buffer writes",
+        &data_store.stream_buffer_writes_tracker,
+    );
 }
 
 fn print_local_stream_buffer_dropped(data_store: &Datastore) {
-    println!("### local stream buffer dropped ###");
-    if data_store
-        .stream_buffer_dropped_tracker
-        .per_stream
-        .is_empty()
-    {
-        println!("    None")
-    } else {
-        for entry in &data_store.stream_buffer_dropped_tracker.per_stream {
-            println!(
-                "    stream={}, total_count={}, first=(offset={}, length={}), last=(offset={}, length={}), total_length={}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first().unwrap().1.offset,
-                entry.1.first().unwrap().1.length,
-                entry.1.last().unwrap().1.offset,
-                entry.1.last().unwrap().1.length,
-                entry.1.last().unwrap().1.offset + entry.1.last().unwrap().1.length,
-            );
-        }
-    }
+    print_stream_buffer(
+        "local stream buffer dropped",
+        &data_store.stream_buffer_dropped_tracker,
+    );
+}
+
+/// Return the greatest end offset among STREAM frames, not the end of whichever
+/// frame happens to be last in the log (events may be out of order).
+/// An unrepresentable offset is reported explicitly rather than wrapped.
+fn max_stream_frame_end(frames: &[(f64, QuicFrame)]) -> Result<Option<u64>, ()> {
+    frames
+        .iter()
+        .try_fold(None, |maximum: Option<u64>, (_, frame)| match frame {
+            QuicFrame::Stream { offset, raw, .. } => {
+                let length = raw
+                    .as_ref()
+                    .and_then(|info| info.payload_length)
+                    .unwrap_or_default();
+                let end =
+                    offset.unwrap_or_default().checked_add(length).ok_or(())?;
+                Ok(Some(maximum.map_or(end, |current| current.max(end))))
+            },
+            _ => Ok(maximum),
+        })
 }
 
 fn print_tx_stream_frames(data_store: &Datastore) {
     println!("### sent STREAM frames ###");
     if data_store.sent_stream_frames.is_empty() {
-        println!("    None")
+        println!("    None");
     } else {
-        for entry in &data_store.sent_stream_frames {
-            let total = match entry.1.last() {
-                Some((_, QuicFrame::Stream { offset, raw, .. })) => {
-                    let offset = offset.unwrap_or_default();
-                    let length = raw
-                        .clone()
-                        .unwrap_or_default()
-                        .payload_length
-                        .unwrap_or_default();
-                    format!("{}", offset + length)
-                },
-
-                _ => "n/a".to_string(),
+        for (stream_id, frames) in &data_store.sent_stream_frames {
+            let max_end = match max_stream_frame_end(frames) {
+                Ok(Some(value)) => value.to_string(),
+                Ok(None) => "n/a".to_string(),
+                Err(()) => "overflow".to_string(),
             };
-
             println!(
-                "    stream={}, total_count={}, first={:?}, last={:?}, total_length={}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first(),
-                stringify_last(entry.1),
-                total
+                "    stream={stream_id}, total_count={}, first={:?}, last={:?}, max_end={max_end}",
+                frames.len(), frames.first(), stringify_last(frames),
             );
         }
     }
@@ -479,4 +463,43 @@ pub fn print_packet_loss(data: &[LogFileData]) {
     }
 
     println!();
+}
+
+#[cfg(test)]
+mod report_safety_tests {
+    use super::*;
+    use qlog::events::quic::QuicFrame;
+
+    fn stream(offset: u64, length: u64) -> QuicFrame {
+        QuicFrame::Stream {
+            stream_id: 1,
+            offset: Some(offset),
+            fin: None,
+            raw: Some(Box::new(qlog::events::RawInfo {
+                payload_length: Some(length),
+                ..Default::default()
+            })),
+        }
+    }
+
+    #[test]
+    fn stream_frame_end_uses_highest_valid_offset_in_any_order() {
+        assert_eq!(max_stream_frame_end(&[]), Ok(None));
+        let frames = vec![
+            (3.0, stream(900, 100)),
+            (1.0, stream(0, 50)),
+            (2.0, stream(50, 70)),
+        ];
+        assert_eq!(max_stream_frame_end(&frames), Ok(Some(1000)));
+        assert_eq!(
+            max_stream_frame_end(&[(1.0, stream(u64::MAX - 2, 2))]),
+            Ok(Some(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn stream_frame_end_rejects_overflow_in_any_frame() {
+        let frames = vec![(1.0, stream(u64::MAX, 2)), (2.0, stream(0, 30))];
+        assert_eq!(max_stream_frame_end(&frames), Err(()));
+    }
 }

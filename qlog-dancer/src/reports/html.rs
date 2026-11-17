@@ -124,6 +124,15 @@ const SESSIONS_STYLES: &str = r#"
 </style>
 "#;
 
+fn open_report_file(filename: &str) -> std::io::Result<std::fs::File> {
+    create_file_recursive(filename).map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("cannot create report {filename}: {error}"),
+        )
+    })
+}
+
 fn inject_table_id_class(
     input: &HtmlTable, id: Option<String>, class: Option<String>,
 ) -> String {
@@ -142,26 +151,19 @@ fn inject_table_id_class(
     input.to_string().replace("<table>", &replaced)
 }
 
-pub fn overview(log_file: &LogFileParseResult, config: &AppConfig) {
-    let mut h2 = vec![];
-    let mut quic = vec![];
-
-    for data in &log_file.data {
-        if let Some(h2_close) = &data.datastore.h2_session_close {
-            h2.push(h2_close);
-        }
-
-        if let Some(quic_close) = &data.datastore.quic_session_close {
-            quic.push(quic_close);
-        }
-    }
-
+/// Generate the overview HTML report.
+///
+/// # Errors
+/// Returns an I/O error if the report file cannot be created or written.
+pub fn overview(
+    log_file: &LogFileParseResult, config: &AppConfig,
+) -> std::io::Result<()> {
     let filename = format!("{}-reports/overview.html", config.filename);
-    let mut file = create_file_recursive(&filename).unwrap();
+    let mut file = open_report_file(&filename)?;
 
-    file.write_all(HTML_INCLUDES.as_bytes()).unwrap();
-    file.write_all(TABLE_INIT_SCRIPT.as_bytes()).unwrap();
-    file.write_all(SESSIONS_STYLES.as_bytes()).unwrap();
+    file.write_all(HTML_INCLUDES.as_bytes())?;
+    file.write_all(TABLE_INIT_SCRIPT.as_bytes())?;
+    file.write_all(SESSIONS_STYLES.as_bytes())?;
     file.write_all(r#"<html>
     <head><head>
     <body>
@@ -173,11 +175,10 @@ pub fn overview(log_file: &LogFileParseResult, config: &AppConfig) {
             <p class ="center">Analysed session detailed information is presented in
             <a href="closures.html">session terminations</a>
             and <a href="requests.html">requests breakdown</a>.</p>
-            "#.as_bytes()).unwrap();
+            "#.as_bytes())?;
 
-    let all_table = HtmlTable::with_header(Vec::<Vec<String>>::from(
-        Table::builder(log_file.details.sessions.values()),
-    ));
+    let all_table =
+        escaped_html_table(Table::builder(log_file.details.sessions.values()));
     file.write_all(
         inject_table_id_class(
             &all_table,
@@ -188,8 +189,7 @@ pub fn overview(log_file: &LogFileParseResult, config: &AppConfig) {
             ),
         )
         .as_bytes(),
-    )
-    .unwrap();
+    )?;
 
     file.write_all(
         r#"
@@ -197,11 +197,17 @@ pub fn overview(log_file: &LogFileParseResult, config: &AppConfig) {
     </body>
     <html>"#
             .as_bytes(),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
-pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
+/// Generate the closures HTML report.
+///
+/// # Errors
+/// Returns an I/O error if the report file cannot be created or written.
+pub fn closures(
+    log_file: &LogFileParseResult, config: &AppConfig,
+) -> std::io::Result<()> {
     let mut h2 = vec![];
     let mut quic = vec![];
 
@@ -216,11 +222,11 @@ pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
     }
 
     let filename = format!("{}-reports/closures.html", config.filename);
-    let mut file = create_file_recursive(&filename).unwrap();
+    let mut file = open_report_file(&filename)?;
 
-    file.write_all(HTML_INCLUDES.as_bytes()).unwrap();
-    file.write_all(TABLE_INIT_SCRIPT.as_bytes()).unwrap();
-    file.write_all(SESSIONS_STYLES.as_bytes()).unwrap();
+    file.write_all(HTML_INCLUDES.as_bytes())?;
+    file.write_all(TABLE_INIT_SCRIPT.as_bytes())?;
+    file.write_all(SESSIONS_STYLES.as_bytes())?;
     file.write_all(r#"<html>
     <head><head>
     <body>
@@ -233,10 +239,9 @@ pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
             each session is closed is also captured in the Error column (and subsequent columns).
             A log that is closed before a session is terminated will not show any value in the
             columns.</p>
-            <h2 class="center">HTTP/2 Connections</h2>"#.as_bytes()).unwrap();
+            <h2 class="center">HTTP/2 Connections</h2>"#.as_bytes())?;
 
-    let mut h2_html_table =
-        HtmlTable::with_header(Vec::<Vec<String>>::from(Table::builder(h2)));
+    let mut h2_html_table = escaped_html_table(Table::builder(h2));
     h2_html_table.visit_mut(H2ClosureTableDecorator { i: 0 });
 
     file.write_all(
@@ -249,18 +254,15 @@ pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
             ),
         )
         .as_bytes(),
-    )
-    .unwrap();
+    )?;
 
     file.write_all(
         r#"
             <h2 class="center">HTTP/3 & QUIC Connections</h2>"#
             .as_bytes(),
-    )
-    .unwrap();
+    )?;
 
-    let mut quic_html_table =
-        HtmlTable::with_header(Vec::<Vec<String>>::from(Table::builder(quic)));
+    let mut quic_html_table = escaped_html_table(Table::builder(quic));
     quic_html_table.visit_mut(QUICClosureTableDecorator { i: 0 });
     file.write_all(
         inject_table_id_class(
@@ -272,8 +274,7 @@ pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
             ),
         )
         .as_bytes(),
-    )
-    .unwrap();
+    )?;
 
     file.write_all(
         r#"
@@ -281,19 +282,24 @@ pub fn closures(log_file: &LogFileParseResult, config: &AppConfig) {
     </body>
     <html>"#
             .as_bytes(),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
-pub fn requests(log_file: &LogFileParseResult, config: &AppConfig) {
+/// Generate the requests HTML report.
+///
+/// # Errors
+/// Returns an I/O error if the report file cannot be created or written.
+pub fn requests(
+    log_file: &LogFileParseResult, config: &AppConfig,
+) -> std::io::Result<()> {
     let filename = format!("{}-reports/requests.html", config.filename);
 
-    let mut file = create_file_recursive(&filename).unwrap();
+    let mut file = open_report_file(&filename)?;
 
-    file.write_all(HTML_INCLUDES.as_bytes()).unwrap();
-    file.write_all(REQUEST_TABLE_INIT_SCRIPT.as_bytes())
-        .unwrap();
-    file.write_all(SESSIONS_STYLES.as_bytes()).unwrap();
+    file.write_all(HTML_INCLUDES.as_bytes())?;
+    file.write_all(REQUEST_TABLE_INIT_SCRIPT.as_bytes())?;
+    file.write_all(SESSIONS_STYLES.as_bytes())?;
     file.write_all(
         r#"<html>
     <head><head>
@@ -344,28 +350,27 @@ pub fn requests(log_file: &LogFileParseResult, config: &AppConfig) {
             "#
             .as_bytes(),
     )
-    .unwrap();
+    ?;
 
     for data in &log_file.data {
         file.write_all(
             format!(
-                "<h2 class=\"center\">Session ID: {:?}, {:?}, {:?}</h2>",
-                data.datastore.session_id.unwrap_or(-1),
-                data.datastore
-                    .host
-                    .clone()
-                    .unwrap_or("ERROR UNKNOWN".to_string()),
-                data.datastore.application_proto
+                "<h2 class=\"center\">{}</h2>",
+                escape_html_cell(&format!(
+                    "Session ID: {:?}, {:?}, {:?}",
+                    data.datastore.session_id.unwrap_or(-1),
+                    data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN"),
+                    data.datastore.application_proto
+                ))
             )
             .as_bytes(),
-        )
-        .unwrap();
+        )?;
 
         // This is a bit weird, we need to get our actual Table and then convert
         // it back to a builder to pass to HtmlTable.
         let table: tabled::builder::Builder =
-            request_timing_table(data, config).unwrap().into();
-        let mut reqs = HtmlTable::with_header(Vec::<Vec<String>>::from(table));
+            request_timing_table(data, config).into();
+        let mut reqs = escaped_html_table(table);
 
         // colorize the table
         reqs.visit_mut(RequestTableDecorator { i: 0 });
@@ -380,8 +385,7 @@ pub fn requests(log_file: &LogFileParseResult, config: &AppConfig) {
                 ),
             )
             .as_bytes(),
-        )
-        .unwrap();
+        )?;
     }
 
     file.write_all(
@@ -390,8 +394,8 @@ pub fn requests(log_file: &LogFileParseResult, config: &AppConfig) {
     </body>
     <html>"#
             .as_bytes(),
-    )
-    .unwrap();
+    )?;
+    Ok(())
 }
 
 /// Escape data (not markup) before handing it to table_to_html, whose
@@ -411,16 +415,22 @@ fn escape_html_cell(value: &str) -> String {
     escaped
 }
 
-/// Render escaped event-list HTML from a previously populated row builder.
-#[must_use]
-pub fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
+/// Convert each header and data cell into escaped text before building a
+/// table. Consumers may still add safe, static HTML attributes afterward.
+fn escaped_html_table(table: tabled::builder::Builder) -> HtmlTable {
     let mut rows = Vec::<Vec<String>>::from(table);
     for row in &mut rows {
         for cell in row {
             *cell = escape_html_cell(cell);
         }
     }
-    let table = HtmlTable::with_header(rows);
+    HtmlTable::with_header(rows)
+}
+
+/// Render the escaped event-list table for CLI and browser use.
+#[must_use]
+pub fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
+    let table = escaped_html_table(table);
     inject_table_id_class(
         &table,
         None,
@@ -439,7 +449,7 @@ pub fn event_list(
     log_file: &LogFileParseResult, config: &AppConfig,
 ) -> std::io::Result<()> {
     let filename = format!("{}-reports/event-list.html", config.filename);
-    let mut file = create_file_recursive(&filename)?;
+    let mut file = open_report_file(&filename)?;
 
     file.write_all(HTML_INCLUDES.as_bytes())?;
     file.write_all(TABLE_INIT_SCRIPT.as_bytes())?;
@@ -691,6 +701,45 @@ mod report_event_html_tests {
     use super::*;
     use qlog::events::JsonEvent;
     use qlog::reader::Event;
+
+    #[test]
+    fn all_report_tables_escape_data_before_decoration() {
+        let mut builder = tabled::builder::Builder::default();
+        builder.push_record((0..26).map(|idx| format!("field_{idx}")));
+        let mut row = vec!["n/a".to_string(); 26];
+        row[2] = "<img src=x onerror='alert(1)'>&".to_string();
+        row[4] = "500".to_string();
+        row[5] = "100".to_string();
+        row[6] = "12".to_string();
+        builder.push_record(row);
+        let mut table = escaped_html_table(builder);
+        table.visit_mut(RequestTableDecorator { i: 0 });
+        let html = table.to_string();
+        assert!(
+            html.contains("&lt;img src=x onerror=&#39;alert(1)&#39;&gt;&amp;"),
+            "{html}"
+        );
+        assert!(!html.contains("<img src=x"), "{html}");
+        assert!(
+            html.contains("red"),
+            "the status-based row decorator must remain effective: {html}"
+        );
+
+        let mut builder = tabled::builder::Builder::default();
+        builder.push_record(["Host", "ID", "Error"]);
+        builder.push_record(["<script>injected</script>", "5", "-3"]);
+        let mut table = escaped_html_table(builder);
+        table.visit_mut(H2ClosureTableDecorator { i: 0 });
+        let html = table.to_string();
+        assert!(
+            html.contains("&lt;script&gt;injected&lt;/script&gt;"),
+            "{html}"
+        );
+        assert!(
+            html.contains("yellow"),
+            "the H2 closure decorator must remain effective: {html}"
+        );
+    }
 
     #[test]
     fn escapes_user_supplied_event_details_and_preserves_unicode() {
