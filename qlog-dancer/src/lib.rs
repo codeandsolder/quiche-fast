@@ -107,7 +107,7 @@ impl PacketType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerializationFormat {
     QlogJson,
     QlogJsonSeq,
@@ -116,31 +116,26 @@ pub enum SerializationFormat {
 }
 
 impl SerializationFormat {
+    #[must_use]
     pub fn from_file_extension(extension: &str) -> Self {
         match extension {
-            "qlog" => SerializationFormat::QlogJson,
-            "sqlog" | "gz" | "zst" => SerializationFormat::QlogJsonSeq,
-            "json" => Self::NetlogJson,
-            _ => SerializationFormat::Unknown,
+            ext if ext.eq_ignore_ascii_case("qlog") => Self::QlogJson,
+            ext if ["sqlog", "gz", "zst"]
+                .iter()
+                .any(|suffix| ext.eq_ignore_ascii_case(suffix)) =>
+                Self::QlogJsonSeq,
+            ext if ext.eq_ignore_ascii_case("json") => Self::NetlogJson,
+            _ => Self::Unknown,
         }
     }
 
+    #[must_use]
     pub fn from_filename(filename: &str) -> Self {
-        // Check for compound extensions first (order matters!)
-        if filename.ends_with(".sqlog.gz") || filename.ends_with(".sqlog.zst") {
-            return SerializationFormat::QlogJsonSeq;
-        }
-        if filename.ends_with(".sqlog") {
-            return SerializationFormat::QlogJsonSeq;
-        }
-        if filename.ends_with(".qlog") {
-            return SerializationFormat::QlogJson;
-        }
-        // Fall back to extension-based detection
-        if let Some(ext) = filename.rsplit('.').next() {
-            return Self::from_file_extension(ext);
-        }
-        SerializationFormat::Unknown
+        // Path handles the final suffix of compound extensions like .sqlog.gz.
+        std::path::Path::new(filename)
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map_or(Self::Unknown, Self::from_file_extension)
     }
 }
 
@@ -441,7 +436,45 @@ pub mod wirefilter;
 #[cfg(test)]
 mod input_tests {
     use super::stringify_last;
+    use super::SerializationFormat;
     use std::io::Cursor;
+
+    #[test]
+    fn serialization_format_recognizes_case_insensitive_extensions() {
+        use SerializationFormat::NetlogJson;
+        use SerializationFormat::QlogJson;
+        use SerializationFormat::QlogJsonSeq;
+        use SerializationFormat::Unknown;
+
+        for (filename, expected) in [
+            ("capture.qlog", QlogJson),
+            ("capture.QLOG", QlogJson),
+            ("nested.path/capture.QLog", QlogJson),
+            ("capture.sqlog", QlogJsonSeq),
+            ("capture.SQLOG", QlogJsonSeq),
+            ("capture.sqlog.GZ", QlogJsonSeq),
+            ("capture.SQLOG.ZST", QlogJsonSeq),
+            ("capture.gz", QlogJsonSeq),
+            ("capture.ZsT", QlogJsonSeq),
+            ("capture.json", NetlogJson),
+            ("capture.JSON", NetlogJson),
+            ("capture.json.gz", QlogJsonSeq),
+            ("capture.qlog.bak", Unknown),
+            ("capture", Unknown),
+            ("qlog", Unknown),
+            (".qlog", Unknown),
+            ("", Unknown),
+        ] {
+            assert_eq!(
+                SerializationFormat::from_filename(filename),
+                expected,
+                "{filename:?}"
+            );
+        }
+
+        assert_eq!(SerializationFormat::from_file_extension("Gz"), QlogJsonSeq);
+        assert_eq!(SerializationFormat::from_file_extension("JSoN"), NetlogJson);
+    }
 
     fn netlog_constants_document() -> serde_json::Value {
         serde_json::json!({
