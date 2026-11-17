@@ -487,21 +487,14 @@ impl SparkCaption {
         }
     }
 
-    fn draw<DB: DrawingBackend>(
-        &self, color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>,
-        x: i32, y: i32,
-    ) -> SparkDrawingResult<DB> {
-        let style = &("monospace", 12).into_text_style(root).color(color);
-
-        let newline_offset = 10;
-        let x = x + 20;
-
+    /// Visit caption rows without allocating intermediate strings or lists.
+    /// Server and client captions deliberately differ by one priority row.
+    fn for_each_row<E>(
+        &self, mut visitor: impl FnMut(i32, &str) -> Result<(), E>,
+    ) -> Result<(), E> {
         match self {
-            SparkCaption::UniStream { summary } => {
-                root.draw_text(summary, style, (x, y))?;
-            },
-
-            SparkCaption::RequestAtServer {
+            Self::UniStream { summary } => visitor(0, summary),
+            Self::RequestAtServer {
                 summary,
                 method,
                 path,
@@ -513,64 +506,25 @@ impl SparkCaption {
                 duration_rx_hdr_tx_first_data,
                 duration_rx_hdr_tx_last_data,
                 duration_tx_first_data_tx_last_data,
-                ..
             } => {
-                root.draw_text(summary, style, (x, y))?;
-
-                root.draw_text(method, style, (x, y + newline_offset))?;
-
-                root.draw_text(path, style, (x, y + newline_offset * 2))?;
-
-                root.draw_text(
-                    client_content_length,
-                    style,
-                    (x, y + newline_offset * 3),
-                )?;
-
-                root.draw_text(
-                    server_content_length,
-                    style,
-                    (x, y + newline_offset * 4),
-                )?;
-
-                root.draw_text(
-                    client_pri_hdr,
-                    style,
-                    (x, y + newline_offset * 6),
-                )?;
-
-                root.draw_text(
-                    server_pri_hdr,
-                    style,
-                    (x, y + newline_offset * 7),
-                )?;
-
-                root.draw_text(
-                    duration_rx_hdr_tx_hdr,
-                    style,
-                    (x, y + newline_offset * 8),
-                )?;
-
-                root.draw_text(
-                    duration_rx_hdr_tx_first_data,
-                    style,
-                    (x, y + newline_offset * 9),
-                )?;
-
-                root.draw_text(
-                    duration_rx_hdr_tx_last_data,
-                    style,
-                    (x, y + newline_offset * 10),
-                )?;
-
-                root.draw_text(
-                    duration_tx_first_data_tx_last_data,
-                    style,
-                    (x, y + newline_offset * 11),
-                )?;
+                for (row, line) in [
+                    (0, summary.as_str()),
+                    (1, method),
+                    (2, path),
+                    (3, client_content_length),
+                    (4, server_content_length),
+                    (6, client_pri_hdr),
+                    (7, server_pri_hdr),
+                    (8, duration_rx_hdr_tx_hdr),
+                    (9, duration_rx_hdr_tx_first_data),
+                    (10, duration_rx_hdr_tx_last_data),
+                    (11, duration_tx_first_data_tx_last_data),
+                ] {
+                    visitor(row, line)?;
+                }
+                Ok(())
             },
-
-            SparkCaption::RequestAtClient {
+            Self::RequestAtClient {
                 summary,
                 method,
                 path,
@@ -583,69 +537,36 @@ impl SparkCaption {
                 duration_tx_hdr_rx_first_data,
                 duration_tx_hdr_rx_last_data,
                 duration_tx_first_data_tx_last_data,
-                ..
             } => {
-                root.draw_text(summary, style, (x, y))?;
-
-                root.draw_text(method, style, (x, y + newline_offset))?;
-                root.draw_text(path, style, (x, y + newline_offset * 2))?;
-
-                root.draw_text(
-                    client_content_length,
-                    style,
-                    (x, y + newline_offset * 3),
-                )?;
-
-                root.draw_text(
-                    server_content_length,
-                    style,
-                    (x, y + newline_offset * 4),
-                )?;
-
-                root.draw_text(
-                    client_pri_hdr,
-                    style,
-                    (x, y + newline_offset * 6),
-                )?;
-
-                root.draw_text(
-                    client_pri_update,
-                    style,
-                    (x, y + newline_offset * 7),
-                )?;
-
-                root.draw_text(
-                    server_pri_hdr,
-                    style,
-                    (x, y + newline_offset * 8),
-                )?;
-
-                root.draw_text(
-                    duration_tx_hdr_rx_hdr,
-                    style,
-                    (x, y + newline_offset * 9),
-                )?;
-
-                root.draw_text(
-                    duration_tx_hdr_rx_first_data,
-                    style,
-                    (x, y + newline_offset * 10),
-                )?;
-
-                root.draw_text(
-                    duration_tx_hdr_rx_last_data,
-                    style,
-                    (x, y + newline_offset * 11),
-                )?;
-
-                root.draw_text(
-                    duration_tx_first_data_tx_last_data,
-                    style,
-                    (x, y + newline_offset * 12),
-                )?;
+                for (row, line) in [
+                    (0, summary.as_str()),
+                    (1, method),
+                    (2, path),
+                    (3, client_content_length),
+                    (4, server_content_length),
+                    (6, client_pri_hdr),
+                    (7, client_pri_update),
+                    (8, server_pri_hdr),
+                    (9, duration_tx_hdr_rx_hdr),
+                    (10, duration_tx_hdr_rx_first_data),
+                    (11, duration_tx_hdr_rx_last_data),
+                    (12, duration_tx_first_data_tx_last_data),
+                ] {
+                    visitor(row, line)?;
+                }
+                Ok(())
             },
         }
-        Ok(())
+    }
+
+    fn draw<DB: DrawingBackend>(
+        &self, color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>,
+        x: i32, y: i32,
+    ) -> SparkDrawingResult<DB> {
+        let style = ("monospace", 12).into_text_style(root).color(color);
+        self.for_each_row(|row, line| {
+            root.draw_text(line, &style, (x + 20, y + row * 10))
+        })
     }
 }
 
@@ -1520,6 +1441,57 @@ mod tests {
             datastore,
             super::SparkOutputs::all(output),
         )
+    }
+
+    #[test]
+    fn caption_rows_preserve_client_server_offsets_and_propagate_errors() {
+        let request = HttpRequestStub::default();
+        let cases = [
+            (
+                SparkCaption::request_at_client_from_stub(
+                    ApplicationProto::Http3,
+                    &request,
+                ),
+                vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11, 12],
+            ),
+            (
+                SparkCaption::request_at_server_from_stub(0, &request),
+                vec![0, 1, 2, 3, 4, 6, 7, 8, 9, 10, 11],
+            ),
+            (
+                SparkCaption::UniStream {
+                    summary: "stream".to_string(),
+                },
+                vec![0],
+            ),
+        ];
+
+        for (caption, expected_rows) in cases {
+            let mut visited = Vec::new();
+            let result = caption.for_each_row(|row, text| {
+                visited.push((row, text.to_owned()));
+                Ok::<(), std::convert::Infallible>(())
+            });
+            assert!(result.is_ok());
+            assert_eq!(
+                visited.iter().map(|(row, _)| *row).collect::<Vec<_>>(),
+                expected_rows,
+            );
+            if expected_rows.len() == 12 {
+                assert!(visited.iter().any(|(row, text)| {
+                    *row == 7 && text.starts_with("client pri updates:")
+                }));
+            } else if expected_rows.len() == 11 {
+                assert!(visited.iter().any(|(row, text)| {
+                    *row == 7 && text.starts_with("server pri hdr:")
+                }));
+            }
+        }
+
+        let caption = SparkCaption::request_at_server_from_stub(0, &request);
+        let result =
+            caption.for_each_row(|row, _| if row == 7 { Err(7) } else { Ok(()) });
+        assert_eq!(result, Err(7));
     }
 
     #[test]
