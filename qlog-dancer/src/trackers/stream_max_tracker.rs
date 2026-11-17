@@ -26,6 +26,9 @@
 
 use std::collections::BTreeMap;
 
+use super::checked_max_advance;
+use super::TrackerError;
+
 /// Tracks monotonically increasing per-stream values with efficient sum
 /// calculation. Handles out-of-order events by taking max value seen per
 /// stream.
@@ -49,30 +52,32 @@ impl StreamMaxTracker {
         Self::default()
     }
 
-    /// Updates stream value, returns Some((old_max, new_max)) if changed.
+    /// Update the maximum of a stream and its running aggregate.
+    /// All overflow validation precedes mutations to any of the fields.
+    ///
+    /// # Errors
+    /// Returns `TrackerError` if the sum of stream maxima overflows.
     pub fn update(
         &mut self, stream_id: u64, new_value: u64, ev_time: f64, init_val: u64,
-    ) -> Option<(u64, u64)> {
+    ) -> Result<Option<(u64, u64)>, TrackerError> {
+        let old_max = self.flat.get(&stream_id).copied().unwrap_or(0);
+        let (new_max, new_sum) =
+            checked_max_advance(stream_id, old_max, new_value, self.running_sum)?;
+
         let entry = self
             .per_stream
             .entry(stream_id)
             .or_insert_with(|| vec![(0.0, init_val)]);
         entry.push((ev_time, new_value));
-
-        let old_max = self.flat.get(&stream_id).copied().unwrap_or(0);
-        let new_max = old_max.max(new_value);
-
         let result = if new_max > old_max {
             self.flat.insert(stream_id, new_max);
-            self.running_sum += new_max - old_max;
             Some((old_max, new_max))
         } else {
             None
         };
-
+        self.running_sum = new_sum;
         self.sum_series.push((ev_time, self.running_sum));
-
-        result
+        Ok(result)
     }
 
     pub fn get_stream_max(&self, stream_id: u64) -> Option<u64> {
@@ -102,13 +107,13 @@ mod tests {
         let mut tracker = StreamMaxTracker::new();
 
         let result = tracker.update(0, 1000, 10.0, 0);
-        assert_eq!(result, Some((0, 1000)));
+        assert_eq!(result, Ok(Some((0, 1000))));
         assert_eq!(tracker.get_stream_max(0), Some(1000));
         assert_eq!(tracker.current_sum(), 1000);
         assert_eq!(tracker.sum_series, vec![(10.0, 1000)]);
 
         let result = tracker.update(0, 2000, 20.0, 0);
-        assert_eq!(result, Some((1000, 2000)));
+        assert_eq!(result, Ok(Some((1000, 2000))));
         assert_eq!(tracker.get_stream_max(0), Some(2000));
         assert_eq!(tracker.current_sum(), 2000);
         assert_eq!(tracker.sum_series, vec![(10.0, 1000), (20.0, 2000)]);
@@ -119,19 +124,19 @@ mod tests {
         let mut tracker = StreamMaxTracker::new();
 
         let result = tracker.update(0, 2000, 20.0, 0);
-        assert_eq!(result, Some((0, 2000)));
+        assert_eq!(result, Ok(Some((0, 2000))));
         assert_eq!(tracker.get_stream_max(0), Some(2000));
         assert_eq!(tracker.current_sum(), 2000);
 
         let result = tracker.update(0, 1000, 10.0, 0);
-        assert_eq!(result, None);
+        assert_eq!(result, Ok(None));
         assert_eq!(tracker.get_stream_max(0), Some(2000));
         assert_eq!(tracker.current_sum(), 2000);
 
         assert_eq!(tracker.sum_series, vec![(20.0, 2000), (10.0, 2000)]);
 
         let result = tracker.update(0, 3000, 30.0, 0);
-        assert_eq!(result, Some((2000, 3000)));
+        assert_eq!(result, Ok(Some((2000, 3000))));
         assert_eq!(tracker.get_stream_max(0), Some(3000));
         assert_eq!(tracker.current_sum(), 3000);
     }
@@ -140,16 +145,16 @@ mod tests {
     fn test_tracker_multiple_streams() {
         let mut tracker = StreamMaxTracker::new();
 
-        tracker.update(0, 1000, 10.0, 0);
+        assert!(tracker.update(0, 1000, 10.0, 0).is_ok());
         assert_eq!(tracker.current_sum(), 1000);
 
-        tracker.update(1, 500, 15.0, 0);
+        assert!(tracker.update(1, 500, 15.0, 0).is_ok());
         assert_eq!(tracker.current_sum(), 1500);
 
-        tracker.update(0, 1500, 20.0, 0);
+        assert!(tracker.update(0, 1500, 20.0, 0).is_ok());
         assert_eq!(tracker.current_sum(), 2000);
 
-        tracker.update(2, 300, 25.0, 0);
+        assert!(tracker.update(2, 300, 25.0, 0).is_ok());
         assert_eq!(tracker.current_sum(), 2300);
 
         assert_eq!(tracker.get_stream_max(0), Some(1500));
@@ -163,10 +168,10 @@ mod tests {
         let mut tracker = StreamMaxTracker::new();
 
         let result = tracker.update(0, 1000, 10.0, 0);
-        assert_eq!(result, Some((0, 1000)));
+        assert_eq!(result, Ok(Some((0, 1000))));
 
         let result = tracker.update(0, 1000, 20.0, 0);
-        assert_eq!(result, None);
+        assert_eq!(result, Ok(None));
 
         assert_eq!(tracker.get_stream_max(0), Some(1000));
         assert_eq!(tracker.current_sum(), 1000);
@@ -179,10 +184,10 @@ mod tests {
     fn test_tracker_running_sum_correctness() {
         let mut tracker = StreamMaxTracker::new();
 
-        tracker.update(0, 1000, 1.0, 0);
-        tracker.update(1, 2000, 2.0, 0);
-        tracker.update(2, 1500, 3.0, 0);
-        tracker.update(0, 1200, 4.0, 0);
+        assert!(tracker.update(0, 1000, 1.0, 0).is_ok());
+        assert!(tracker.update(1, 2000, 2.0, 0).is_ok());
+        assert!(tracker.update(2, 1500, 3.0, 0).is_ok());
+        assert!(tracker.update(0, 1200, 4.0, 0).is_ok());
 
         let manual_sum: u64 = tracker.flat.values().sum();
 
@@ -204,7 +209,7 @@ mod tests {
         ];
 
         for (stream_id, value, time) in updates {
-            tracker.update(stream_id, value, time, 0);
+            assert!(tracker.update(stream_id, value, time, 0).is_ok());
         }
 
         assert_eq!(tracker.get_stream_max(0), Some(1500));
@@ -219,18 +224,55 @@ mod tests {
     fn test_tracker_init_value() {
         let mut tracker = StreamMaxTracker::new();
 
-        tracker.update(0, 1000, 10.0, 500);
+        assert!(tracker.update(0, 1000, 10.0, 500).is_ok());
 
         let stream_data = tracker.per_stream.get(&0).unwrap();
         assert_eq!(stream_data.len(), 2);
         assert_eq!(stream_data[0], (0.0, 500));
         assert_eq!(stream_data[1], (10.0, 1000));
 
-        tracker.update(0, 1500, 20.0, 500);
+        assert!(tracker.update(0, 1500, 20.0, 500).is_ok());
         let stream_data = tracker.per_stream.get(&0).unwrap();
         assert_eq!(stream_data.len(), 3);
         assert_eq!(stream_data[0], (0.0, 500));
         assert_eq!(stream_data[1], (10.0, 1000));
         assert_eq!(stream_data[2], (20.0, 1500));
+    }
+
+    #[test]
+    fn rejects_aggregate_overflow_atomically_and_accepts_duplicates() {
+        let mut tracker = StreamMaxTracker::new();
+        assert_eq!(
+            tracker.update(5, u64::MAX, 1.0, 12),
+            Ok(Some((0, u64::MAX)))
+        );
+        let err = tracker.update(6, 1, 2.0, 4);
+        assert_eq!(
+            err,
+            Err(super::TrackerError::RunningSumOverflow {
+                stream_id: 6,
+                total: u64::MAX,
+                increment: 1,
+            })
+        );
+        assert_eq!(tracker.current_sum(), u64::MAX);
+        assert_eq!(tracker.get_stream_max(6), None);
+        assert!(!tracker.per_stream.contains_key(&6));
+        assert_eq!(tracker.sum_series, vec![(1.0, u64::MAX)]);
+        assert_eq!(tracker.update(5, 3, 3.0, 0), Ok(None));
+        assert_eq!(tracker.get_stream_max(5), Some(u64::MAX));
+        assert_eq!(tracker.sum_series, vec![(1.0, u64::MAX), (3.0, u64::MAX)]);
+    }
+
+    #[test]
+    fn accepts_exactly_representable_aggregate_boundary() {
+        let mut tracker = StreamMaxTracker::new();
+        assert_eq!(
+            tracker.update(1, u64::MAX - 2, 1.0, 0),
+            Ok(Some((0, u64::MAX - 2)))
+        );
+        assert_eq!(tracker.update(2, 2, 2.0, 0), Ok(Some((0, 2))));
+        assert_eq!(tracker.current_sum(), u64::MAX);
+        assert_eq!(tracker.update(1, u64::MAX - 2, 3.0, 0), Ok(None));
     }
 }

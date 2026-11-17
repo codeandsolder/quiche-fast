@@ -77,7 +77,7 @@ fn run() -> i32 {
 
         Err(e)
             if e.is::<qlog_dancer::wirefilter::FilterError>() ||
-                e.is::<qlog_dancer::datastore::UnsupportedVantagePoint>() =>
+                e.is::<qlog_dancer::datastore::DatastoreError>() =>
         {
             error!("Unable to process qlog: {e}");
             return 1;
