@@ -315,10 +315,7 @@ fn run() -> i32 {
                     &chart_filename,
                     ss,
                     &data.datastore,
-                    &chart_config,
-                    &chart_config,
-                    &chart_config,
-                    &chart_config,
+                    stream_sparks::SparkOutputs::all(&chart_config),
                 ) {
                     error!(
                         "Unable to draw stream spark charts for {label}: {error}"
