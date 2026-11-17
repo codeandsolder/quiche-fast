@@ -52,7 +52,7 @@ macro_rules! printy_json {
         $s += &format!(
             "{}={}, ",
             $k,
-            &serde_json::to_string(&$value).unwrap().replace("\"", "")
+            &serde_json::to_string(&$value)?.replace("\"", "")
         );
     }};
 }
@@ -63,7 +63,7 @@ macro_rules! printyo_json {
             $s += &format!(
                 "{}={}, ",
                 $k,
-                &serde_json::to_string(&v).unwrap().replace("\"", "")
+                &serde_json::to_string(&v)?.replace("\"", "")
             );
         }
     }};
@@ -232,13 +232,13 @@ enum EventView<'a> {
 
 fn qlog_event_rows<'a>(
     events: impl IntoIterator<Item = EventView<'a>>,
-) -> tabled::builder::Builder {
+) -> Result<tabled::builder::Builder, serde_json::Error> {
     let mut pp = vec![];
 
     for event in events {
         match event {
             EventView::Native(ev) => {
-                let (cat, ty) = category_and_type_from_event(ev);
+                let (cat, ty) = category_and_type_from_event(ev)?;
 
                 let mut p = PrintableEvent {
                     time: ev.time,
@@ -439,7 +439,7 @@ fn qlog_event_rows<'a>(
                     },
 
                     _ => {
-                        p.details += &serde_json::to_string(&ev.data).unwrap();
+                        p.details += &serde_json::to_string(&ev.data)?;
                     },
                 }
 
@@ -453,7 +453,7 @@ fn qlog_event_rows<'a>(
                     time: ev.time,
                     ty,
                     category: cat,
-                    details: serde_json::to_string(&ev.data).unwrap(),
+                    details: serde_json::to_string(&ev.data)?,
                 };
 
                 pp.push(p);
@@ -461,20 +461,20 @@ fn qlog_event_rows<'a>(
         }
     }
 
-    Table::builder(pp)
+    Ok(Table::builder(pp))
 }
 
 /// Render native qlog JSON records without copying the event list.
 pub fn qlog_event_list(
     events: &[qlog::events::Event],
-) -> tabled::builder::Builder {
+) -> Result<tabled::builder::Builder, serde_json::Error> {
     qlog_event_rows(events.iter().map(EventView::Native))
 }
 
 /// Render both typed and extensible qlog JSON-SEQ records.
 pub fn sqlog_event_list(
     events: &[qlog::reader::Event],
-) -> tabled::builder::Builder {
+) -> Result<tabled::builder::Builder, serde_json::Error> {
     qlog_event_rows(events.iter().map(|event| match event {
         qlog::reader::Event::Qlog(event) => EventView::Native(event),
         qlog::reader::Event::Json(event) => EventView::Json(event),
@@ -507,10 +507,12 @@ pub fn netlog_event_list(
 }
 
 /// Convert any of the three supported log formats into a report table.
-pub fn event_list(raw: &crate::RawLogEvents) -> tabled::builder::Builder {
+pub fn event_list(
+    raw: &crate::RawLogEvents,
+) -> Result<tabled::builder::Builder, serde_json::Error> {
     match raw {
         crate::RawLogEvents::QlogJson { events } => qlog_event_list(events),
         crate::RawLogEvents::QlogJsonSeq { events } => sqlog_event_list(events),
-        crate::RawLogEvents::Netlog { events } => netlog_event_list(events),
+        crate::RawLogEvents::Netlog { events } => Ok(netlog_event_list(events)),
     }
 }

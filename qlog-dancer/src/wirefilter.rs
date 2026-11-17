@@ -40,6 +40,7 @@ pub enum FilterError {
     InvalidExpression(String),
     InvalidStreamId(u64),
     Execution(String),
+    EventEncoding(String),
 }
 
 impl std::fmt::Display for FilterError {
@@ -56,6 +57,8 @@ impl std::fmt::Display for FilterError {
             },
             Self::Execution(error) =>
                 write!(f, "qlog filter execution failed: {error}"),
+            Self::EventEncoding(error) =>
+                write!(f, "qlog event metadata serialization failed: {error}"),
         }
     }
 }
@@ -154,7 +157,8 @@ pub fn filter_sqlog_events(
         let (category, name) = match &event {
             Event::Qlog(event) => category_and_type_from_event(event),
             Event::Json(event) => category_and_type_from_event(event),
-        };
+        }
+        .map_err(|error| FilterError::EventEncoding(error.to_string()))?;
         ctx.set_field_value(category_field, category)
             .map_err(|error| FilterError::Execution(error.to_string()))?;
         ctx.set_field_value(name_field, name)

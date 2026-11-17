@@ -177,8 +177,38 @@ pub fn overview(
             and <a href="requests.html">requests breakdown</a>.</p>
             "#.as_bytes())?;
 
-    let all_table =
-        escaped_html_table(Table::builder(log_file.details.sessions.values()));
+    // Chrome netlog provides session IDs; qlog has independent traces
+    // with titles/vantage points instead. Both deserve overview rows.
+    #[derive(tabled::Tabled)]
+    struct TraceOverview<'a> {
+        #[tabled(rename = "Trace")]
+        number: usize,
+        #[tabled(rename = "Title")]
+        title: &'a str,
+        #[tabled(rename = "Vantage point")]
+        vantage: String,
+        #[tabled(rename = "Events")]
+        events: usize,
+    }
+    let all_table = if log_file.data.iter().any(|entry| entry.trace.is_some()) {
+        escaped_html_table(Table::builder(log_file.data.iter().filter_map(
+            |entry| {
+                entry.trace.as_ref().map(|trace| TraceOverview {
+                    number: trace.index + 1,
+                    title: trace.title.as_deref().unwrap_or(""),
+                    vantage: format!("{:?}", trace.vantage_point),
+                    events: match &entry.raw {
+                        crate::RawLogEvents::QlogJson { events } => events.len(),
+                        crate::RawLogEvents::QlogJsonSeq { events } =>
+                            events.len(),
+                        crate::RawLogEvents::Netlog { events } => events.len(),
+                    },
+                })
+            },
+        )))
+    } else {
+        escaped_html_table(Table::builder(log_file.details.sessions.values()))
+    };
     file.write_all(
         inject_table_id_class(
             &all_table,
@@ -356,11 +386,18 @@ pub fn requests(
         file.write_all(
             format!(
                 "<h2 class=\"center\">{}</h2>",
-                escape_html_cell(&format!(
-                    "Session ID: {:?}, {:?}, {:?}",
-                    data.datastore.session_id.unwrap_or(-1),
-                    data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN"),
-                    data.datastore.application_proto
+                escape_html_cell(&data.trace.as_ref().map_or_else(
+                    || format!(
+                        "Session ID: {:?}, {:?}, {:?}",
+                        data.datastore.session_id.unwrap_or(-1),
+                        data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN"),
+                        data.datastore.application_proto
+                    ),
+                    |trace| format!(
+                        "{} ({:?})",
+                        trace.label(),
+                        trace.vantage_point
+                    ),
                 ))
             )
             .as_bytes(),
@@ -467,13 +504,21 @@ pub fn event_list(
     )?;
 
     for data in &log_file.data {
-        let table = event_list_html_from_table(build_event_list(&data.raw));
-        let session = data.datastore.session_id.map_or_else(
-            || "qlog trace".to_string(),
-            |id| format!("session {id}"),
+        let table = event_list_html_from_table(
+            build_event_list(&data.raw).map_err(std::io::Error::other)?,
+        );
+        let session = data.trace.as_ref().map_or_else(
+            || {
+                data.datastore.session_id.map_or_else(
+                    || "unnamed session".to_owned(),
+                    |id| format!("session {id}"),
+                )
+            },
+            |trace| format!("{} ({:?})", trace.label(), trace.vantage_point),
         );
         file.write_all(
-            format!("<h2 class=\"center\">{session}</h2>").as_bytes(),
+            format!("<h2 class=\"center\">{}</h2>", escape_html_cell(&session))
+                .as_bytes(),
         )?;
         file.write_all(table.as_bytes())?;
     }
@@ -752,7 +797,9 @@ mod report_event_html_tests {
         let raw = crate::RawLogEvents::QlogJsonSeq {
             events: vec![record],
         };
-        let html = event_list_html_from_table(build_event_list(&raw));
+        let html = event_list_html_from_table(
+            build_event_list(&raw).expect("valid JSON qlog fixture"),
+        );
         assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;&amp;🏁"));
         assert!(html.contains("&lt;img src=x onerror=&#39;alert(1)&#39;&gt;"));
         assert!(!html.contains("<script>alert(1)</script>"));

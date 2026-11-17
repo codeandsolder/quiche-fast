@@ -828,8 +828,10 @@ impl QlogDancerWeb {
                 ))
             })?;
 
-        let event_table =
-            event_list_html_from_table(sqlog_event_list(&self.qlog_events));
+        let event_table = event_list_html_from_table(
+            sqlog_event_list(&self.qlog_events)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        );
         target_div.set_inner_html(&event_table);
         Ok(())
     }

@@ -42,19 +42,29 @@ pub fn report(
     if config.report_text {
         for data in &log_file.data {
             let table = text::request_timing_table(data, config);
-            println!(
-                "Request timing table for session ID: {:?}, app proto: {:?}, host: {:?}",
-                data.datastore.session_id.unwrap_or(-1),
-                data.datastore.application_proto,
-                data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
-            );
+            if let Some(trace) = &data.trace {
+                println!(
+                    "Request timing table for {} ({:?})",
+                    trace.label(),
+                    trace.vantage_point
+                );
+            } else {
+                println!(
+                    "Request timing table for session ID: {:?}, app proto: {:?}, host: {:?}",
+                    data.datastore.session_id.unwrap_or(-1),
+                    data.datastore.application_proto,
+                    data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
+                );
+            }
             println!("{}", table);
             println!();
 
             text::print_stats(&data.datastore, &config.stats_config);
             println!();
 
-            let mut table = event_list(&data.raw).build();
+            let mut table = event_list(&data.raw)
+                .map_err(std::io::Error::other)?
+                .build();
             table.with(Style::sharp());
             println!("Recognized log events");
             println!("{table}");

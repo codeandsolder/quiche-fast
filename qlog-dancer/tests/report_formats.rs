@@ -306,3 +306,182 @@ fn conn_flow_cli_actually_creates_png_when_selected(
     assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
     Ok(())
 }
+
+fn multitrace_qlog() -> Vec<u8> {
+    serde_json::json!({
+        "file_schema": "0.3", "serialization_format": "JSON",
+        "traces": [
+            {
+                "title": "<script>alert(1)</script>",
+                "vantage_point": { "type": "client" },
+                "event_schemas": [],
+                "events": [{
+                    "time": 1.0, "name": "quic:connection_state_updated",
+                    "data": { "new": "handshake_started" }
+                }]
+            },
+            {
+                "title": "<script>alert(1)</script>",
+                "vantage_point": { "type": "server" },
+                "event_schemas": [],
+                "events": [{
+                    "time": 2.0, "name": "quic:connection_state_updated",
+                    "data": { "new": "handshake_completed" }
+                }]
+            }
+        ]
+    })
+    .to_string()
+    .into_bytes()
+}
+
+#[test]
+fn qlog_multiple_traces_retain_identity_and_generate_separate_charts(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let file = run.0.join("multi.qlog");
+    fs::write(&file, multitrace_qlog())?;
+    let chart_dir = run.0.join("charts");
+    let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+        .arg(&file)
+        .args([
+            "--report-text",
+            "--report-html",
+            "--charts",
+            "conn-flow",
+            "--charts-directory",
+        ])
+        .arg(&chart_dir)
+        .current_dir(&run.0)
+        .env("RUST_LOG", "warn")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success(),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(
+        stdout.contains("trace 1: <script>alert(1)</script> (Client)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("trace 2: <script>alert(1)</script> (Server)"),
+        "{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("Recognized log events").count(),
+        2,
+        "{stdout}"
+    );
+    assert!(stdout.contains("handshake_started"), "{stdout}");
+    assert!(stdout.contains("handshake_completed"), "{stdout}");
+
+    let chart_files = fs::read_dir(&chart_dir)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(chart_files.len(), 2);
+    for suffix in ["trace-0001", "trace-0002"] {
+        let entry = chart_files
+            .iter()
+            .find(|entry| entry.file_name().to_string_lossy().contains(suffix))
+            .ok_or_else(|| format!("missing chart for {suffix}"))?;
+        assert!(fs::read(entry.path())?.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+    let html_dir = run.0.join("multi.qlog-reports");
+    let events = fs::read_to_string(html_dir.join("event-list.html"))?;
+    assert!(
+        events.contains("trace 1: &lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{events}"
+    );
+    assert!(
+        events.contains("trace 2: &lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{events}"
+    );
+    assert!(!events.contains("trace 1: <script>"), "{events}");
+    let requests = fs::read_to_string(html_dir.join("requests.html"))?;
+    assert!(
+        requests.contains("trace 1: &lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{requests}"
+    );
+    assert!(
+        requests.contains("trace 2: &lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{requests}"
+    );
+    assert!(!requests.contains("Session ID: -1"), "{requests}");
+    let overview = fs::read_to_string(html_dir.join("overview.html"))?;
+    assert!(overview.contains("Vantage point"), "{overview}");
+    assert!(
+        overview.contains("Client") && overview.contains("Server"),
+        "{overview}"
+    );
+    assert!(
+        overview.contains("&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{overview}"
+    );
+    assert!(
+        !overview.contains("<script>alert(1)</script>"),
+        "{overview}"
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_second_qlog_trace_rejects_entire_file_instead_of_silently_skipping_it(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let file = run.0.join("multi.qlog");
+    let mut qlog: serde_json::Value = serde_json::from_slice(&multitrace_qlog())?;
+    qlog["traces"][1]["vantage_point"]["type"] = "network".into();
+    fs::write(&file, serde_json::to_vec(&qlog)?)?;
+    let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+        .arg(&file)
+        .arg("--report-text")
+        .current_dir(&run.0)
+        .env("RUST_LOG", "error")
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("unsupported qlog vantage point"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+    Ok(())
+}
+
+#[test]
+fn chrome_netlog_sessions_produce_distinct_charts(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let run = RunDir::new()?;
+    let input = run.0.join("sessions.json");
+    // Chrome netlog is line-oriented even though the enclosing structure is
+    // JSON: each event must occupy its own physical record for the parser.
+    let original = String::from_utf8(chrome_netlog()?)?;
+    let netlog: serde_json::Value = serde_json::from_str(&original)?;
+    let mut second = netlog["events"][0].clone();
+    second["source"]["id"] = 8.into();
+    second["params"]["host"] = "other.example".into();
+    let prefix = original
+        .strip_suffix("\n]\n}")
+        .ok_or("netlog fixture missing event array terminator")?;
+    fs::write(&input, format!("{prefix},\n{second}\n]\n}}"))?;
+    let chart_dir = run.0.join("charts");
+    let output = Command::new(env!("CARGO_BIN_EXE_qlog-dancer"))
+        .arg(&input)
+        .args(["--charts", "conn-flow", "--charts-directory"])
+        .arg(&chart_dir)
+        .current_dir(&run.0)
+        .env("RUST_LOG", "error")
+        .output()?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    let files = fs::read_dir(&chart_dir)?.collect::<Result<Vec<_>, _>>()?;
+    assert_eq!(files.len(), 2);
+    for id in ["session-7", "session-8"] {
+        let file = files
+            .iter()
+            .find(|entry| entry.file_name().to_string_lossy().contains(id))
+            .ok_or_else(|| format!("missing chart for {id}"))?;
+        assert!(fs::read(file.path())?.starts_with(b"\x89PNG\r\n\x1a\n"));
+    }
+    Ok(())
+}
