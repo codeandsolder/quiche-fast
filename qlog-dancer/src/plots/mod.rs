@@ -304,6 +304,8 @@ fn draw_line<DB: DrawingBackend>(
     }
 }
 
+mod fallible;
+
 pub mod colors;
 pub mod congestion_control;
 pub mod conn_flow_control;

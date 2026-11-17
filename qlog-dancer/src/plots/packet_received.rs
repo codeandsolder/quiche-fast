@@ -24,17 +24,27 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::bitmap_area;
+#[cfg(target_arch = "wasm32")]
+use crate::plots::fallible::canvas_area;
+use crate::plots::fallible::invalid_chart;
 use packet_sent::draw_packet_sent_received_plot;
+use std::error::Error;
 
 use crate::plots::*;
 
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
 
+/// Render packet-received timeline.
+///
+/// # Errors
+/// Propagates validation, output and drawing failures to callers.
 pub fn plot_packet_received(
     params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
-) {
+) -> Result<(), Box<dyn Error>> {
     let chart_config = ChartConfig {
         title: "packet-received".into(),
         input_filename: filename.into(),
@@ -45,27 +55,74 @@ pub fn plot_packet_received(
         ty: ty.clone(),
     };
 
-    chart_config.init_chart_dir();
-
     #[cfg(not(target_arch = "wasm32"))]
-    let chart_path = chart_config.chart_filepath();
-
+    let chart_path = match ty {
+        ChartOutputType::Png { .. } => chart_config.chart_filepath(),
+        ChartOutputType::Canvas { .. } =>
+            return Err(invalid_chart(
+                "native received chart requires PNG output",
+            )
+            .into()),
+    };
     #[cfg(not(target_arch = "wasm32"))]
-    let root = make_chart_bitmap_area(
+    let root = bitmap_area(
         &chart_path,
         params.chart_size,
         params.colors,
         params.chart_margin,
-    );
+    )?;
 
     #[cfg(target_arch = "wasm32")]
-    let canvas_id: String = chart_config.canvas_id().unwrap_or_default();
-
+    let canvas_id = chart_config.canvas_id().ok_or_else(|| {
+        invalid_chart("browser received chart requires canvas output")
+    })?;
     #[cfg(target_arch = "wasm32")]
-    let root =
-        make_chart_canvas_area(&canvas_id, params.colors, params.chart_margin);
+    let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
 
     let (raw_timings, _remainder) = root.split_vertically((60).percent());
+    draw_packet_sent_received_plot(false, filename, params, ss, &raw_timings)?;
+    root.present()?;
+    Ok(())
+}
 
-    draw_packet_sent_received_plot(false, filename, params, ss, &raw_timings);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plots::fallible::test_support::TempCharts;
+
+    #[test]
+    fn empty_received_chart_renders_and_invalid_output_fails_cleanly(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = PlotParameters {
+            clamp: ClampParams::default(),
+            cwnd_y_max: None,
+            chart_size: ChartSize {
+                width: 640,
+                height: 480,
+            },
+            colors: PlotColors::default(),
+            chart_margin: ChartMargin::default(),
+            area_margin: AreaMargin { x: 30, y: 40 },
+            display_chart_title: false,
+            display_legend: true,
+            display_minor_lines: false,
+        };
+        let ds = Datastore::default();
+        let ss = SeriesStore::default();
+        let out = TempCharts::new()?;
+        plot_packet_received(&params, "empty", &ss, &ds, &out.output())?;
+        assert!(
+            std::fs::read(out.only_file()?)?.starts_with(b"\x89PNG\r\n\x1a\n")
+        );
+        let blocked = TempCharts::new()?;
+        let blocker = blocked.0.join("file-not-dir");
+        std::fs::write(&blocker, b"not a dir")?;
+        let ty = ChartOutputType::Png {
+            output_dir: blocker.to_string_lossy().into_owned(),
+            cwnd_y_max: None,
+            stream_y_max: None,
+        };
+        assert!(plot_packet_received(&params, "blocked", &ss, &ds, &ty).is_err());
+        Ok(())
+    }
 }

@@ -27,7 +27,15 @@
 //! Multiplexing charts
 //! A single image file containing various renderings of stream and H3 DATA
 
-use log::warn;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::bitmap_area;
+#[cfg(target_arch = "wasm32")]
+use crate::plots::fallible::canvas_area;
+use crate::plots::fallible::checked_pixel;
+use crate::plots::fallible::checked_time_range;
+use crate::plots::fallible::invalid_chart;
+use std::error::Error;
+use std::io;
 
 use crate::datastore::VantagePoint;
 use crate::plots::colors::*;
@@ -59,66 +67,193 @@ impl Default for MultiplexPlotsParams {
             combined_plot_height: 300,
             frame_swimlane_height: 60,
             bubbles_swimlane_height: 100,
-            clamp: Default::default(),
-            colors: Default::default(),
+            clamp: ClampParams::default(),
+            colors: PlotColors::default(),
             area_margin: AreaMargin { x: 40, y: 0 },
         }
     }
 }
 
+/// Determine stream visibility using the protocol's stream-ID rules. HTTP/2
+/// stream IDs have no QUIC initiator/direction bits.
+fn visible_stream(
+    params: &MultiplexPlotsParams, protocol: crate::datastore::ApplicationProto,
+    stream_id: u64,
+) -> bool {
+    !params.bidi_only ||
+        protocol == crate::datastore::ApplicationProto::Http2 ||
+        (stream_id & 2) == 0
+}
+
+/// An explicit, non-overlapping vertical layout. Row spacing follows the
+/// configured swimlane heights, rather than fixed 20/70px increments that
+/// overlapped adjacent charts in the original implementation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MultiplexLayout {
+    width: u32,
+    height: u32,
+    chart_width: u32,
+    data_mini_y: u32,
+    bubbles_y: u32,
+    stream_combined_y: u32,
+    stream_mini_y: u32,
+    frame_step: u32,
+    bubble_step: u32,
+}
+
+impl MultiplexLayout {
+    fn new(
+        params: &MultiplexPlotsParams, request_count: usize,
+    ) -> io::Result<Self> {
+        let chart_width = params
+            .width
+            .checked_sub(params.right_shrink_margin)
+            .filter(|width| *width > 0)
+            .ok_or_else(|| {
+                invalid_chart("multiplex width must exceed its right margin")
+            })?;
+        if params.combined_plot_height == 0 ||
+            params.frame_swimlane_height == 0 ||
+            params.bubbles_swimlane_height == 0
+        {
+            return Err(invalid_chart(
+                "multiplex section heights must be nonzero",
+            ));
+        }
+        let rows = u64::try_from(request_count)
+            .map_err(|_| invalid_chart("too many multiplex request rows"))?;
+        let overflow = || invalid_chart("multiplex layout arithmetic overflow");
+        let add = |a: u64, b: u64| a.checked_add(b).ok_or_else(overflow);
+        let mul = |a: u64, b: u64| a.checked_mul(b).ok_or_else(overflow);
+        let spacing = u64::from(params.y_spacer);
+        let frame_step = add(u64::from(params.frame_swimlane_height), spacing)?;
+        let bubble_step =
+            add(u64::from(params.bubbles_swimlane_height), spacing)?;
+        let frame_rows_height = mul(rows, frame_step)?;
+        let bubble_rows_height = mul(rows, bubble_step)?;
+        let data_mini_y = add(u64::from(params.combined_plot_height), spacing)?;
+        let bubbles_y = add(add(data_mini_y, frame_rows_height)?, spacing)?;
+        let stream_combined_y =
+            add(add(bubbles_y, bubble_rows_height)?, spacing)?;
+        let stream_mini_y = add(
+            add(stream_combined_y, u64::from(params.combined_plot_height))?,
+            spacing,
+        )?;
+        let full_height =
+            add(add(add(stream_mini_y, frame_rows_height)?, spacing)?, 40)?;
+        checked_pixel(u64::from(params.width))?;
+        checked_pixel(full_height)?;
+        for position in [data_mini_y, bubbles_y, stream_combined_y, stream_mini_y]
+        {
+            checked_pixel(position)?;
+        }
+        let convert = |v: u64| {
+            u32::try_from(v).map_err(|_| {
+                invalid_chart("multiplex plot coordinate exceeds u32")
+            })
+        };
+        Ok(Self {
+            width: params.width,
+            height: convert(full_height)?,
+            chart_width,
+            data_mini_y: convert(data_mini_y)?,
+            bubbles_y: convert(bubbles_y)?,
+            stream_combined_y: convert(stream_combined_y)?,
+            stream_mini_y: convert(stream_mini_y)?,
+            frame_step: convert(frame_step)?,
+            bubble_step: convert(bubble_step)?,
+        })
+    }
+
+    fn row_y(&self, offset: u32, step: u32, row: usize) -> io::Result<i32> {
+        let row = u64::try_from(row)
+            .map_err(|_| invalid_chart("row index exceeds u64"))?;
+        let y = row
+            .checked_mul(u64::from(step))
+            .and_then(|offset_y| u64::from(offset).checked_add(offset_y))
+            .ok_or_else(|| {
+                invalid_chart("multiplex request row coordinate overflow")
+            })?;
+        checked_pixel(y)
+    }
+}
+
+/// Draw per-stream DATA and STREAM events across combined and individual lanes.
+///
+/// # Errors
+/// Returns invalid layout, nonfinite times, output filesystem/canvas, and
+/// backend/drawing failures as errors rather than panicking.
 pub fn plot_stream_multiplexing(
     params: &MultiplexPlotsParams, filename: &str, ss: &SeriesStore,
     ds: &Datastore, ty: &ChartOutputType,
-) {
-    let (mut x_min, mut x_max) = match ds.vantage_point {
+) -> Result<(), Box<dyn Error>> {
+    let requests: Vec<_> = ds
+        .http_requests
+        .iter()
+        .filter(|(stream_id, _)| {
+            visible_stream(params, ds.application_proto, **stream_id)
+        })
+        .collect();
+    let layout = MultiplexLayout::new(params, requests.len())?;
+
+    let stream_frame_series = match (ds.application_proto, ds.vantage_point) {
+        (crate::datastore::ApplicationProto::Http2, VantagePoint::Client) =>
+            &ss.received_data_frames_series,
+        (crate::datastore::ApplicationProto::Http2, VantagePoint::Server) =>
+            &ss.sent_data_frames_series,
+        (crate::datastore::ApplicationProto::Http3, VantagePoint::Client) =>
+            &ss.received_stream_frames_series,
+        (crate::datastore::ApplicationProto::Http3, VantagePoint::Server) =>
+            &ss.sent_stream_frames_series,
+    };
+    let frame_sets = requests
+        .iter()
+        .map(|(_, request)| match ds.vantage_point {
+            VantagePoint::Client => &request.time_data_rx_set,
+            VantagePoint::Server => &request.time_data_tx_set,
+        })
+        .collect::<Vec<_>>();
+    let (mut start, mut end) = match ds.vantage_point {
         VantagePoint::Client => (ss.received_x_min, ss.received_x_max),
         VantagePoint::Server => (ss.sent_x_min, ss.sent_x_max),
     };
-
-    // Clamp plot x-axis if the user told us.
-    if let Some(s) = params.clamp.start {
-        x_min = s;
+    if !start.is_finite() || !end.is_finite() {
+        return Err(
+            invalid_chart("multiplex source time bounds must be finite").into()
+        );
     }
-
-    if let Some(e) = params.clamp.end {
-        x_max = x_max.min(e);
+    for time in frame_sets
+        .iter()
+        .flat_map(|points| points.iter().map(|point| point.0))
+        .chain(
+            stream_frame_series
+                .iter()
+                .filter(|(id, _)| {
+                    visible_stream(params, ds.application_proto, **id)
+                })
+                .flat_map(|(_, points)| points.iter().map(|point| point.0)),
+        )
+        .chain(
+            requests
+                .iter()
+                .flat_map(|(_, request)| {
+                    [request.time_first_headers_rx, request.time_first_headers_tx]
+                })
+                .flatten(),
+        )
+    {
+        if !time.is_finite() {
+            return Err(invalid_chart(
+                "multiplex event timestamps must be finite",
+            )
+            .into());
+        }
+        start = start.min(time);
+        end = end.max(time);
     }
+    let x_range = checked_time_range(start, end, &params.clamp)?;
 
-    let http_requests = match ds.vantage_point {
-        VantagePoint::Client => &ds.http_requests,
-        VantagePoint::Server => &ds.http_requests,
-    };
-
-    let y_spacer = 50;
-
-    let data_frames_all_combined_x = params.width - params.right_shrink_margin;
-    let data_frames_all_combined_y: i32 = params.combined_plot_height as i32;
-
-    let data_frames_mini_offset_y = data_frames_all_combined_y + y_spacer;
-    let data_frames_mini_x = params.width - params.right_shrink_margin;
-    let data_frames_mini_y = params.frame_swimlane_height;
-
-    let bubbles_x = params.width - params.right_shrink_margin;
-    let bubbles_y = params.bubbles_swimlane_height;
-    let bubbles_offset_y =
-        data_frames_mini_offset_y + (http_requests.len() * 25) as i32;
-
-    let stream_frames_all_combined_x = params.width - params.right_shrink_margin;
-    let stream_frames_all_combined_y = params.combined_plot_height;
-    let stream_frames_all_combined_offset_y =
-        bubbles_offset_y + (http_requests.len() * 70) as i32;
-
-    let stream_frames_mini_offset_y = stream_frames_all_combined_offset_y +
-        stream_frames_all_combined_y as i32 +
-        y_spacer;
-    let stream_frames_mini_x = params.width - params.right_shrink_margin;
-    let stream_frames_mini_y = params.frame_swimlane_height;
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let full_y =
-        stream_frames_mini_offset_y as u32 + (http_requests.len() * 25) as u32;
-
-    let chart_config = ChartConfig {
+    let config = ChartConfig {
         title: "stream-multiplexing".into(),
         input_filename: filename.into(),
         clamp: params.clamp.clone(),
@@ -127,330 +262,363 @@ pub fn plot_stream_multiplexing(
         session_id: ds.session_id,
         ty: ty.clone(),
     };
-
-    chart_config.init_chart_dir();
-
     let margin = ChartMargin {
         top: 20,
         bottom: 20,
         left: 20,
         right: 20,
     };
-
     #[cfg(not(target_arch = "wasm32"))]
-    let size = ChartSize {
-        width: params.width,
-        height: full_y,
-    };
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let chart_path = chart_config.chart_filepath();
-
-    #[cfg(not(target_arch = "wasm32"))]
-    let root = make_chart_bitmap_area(&chart_path, size, params.colors, margin);
-
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id: String = chart_config.canvas_id().unwrap_or_default();
-
-    #[cfg(target_arch = "wasm32")]
-    let root = make_chart_canvas_area(&canvas_id, params.colors, margin);
-
-    let stream_frame_series = match ds.vantage_point {
-        VantagePoint::Client => &ss.received_stream_frames_series,
-        VantagePoint::Server => &ss.sent_stream_frames_series,
-    };
-
-    //// Plot the data frames first
-    let mut color_cyle = ColorCycle::default();
-
-    color_cyle.reset();
-
-    let data_frames_all_combined_temp_root = root.clone().shrink(
-        (0, 0),
-        (data_frames_all_combined_x, data_frames_all_combined_y),
-    );
-
-    let mut data_frames_all_combined_chart =
-        ChartBuilder::on(&data_frames_all_combined_temp_root)
-            .caption(
-                "DATA frame events",
-                chart_title_style(&params.colors.caption),
+    let chart_path = match ty {
+        ChartOutputType::Png { .. } => config.chart_filepath(),
+        ChartOutputType::Canvas { .. } =>
+            return Err(invalid_chart(
+                "native multiplex chart requires PNG output",
             )
-            .x_label_area_size(params.area_margin.x)
-            .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(x_min..x_max, 0..2)
-            .unwrap();
+            .into()),
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let root = bitmap_area(
+        &chart_path,
+        ChartSize {
+            width: layout.width,
+            height: layout.height,
+        },
+        params.colors,
+        margin,
+    )?;
 
-    data_frames_all_combined_chart
+    #[cfg(target_arch = "wasm32")]
+    let canvas_id = config.canvas_id().ok_or_else(|| {
+        invalid_chart("browser multiplex chart requires canvas output")
+    })?;
+    #[cfg(target_arch = "wasm32")]
+    let root = canvas_area(&canvas_id, params.colors, margin)?;
+
+    let mut palette = ColorCycle::default();
+    let combined_data_area = root
+        .clone()
+        .shrink((0, 0), (layout.chart_width, params.combined_plot_height));
+    let mut combined_data = ChartBuilder::on(&combined_data_area)
+        .caption(
+            "DATA frame events",
+            chart_title_style(&params.colors.caption),
+        )
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y)
+        .build_cartesian_2d(x_range.clone(), 0..2)?;
+    combined_data
         .configure_mesh()
         .disable_mesh()
         .axis_style(params.colors.axis)
         .label_style(chart_label_style(&params.colors.caption))
-        .draw()
-        .unwrap();
-
-    for (id, stub) in http_requests {
-        if params.bidi_only && (id & 0x2) != 0 {
-            continue;
-        }
-
-        let data_frames = match ds.vantage_point {
-            VantagePoint::Client => &stub.time_data_rx_set,
-            VantagePoint::Server => &stub.time_data_tx_set,
-        };
-
-        let style = color_cyle.next_color();
-
-        let lines = data_frames
-            .iter()
-            .map(|point| PathElement::new([(point.0, 2), (point.0, 0)], style));
-
-        data_frames_all_combined_chart
-            .draw_series(lines.clone())
-            .unwrap();
+        .draw()?;
+    for points in &frame_sets {
+        let color = palette.next_color();
+        combined_data.draw_series(points.iter().map(|(time, _)| {
+            PathElement::new([(*time, 2), (*time, 0)], color)
+        }))?;
     }
 
-    //// Now plot the stream frames combined
-    color_cyle.reset();
-
-    let data_frames_all_combined_temp_root = root.clone().shrink(
-        (0, stream_frames_all_combined_offset_y),
-        (stream_frames_all_combined_x, stream_frames_all_combined_y),
+    palette.reset();
+    let combined_stream_area = root.clone().shrink(
+        (0, checked_pixel(u64::from(layout.stream_combined_y))?),
+        (layout.chart_width, params.combined_plot_height),
     );
-
-    let mut stream_frames_all_combined_chart =
-        ChartBuilder::on(&data_frames_all_combined_temp_root)
-            .caption(
-                "STREAM frame events",
-                chart_title_style(&params.colors.caption),
-            )
-            .x_label_area_size(params.area_margin.x)
-            .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(x_min..x_max, 0..1)
-            .unwrap();
-
-    stream_frames_all_combined_chart
+    let mut combined_stream = ChartBuilder::on(&combined_stream_area)
+        .caption(
+            "STREAM frame events",
+            chart_title_style(&params.colors.caption),
+        )
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y)
+        .build_cartesian_2d(x_range.clone(), 0..2)?;
+    combined_stream
         .configure_mesh()
         .disable_mesh()
         .axis_style(params.colors.axis)
         .label_style(chart_label_style(&params.colors.caption))
-        .draw()
-        .unwrap();
-
-    for (id, stream_frames) in stream_frame_series {
-        if params.bidi_only && (id & 0x2) != 0 {
-            continue;
-        }
-
-        let style = color_cyle.next_color();
-
-        let lines = stream_frames
-            .iter()
-            .map(|point| PathElement::new([(point.0, 2), (point.0, 0)], style));
-
-        stream_frames_all_combined_chart.draw_series(lines).unwrap();
+        .draw()?;
+    for (_, points) in stream_frame_series
+        .iter()
+        .filter(|(id, _)| visible_stream(params, ds.application_proto, **id))
+    {
+        let color = palette.next_color();
+        combined_stream.draw_series(points.iter().map(|(time, _)| {
+            PathElement::new([(*time, 2), (*time, 0)], color)
+        }))?;
     }
 
-    //// now the mini charts
-    color_cyle.reset();
-
-    let mut upper_y = 0;
-    let mut bubbles_upper_y = 0;
-    let mini_chart_axis_y_range = 0..4;
-    let marker_y = 2;
-    let marker_size = 5;
-
-    let max_data_len = match ds.vantage_point {
-        VantagePoint::Client => ds.largest_data_frame_rx_length_global,
-        VantagePoint::Server => ds.largest_data_frame_tx_length_global,
-    };
-
-    if max_data_len == 0 {
-        warn!("max_data_len = 0, skipping remaining charts");
-        return;
-    }
-
-    for (id, stub) in http_requests {
-        if params.bidi_only && (id & 0x2) != 0 {
-            continue;
-        }
-
-        let data_frames = match ds.vantage_point {
-            VantagePoint::Client => &stub.time_data_rx_set,
-            VantagePoint::Server => &stub.time_data_tx_set,
-        };
-
-        let headers_init = match ds.vantage_point {
-            VantagePoint::Client => stub.time_first_headers_tx,
-            VantagePoint::Server => stub.time_first_headers_rx,
-        };
-
-        let headers_actioned = match ds.vantage_point {
-            VantagePoint::Client => stub.time_first_headers_rx,
-            VantagePoint::Server => stub.time_first_headers_tx,
-        };
-
-        let data_frames_temp_root = root.clone().shrink(
-            (0, upper_y + data_frames_mini_offset_y),
-            (data_frames_mini_x, data_frames_mini_y),
+    palette.reset();
+    let max_data = frame_sets
+        .iter()
+        .flat_map(|points| points.iter().map(|point| point.1))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    for (row, ((stream_id, request), points)) in
+        requests.iter().zip(&frame_sets).enumerate()
+    {
+        let color = palette.next_color();
+        let frame_y = layout.row_y(layout.data_mini_y, layout.frame_step, row)?;
+        let stream_y =
+            layout.row_y(layout.stream_mini_y, layout.frame_step, row)?;
+        let bubble_y = layout.row_y(layout.bubbles_y, layout.bubble_step, row)?;
+        let data_area = root.clone().shrink(
+            (0, frame_y),
+            (layout.chart_width, params.frame_swimlane_height),
+        );
+        let stream_area = root.clone().shrink(
+            (0, stream_y),
+            (layout.chart_width, params.frame_swimlane_height),
+        );
+        let bubble_area = root.clone().shrink(
+            (0, bubble_y),
+            (layout.chart_width, params.bubbles_swimlane_height),
         );
 
-        let stream_frames_temp_root = root.clone().shrink(
-            (0, upper_y + stream_frames_mini_offset_y),
-            (stream_frames_mini_x, stream_frames_mini_y),
-        );
-
-        upper_y += 20;
-
-        let mut data_frames_mini_independent_chart =
-            ChartBuilder::on(&data_frames_temp_root)
-                .x_label_area_size(params.area_margin.x)
-                .y_label_area_size(params.area_margin.y)
-                .build_cartesian_2d(x_min..x_max, mini_chart_axis_y_range.clone())
-                .unwrap();
-
-        data_frames_mini_independent_chart
-            .configure_mesh()
-            .disable_y_mesh()
-            .disable_y_axis()
-            .axis_style(params.colors.axis)
-            .draw()
-            .unwrap();
-
-        // let's jump ahead here and plot the mini chart header events, to avoid
-        // having to loop again later
-        let mut stream_frames_mini_independent_chart =
-            ChartBuilder::on(&stream_frames_temp_root)
-                .x_label_area_size(params.area_margin.x)
-                .y_label_area_size(params.area_margin.y)
-                .build_cartesian_2d(x_min..x_max, mini_chart_axis_y_range.clone())
-                .unwrap();
-
-        stream_frames_mini_independent_chart
-            .configure_mesh()
-            .disable_y_mesh()
-            .disable_y_axis()
-            .axis_style(params.colors.axis)
-            .draw()
-            .unwrap();
-
-        let style = color_cyle.next_color();
-
-        if let Some(h) = headers_init {
-            data_frames_mini_independent_chart
-                .draw_series([TriangleMarker::new(
-                    (h, marker_y),
-                    marker_size,
-                    style,
-                )])
-                .unwrap();
-
-            stream_frames_mini_independent_chart
-                .draw_series([TriangleMarker::new(
-                    (h, marker_y),
-                    marker_size,
-                    style,
-                )])
-                .unwrap();
-        }
-
-        if let Some(h) = headers_actioned {
-            data_frames_mini_independent_chart
-                .draw_series([TriangleMarker::new(
-                    (h, marker_y),
-                    marker_size,
-                    style,
-                )])
-                .unwrap();
-
-            stream_frames_mini_independent_chart
-                .draw_series([TriangleMarker::new(
-                    (h, marker_y),
-                    marker_size,
-                    style,
-                )])
-                .unwrap();
-        }
-
-        let lines = data_frames
-            .iter()
-            .map(|point| PathElement::new([(point.0, 2), (point.0, 0)], style));
-
-        data_frames_mini_independent_chart
-            .draw_series(lines.clone())
-            .unwrap();
-
-        if let Some(stream_frames) = stream_frame_series.get(id) {
-            let lines = stream_frames.iter().map(|point| {
-                PathElement::new([(point.0, 2), (point.0, 0)], style)
-            });
-
-            stream_frames_mini_independent_chart
-                .draw_series(lines.clone())
-                .unwrap();
-        }
-
-        let bubbles_temp_root = root.clone().shrink(
-            (0, bubbles_upper_y + bubbles_offset_y),
-            (bubbles_x, bubbles_y),
-        );
-
-        bubbles_upper_y += 70;
-
-        let mut bubbles_mini_chart = ChartBuilder::on(&bubbles_temp_root)
+        let mut data_chart = ChartBuilder::on(&data_area)
             .x_label_area_size(params.area_margin.x)
             .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(
-                x_min..x_max,
-                0..max_data_len, /*0..30*/ /*mini_chart_axis_y_range.clone()*/
-            )
-            .unwrap();
-
-        bubbles_mini_chart
+            .build_cartesian_2d(x_range.clone(), 0..4)?;
+        data_chart
             .configure_mesh()
             .disable_y_mesh()
             .disable_y_axis()
             .axis_style(params.colors.axis)
-            .draw()
-            .unwrap();
+            .draw()?;
+        let mut stream_chart = ChartBuilder::on(&stream_area)
+            .x_label_area_size(params.area_margin.x)
+            .y_label_area_size(params.area_margin.y)
+            .build_cartesian_2d(x_range.clone(), 0..4)?;
+        stream_chart
+            .configure_mesh()
+            .disable_y_mesh()
+            .disable_y_axis()
+            .axis_style(params.colors.axis)
+            .draw()?;
 
-        // Integer conversion will floor, so when hardly any DATA is transferred
-        // avoid 0, which would cause a divide-by-0 later.
-        let bucket_size = if max_data_len >= 5 {
-            max_data_len / 5
-        } else {
-            1
-        };
-
-        let mut bubbles: Vec<Circle<(f64, i32), i32>> = vec![];
-        let mut lines: Vec<PathElement<(f64, i32)>> = vec![];
-        let mut lines2: Vec<PathElement<(f64, u64)>> = vec![];
-
-        let bubble_sizes = [1, 6, 11, 16, 21, 26, 31];
-
-        for (time, length) in data_frames {
-            // TODO: Replace this calculation with `div_ceil`.
-            let i: usize = (length / bucket_size) as usize +
-                usize::from(length % bucket_size != 0);
-            let i = i.saturating_sub(1);
-
-            // Bubbles beyond `x_max` still appear due to a plotting bug, so
-            // omit them.
-            if time > &x_max {
-                continue;
-            }
-
-            lines.push(PathElement::new(
-                [(*time, 2), (*time, 2 + bubble_sizes[i])],
-                style,
-            ));
-
-            lines2.push(PathElement::new([(*time, 0), (*time, *length)], style));
-
-            bubbles.push(Circle::new((*time, 2), bubble_sizes[i], style));
+        for time in [
+            match ds.vantage_point {
+                VantagePoint::Client => request.time_first_headers_tx,
+                VantagePoint::Server => request.time_first_headers_rx,
+            },
+            match ds.vantage_point {
+                VantagePoint::Client => request.time_first_headers_rx,
+                VantagePoint::Server => request.time_first_headers_tx,
+            },
+        ]
+        .into_iter()
+        .flatten()
+        {
+            data_chart.draw_series([TriangleMarker::new((time, 2), 5, color)])?;
+            stream_chart.draw_series([TriangleMarker::new(
+                (time, 2),
+                5,
+                color,
+            )])?;
+        }
+        data_chart.draw_series(points.iter().map(|(time, _)| {
+            PathElement::new([(*time, 2), (*time, 0)], color)
+        }))?;
+        if let Some(stream_frames) = stream_frame_series.get(stream_id) {
+            stream_chart.draw_series(stream_frames.iter().map(|(time, _)| {
+                PathElement::new([(*time, 2), (*time, 0)], color)
+            }))?;
         }
 
-        // bubbles_mini_chart.draw_series(bubbles).unwrap();
-        bubbles_mini_chart.draw_series(lines2).unwrap();
+        let mut length_chart = ChartBuilder::on(&bubble_area)
+            .x_label_area_size(params.area_margin.x)
+            .y_label_area_size(params.area_margin.y)
+            .build_cartesian_2d(x_range.clone(), 0..max_data)?;
+        length_chart
+            .configure_mesh()
+            .disable_y_mesh()
+            .disable_y_axis()
+            .axis_style(params.colors.axis)
+            .draw()?;
+        length_chart.draw_series(points.iter().map(|(time, length)| {
+            PathElement::new([(*time, 0), (*time, *length)], color)
+        }))?;
+    }
+    root.present()?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::datastore::ApplicationProto;
+    use crate::plots::fallible::test_support::TempCharts;
+    use crate::request_stub::HttpRequestStub;
+
+    fn test_params() -> MultiplexPlotsParams {
+        MultiplexPlotsParams {
+            width: 760,
+            combined_plot_height: 110,
+            frame_swimlane_height: 68,
+            bubbles_swimlane_height: 74,
+            y_spacer: 12,
+            right_shrink_margin: 35,
+            area_margin: AreaMargin { x: 26, y: 10 },
+            ..MultiplexPlotsParams::default()
+        }
+    }
+
+    #[test]
+    fn layout_never_overlaps_and_rejects_impossible_dimensions(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let layout = MultiplexLayout::new(&params, 3)?;
+        assert!(layout.data_mini_y >= params.combined_plot_height);
+        assert!(layout.bubbles_y >= layout.data_mini_y + 3 * layout.frame_step);
+        assert!(
+            layout.stream_combined_y >= layout.bubbles_y + 3 * layout.bubble_step
+        );
+        assert!(
+            layout.stream_mini_y >=
+                layout.stream_combined_y + params.combined_plot_height
+        );
+        assert!(layout.height > layout.stream_mini_y + 3 * layout.frame_step);
+        let bad_width = MultiplexPlotsParams {
+            right_shrink_margin: params.width + 1,
+            ..test_params()
+        };
+        assert!(MultiplexLayout::new(&bad_width, 1).is_err());
+        let bad_height = MultiplexPlotsParams {
+            combined_plot_height: u32::MAX,
+            ..test_params()
+        };
+        assert!(MultiplexLayout::new(&bad_height, 1).is_err());
+        assert!(MultiplexLayout::new(&params, usize::MAX).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn empty_logs_render_and_bad_output_paths_return_errors(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let ss = SeriesStore::default();
+        let ds = Datastore::default();
+        let out = TempCharts::new()?;
+        plot_stream_multiplexing(&params, "no-events", &ss, &ds, &out.output())?;
+        let path = out.only_file()?;
+        let (width, height) = image::image_dimensions(&path)?;
+        assert_eq!(
+            (width, height),
+            (params.width, MultiplexLayout::new(&params, 0)?.height)
+        );
+        let blocked = TempCharts::new()?;
+        let obstacle = blocked.0.join("occupied-file");
+        std::fs::write(&obstacle, b"not a directory")?;
+        let ty = ChartOutputType::Png {
+            output_dir: obstacle.to_string_lossy().into_owned(),
+            cwnd_y_max: None,
+            stream_y_max: None,
+        };
+        assert!(
+            plot_stream_multiplexing(&params, "blocked", &ss, &ds, &ty).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn http2_request_ids_not_filtered_and_large_data_lengths_render(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http2,
+            vantage_point: VantagePoint::Server,
+            ..Datastore::default()
+        };
+        let request = HttpRequestStub {
+            time_data_tx_set: vec![(1.0, 9), (4.0, 7), (7.0, 1)],
+            time_first_headers_rx: Some(0.5),
+            ..HttpRequestStub::default()
+        };
+        // HTTP/2 stream ID 3 is not QUIC unidirectional and must survive
+        // bidi_only.
+        ds.http_requests.insert(3, request);
+        let mut series = SeriesStore {
+            sent_x_min: 0.0,
+            sent_x_max: 8.0,
+            ..SeriesStore::default()
+        };
+        series
+            .sent_data_frames_series
+            .insert(3, vec![(1.0, 3), (6.0, 5)]);
+        let out = TempCharts::new()?;
+        plot_stream_multiplexing(&params, "h2-id3", &series, &ds, &out.output())?;
+        let path = out.only_file()?;
+        let rendered = image::open(&path)?.to_rgb8();
+        let layout = MultiplexLayout::new(&params, 1)?;
+        assert_eq!(
+            (rendered.width(), rendered.height()),
+            (layout.width, layout.height)
+        );
+        // Compare to same request without STREAM/DATA samples. Chart geometry
+        // remains identical; pixel differences prove the H2 stream was drawn.
+        let no_frames = SeriesStore {
+            sent_x_min: 0.0,
+            sent_x_max: 8.0,
+            ..SeriesStore::default()
+        };
+        // No frame series, preserving the source time bounds.
+        let out_without = TempCharts::new()?;
+        plot_stream_multiplexing(
+            &params,
+            "h2-id3",
+            &no_frames,
+            &ds,
+            &out_without.output(),
+        )?;
+        let without = image::open(out_without.only_file()?)?.to_rgb8();
+        assert_ne!(
+            rendered.as_raw(),
+            without.as_raw(),
+            "HTTP/2 STREAM lane must render DATA frames"
+        );
+
+        // HTTP/3 does have unidirectional stream IDs; bidi-only filters them.
+        ds.application_proto = ApplicationProto::Http3;
+        let filtered = TempCharts::new()?;
+        plot_stream_multiplexing(
+            &params,
+            "h3-id3",
+            &series,
+            &ds,
+            &filtered.output(),
+        )?;
+        let (_, filtered_height) =
+            image::image_dimensions(filtered.only_file()?)?;
+        assert_eq!(filtered_height, MultiplexLayout::new(&params, 0)?.height);
+        assert!(filtered_height < layout.height);
+        Ok(())
+    }
+
+    #[test]
+    fn reject_nonfinite_event_timestamps_before_backend_rendering(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_data_tx_set: vec![(f64::NAN, 3)],
+            ..HttpRequestStub::default()
+        });
+        ds.vantage_point = VantagePoint::Server;
+        let out = TempCharts::new()?;
+        assert!(plot_stream_multiplexing(
+            &params,
+            "nan-time",
+            &SeriesStore::default(),
+            &ds,
+            &out.output()
+        )
+        .is_err());
+        assert!(
+            std::fs::read_dir(&out.0)?.next().is_none(),
+            "no invalid partial PNG should be created"
+        );
+        Ok(())
     }
 }
