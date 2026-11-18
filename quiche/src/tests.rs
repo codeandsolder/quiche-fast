@@ -120,6 +120,25 @@ fn transport_params() {
 }
 
 #[test]
+fn peer_transport_params_wire_preserves_original_encoding() {
+    let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    assert!(pipe.client.peer_transport_params_wire().is_none());
+    assert!(pipe.server.peer_transport_params_wire().is_none());
+
+    pipe.handshake().unwrap();
+
+    for conn in [&pipe.client, &pipe.server] {
+        let raw = conn
+            .peer_transport_params_wire()
+            .expect("validated raw QUIC parameters");
+        assert!(!raw.is_empty());
+        let parsed = TransportParams::decode(raw, conn.is_server(), None).unwrap();
+        assert_eq!(&parsed, conn.peer_transport_params().unwrap());
+        assert_eq!(conn.peer_transport_params_wire(), Some(raw));
+    }
+}
+
+#[test]
 fn transport_params_forbid_duplicates() {
     // Given an encoded param.
     let initial_source_connection_id = b"id";
