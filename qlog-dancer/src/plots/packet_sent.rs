@@ -38,12 +38,41 @@ use std::ops::Range;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
+use plotters::drawing::DrawingAreaErrorKind;
+use plotters::prelude::AsRelative;
+use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::ChartContext;
+use plotters::prelude::Color;
+use plotters::prelude::Cross;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::LineSeries;
+use plotters::prelude::PathElement;
+use plotters::prelude::RGBColor;
+use plotters::prelude::SeriesLabelPosition;
+use plotters::prelude::BLACK;
+use plotters::prelude::BLUE;
+use plotters::prelude::GREEN;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
 
-use crate::plots::colors::*;
-use crate::plots::*;
+use crate::plots::chart_label_style;
+use crate::plots::chart_subtitle_style;
+use crate::plots::chart_title_style;
+use crate::plots::colors::ORANGE;
+use crate::plots::colors::PURPLE;
+use crate::plots::colors::SOFT_PINK;
+use crate::plots::colors::TAUPE;
+use crate::plots::colors::TEAL;
+use crate::plots::draw_line;
+use crate::plots::ChartConfig;
+use crate::plots::ChartOutputType;
+use crate::plots::ClampParams;
+use crate::plots::PlotParameters;
 
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
+use crate::QlogPointu64;
 
 struct XYMinMax {
     pub x: Range<f64>,
@@ -68,7 +97,7 @@ impl XYMinMax {
         })
     }
 
-    fn y_range(&self) -> Range<u64> {
+    const fn y_range(&self) -> Range<u64> {
         self.y_min..self.y_max
     }
 }
@@ -80,6 +109,37 @@ fn padded_upper(value: u64) -> u64 {
     value.saturating_add(value.div_ceil(10)).max(1)
 }
 
+/// The cumulative-count chart is not a packet-number chart. Packet numbers
+/// can start arbitrarily high or contain gaps unrelated to observed counts.
+fn packet_count_upper(ss: &SeriesStore) -> u64 {
+    let largest_count = ss
+        .onertt_packet_sent_aggregate_count
+        .iter()
+        .chain(&ss.onertt_packet_delivered_aggregate_count)
+        .chain(&ss.onertt_packet_without_observed_ack_aggregate_count)
+        .map(|(_, count)| *count)
+        .max()
+        .unwrap_or(0);
+    padded_upper(largest_count)
+}
+
+/// Series metadata is data, not repeated draw/label/legend code.
+type LabeledPacketLine<'a> = (&'a [QlogPointu64], &'static str, RGBColor);
+
+fn draw_packet_lines<DB: DrawingBackend>(
+    chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+    lines: &[LabeledPacketLine<'_>],
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    for &(series, label, color) in lines {
+        draw_line(series, Some(label), color, chart)?;
+    }
+    Ok(())
+}
+
+/// Draw packet-number timelines for transmitted or received 1-RTT packets.
+///
+/// # Errors
+/// Returns invalid chart ranges and drawing backend failures.
 pub fn draw_packet_sent_received_plot<'a, DB: DrawingBackend + 'a>(
     is_sent: bool, filename: &str, params: &PlotParameters, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
@@ -93,11 +153,11 @@ where
     let (caption, y_max) = if is_sent {
         let y_max = padded_upper(ss.y_max_onertt_pkt_sent_plot);
 
-        (format!("{} Packet Sent timeline", filename), y_max)
+        (format!("{filename} Packet Sent timeline"), y_max)
     } else {
         let y_max = padded_upper(ss.y_max_onertt_pkt_received_plot);
 
-        (format!("{} Packet Received timeline", filename), y_max)
+        (format!("{filename} Packet Received timeline"), y_max)
     };
 
     let axis = XYMinMax::init(params, ss, y_max, is_sent)?;
@@ -123,31 +183,29 @@ where
     )?;
 
     if is_sent {
-        chart
-            .draw_series(LineSeries::new(
-                ss.onertt_packet_created.iter().copied(),
-                GREEN,
-            ))?
-            .label("packet created")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN));
+        draw_line(
+            &ss.onertt_packet_created,
+            Some("packet created"),
+            GREEN,
+            &mut chart,
+        )?;
 
-        chart
-            .draw_series(LineSeries::new(
-                ss.onertt_packet_sent.iter().copied(),
-                ORANGE,
-            ))?
-            .label("packet sent (packet number)")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], ORANGE));
+        draw_line(
+            &ss.onertt_packet_sent,
+            Some("packet sent (packet number)"),
+            ORANGE,
+            &mut chart,
+        )?;
 
-        let packet_losses = ss
-            .onertt_packet_lost_hacky
+        let packets_without_ack = ss
+            .onertt_packet_without_observed_ack
             .iter()
             .map(|point| Cross::new(*point, 2, PURPLE));
 
         chart
-            .draw_series(packet_losses)?
-            .label("packet lost (packet number)")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], PURPLE));
+            .draw_series(packets_without_ack)?
+            .label("packet without observed ACK (not proven lost)")
+            .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], PURPLE));
     } else {
         let missing_packets_line = ss
             .netlog_missing_packets
@@ -157,15 +215,14 @@ where
         chart
             .draw_series(missing_packets_line)?
             .label("missing packets")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
+            .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], BLUE));
 
-        chart
-            .draw_series(LineSeries::new(
-                ss.onertt_packet_received.iter().copied(),
-                ORANGE,
-            ))?
-            .label("packet received")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], ORANGE));
+        draw_line(
+            &ss.onertt_packet_received,
+            Some("packet received"),
+            ORANGE,
+            &mut chart,
+        )?;
     }
 
     if params.display_legend {
@@ -181,7 +238,11 @@ where
     Ok(chart)
 }
 
-pub fn draw_packet_sent_lost_delivered_count_plot<'a, DB: DrawingBackend + 'a>(
+/// Render cumulative packet counts, independently of packet-number numbering.
+///
+/// # Errors
+/// Returns invalid ranges or backend drawing failures.
+pub fn draw_packet_sent_ack_status_count_plot<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
 ) -> Result<
@@ -191,9 +252,9 @@ pub fn draw_packet_sent_lost_delivered_count_plot<'a, DB: DrawingBackend + 'a>(
 where
     DB::ErrorType: 'static,
 {
-    let caption = "Packet sent/lost/delivered counts";
+    let caption = "Packet sent, ACKed and unconfirmed counts";
 
-    let y_max = padded_upper(ss.y_max_onertt_pkt_sent_plot);
+    let y_max = packet_count_upper(ss);
 
     let axis = XYMinMax::init(params, ss, y_max, true)?;
 
@@ -217,29 +278,24 @@ where
         &mut chart,
     )?;
 
-    chart
-        .draw_series(LineSeries::new(
-            ss.onertt_packet_sent_aggregate_count.iter().copied(),
+    draw_packet_lines(&mut chart, &[
+        (
+            ss.onertt_packet_sent_aggregate_count.as_slice(),
+            "packet sent count",
             TAUPE,
-        ))?
-        .label("packet sent count")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], TAUPE));
-
-    chart
-        .draw_series(LineSeries::new(
-            ss.onertt_packet_delivered_aggregate_count.iter().copied(),
+        ),
+        (
+            ss.onertt_packet_delivered_aggregate_count.as_slice(),
+            "ACK-confirmed packet count",
             BLUE,
-        ))?
-        .label("packet delivered count")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
-
-    chart
-        .draw_series(LineSeries::new(
-            ss.onertt_packet_lost_aggregate_count.iter().copied(),
+        ),
+        (
+            ss.onertt_packet_without_observed_ack_aggregate_count
+                .as_slice(),
+            "packet without observed ACK count",
             SOFT_PINK,
-        ))?
-        .label("packet lost count")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], SOFT_PINK));
+        ),
+    ])?;
 
     if params.display_legend {
         chart
@@ -291,23 +347,15 @@ where
         &mut chart,
     )?;
 
-    // Draw the series
-
-    // not sure best way to render these, lines or points?
     let lines = LineSeries::new(
         ss.onertt_packet_created_sent_delta.iter().copied(),
         BLUE,
     );
 
-    let _crosses = ss
-        .onertt_packet_created_sent_delta
-        .iter()
-        .map(|point| Cross::new(*point, 2, BLUE));
-
     chart
         .draw_series(lines)?
         .label("packet created/sent delta")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLACK));
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], BLACK));
 
     if params.display_legend {
         chart
@@ -362,32 +410,12 @@ where
         &mut chart,
     )?;
 
-    // Draw all 4 rate series
-    chart
-        .draw_series(LineSeries::new(
-            ss.local_pacing_rate.iter().copied(),
-            PURPLE,
-        ))?
-        .label("pacing rate")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], PURPLE));
-
-    chart
-        .draw_series(LineSeries::new(
-            ss.local_delivery_rate.iter().copied(),
-            TEAL,
-        ))?
-        .label("delivery rate")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], TEAL));
-
-    chart
-        .draw_series(LineSeries::new(ss.local_send_rate.iter().copied(), ORANGE))?
-        .label("send rate")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], ORANGE));
-
-    chart
-        .draw_series(LineSeries::new(ss.local_ack_rate.iter().copied(), BLUE))?
-        .label("ack rate")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
+    draw_packet_lines(&mut chart, &[
+        (ss.local_pacing_rate.as_slice(), "pacing rate", PURPLE),
+        (ss.local_delivery_rate.as_slice(), "delivery rate", TEAL),
+        (ss.local_send_rate.as_slice(), "send rate", ORANGE),
+        (ss.local_ack_rate.as_slice(), "ack rate", BLUE),
+    ])?;
 
     if params.display_legend {
         chart
@@ -441,7 +469,7 @@ pub fn plot_packet_sent(
     let (delta_timings, pacing_rate) = remainder.split_vertically((50).percent());
 
     draw_packet_sent_received_plot(true, filename, params, ss, &raw_timings)?;
-    draw_packet_sent_lost_delivered_count_plot(params, ss, &counts)?;
+    draw_packet_sent_ack_status_count_plot(params, ss, &counts)?;
     draw_delta_plot(params, ss, &delta_timings)?;
     draw_pacing_rate_plot(params, ss, ds, &pacing_rate)?;
     root.present()?;
@@ -468,14 +496,14 @@ pub fn plot_packet_sent_plot_canvas<'a>(
 ///
 /// # Errors
 /// Returns browser canvas/backend or invalid chart errors.
-pub fn plot_packet_sent_lost_delivered_count_plot<'a>(
+pub fn plot_packet_sent_ack_status_count_plot<'a>(
     params: &PlotParameters, ss: &SeriesStore, canvas_id: &str,
 ) -> Result<
     ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     Box<dyn Error>,
 > {
     let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
-    draw_packet_sent_lost_delivered_count_plot(params, ss, &root)
+    draw_packet_sent_ack_status_count_plot(params, ss, &root)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -512,6 +540,12 @@ pub fn plot_packet_sent_pacing_rate_plot_canvas<'a>(
 mod tests {
     use super::*;
     use crate::plots::fallible::test_support::TempCharts;
+    use crate::plots::AreaMargin;
+    use crate::plots::ChartMargin;
+    use crate::plots::ChartSize;
+    use crate::plots::PlotColors;
+    use plotters::drawing::IntoDrawingArea;
+    use plotters::prelude::BitMapBackend;
 
     fn test_params() -> PlotParameters {
         PlotParameters {
@@ -536,6 +570,44 @@ mod tests {
         assert_eq!(padded_upper(9), 10);
         assert_eq!(padded_upper(10), 11);
         assert_eq!(padded_upper(u64::MAX), u64::MAX);
+    }
+
+    #[test]
+    fn cumulative_packet_count_axis_uses_counts_not_packet_numbers(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut series = SeriesStore {
+            sent_x_min: 0.0,
+            sent_x_max: 5.0,
+            y_max_onertt_pkt_sent_plot: 1_000_000,
+            onertt_packet_sent_aggregate_count: vec![(1.0, 2), (2.0, 3)],
+            onertt_packet_delivered_aggregate_count: vec![(2.0, 1)],
+            onertt_packet_without_observed_ack_aggregate_count: vec![(2.0, 2)],
+            ..SeriesStore::default()
+        };
+        assert_eq!(packet_count_upper(&series), 4);
+        let mut pixels = vec![0_u8; 720 * 540 * 3];
+        let area = BitMapBackend::with_buffer(&mut pixels, (720, 540))
+            .into_drawing_area();
+        let chart = draw_packet_sent_ack_status_count_plot(
+            &test_params(),
+            &series,
+            &area,
+        )?;
+        assert_eq!(chart.y_range(), 0..4);
+        drop(chart);
+
+        // Counts can also exceed the packet-number maximum, e.g. when
+        // packet numbering is deliberately reset or the series is imported.
+        series
+            .onertt_packet_without_observed_ack_aggregate_count
+            .push((3.0, 37));
+        assert_eq!(packet_count_upper(&series), 41);
+        series
+            .onertt_packet_delivered_aggregate_count
+            .push((4.0, u64::MAX));
+        assert_eq!(packet_count_upper(&series), u64::MAX);
+        assert_eq!(packet_count_upper(&SeriesStore::default()), 1);
+        Ok(())
     }
 
     #[test]

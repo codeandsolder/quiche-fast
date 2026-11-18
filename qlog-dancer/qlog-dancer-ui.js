@@ -200,7 +200,7 @@ function redrawByCanvasId(canvas_id) {
     } else if (canvas_id === PKT_TX_CANVAS) {
         qlog_dancer.draw_packet_sent_plot(PKT_TX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
     } else if (canvas_id === PKT_TX_COUNTS_CANVAS) {
-        qlog_dancer.draw_packet_sent_lost_delivered_count_plot(PKT_TX_COUNTS_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
+        qlog_dancer.draw_packet_sent_ack_status_count_plot(PKT_TX_COUNTS_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
     }else if (canvas_id === PKT_TX_DELTA_CANVAS) {
         qlog_dancer.draw_packet_sent_delta_plot(PKT_TX_DELTA_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
     } else if (canvas_id === PKT_TX_PACING_CANVAS) {
@@ -270,7 +270,7 @@ function drawPacketSent(resize) {
         let pkt_sent_canvas = canvasMap.get(PKT_TX_CANVAS);
         qlog_dancer.draw_packet_sent_plot(PKT_TX_CANVAS, pkt_sent_canvas.show_legend, pkt_sent_canvas.x_start, pkt_sent_canvas.x_end);
         let pkt_sent_counts_canvas = canvasMap.get(PKT_TX_COUNTS_CANVAS);
-        qlog_dancer.draw_packet_sent_lost_delivered_count_plot(PKT_TX_COUNTS_CANVAS, pkt_sent_counts_canvas.show_legend, pkt_sent_counts_canvas.x_start, pkt_sent_counts_canvas.x_end);
+        qlog_dancer.draw_packet_sent_ack_status_count_plot(PKT_TX_COUNTS_CANVAS, pkt_sent_counts_canvas.show_legend, pkt_sent_counts_canvas.x_start, pkt_sent_counts_canvas.x_end);
         let pkt_sent_delta_canvas = canvasMap.get(PKT_TX_DELTA_CANVAS);
         qlog_dancer.draw_packet_sent_delta_plot(PKT_TX_DELTA_CANVAS, pkt_sent_delta_canvas.show_legend, pkt_sent_delta_canvas.x_start, pkt_sent_delta_canvas.x_end);
         let pkt_sent_pacing_canvas = canvasMap.get(PKT_TX_PACING_CANVAS);
