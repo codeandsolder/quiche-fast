@@ -105,6 +105,23 @@ impl<T> SparkOutputs<T> {
         }
     }
 
+    /// Transform all four outputs in a stable order, stopping on the first
+    /// backend error rather than continuing to initialize later outputs.
+    fn try_map<U, E>(
+        self, mut f: impl FnMut(T) -> Result<U, E>,
+    ) -> Result<SparkOutputs<U>, E> {
+        Ok(SparkOutputs {
+            download: SparkPair {
+                absolute: f(self.download.absolute)?,
+                relative: f(self.download.relative)?,
+            },
+            upload: SparkPair {
+                absolute: f(self.upload.absolute)?,
+                relative: f(self.upload.relative)?,
+            },
+        })
+    }
+
     fn as_ref(&self) -> SparkOutputs<&T> {
         SparkOutputs {
             download: SparkPair {
@@ -875,36 +892,9 @@ pub fn plot_sparks(
     let paths = configs.as_ref().map(ChartConfig::chart_filepath);
 
     #[cfg(not(target_arch = "wasm32"))]
-    let roots = SparkOutputs {
-        download: SparkPair {
-            absolute: spark_bitmap_area(
-                &paths.download.absolute,
-                size,
-                params.colors,
-                margin,
-            )?,
-            relative: spark_bitmap_area(
-                &paths.download.relative,
-                size,
-                params.colors,
-                margin,
-            )?,
-        },
-        upload: SparkPair {
-            absolute: spark_bitmap_area(
-                &paths.upload.absolute,
-                size,
-                params.colors,
-                margin,
-            )?,
-            relative: spark_bitmap_area(
-                &paths.upload.relative,
-                size,
-                params.colors,
-                margin,
-            )?,
-        },
-    };
+    let roots = paths
+        .as_ref()
+        .try_map(|path| spark_bitmap_area(path, size, params.colors, margin))?;
 
     #[cfg(target_arch = "wasm32")]
     let canvas_ids = SparkOutputs {
@@ -931,32 +921,9 @@ pub fn plot_sparks(
     };
 
     #[cfg(target_arch = "wasm32")]
-    let roots = SparkOutputs {
-        download: SparkPair {
-            absolute: spark_canvas_area(
-                &canvas_ids.download.absolute,
-                params.colors,
-                margin,
-            )?,
-            relative: spark_canvas_area(
-                &canvas_ids.download.relative,
-                params.colors,
-                margin,
-            )?,
-        },
-        upload: SparkPair {
-            absolute: spark_canvas_area(
-                &canvas_ids.upload.absolute,
-                params.colors,
-                margin,
-            )?,
-            relative: spark_canvas_area(
-                &canvas_ids.upload.relative,
-                params.colors,
-                margin,
-            )?,
-        },
-    };
+    let roots = canvas_ids.as_ref().try_map(|canvas_id| {
+        spark_canvas_area(canvas_id, params.colors, margin)
+    })?;
 
     let legend_x = chart_coord(
         u64::from(params.spark_offset_x) +
@@ -1270,11 +1237,12 @@ fn draw_stream_frames_line<DB: DrawingBackend>(
 
     rel_chart.draw_series(LineSeries::new(points.iter().copied(), PURPLE_500))?;
 
-    let circles: Vec<Circle<(f64, u64), i32>> = points
-        .iter()
-        .map(|point| Circle::new(*point, 2, PURPLE_500))
-        .collect();
-    rel_chart.draw_series(circles)?;
+    rel_chart.draw_series(
+        points
+            .iter()
+            .copied()
+            .map(|point| Circle::new(point, 2, PURPLE_500)),
+    )?;
     Ok(())
 }
 
@@ -1340,15 +1308,15 @@ fn draw_request_timing_lines<DB: DrawingBackend>(
 ) -> SparkDrawingResult<DB> {
     if let Some(req) = ds.http_requests.get(&stream_id) {
         if let Some(h) = req.time_first_headers_rx {
-            let points = vec![(h, 0), (h, y_max)];
-            abs_chart.draw_series(LineSeries::new(points, GREEN))?;
+            abs_chart
+                .draw_series(LineSeries::new([(h, 0), (h, y_max)], GREEN))?;
 
             // don't care about rx events on the relative spark chart
         }
 
         if let Some(h) = req.time_first_headers_tx {
-            let points = vec![(h, 0), (h, y_max)];
-            abs_chart.draw_series(LineSeries::new(points.clone(), CYAN))?;
+            let points = [(h, 0), (h, y_max)];
+            abs_chart.draw_series(LineSeries::new(points, CYAN))?;
             rel_chart.draw_series(LineSeries::new(points, CYAN))?;
         }
 
@@ -1360,14 +1328,14 @@ fn draw_request_timing_lines<DB: DrawingBackend>(
         };
 
         if let Some(t) = first_data_to_plot {
-            let points = vec![(t, 0), (t, y_max)];
-            abs_chart.draw_series(LineSeries::new(points.clone(), ORANGE))?;
+            let points = [(t, 0), (t, y_max)];
+            abs_chart.draw_series(LineSeries::new(points, ORANGE))?;
             rel_chart.draw_series(LineSeries::new(points, ORANGE))?;
         }
 
         if let Some(t) = last_data_to_plot {
-            let points = vec![(t, 0), (t, y_max)];
-            abs_chart.draw_series(LineSeries::new(points.clone(), BROWN))?;
+            let points = [(t, 0), (t, y_max)];
+            abs_chart.draw_series(LineSeries::new(points, BROWN))?;
             rel_chart.draw_series(LineSeries::new(points, BROWN))?;
         }
     }
@@ -1632,6 +1600,38 @@ mod tests {
         assert_eq!(mapped.download.relative, "download-relative".len());
         assert_eq!(mapped.upload.absolute, "upload-absolute".len());
         assert_eq!(mapped.upload.relative, "upload-relative".len());
+    }
+
+    #[test]
+    fn spark_output_initialization_is_ordered_and_short_circuits_on_error() {
+        let outputs = super::SparkOutputs {
+            download: super::SparkPair {
+                absolute: 1_u8,
+                relative: 2,
+            },
+            upload: super::SparkPair {
+                absolute: 3,
+                relative: 4,
+            },
+        };
+        let mapped = outputs.try_map(|value| Ok::<u8, &'static str>(value * 2));
+        let mapped = mapped.expect("all outputs should initialize");
+        assert_eq!(mapped.download.absolute, 2);
+        assert_eq!(mapped.download.relative, 4);
+        assert_eq!(mapped.upload.absolute, 6);
+        assert_eq!(mapped.upload.relative, 8);
+
+        let mut visited = Vec::new();
+        let failed = outputs.try_map(|value| {
+            visited.push(value);
+            if value == 3 {
+                Err("backend initialization failed")
+            } else {
+                Ok(value)
+            }
+        });
+        assert!(matches!(failed, Err("backend initialization failed")));
+        assert_eq!(visited, [1, 2, 3]);
     }
 
     #[test]
