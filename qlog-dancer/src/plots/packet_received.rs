@@ -29,10 +29,12 @@ use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::invalid_chart;
-use packet_sent::draw_packet_sent_received_plot;
+use crate::plots::packet_sent::draw_packet_sent_received_plot;
+use crate::plots::ChartConfig;
+use crate::plots::ChartOutputType;
+use crate::plots::PlotParameters;
+use plotters::prelude::AsRelative;
 use std::error::Error;
-
-use crate::plots::*;
 
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
@@ -42,11 +44,11 @@ use crate::seriesstore::SeriesStore;
 /// # Errors
 /// Propagates validation, output and drawing failures to callers.
 pub fn plot_packet_received(
-    params: &PlotParameters, filename: &str, ss: &SeriesStore, _ds: &Datastore,
+    params: &PlotParameters, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
     let chart_config =
-        ChartConfig::new("packet-received", filename, &params.clamp, _ds, ty);
+        ChartConfig::new("packet-received", filename, &params.clamp, ds, ty);
 
     #[cfg(not(target_arch = "wasm32"))]
     let chart_path = match ty {
@@ -82,6 +84,11 @@ pub fn plot_packet_received(
 mod tests {
     use super::*;
     use crate::plots::fallible::test_support::TempCharts;
+    use crate::plots::AreaMargin;
+    use crate::plots::ChartMargin;
+    use crate::plots::ChartSize;
+    use crate::plots::ClampParams;
+    use crate::plots::PlotColors;
 
     #[test]
     fn empty_received_chart_renders_and_invalid_output_fails_cleanly(

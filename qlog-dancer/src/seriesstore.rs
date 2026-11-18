@@ -73,8 +73,9 @@ pub struct SeriesStore {
     pub onertt_packet_created: Vec<QlogPointu64>,
     pub onertt_packet_sent: Vec<QlogPointu64>,
     pub onertt_packet_sent_aggregate_count: Vec<QlogPointu64>,
-    pub onertt_packet_lost_hacky: Vec<QlogPointu64>,
-    pub onertt_packet_lost_aggregate_count: Vec<QlogPointu64>,
+    /// Packets without a confirmed ACK, not proven packet losses.
+    pub onertt_packet_without_observed_ack: Vec<QlogPointu64>,
+    pub onertt_packet_without_observed_ack_aggregate_count: Vec<QlogPointu64>,
     pub onertt_packet_delivered_aggregate_count: Vec<QlogPointu64>,
 
     pub onertt_packet_received: Vec<QlogPointu64>,
@@ -296,7 +297,7 @@ impl SeriesStore {
             // TODO: Gather these counts during recovery-metric processing.
             let mut sent_count = 0;
             let mut delivered_count = 0;
-            let mut lost_count = 0;
+            let mut without_ack_count = 0;
 
             for (pkt_num, pkt_info) in onertt_pkts.iter() {
                 sent_count += 1;
@@ -309,21 +310,24 @@ impl SeriesStore {
                     (pkt_info.created_time, sent_count),
                 );
 
-                // The actual loss time is unavailable, so use the packet's
-                // creation time.
-                if pkt_info.acked.is_none() {
-                    self.onertt_packet_lost_hacky
-                        .push((pkt_info.created_time, *pkt_num));
-                    lost_count += 1;
-                    push_interp(
-                        &mut self.onertt_packet_lost_aggregate_count,
-                        (pkt_info.created_time, lost_count),
-                    );
-                } else {
+                // No ACK observation is not evidence of loss. Plot those
+                // packets at creation time, since the observation timestamp is
+                // unknown. Only Some(true) establishes that delivery was
+                // confirmed.
+                if pkt_info.acked == Some(true) {
                     delivered_count += 1;
                     push_interp(
                         &mut self.onertt_packet_delivered_aggregate_count,
                         (pkt_info.created_time, delivered_count),
+                    );
+                } else {
+                    self.onertt_packet_without_observed_ack
+                        .push((pkt_info.created_time, *pkt_num));
+                    without_ack_count += 1;
+                    push_interp(
+                        &mut self
+                            .onertt_packet_without_observed_ack_aggregate_count,
+                        (pkt_info.created_time, without_ack_count),
                     );
                 }
 
@@ -860,9 +864,56 @@ impl SeriesStore {
 mod tests {
     use super::SeriesStore;
     use crate::datastore::Datastore;
+    use crate::datastore::PacketInfoStub;
     use crate::datastore::StreamDatapoint;
+    use crate::PacketType;
     use qlog::events::quic::QuicFrame;
     use qlog::events::RawInfo;
+
+    #[test]
+    fn packet_ack_counts_do_not_equate_unknown_status_with_loss_or_delivery() {
+        let mut ds = Datastore::default();
+        for (number, acked) in [(10, None), (11, Some(false)), (12, Some(true))] {
+            ds.packet_sent
+                .entry(PacketType::OneRtt)
+                .or_default()
+                .insert(number, PacketInfoStub {
+                    acked,
+                    raw: None,
+                    created_time: (number - 9) as f64,
+                    send_at_time: None,
+                    ty: PacketType::OneRtt,
+                    number,
+                });
+        }
+        let mut series = SeriesStore::default();
+        series.packet_sent(&ds);
+        assert_eq!(series.onertt_packet_without_observed_ack, vec![
+            (1.0, 10),
+            (2.0, 11)
+        ]);
+        assert_eq!(
+            series
+                .onertt_packet_without_observed_ack_aggregate_count
+                .last()
+                .map(|p| p.1),
+            Some(2),
+        );
+        assert_eq!(
+            series
+                .onertt_packet_delivered_aggregate_count
+                .last()
+                .map(|p| p.1),
+            Some(1),
+        );
+        assert_eq!(
+            series
+                .onertt_packet_sent_aggregate_count
+                .last()
+                .map(|p| p.1),
+            Some(3),
+        );
+    }
 
     #[test]
     fn received_time_range_is_independent_of_sent_packets_and_monotonic() {

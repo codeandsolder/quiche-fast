@@ -29,8 +29,8 @@ use crate::plots::congestion_control::plot_cc_plot;
 use crate::plots::conn_flow_control::plot_conn_flow_control_canvas;
 use crate::plots::conn_overview::plot_main_plot;
 use crate::plots::packet_received::plot_packet_received;
+use crate::plots::packet_sent::plot_packet_sent_ack_status_count_plot;
 use crate::plots::packet_sent::plot_packet_sent_delta_plot_canvas;
-use crate::plots::packet_sent::plot_packet_sent_lost_delivered_count_plot;
 use crate::plots::packet_sent::plot_packet_sent_pacing_rate_plot_canvas;
 use crate::plots::packet_sent::plot_packet_sent_plot_canvas;
 use crate::plots::pending::plot_pending;
@@ -645,7 +645,7 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     /// Draws the packet sent plot into the provided canvas_id.
-    pub fn draw_packet_sent_lost_delivered_count_plot(
+    pub fn draw_packet_sent_ack_status_count_plot(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
@@ -670,10 +670,9 @@ impl QlogDancerWeb {
             };
 
             self.pkt_tx_counts_chart_info = None;
-            let chart = plot_packet_sent_lost_delivered_count_plot(
-                &params, ss, canvas_id,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            let chart =
+                plot_packet_sent_ack_status_count_plot(&params, ss, canvas_id)
+                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
             self.pkt_tx_counts_chart_info = Some(ChartInfo::from_chart(&chart));
         }
