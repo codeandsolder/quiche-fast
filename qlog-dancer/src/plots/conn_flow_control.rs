@@ -45,6 +45,8 @@ use plotters::prelude::PathElement;
 use plotters::prelude::SeriesLabelPosition;
 use plotters::prelude::BLUE;
 use plotters::prelude::GREEN;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
 use std::error::Error;
 use std::io;
 use std::ops::Range;

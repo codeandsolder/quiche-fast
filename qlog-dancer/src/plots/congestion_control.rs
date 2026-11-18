@@ -46,6 +46,8 @@ use plotters::prelude::Text;
 use plotters::prelude::BLACK;
 use plotters::prelude::WHITE;
 use plotters::style::full_palette::PURPLE_500;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
 use std::error::Error;
 
 use crate::plots::chart_label_style;
