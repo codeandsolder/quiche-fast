@@ -28,16 +28,29 @@
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
-use minmax::XYMinMax;
 use plotters::coord::types::RangedCoordf32;
 use plotters::coord::types::RangedCoordf64;
+use plotters::coord::Shift;
+use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::ChartContext;
+use plotters::prelude::Color;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::LineSeries;
+use plotters::prelude::PathElement;
+use plotters::prelude::SeriesLabelPosition;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
 use std::error::Error;
 
-use plotters::coord::Shift;
-
-use crate::plots::colors::*;
-use crate::plots::*;
-
+use super::minmax::XYMinMax;
+use crate::plots::chart_label_style;
+use crate::plots::chart_subtitle_style;
+use crate::plots::colors::BROWN;
+use crate::plots::colors::ORANGE;
+use crate::plots::colors::SOFT_PINK;
+use crate::plots::draw_mesh;
+use crate::plots::PlotParameters;
 use crate::seriesstore::SeriesStore;
 
 fn padded_rtt_max(value: f32) -> Result<f32, Box<dyn Error>> {
@@ -46,7 +59,12 @@ fn padded_rtt_max(value: f32) -> Result<f32, Box<dyn Error>> {
             invalid_chart("RTT maximum must be finite and nonnegative").into()
         );
     }
-    Ok(((f64::from(value) * 1.1).max(1.0).min(f64::from(f32::MAX))) as f32)
+    let scaled = value * 1.1;
+    Ok(if scaled.is_finite() {
+        scaled.max(1.0)
+    } else {
+        f32::MAX
+    })
 }
 
 /// Render all recorded RTT series.
@@ -64,6 +82,17 @@ where
     DB::ErrorType: 'static,
 {
     let x = checked_time_range(axis.x.min, axis.x.max, &params.clamp)?;
+    for samples in [
+        &ss.local_min_rtt,
+        &ss.local_latest_rtt,
+        &ss.local_smoothed_rtt,
+    ] {
+        if samples.iter().any(|(time, value)| {
+            !time.is_finite() || !value.is_finite() || *value < 0.0
+        }) {
+            return Err(invalid_chart("RTT samples must have finite times and nonnegative finite values").into());
+        }
+    }
     let upper = padded_rtt_max(ss.y_max_rtt_plot)?;
     let mut builder = ChartBuilder::on(plot);
     builder
@@ -89,7 +118,7 @@ where
             .draw_series(LineSeries::new(points.iter().copied(), colour))?
             .label(label)
             .legend(move |(x, y)| {
-                PathElement::new(vec![(x, y), (x + 20, y)], colour)
+                PathElement::new([(x, y), (x + 20, y)], colour)
             });
     }
     if params.display_legend {
@@ -136,6 +165,8 @@ pub fn plot_rtt_plot<'a>(
 mod tests {
     use super::*;
     use crate::plots::fallible::test_support::chart_params;
+    use plotters::drawing::IntoDrawingArea;
+    use plotters::prelude::BitMapBackend;
 
     #[test]
     fn rtt_bounds_are_nonempty_precise_and_validate_nonfinite_data(
@@ -143,6 +174,8 @@ mod tests {
         assert_eq!(padded_rtt_max(0.0)?, 1.0);
         assert_eq!(padded_rtt_max(100.0)?, 110.0);
         assert_eq!(padded_rtt_max(f32::MAX)?, f32::MAX);
+        assert_eq!(padded_rtt_max(f32::MAX / 2.0)?, f32::MAX / 2.0 * 1.1);
+        assert_eq!(padded_rtt_max(f32::MIN_POSITIVE)?, 1.0);
         assert!(padded_rtt_max(f32::INFINITY).is_err());
         assert!(padded_rtt_max(-1.0).is_err());
         let mut buffer = vec![0_u8; 1000 * 900 * 3];
@@ -152,6 +185,32 @@ mod tests {
         let axis = XYMinMax::init(0.0..0.0, None, None, 0..1);
         let chart = draw_rtt_plot(&chart_params(), &axis, &ss, &area)?;
         assert_eq!(chart.y_range(), 0.0..1.0);
+        drop(chart);
+
+        for bad_point in [
+            (f64::NAN, 1.0_f32),
+            (f64::INFINITY, 1.0_f32),
+            (1.0, f32::NAN),
+            (1.0, f32::INFINITY),
+            (1.0, -1.0),
+        ] {
+            let ss = SeriesStore {
+                local_min_rtt: vec![bad_point],
+                ..SeriesStore::default()
+            };
+            assert!(draw_rtt_plot(&chart_params(), &axis, &ss, &area).is_err());
+        }
+        for (latest, smoothed) in [
+            (Some((1.0, f32::NAN)), None),
+            (None, Some((1.0, f32::INFINITY))),
+        ] {
+            let ss = SeriesStore {
+                local_latest_rtt: latest.into_iter().collect(),
+                local_smoothed_rtt: smoothed.into_iter().collect(),
+                ..SeriesStore::default()
+            };
+            assert!(draw_rtt_plot(&chart_params(), &axis, &ss, &area).is_err());
+        }
         Ok(())
     }
 }
