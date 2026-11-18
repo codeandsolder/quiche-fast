@@ -28,14 +28,33 @@
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
-use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
+use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::ChartContext;
+use plotters::prelude::Color;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::EmptyElement;
+use plotters::prelude::IntoFont;
+use plotters::prelude::LineSeries;
+use plotters::prelude::RGBColor;
+use plotters::prelude::Rectangle;
+use plotters::prelude::SeriesLabelPosition;
+use plotters::prelude::Text;
+use plotters::prelude::BLACK;
+use plotters::prelude::WHITE;
+use plotters::style::full_palette::PURPLE_500;
 use std::error::Error;
 
-use crate::plots::colors::*;
-use crate::plots::*;
+use crate::plots::chart_label_style;
+use crate::plots::chart_subtitle_style;
+use crate::plots::colors::ORANGE;
+use crate::plots::colors::TAUPE;
+use crate::plots::draw_line;
+use crate::plots::draw_mesh;
+use crate::plots::PlotParameters;
 
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
@@ -154,10 +173,7 @@ where
             .into());
         }
         let color = cc_state_to_color(name);
-        let text_width = i32::try_from(name.len())
-            .ok()
-            .and_then(|width| width.checked_mul(6))
-            .ok_or_else(|| invalid_chart("congestion state label is too wide"))?;
+        let text_right = label_right_edge(name.len())?;
         chart.draw_series(LineSeries::new(
             [
                 (*time, y_range_extended.start),
@@ -167,7 +183,7 @@ where
         ))?;
         let label = EmptyElement::at((*time, positions[index % positions.len()])) +
             Rectangle::new(
-                [(1, -2), (1 + text_width, 12)],
+                [(1, -2), (text_right, 12)],
                 WHITE.mix(0.7).filled(),
             ) +
             Text::new(
@@ -180,20 +196,23 @@ where
     Ok(())
 }
 
-// Colors from ColorCycle list
+/// Text labels are positioned relative to the event, with a one-pixel
+/// rectangle inset. Check the *final* x coordinate to avoid i32 overflow.
+fn label_right_edge(byte_len: usize) -> std::io::Result<i32> {
+    i32::try_from(byte_len)
+        .ok()
+        .and_then(|len| len.checked_mul(6))
+        .and_then(|width| width.checked_add(1))
+        .ok_or_else(|| invalid_chart("congestion state label is too wide"))
+}
+
+// Equivalent congestion-control states share colors across Cubic/Reno and BBR.
 fn cc_state_to_color(cc_state: &str) -> RGBColor {
     match cc_state {
-        // Cubic and Reno
-        "slow_start" => RGBColor(204, 81, 81),
-        "recovery" => RGBColor(127, 51, 51),
-        "congestion_avoidance" => RGBColor(81, 204, 204),
-
-        // BBR
-        "bbr_startup" => RGBColor(204, 81, 81),
-        "bbr_drain" => RGBColor(127, 51, 51),
-        "bbr_probe_bw" => RGBColor(81, 204, 204),
+        "slow_start" | "bbr_startup" => RGBColor(204, 81, 81),
+        "recovery" | "bbr_drain" => RGBColor(127, 51, 51),
+        "congestion_avoidance" | "bbr_probe_bw" => RGBColor(81, 204, 204),
         "bbr_probe_rtt" => RGBColor(51, 127, 127),
-
         _ => BLACK,
     }
 }
@@ -202,6 +221,39 @@ fn cc_state_to_color(cc_state: &str) -> RGBColor {
 mod tests {
     use super::*;
     use crate::plots::fallible::test_support::chart_params;
+    use plotters::drawing::IntoDrawingArea;
+    use plotters::prelude::BitMapBackend;
+
+    #[test]
+    fn congestion_state_colors_are_shared_across_algorithms() {
+        for (cubic, bbr, expected) in [
+            ("slow_start", "bbr_startup", RGBColor(204, 81, 81)),
+            ("recovery", "bbr_drain", RGBColor(127, 51, 51)),
+            (
+                "congestion_avoidance",
+                "bbr_probe_bw",
+                RGBColor(81, 204, 204),
+            ),
+        ] {
+            assert_eq!(cc_state_to_color(cubic), expected);
+            assert_eq!(cc_state_to_color(bbr), expected);
+        }
+        assert_eq!(cc_state_to_color("bbr_probe_rtt"), RGBColor(51, 127, 127));
+        assert_eq!(cc_state_to_color("unknown"), BLACK);
+    }
+
+    #[test]
+    fn label_rectangle_rejects_final_coordinate_overflow() {
+        assert_eq!(label_right_edge(0).expect("empty state"), 1);
+        assert_eq!(label_right_edge(8).expect("short state"), 49);
+        let largest = ((i32::MAX as usize) - 1) / 6;
+        assert_eq!(
+            label_right_edge(largest).expect("largest valid label"),
+            (largest * 6 + 1) as i32
+        );
+        assert!(label_right_edge(largest + 1).is_err());
+        assert!(label_right_edge(usize::MAX).is_err());
+    }
 
     #[test]
     fn empty_congestion_renders_and_invalid_timestamps_fail(
@@ -214,6 +266,14 @@ mod tests {
         let axis = XYMinMax::init(0.0..1.0, None, None, 0..1);
         let ds = Datastore::default();
         assert!(draw_congestion_plot(&params, &axis, &ss, &ds, &area).is_ok());
+        let mut populated = Datastore::default();
+        populated.congestion_state_updates.extend([
+            (0.2, 0, "slow_start".to_owned()),
+            (0.4, 0, "bbr_probe_bw".to_owned()),
+        ]);
+        assert!(
+            draw_congestion_plot(&params, &axis, &ss, &populated, &area).is_ok()
+        );
         let mut invalid = Datastore::default();
         invalid.congestion_state_updates.push((
             f64::NAN,
