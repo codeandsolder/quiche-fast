@@ -57,6 +57,7 @@ use crate::plots::chart_label_style;
 use crate::plots::chart_title_style;
 use crate::plots::colors::ORANGE;
 use crate::plots::draw_mesh;
+#[cfg(not(target_arch = "wasm32"))]
 use crate::plots::ChartConfig;
 use crate::plots::ChartOutputType;
 use crate::plots::PlotParameters;

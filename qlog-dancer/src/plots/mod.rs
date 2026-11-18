@@ -27,6 +27,7 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::fmt::Write;
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
 use colors::PlotColors;
@@ -278,6 +279,7 @@ pub mod stream_sparks;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::datastore::ApplicationProto;
     use std::error::Error;
     use std::path::Path;
 
