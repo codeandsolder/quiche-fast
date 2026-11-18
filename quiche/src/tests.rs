@@ -15128,3 +15128,35 @@ fn alpn_wire_format_rejects_truncated_entries() {
         assert_eq!(config.application_protos, vec![b"h3".to_vec()]);
     }
 }
+
+#[test]
+fn alpn_rejects_empty_and_oversized_protocol_lists() {
+    let mut config = Config::new(0xbabababa).unwrap();
+    config.set_application_protos(&[b"h3"]).unwrap();
+
+    assert!(config.set_application_protos(&[]).is_err());
+    assert!(config.set_application_protos_wire_format(b"").is_err());
+    assert_eq!(config.application_protos, vec![b"h3".to_vec()]);
+
+    // 255 * (1 + 255) + (1 + 252) = 65_533: the largest ALPN list
+    // that fits into the TLS extension's 16-bit length.
+    let long_proto = [b'a'; 255];
+    let last_proto = [b'b'; 252];
+    let mut protos: Vec<&[u8]> = vec![&long_proto; 255];
+    protos.push(&last_proto);
+
+    config.set_application_protos(&protos).unwrap();
+    let previous = config.application_protos.clone();
+
+    protos.push(b"c");
+    assert!(config.set_application_protos(&protos).is_err());
+    assert_eq!(config.application_protos, previous);
+
+    let mut wire = Vec::new();
+    for proto in &protos {
+        wire.push(proto.len() as u8);
+        wire.extend_from_slice(proto);
+    }
+    assert!(config.set_application_protos_wire_format(&wire).is_err());
+    assert_eq!(config.application_protos, previous);
+}

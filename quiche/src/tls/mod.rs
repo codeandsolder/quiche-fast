@@ -332,11 +332,17 @@ impl Context {
     }
 
     pub fn set_alpn(&mut self, v: &[&[u8]]) -> Result<()> {
+        if v.is_empty() {
+            return Err(Error::TlsFail);
+        }
+
+        // The ALPN extension's u16 length includes the u16 list length.
+        const MAX_WIRE_LEN: usize = u16::MAX as usize - 2;
         let mut protos: Vec<u8> = Vec::new();
 
         for proto in v {
             let len = u8::try_from(proto.len()).map_err(|_| Error::TlsFail)?;
-            if len == 0 {
+            if len == 0 || protos.len() + 1 + usize::from(len) > MAX_WIRE_LEN {
                 return Err(Error::TlsFail);
             }
             protos.push(len);
