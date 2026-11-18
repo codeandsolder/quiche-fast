@@ -42,6 +42,7 @@ use crate::plots::colors::*;
 use crate::plots::*;
 
 use crate::datastore::Datastore;
+use crate::request_stub::HttpRequestStub;
 use crate::seriesstore::SeriesStore;
 
 pub struct MultiplexPlotsParams {
@@ -178,6 +179,17 @@ impl MultiplexLayout {
     }
 }
 
+/// Select the recorded DATA frames for the trace vantage without collecting a
+/// second vector of per-request references.
+fn request_data_frames(
+    request: &HttpRequestStub, vantage: VantagePoint,
+) -> &[(f64, u64)] {
+    match vantage {
+        VantagePoint::Client => &request.time_data_rx_set,
+        VantagePoint::Server => &request.time_data_tx_set,
+    }
+}
+
 /// Draw per-stream DATA and STREAM events across combined and individual lanes.
 ///
 /// # Errors
@@ -187,14 +199,10 @@ pub fn plot_stream_multiplexing(
     params: &MultiplexPlotsParams, _filename: &str, ss: &SeriesStore,
     ds: &Datastore, ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
-    let requests: Vec<_> = ds
-        .http_requests
-        .iter()
-        .filter(|(stream_id, _)| {
-            visible_stream(params, ds.application_proto, **stream_id)
-        })
-        .collect();
-    let layout = MultiplexLayout::new(params, requests.len())?;
+    let requests = ds.http_requests.iter().filter(|(stream_id, _)| {
+        visible_stream(params, ds.application_proto, **stream_id)
+    });
+    let layout = MultiplexLayout::new(params, requests.clone().count())?;
 
     let stream_frame_series = match (ds.application_proto, ds.vantage_point) {
         (crate::datastore::ApplicationProto::Http2, VantagePoint::Client) =>
@@ -206,13 +214,6 @@ pub fn plot_stream_multiplexing(
         (crate::datastore::ApplicationProto::Http3, VantagePoint::Server) =>
             &ss.sent_stream_frames_series,
     };
-    let frame_sets = requests
-        .iter()
-        .map(|(_, request)| match ds.vantage_point {
-            VantagePoint::Client => &request.time_data_rx_set,
-            VantagePoint::Server => &request.time_data_tx_set,
-        })
-        .collect::<Vec<_>>();
     let (mut start, mut end) = match ds.vantage_point {
         VantagePoint::Client => (ss.received_x_min, ss.received_x_max),
         VantagePoint::Server => (ss.sent_x_min, ss.sent_x_max),
@@ -222,9 +223,13 @@ pub fn plot_stream_multiplexing(
             invalid_chart("multiplex source time bounds must be finite").into()
         );
     }
-    for time in frame_sets
-        .iter()
-        .flat_map(|points| points.iter().map(|point| point.0))
+    for time in requests
+        .clone()
+        .flat_map(|(_, request)| {
+            request_data_frames(request, ds.vantage_point)
+                .iter()
+                .map(|point| point.0)
+        })
         .chain(
             stream_frame_series
                 .iter()
@@ -235,7 +240,7 @@ pub fn plot_stream_multiplexing(
         )
         .chain(
             requests
-                .iter()
+                .clone()
                 .flat_map(|(_, request)| {
                     [request.time_first_headers_rx, request.time_first_headers_tx]
                 })
@@ -306,7 +311,8 @@ pub fn plot_stream_multiplexing(
         .axis_style(params.colors.axis)
         .label_style(chart_label_style(&params.colors.caption))
         .draw()?;
-    for points in &frame_sets {
+    for (_, request) in requests.clone() {
+        let points = request_data_frames(request, ds.vantage_point);
         let color = palette.next_color();
         combined_data.draw_series(points.iter().map(|(time, _)| {
             PathElement::new([(*time, 2), (*time, 0)], color)
@@ -343,15 +349,18 @@ pub fn plot_stream_multiplexing(
     }
 
     palette.reset();
-    let max_data = frame_sets
-        .iter()
-        .flat_map(|points| points.iter().map(|point| point.1))
+    let max_data = requests
+        .clone()
+        .flat_map(|(_, request)| {
+            request_data_frames(request, ds.vantage_point)
+                .iter()
+                .map(|point| point.1)
+        })
         .max()
         .unwrap_or(0)
         .max(1);
-    for (row, ((stream_id, request), points)) in
-        requests.iter().zip(&frame_sets).enumerate()
-    {
+    for (row, (stream_id, request)) in requests.enumerate() {
+        let points = request_data_frames(request, ds.vantage_point);
         let color = palette.next_color();
         let frame_y = layout.row_y(layout.data_mini_y, layout.frame_step, row)?;
         let stream_y =
@@ -586,6 +595,66 @@ mod tests {
             image::image_dimensions(filtered.only_file()?)?;
         assert_eq!(filtered_height, MultiplexLayout::new(&params, 0)?.height);
         assert!(filtered_height < layout.height);
+        Ok(())
+    }
+
+    #[test]
+    fn multiple_requests_preserve_sorted_lanes_and_vantage_specific_data(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let mut datastore = Datastore {
+            application_proto: ApplicationProto::Http2,
+            vantage_point: VantagePoint::Client,
+            ..Datastore::default()
+        };
+        // Insert out of stream-ID order; each request must retain its own
+        // distinct payload and grid row, whichever vantage is selected.
+        datastore.http_requests.insert(7, HttpRequestStub {
+            time_data_rx_set: vec![(3.0, 8), (8.0, 12)],
+            time_data_tx_set: vec![(2.0, 3)],
+            ..HttpRequestStub::default()
+        });
+        datastore.http_requests.insert(3, HttpRequestStub {
+            time_data_rx_set: vec![(1.0, 30)],
+            time_data_tx_set: vec![(6.0, 5), (9.0, 11)],
+            ..HttpRequestStub::default()
+        });
+        let series = SeriesStore {
+            received_x_min: 0.0,
+            received_x_max: 10.0,
+            sent_x_min: 0.0,
+            sent_x_max: 10.0,
+            ..SeriesStore::default()
+        };
+
+        let client_output = TempCharts::new()?;
+        plot_stream_multiplexing(
+            &params,
+            "multi-request",
+            &series,
+            &datastore,
+            &client_output.output(),
+        )?;
+        let client_png = image::open(client_output.only_file()?)?.to_rgb8();
+        let expected_height = MultiplexLayout::new(&params, 2)?.height;
+        assert_eq!(client_png.dimensions(), (params.width, expected_height));
+
+        datastore.vantage_point = VantagePoint::Server;
+        let server_output = TempCharts::new()?;
+        plot_stream_multiplexing(
+            &params,
+            "multi-request",
+            &series,
+            &datastore,
+            &server_output.output(),
+        )?;
+        let server_png = image::open(server_output.only_file()?)?.to_rgb8();
+        assert_eq!(server_png.dimensions(), client_png.dimensions());
+        assert_ne!(
+            client_png.as_raw(),
+            server_png.as_raw(),
+            "client RX and server TX data must produce different lane plots"
+        );
         Ok(())
     }
 
