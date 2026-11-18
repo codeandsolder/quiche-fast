@@ -15101,3 +15101,30 @@ fn padding_only_packet_counts_toward_bytes_in_flight() {
          {bytes_in_flight} in flight"
     );
 }
+
+#[test]
+fn alpn_rejects_invalid_lengths_without_changing_configuration() {
+    let mut config = Config::new(0xbabababa).unwrap();
+    config.set_application_protos(&[b"h3"]).unwrap();
+
+    for invalid in [&[][..], &[b'x'; 256][..]] {
+        assert!(config.set_application_protos(&[invalid]).is_err());
+        assert_eq!(config.application_protos, vec![b"h3".to_vec()]);
+    }
+
+    assert!(config
+        .set_application_protos(&[b"h3", &[b'x'; 256]])
+        .is_err());
+    assert_eq!(config.application_protos, vec![b"h3".to_vec()]);
+}
+
+#[test]
+fn alpn_wire_format_rejects_truncated_entries() {
+    let mut config = Config::new(0xbabababa).unwrap();
+    config.set_application_protos(&[b"h3"]).unwrap();
+
+    for invalid in [&b"\x04h3"[..], &b"\x02h3\x03x"[..], &b"\x00"[..]] {
+        assert!(config.set_application_protos_wire_format(invalid).is_err());
+        assert_eq!(config.application_protos, vec![b"h3".to_vec()]);
+    }
+}

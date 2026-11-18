@@ -859,10 +859,10 @@ impl Config {
     pub fn set_application_protos(
         &mut self, protos_list: &[&[u8]],
     ) -> Result<()> {
+        self.tls_ctx.set_alpn(protos_list)?;
         self.application_protos =
             protos_list.iter().map(|s| s.to_vec()).collect();
-
-        self.tls_ctx.set_alpn(protos_list)
+        Ok(())
     }
 
     /// Configures the list of supported application protocols using wire
@@ -888,7 +888,9 @@ impl Config {
 
         let mut protos_list = Vec::new();
 
-        while let Ok(proto) = b.get_bytes_with_u8_length() {
+        while b.cap() > 0 {
+            let proto =
+                b.get_bytes_with_u8_length().map_err(|_| Error::TlsFail)?;
             protos_list.push(proto.buf());
         }
 

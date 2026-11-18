@@ -335,7 +335,11 @@ impl Context {
         let mut protos: Vec<u8> = Vec::new();
 
         for proto in v {
-            protos.push(proto.len() as u8);
+            let len = u8::try_from(proto.len()).map_err(|_| Error::TlsFail)?;
+            if len == 0 {
+                return Err(Error::TlsFail);
+            }
+            protos.push(len);
             protos.extend_from_slice(proto);
         }
 
