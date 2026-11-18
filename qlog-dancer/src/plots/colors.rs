@@ -40,140 +40,158 @@ pub const BLUEY_BLACK: RGBColor = RGBColor(23, 32, 42);
 pub const BLUEY_GREY: RGBColor = RGBColor(128, 139, 150);
 pub const TEAL: RGBColor = RGBColor(0, 128, 128);
 
-/// Cycle through a set of colors
-///
-/// By default, the set is based on a modified version of the set from
-/// https://stackoverflow.com/a/13781114
-pub struct ColorCycle {
-    pub colors: Vec<RGBColor>,
-    pub initial_index: usize,
-    pub tracking_index: usize,
+/// Cycle through a borrowed nonempty palette without allocating on reset or
+/// wraparound. The default palette is a static ColorCycle-derived collection.
+#[derive(Debug, Clone)]
+pub struct ColorCycle<'a> {
+    colors: &'a [RGBColor],
+    initial_index: usize,
+    tracking_index: usize,
 }
 
-impl ColorCycle {
+impl<'a> ColorCycle<'a> {
+    /// An initial position outside the palette (including an empty palette)
+    /// cannot produce a color and is rejected at construction.
+    #[must_use]
+    pub const fn with_colors(
+        colors: &'a [RGBColor], initial_index: usize,
+    ) -> Option<Self> {
+        if initial_index >= colors.len() {
+            return None;
+        }
+        Some(Self {
+            colors,
+            initial_index,
+            tracking_index: initial_index,
+        })
+    }
+
+    /// Advance through the palette, wrapping to its beginning.
     pub fn next_color(&mut self) -> RGBColor {
         let color = self.colors[self.tracking_index];
-        if self.tracking_index == self.colors.len() - 1 {
-            self.tracking_index = 0
+        self.tracking_index = if self.tracking_index + 1 == self.colors.len() {
+            0
         } else {
-            self.tracking_index += 1
-        }
-
+            self.tracking_index + 1
+        };
         color
     }
 
-    pub fn reset(&mut self) {
+    /// Restart from the initial palette position.
+    pub const fn reset(&mut self) {
         self.tracking_index = self.initial_index;
     }
 }
 
-impl Default for ColorCycle {
-    fn default() -> Self {
-        let colors = vec![
-            RGBColor(204, 81, 81),
-            RGBColor(127, 51, 51),
-            RGBColor(81, 204, 204),
-            RGBColor(51, 127, 127),
-            RGBColor(142, 204, 81),
-            RGBColor(89, 127, 51),
-            RGBColor(142, 81, 204),
-            RGBColor(89, 51, 127),
-            RGBColor(204, 173, 81),
-            RGBColor(127, 108, 51),
-            RGBColor(81, 204, 112),
-            RGBColor(51, 127, 70),
-            RGBColor(81, 112, 204),
-            RGBColor(51, 70, 127),
-            RGBColor(204, 81, 173),
-            RGBColor(127, 51, 108),
-            RGBColor(204, 127, 81),
-            RGBColor(127, 79, 51),
-            RGBColor(188, 204, 81),
-            RGBColor(117, 127, 51),
-            RGBColor(96, 204, 81),
-            RGBColor(60, 127, 51),
-            RGBColor(81, 204, 158),
-            RGBColor(51, 127, 98),
-            RGBColor(81, 158, 204),
-            RGBColor(51, 98, 127),
-            RGBColor(96, 81, 204),
-            RGBColor(60, 51, 127),
-            RGBColor(188, 81, 204),
-            RGBColor(117, 51, 127),
-            RGBColor(204, 81, 127),
-            RGBColor(127, 51, 79),
-            RGBColor(204, 104, 81),
-            RGBColor(127, 65, 51),
-            RGBColor(204, 150, 81),
-            RGBColor(127, 94, 51),
-            RGBColor(204, 196, 81),
-            RGBColor(127, 122, 51),
-            RGBColor(165, 204, 81),
-            RGBColor(103, 127, 51),
-            RGBColor(119, 204, 81),
-            RGBColor(74, 127, 51),
-            RGBColor(81, 204, 89),
-            RGBColor(51, 127, 55),
-            RGBColor(81, 204, 135),
-            RGBColor(51, 127, 84),
-            RGBColor(81, 204, 181),
-            RGBColor(51, 127, 113),
-            RGBColor(81, 181, 204),
-            RGBColor(51, 113, 127),
-            RGBColor(81, 135, 204),
-            RGBColor(51, 84, 127),
-            RGBColor(81, 89, 204),
-            RGBColor(51, 55, 127),
-            RGBColor(119, 81, 204),
-            RGBColor(74, 51, 127),
-            RGBColor(165, 81, 204),
-            RGBColor(103, 51, 127),
-            RGBColor(204, 81, 196),
-            RGBColor(127, 51, 122),
-            RGBColor(204, 81, 150),
-            RGBColor(127, 51, 94),
-            RGBColor(204, 81, 104),
-            RGBColor(127, 51, 65),
-            RGBColor(204, 93, 81),
-            RGBColor(127, 58, 51),
-            RGBColor(204, 116, 81),
-            RGBColor(127, 72, 51),
-            RGBColor(204, 138, 81),
-            RGBColor(127, 86, 51),
-            RGBColor(204, 161, 81),
-            RGBColor(127, 101, 51),
-            RGBColor(204, 184, 81),
-            RGBColor(127, 115, 51),
-            RGBColor(200, 204, 81),
-            RGBColor(125, 127, 51),
-            RGBColor(177, 204, 81),
-            RGBColor(110, 127, 51),
-            RGBColor(154, 204, 81),
-            RGBColor(96, 127, 51),
-            RGBColor(131, 204, 81),
-            RGBColor(82, 127, 51),
-            RGBColor(108, 204, 81),
-            RGBColor(67, 127, 51),
-            RGBColor(85, 204, 81),
-            RGBColor(53, 127, 51),
-            RGBColor(81, 204, 100),
-            RGBColor(51, 127, 62),
-            RGBColor(81, 204, 123),
-            RGBColor(51, 127, 77),
-            RGBColor(81, 204, 146),
-            RGBColor(51, 127, 91),
-            RGBColor(81, 204, 169),
-            RGBColor(51, 127, 105),
-            RGBColor(81, 204, 192),
-            RGBColor(51, 127, 120),
-            RGBColor(81, 192, 204),
-            RGBColor(51, 120, 127),
-            RGBColor(81, 169, 204),
-            RGBColor(51, 105, 127),
-        ];
+// Keep the original order: multiplex timelines assign stream colors by
+// sorted request ID and reuse those colors across all chart sections.
+const DEFAULT_CYCLE_COLORS: &[RGBColor] = &[
+    RGBColor(204, 81, 81),
+    RGBColor(127, 51, 51),
+    RGBColor(81, 204, 204),
+    RGBColor(51, 127, 127),
+    RGBColor(142, 204, 81),
+    RGBColor(89, 127, 51),
+    RGBColor(142, 81, 204),
+    RGBColor(89, 51, 127),
+    RGBColor(204, 173, 81),
+    RGBColor(127, 108, 51),
+    RGBColor(81, 204, 112),
+    RGBColor(51, 127, 70),
+    RGBColor(81, 112, 204),
+    RGBColor(51, 70, 127),
+    RGBColor(204, 81, 173),
+    RGBColor(127, 51, 108),
+    RGBColor(204, 127, 81),
+    RGBColor(127, 79, 51),
+    RGBColor(188, 204, 81),
+    RGBColor(117, 127, 51),
+    RGBColor(96, 204, 81),
+    RGBColor(60, 127, 51),
+    RGBColor(81, 204, 158),
+    RGBColor(51, 127, 98),
+    RGBColor(81, 158, 204),
+    RGBColor(51, 98, 127),
+    RGBColor(96, 81, 204),
+    RGBColor(60, 51, 127),
+    RGBColor(188, 81, 204),
+    RGBColor(117, 51, 127),
+    RGBColor(204, 81, 127),
+    RGBColor(127, 51, 79),
+    RGBColor(204, 104, 81),
+    RGBColor(127, 65, 51),
+    RGBColor(204, 150, 81),
+    RGBColor(127, 94, 51),
+    RGBColor(204, 196, 81),
+    RGBColor(127, 122, 51),
+    RGBColor(165, 204, 81),
+    RGBColor(103, 127, 51),
+    RGBColor(119, 204, 81),
+    RGBColor(74, 127, 51),
+    RGBColor(81, 204, 89),
+    RGBColor(51, 127, 55),
+    RGBColor(81, 204, 135),
+    RGBColor(51, 127, 84),
+    RGBColor(81, 204, 181),
+    RGBColor(51, 127, 113),
+    RGBColor(81, 181, 204),
+    RGBColor(51, 113, 127),
+    RGBColor(81, 135, 204),
+    RGBColor(51, 84, 127),
+    RGBColor(81, 89, 204),
+    RGBColor(51, 55, 127),
+    RGBColor(119, 81, 204),
+    RGBColor(74, 51, 127),
+    RGBColor(165, 81, 204),
+    RGBColor(103, 51, 127),
+    RGBColor(204, 81, 196),
+    RGBColor(127, 51, 122),
+    RGBColor(204, 81, 150),
+    RGBColor(127, 51, 94),
+    RGBColor(204, 81, 104),
+    RGBColor(127, 51, 65),
+    RGBColor(204, 93, 81),
+    RGBColor(127, 58, 51),
+    RGBColor(204, 116, 81),
+    RGBColor(127, 72, 51),
+    RGBColor(204, 138, 81),
+    RGBColor(127, 86, 51),
+    RGBColor(204, 161, 81),
+    RGBColor(127, 101, 51),
+    RGBColor(204, 184, 81),
+    RGBColor(127, 115, 51),
+    RGBColor(200, 204, 81),
+    RGBColor(125, 127, 51),
+    RGBColor(177, 204, 81),
+    RGBColor(110, 127, 51),
+    RGBColor(154, 204, 81),
+    RGBColor(96, 127, 51),
+    RGBColor(131, 204, 81),
+    RGBColor(82, 127, 51),
+    RGBColor(108, 204, 81),
+    RGBColor(67, 127, 51),
+    RGBColor(85, 204, 81),
+    RGBColor(53, 127, 51),
+    RGBColor(81, 204, 100),
+    RGBColor(51, 127, 62),
+    RGBColor(81, 204, 123),
+    RGBColor(51, 127, 77),
+    RGBColor(81, 204, 146),
+    RGBColor(51, 127, 91),
+    RGBColor(81, 204, 169),
+    RGBColor(51, 127, 105),
+    RGBColor(81, 204, 192),
+    RGBColor(51, 127, 120),
+    RGBColor(81, 192, 204),
+    RGBColor(51, 120, 127),
+    RGBColor(81, 169, 204),
+    RGBColor(51, 105, 127),
+];
 
+impl Default for ColorCycle<'static> {
+    fn default() -> Self {
         Self {
-            colors,
+            colors: DEFAULT_CYCLE_COLORS,
             initial_index: 0,
             tracking_index: 0,
         }
@@ -210,3 +228,37 @@ pub const DARK_MODE: PlotColors = PlotColors {
     light_line: BLUEY_GREY,
     caption: WHITE,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::ColorCycle;
+    use super::DEFAULT_CYCLE_COLORS;
+    use plotters::style::RGBColor;
+
+    #[test]
+    fn default_palette_preserves_order_wraparound_and_reset() {
+        let mut cycle = ColorCycle::default();
+        for &expected in DEFAULT_CYCLE_COLORS {
+            assert_eq!(cycle.next_color(), expected);
+        }
+        assert_eq!(cycle.next_color(), DEFAULT_CYCLE_COLORS[0]);
+        assert_eq!(cycle.next_color(), DEFAULT_CYCLE_COLORS[1]);
+        cycle.reset();
+        assert_eq!(cycle.next_color(), DEFAULT_CYCLE_COLORS[0]);
+    }
+
+    #[test]
+    fn borrowed_custom_palette_rejects_invalid_starts_and_cycles() {
+        let colors = [RGBColor(1, 2, 3), RGBColor(4, 5, 6)];
+        assert!(ColorCycle::with_colors(&[], 0).is_none());
+        assert!(ColorCycle::with_colors(&colors, colors.len()).is_none());
+
+        let mut cycle =
+            ColorCycle::with_colors(&colors, 1).expect("valid starting index");
+        assert_eq!(cycle.next_color(), colors[1]);
+        assert_eq!(cycle.next_color(), colors[0]);
+        assert_eq!(cycle.next_color(), colors[1]);
+        cycle.reset();
+        assert_eq!(cycle.next_color(), colors[1]);
+    }
+}
