@@ -132,7 +132,8 @@ fn peer_transport_params_wire_preserves_original_encoding() {
             .peer_transport_params_wire()
             .expect("validated raw QUIC parameters");
         assert!(!raw.is_empty());
-        let parsed = TransportParams::decode(raw, conn.is_server(), None).unwrap();
+        let parsed =
+            TransportParams::decode(raw, conn.is_server(), None).unwrap();
         assert_eq!(&parsed, conn.peer_transport_params().unwrap());
         assert_eq!(conn.peer_transport_params_wire(), Some(raw));
     }

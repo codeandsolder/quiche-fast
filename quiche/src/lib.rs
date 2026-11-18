@@ -8121,7 +8121,8 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Unknown parameters and original encoding are preserved. Returns `None`
     /// until the peer's parameters have been validated. The data is borrowed
-    /// from the TLS handshake and remains valid only while this connection lives.
+    /// from the TLS handshake and remains valid only while this connection
+    /// lives.
     pub fn peer_transport_params_wire(&self) -> Option<&[u8]> {
         self.parsed_peer_transport_params
             .then(|| self.handshake.quic_transport_params())
