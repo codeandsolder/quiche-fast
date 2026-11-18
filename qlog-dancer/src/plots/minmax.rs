@@ -31,7 +31,10 @@ pub struct XMinMax {
 }
 
 impl XMinMax {
-    pub fn new(min: f64, max: f64, start: Option<f64>, end: Option<f64>) -> Self {
+    #[must_use]
+    pub const fn new(
+        min: f64, max: f64, start: Option<f64>, end: Option<f64>,
+    ) -> Self {
         let mut minmax = Self { min, max };
 
         if let Some(s) = start {
@@ -45,7 +48,8 @@ impl XMinMax {
         minmax
     }
 
-    pub fn range(&self) -> std::ops::Range<f64> {
+    #[must_use]
+    pub const fn range(&self) -> std::ops::Range<f64> {
         self.min..self.max
     }
 }
@@ -56,7 +60,8 @@ pub struct XYMinMax<Y> {
 }
 
 impl<Y> XYMinMax<Y> {
-    pub fn init(
+    #[must_use]
+    pub const fn init(
         x_data_range: std::ops::Range<f64>, x_start: Option<f64>,
         x_end: Option<f64>, y_range: std::ops::Range<Y>,
     ) -> Self {
@@ -64,5 +69,26 @@ impl<Y> XYMinMax<Y> {
             XMinMax::new(x_data_range.start, x_data_range.end, x_start, x_end);
 
         Self { x, y_range }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CLAMPED: XMinMax = XMinMax::new(1.0, 10.0, Some(2.0), Some(7.0));
+    const AXIS: XYMinMax<u64> =
+        XYMinMax::init(1.0..10.0, Some(2.0), Some(7.0), 0..100);
+
+    #[test]
+    fn axis_construction_is_const_and_preserves_clamping_order() {
+        assert_eq!(CLAMPED.range(), 2.0..7.0);
+        assert_eq!(AXIS.x.range(), 2.0..7.0);
+        assert_eq!(AXIS.y_range, 0..100);
+        assert_eq!(XMinMax::new(1.0, 10.0, None, None).range(), 1.0..10.0);
+        assert_eq!(
+            XMinMax::new(1.0, 10.0, Some(20.0), Some(7.0)).range(),
+            20.0..7.0
+        );
     }
 }
