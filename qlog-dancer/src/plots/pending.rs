@@ -29,14 +29,30 @@
 
 use crate::datastore::Datastore;
 use crate::datastore::VantagePoint;
+use crate::plots::chart_label_style;
+use crate::plots::chart_title_style;
+use crate::plots::colors;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
-use crate::plots::*;
+use crate::plots::ChartConfig;
+use crate::plots::ChartMargin;
+use crate::plots::ChartOutputType;
+use crate::plots::ChartSize;
+use crate::plots::ClampParams;
+use crate::plots::PlotColors;
+use crate::request_stub::HttpRequestStub;
 use crate::seriesstore::SeriesStore;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::Color;
+use plotters::prelude::LabelAreaPosition;
+use plotters::prelude::PathElement;
+use plotters::prelude::Rectangle;
+use plotters::prelude::SeriesLabelPosition;
+use std::cmp::Ordering;
 use std::error::Error;
 use std::io;
 
@@ -56,8 +72,28 @@ struct PendingInterval {
     in_flight: u64,
 }
 
-/// Piecewise constant request occupancy. Unlike the old one-millisecond
-/// resampling loop, cost depends on request events, not trace duration.
+fn request_times(request: &HttpRequestStub) -> impl Iterator<Item = f64> {
+    [
+        request.time_discovery,
+        request.time_first_headers_tx,
+        request.time_fin_rx,
+    ]
+    .into_iter()
+    .flatten()
+}
+
+fn validate_request_time(time: f64) -> io::Result<()> {
+    if time.is_finite() && time >= 0.0 {
+        Ok(())
+    } else {
+        Err(invalid_chart(
+            "request timestamps must be finite and nonnegative",
+        ))
+    }
+}
+
+/// Piecewise constant request occupancy, clipped at a finite time limit.
+/// Unlike millisecond resampling, cost depends on request events, not duration.
 fn occupancy_intervals(
     ds: &Datastore, limit: f64,
 ) -> io::Result<Vec<PendingInterval>> {
@@ -71,26 +107,34 @@ fn occupancy_intervals(
         let discovery = request.time_discovery;
         let headers = request.time_first_headers_tx;
         let finish = request.time_fin_rx;
-        for time in [discovery, headers, finish].into_iter().flatten() {
-            if !time.is_finite() || time < 0.0 {
-                return Err(invalid_chart(
-                    "request timestamps must be finite and nonnegative",
-                ));
-            }
+        for time in request_times(request) {
+            validate_request_time(time)?;
         }
         let Some(begin) = discovery.or(headers) else {
             continue;
         };
-        let end = finish.unwrap_or(limit);
-        if end < begin || headers.is_some_and(|h| h < begin || h > end) {
+        // An unfinished request can legitimately begin after the plotting
+        // horizon, or send headers after it. Validate only observed lifecycle
+        // ordering; the artificial horizon must not act like a FIN event.
+        if finish.is_some_and(|end| end < begin) ||
+            headers.is_some_and(|h| {
+                h < begin || finish.is_some_and(|end| h > end)
+            })
+        {
             return Err(invalid_chart(
                 "request lifecycle timestamps are reversed",
             ));
         }
+        if begin >= limit {
+            continue;
+        }
+        let end = finish.unwrap_or(limit).min(limit);
         // A completed request remains pending until headers are transmitted,
         // then in-flight until FIN. A header-only trace begins in-flight.
+        // Clip events at the requested time limit *after* validating the full
+        // lifecycle, so even malformed future events cannot be hidden by it.
         if discovery.is_some() {
-            let pending_end = headers.unwrap_or(end);
+            let pending_end = headers.unwrap_or(end).min(end);
             if pending_end > begin {
                 events.push((begin, 1, 0));
                 events.push((pending_end, -1, 0));
@@ -123,7 +167,12 @@ fn occupancy_intervals(
                 })?,
             });
         }
-        while index < events.len() && events[index].0 == time {
+        // Events share a timestamp only when they are exactly equal. An
+        // epsilon would merge distinct packet times; partial_cmp preserves
+        // the old -0.0/+0.0 equivalence without floating-point ==.
+        while index < events.len() &&
+            events[index].0.partial_cmp(&time) == Some(Ordering::Equal)
+        {
             pending = pending.checked_add(events[index].1).ok_or_else(|| {
                 invalid_chart("pending request count overflows")
             })?;
@@ -168,25 +217,16 @@ pub fn plot_pending(
         return Err(invalid_chart("trace duration must be finite").into());
     }
     for request in ds.http_requests.values() {
-        for time in [
-            request.time_discovery,
-            request.time_first_headers_tx,
-            request.time_fin_rx,
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !time.is_finite() || time < 0.0 {
-                return Err(invalid_chart(
-                    "request timestamps must be finite and nonnegative",
-                )
-                .into());
-            }
+        for time in request_times(request) {
+            validate_request_time(time)?;
             end = end.max(time);
         }
     }
     let range = checked_time_range(0.0, end, &params.clamp)?;
-    let intervals = occupancy_intervals(ds, end)?;
+    // The plotting clamp is also the occupancy horizon. Avoid accumulating
+    // future events that cannot appear in a truncated output chart.
+    let visible_end = params.clamp.end.map_or(end, |clamp| end.min(clamp));
+    let intervals = occupancy_intervals(ds, visible_end)?;
     let y_max = intervals.iter().try_fold(1_u64, |maximum, item| {
         let count = item
             .pending
@@ -243,7 +283,7 @@ pub fn plot_pending(
         }))?
         .label("In-flight requests")
         .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 20, y)], colors::FOREST_GREEN)
+            PathElement::new([(x, y), (x + 20, y)], colors::FOREST_GREEN)
         });
     chart
         .draw_series(intervals.iter().map(|item| {
@@ -256,9 +296,7 @@ pub fn plot_pending(
             )
         }))?
         .label("Pending requests")
-        .legend(|(x, y)| {
-            PathElement::new(vec![(x, y), (x + 20, y)], colors::ORANGE)
-        });
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], colors::ORANGE));
     chart
         .configure_series_labels()
         .label_font(chart_label_style(&params.colors.caption))
@@ -325,6 +363,138 @@ mod tests {
             },
         ]);
         assert!(occupancy_intervals(&ds, f64::INFINITY).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn events_at_signed_zero_are_grouped_without_merging_distinct_times(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_discovery: Some(-0.0),
+            time_first_headers_tx: Some(1.0),
+            time_fin_rx: Some(2.0),
+            ..HttpRequestStub::default()
+        });
+        ds.http_requests.insert(3, HttpRequestStub {
+            time_first_headers_tx: Some(0.0),
+            time_fin_rx: Some(2.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 3.0)?, vec![
+            PendingInterval {
+                start: 0.0,
+                end: 1.0,
+                pending: 1,
+                in_flight: 1,
+            },
+            PendingInterval {
+                start: 1.0,
+                end: 2.0,
+                pending: 0,
+                in_flight: 2,
+            },
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn finite_horizon_clips_active_requests_and_checks_future_lifecycles(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_discovery: Some(1.0),
+            time_first_headers_tx: Some(3.0),
+            time_fin_rx: Some(20.0),
+            ..HttpRequestStub::default()
+        });
+        ds.http_requests.insert(3, HttpRequestStub {
+            time_discovery: Some(7.0),
+            time_first_headers_tx: Some(8.0),
+            time_fin_rx: Some(10.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 5.0)?, vec![
+            PendingInterval {
+                start: 1.0,
+                end: 3.0,
+                pending: 1,
+                in_flight: 0,
+            },
+            PendingInterval {
+                start: 3.0,
+                end: 5.0,
+                pending: 0,
+                in_flight: 1,
+            },
+        ]);
+        assert!(occupancy_intervals(&ds, 0.0)?.is_empty());
+        // An open request beginning after the horizon is valid, not a
+        // reversed lifecycle caused by an invented FIN at the horizon.
+        ds.http_requests.insert(7, HttpRequestStub {
+            time_discovery: Some(8.0),
+            time_first_headers_tx: Some(9.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 5.0)?.len(), 2);
+
+        // Validate all lifecycle events even when they would fall entirely
+        // outside the requested plotting horizon.
+        ds.http_requests.insert(5, HttpRequestStub {
+            time_discovery: Some(6.0),
+            time_first_headers_tx: Some(9.0),
+            time_fin_rx: Some(8.0),
+            ..HttpRequestStub::default()
+        });
+        assert!(occupancy_intervals(&ds, 5.0).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn unfinished_request_with_headers_beyond_horizon_remains_pending(
+    ) -> Result<(), Box<dyn Error>> {
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_discovery: Some(2.0),
+            time_first_headers_tx: Some(8.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 5.0)?, vec![PendingInterval {
+            start: 2.0,
+            end: 5.0,
+            pending: 1,
+            in_flight: 0
+        },]);
+        Ok(())
+    }
+
+    #[test]
+    fn pending_png_respects_early_end_clamp() -> Result<(), Box<dyn Error>> {
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_discovery: Some(1.0),
+            time_first_headers_tx: Some(2.0),
+            time_fin_rx: Some(20.0),
+            ..HttpRequestStub::default()
+        });
+        let ss = SeriesStore {
+            received_x_max: 20.0,
+            ..SeriesStore::default()
+        };
+        let params = PendingPlotParams {
+            clamp: ClampParams {
+                end: Some(5.0),
+                ..ClampParams::default()
+            },
+            chart_size: ChartSize {
+                width: 640,
+                height: 440,
+            },
+            ..PendingPlotParams::default()
+        };
+        let out = TempCharts::new()?;
+        plot_pending(&params, "early-end", &ss, &ds, &out.output())?;
+        assert_eq!(image::image_dimensions(out.only_file()?)?, (640, 440));
         Ok(())
     }
 
