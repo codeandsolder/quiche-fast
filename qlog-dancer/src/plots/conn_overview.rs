@@ -31,17 +31,47 @@ use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plots::fallible::invalid_chart;
-use full_palette::PURPLE_500;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
 use plotters::drawing::DrawingAreaErrorKind;
+#[cfg(not(target_arch = "wasm32"))]
+use plotters::prelude::AsRelative;
+use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::ChartContext;
+use plotters::prelude::Color;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::RGBColor;
+use plotters::prelude::SeriesLabelPosition;
+use plotters::prelude::BLACK;
+use plotters::prelude::BLUE;
+use plotters::prelude::CYAN;
+use plotters::prelude::GREEN;
+use plotters::prelude::MAGENTA;
+use plotters::style::full_palette::PURPLE_500;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::io;
 use std::ops::Range;
 
-use crate::plots::colors::*;
-use crate::plots::*;
+use crate::plots::chart_label_style;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::chart_subtitle_style;
+use crate::plots::chart_title_style;
+use crate::plots::colors::FOREST_GREEN;
+use crate::plots::colors::MID_GREY;
+use crate::plots::colors::MUSTARD;
+use crate::plots::colors::ORANGE;
+use crate::plots::draw_line;
+use crate::plots::draw_mesh;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::ChartConfig;
+use crate::plots::ChartOutputType;
+use crate::plots::PlotParameters;
+use crate::QlogPointu64;
 
 #[cfg(not(target_arch = "wasm32"))]
 use crate::datastore::Datastore;
@@ -74,7 +104,7 @@ impl XYMinMax {
         })
     }
 
-    fn y_range(&self) -> Range<u64> {
+    const fn y_range(&self) -> Range<u64> {
         self.y_min..self.y_max
     }
 }
@@ -101,220 +131,92 @@ impl From<OverviewChartOutputType> for ChartOutputType {
                 output_dir,
                 cwnd_y_max,
                 stream_y_max,
-            } => ChartOutputType::Png {
+            } => Self::Png {
                 output_dir,
                 cwnd_y_max,
                 stream_y_max,
             },
 
-            // Where we use this type in this module, this variant is a no-op,
-            // so we can put anything in the output TBH
             OverviewChartOutputType::Canvas {
                 main_plot_canvas_id,
                 ..
-            } => ChartOutputType::Canvas {
+            } => Self::Canvas {
                 canvas_id: main_plot_canvas_id,
             },
         }
     }
 }
 
-fn draw_sent_max_data<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
+/// Draw a group of stream-specific series in stream-id order.
+///
+/// Empty series do not consume the shared legend label. The first series
+/// containing data receives the label, and subsequent streams share its color.
+fn draw_stream_group<DB: DrawingBackend>(
+    streams: &BTreeMap<u64, Vec<QlogPointu64>>, label: &'static str,
+    colour: RGBColor,
+    chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    draw_line(
-        &ss.sent_max_data,
-        Some("Sent MAX_DATA"),
-        BLACK,
-        stream_chart,
-    )?;
+    let mut label = Some(label);
+    for data in streams.values().filter(|data| !data.is_empty()) {
+        draw_line(data, label.take(), colour, chart)?;
+    }
     Ok(())
 }
 
-fn draw_cumulative_sent_max_data<DB: DrawingBackend>(
+/// Draw the receive-side series shared by the combined browser overview and
+/// native stream receive panel in their original order.
+fn draw_receive_panel_series<DB: DrawingBackend>(
     ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
+    chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    draw_line(&ss.sent_max_data, Some("Sent MAX_DATA"), BLACK, chart)?;
     draw_line(
         &ss.sum_sent_stream_max_data,
         Some("Cumulative sent MAX_STREAM_DATA"),
         CYAN,
-        stream_chart,
+        chart,
     )?;
-    Ok(())
-}
-
-fn draw_sent_max_stream_data<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let mut label = Some("Sent MAX_STREAM_DATA");
-
-    let streams = &ss.sent_stream_max_data;
-    for series in streams {
-        draw_line(series.1, label, BLUE, stream_chart)?;
-        label = None;
-    }
-    Ok(())
-}
-
-fn draw_buffer_reads<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let mut label = Some("Stream buffer read");
-
-    let streams = &ss.stream_buffer_reads;
-    for series in streams {
-        draw_line(series.1, label, FOREST_GREEN, stream_chart)?;
-        label = None;
-    }
-    Ok(())
-}
-
-fn draw_cumulative_buffer_reads<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    draw_stream_group(
+        &ss.sent_stream_max_data,
+        "Sent MAX_STREAM_DATA",
+        BLUE,
+        chart,
+    )?;
+    draw_stream_group(
+        &ss.stream_buffer_reads,
+        "Stream buffer read",
+        FOREST_GREEN,
+        chart,
+    )?;
     draw_line(
         &ss.sum_stream_buffer_reads,
         Some("Cumulative stream buffer read"),
         GREEN,
-        stream_chart,
+        chart,
     )?;
     Ok(())
 }
 
-fn draw_buffer_writes<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
+/// Keep legend styling identical in native split views and the browser view.
+fn draw_legend<'a, DB: DrawingBackend + 'a>(
+    params: &PlotParameters,
+    chart: &mut ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let mut label = Some("Stream buffer write");
-
-    let streams = &ss.stream_buffer_writes;
-    for series in streams {
-        draw_line(series.1, label, MAGENTA, stream_chart)?;
-        label = None;
+    if params.display_legend {
+        chart
+            .configure_series_labels()
+            .label_font(chart_label_style(&params.colors.caption))
+            .background_style(params.colors.fill.mix(0.8))
+            .border_style(params.colors.axis)
+            .position(SeriesLabelPosition::UpperLeft)
+            .draw()?;
     }
-    Ok(())
-}
-
-fn draw_cumulative_buffer_writes<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let data = &ss.sum_stream_buffer_writes;
-    let label = Some("Cumulative stream buffer writes");
-
-    draw_line(data, label, RGBColor(255, 0, 0), stream_chart)?;
-    Ok(())
-}
-
-fn draw_buffer_dropped<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let mut label = Some("Stream buffer dropped");
-
-    let streams = &ss.stream_buffer_dropped;
-    for series in streams {
-        draw_line(series.1, label, ORANGE, stream_chart)?;
-        label = None;
-    }
-    Ok(())
-}
-
-fn draw_cumulative_buffer_dropped<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let data = &ss.sum_stream_buffer_dropped;
-    let label = Some("Cumulative stream buffer dropped");
-
-    draw_line(data, label, RGBColor(0, 0, 255), stream_chart)?;
-    Ok(())
-}
-
-fn draw_sent_stream_data<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let mut label = Some("Sent stream data");
-
-    let streams = &ss.sent_stream_frames_series;
-    for series in streams {
-        draw_line(series.1, label, PURPLE_500, stream_chart)?;
-        label = None;
-    }
-    Ok(())
-}
-
-fn draw_received_max_data<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    draw_line(
-        &ss.received_max_data,
-        Some("Cumulative received MAX_DATA"),
-        MID_GREY,
-        stream_chart,
-    )?;
-    Ok(())
-}
-
-fn draw_cumulative_received_stream_max_data<DB: DrawingBackend>(
-    ss: &SeriesStore,
-    stream_chart: &mut ChartContext<
-        DB,
-        Cartesian2d<RangedCoordf64, RangedCoordu64>,
-    >,
-) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    draw_line(
-        &ss.sum_received_stream_max_data,
-        Some("Cumulative received MAX_STREAM_DATA"),
-        MUSTARD,
-        stream_chart,
-    )?;
     Ok(())
 }
 
 #[cfg(target_arch = "wasm32")]
 fn draw_main_plot<'a, DB: DrawingBackend + 'a>(
-    filename: &str, params: &PlotParameters, axis: XYMinMax, ss: &SeriesStore,
+    filename: &str, params: &PlotParameters, axis: &XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
 ) -> Result<
     ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
@@ -329,7 +231,7 @@ where
         .y_label_area_size(params.area_margin.y);
 
     if params.display_chart_title {
-        let caption = format!("{} Connection overview", filename);
+        let caption = format!("{filename} Connection overview");
         builder.caption(caption, chart_title_style(&params.colors.caption));
     }
 
@@ -343,34 +245,57 @@ where
         &mut chart,
     )?;
 
-    draw_sent_max_data(ss, &mut chart)?;
-    draw_cumulative_sent_max_data(ss, &mut chart)?;
-    draw_sent_max_stream_data(ss, &mut chart)?;
-    draw_buffer_reads(ss, &mut chart)?;
-    draw_cumulative_buffer_reads(ss, &mut chart)?;
-    draw_buffer_writes(ss, &mut chart)?;
-    draw_cumulative_buffer_writes(ss, &mut chart)?;
-    draw_buffer_dropped(ss, &mut chart)?;
-    draw_cumulative_buffer_dropped(ss, &mut chart)?;
-    draw_sent_stream_data(ss, &mut chart)?;
-    draw_received_max_data(ss, &mut chart)?;
-    draw_cumulative_received_stream_max_data(ss, &mut chart)?;
+    draw_receive_panel_series(ss, &mut chart)?;
+    draw_stream_group(
+        &ss.stream_buffer_writes,
+        "Stream buffer write",
+        MAGENTA,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.sum_stream_buffer_writes,
+        Some("Cumulative stream buffer writes"),
+        RGBColor(255, 0, 0),
+        &mut chart,
+    )?;
+    draw_stream_group(
+        &ss.stream_buffer_dropped,
+        "Stream buffer dropped",
+        ORANGE,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.sum_stream_buffer_dropped,
+        Some("Cumulative stream buffer dropped"),
+        RGBColor(0, 0, 255),
+        &mut chart,
+    )?;
+    draw_stream_group(
+        &ss.sent_stream_frames_series,
+        "Sent stream data",
+        PURPLE_500,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.received_max_data,
+        Some("Cumulative received MAX_DATA"),
+        MID_GREY,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.sum_received_stream_max_data,
+        Some("Cumulative received MAX_STREAM_DATA"),
+        MUSTARD,
+        &mut chart,
+    )?;
 
-    if params.display_legend {
-        chart
-            .configure_series_labels()
-            .label_font(chart_label_style(&params.colors.caption))
-            .background_style(params.colors.fill.mix(0.8))
-            .border_style(params.colors.axis)
-            .position(SeriesLabelPosition::UpperLeft)
-            .draw()?;
-    }
+    draw_legend(params, &mut chart)?;
     Ok(chart)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn draw_stream_send_plot<'a, DB: DrawingBackend + 'a>(
-    params: &PlotParameters, axis: XYMinMax, ss: &SeriesStore,
+    params: &PlotParameters, axis: &XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
 ) -> Result<
     ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
@@ -401,29 +326,56 @@ where
         &mut chart,
     )?;
 
-    draw_cumulative_buffer_writes(ss, &mut chart)?;
-    draw_cumulative_buffer_dropped(ss, &mut chart)?;
-    draw_buffer_writes(ss, &mut chart)?;
-    draw_buffer_dropped(ss, &mut chart)?;
-    draw_sent_stream_data(ss, &mut chart)?;
-    draw_received_max_data(ss, &mut chart)?;
-    draw_cumulative_received_stream_max_data(ss, &mut chart)?;
+    draw_line(
+        &ss.sum_stream_buffer_writes,
+        Some("Cumulative stream buffer writes"),
+        RGBColor(255, 0, 0),
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.sum_stream_buffer_dropped,
+        Some("Cumulative stream buffer dropped"),
+        RGBColor(0, 0, 255),
+        &mut chart,
+    )?;
+    draw_stream_group(
+        &ss.stream_buffer_writes,
+        "Stream buffer write",
+        MAGENTA,
+        &mut chart,
+    )?;
+    draw_stream_group(
+        &ss.stream_buffer_dropped,
+        "Stream buffer dropped",
+        ORANGE,
+        &mut chart,
+    )?;
+    draw_stream_group(
+        &ss.sent_stream_frames_series,
+        "Sent stream data",
+        PURPLE_500,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.received_max_data,
+        Some("Cumulative received MAX_DATA"),
+        MID_GREY,
+        &mut chart,
+    )?;
+    draw_line(
+        &ss.sum_received_stream_max_data,
+        Some("Cumulative received MAX_STREAM_DATA"),
+        MUSTARD,
+        &mut chart,
+    )?;
 
-    if params.display_legend {
-        chart
-            .configure_series_labels()
-            .label_font(chart_label_style(&params.colors.caption))
-            .background_style(params.colors.fill.mix(0.8))
-            .border_style(params.colors.axis)
-            .position(SeriesLabelPosition::UpperLeft)
-            .draw()?;
-    }
+    draw_legend(params, &mut chart)?;
     Ok(chart)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 fn draw_stream_recv_plot<'a, DB: DrawingBackend + 'a>(
-    params: &PlotParameters, axis: XYMinMax, ss: &SeriesStore,
+    params: &PlotParameters, axis: &XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
 ) -> Result<
     ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
@@ -454,21 +406,9 @@ where
         &mut chart,
     )?;
 
-    draw_sent_max_data(ss, &mut chart)?;
-    draw_cumulative_sent_max_data(ss, &mut chart)?;
-    draw_sent_max_stream_data(ss, &mut chart)?;
-    draw_buffer_reads(ss, &mut chart)?;
-    draw_cumulative_buffer_reads(ss, &mut chart)?;
+    draw_receive_panel_series(ss, &mut chart)?;
 
-    if params.display_legend {
-        chart
-            .configure_series_labels()
-            .label_font(chart_label_style(&params.colors.caption))
-            .background_style(params.colors.fill.mix(0.8))
-            .border_style(params.colors.axis)
-            .position(SeriesLabelPosition::UpperLeft)
-            .draw()?;
-    }
+    draw_legend(params, &mut chart)?;
     Ok(chart)
 }
 
@@ -538,8 +478,8 @@ pub fn plot_connection_overview(
         &chart_title_style(&params.colors.caption),
         (0, 0),
     )?;
-    draw_stream_send_plot(params, stream_send_axis, ss, &stream_send_plot)?;
-    draw_stream_recv_plot(params, stream_recv_axis, ss, &stream_recv_plot)?;
+    draw_stream_send_plot(params, &stream_send_axis, ss, &stream_send_plot)?;
+    draw_stream_recv_plot(params, &stream_recv_axis, ss, &stream_recv_plot)?;
     draw_congestion_plot(params, &common_axis, ss, ds, &congestion_plot)?;
     draw_rtt_plot(params, &common_axis, ss, &rtt_plot)?;
     root.present()?;
@@ -563,7 +503,7 @@ pub fn plot_main_plot<'a>(
         .stream_y_max
         .unwrap_or(ss.y_max_stream_send_plot.max(ss.y_max_stream_recv_plot));
     let axis = XYMinMax::init(params, ss, stream_y)?;
-    draw_main_plot(filename, params, axis, ss, &root)
+    draw_main_plot(filename, params, &axis, ss, &root)
 }
 
 #[cfg(test)]
@@ -571,6 +511,50 @@ mod tests {
     use super::*;
     use crate::plots::fallible::test_support::chart_params;
     use crate::plots::fallible::test_support::TempCharts;
+    use crate::plots::ClampParams;
+
+    fn render_stream_group(
+        streams: &BTreeMap<u64, Vec<QlogPointu64>>,
+    ) -> Result<Vec<u8>, Box<dyn Error>> {
+        use plotters::drawing::IntoDrawingArea;
+        use plotters::prelude::BitMapBackend;
+
+        let mut pixels = vec![0_u8; 480 * 360 * 3];
+        {
+            let root = BitMapBackend::with_buffer(&mut pixels, (480, 360))
+                .into_drawing_area();
+            let mut chart = ChartBuilder::on(&root)
+                .build_cartesian_2d(0.0..5.0, 0_u64..10)?;
+            draw_stream_group(streams, "stream", BLUE, &mut chart)?;
+            chart.configure_series_labels().draw()?;
+            root.present()?;
+        }
+        Ok(pixels)
+    }
+
+    #[test]
+    fn stream_groups_skip_empty_entries_without_stealing_legend_label(
+    ) -> Result<(), Box<dyn Error>> {
+        let nonempty = BTreeMap::from([
+            (5, vec![(1.0, 3), (2.0, 4)]),
+            (8, vec![(2.0, 5), (4.0, 6)]),
+        ]);
+        let mut with_empty = nonempty.clone();
+        with_empty.insert(1, Vec::new());
+        with_empty.insert(7, Vec::new());
+        with_empty.insert(12, Vec::new());
+
+        assert_eq!(
+            render_stream_group(&nonempty)?,
+            render_stream_group(&with_empty)?
+        );
+        // Nonempty stream data should change the rendered content.
+        assert_ne!(
+            render_stream_group(&nonempty)?,
+            render_stream_group(&BTreeMap::new())?
+        );
+        Ok(())
+    }
 
     #[test]
     fn empty_overview_renders_all_panels_and_bad_output_returns_error(
