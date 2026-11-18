@@ -36,14 +36,31 @@ use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
 use plotters::drawing::DrawingAreaErrorKind;
 use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::Circle;
+use plotters::prelude::Color;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::LineSeries;
+use plotters::prelude::PathElement;
+use plotters::prelude::SeriesLabelPosition;
+use plotters::prelude::BLUE;
+use plotters::prelude::GREEN;
+#[cfg(target_arch = "wasm32")]
+use plotters_canvas::CanvasBackend;
 use std::error::Error;
 use std::io;
 use std::ops::Range;
 
-use crate::plots::colors::*;
-use crate::plots::*;
-
+use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
+use crate::plots::chart_label_style;
+use crate::plots::chart_title_style;
+use crate::plots::colors::ORANGE;
+use crate::plots::draw_mesh;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::ChartConfig;
+use crate::plots::ChartOutputType;
+use crate::plots::PlotParameters;
 use crate::seriesstore::SeriesStore;
 
 struct XYMinMax {
@@ -64,15 +81,15 @@ impl XYMinMax {
         Ok(Self {
             x,
             y_min: 0,
-            y_max: Self::y_max(ss, &ds.application_proto),
+            y_max: Self::y_max(ss, ds.application_proto),
         })
     }
 
-    fn y_range(&self) -> Range<u64> {
+    const fn y_range(&self) -> Range<u64> {
         self.y_min..self.y_max
     }
 
-    fn y_max(ss: &SeriesStore, proto: &ApplicationProto) -> u64 {
+    fn y_max(ss: &SeriesStore, proto: ApplicationProto) -> u64 {
         let max_series = match proto {
             ApplicationProto::Http2 => ss
                 .netlog_h2_stream_received_connection_cumulative
@@ -115,13 +132,13 @@ fn blocked_lines<DB: DrawingBackend>(
         chart
             .draw_series(lines)?
             .label("server conn blocked")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], GREEN));
+            .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], GREEN));
     }
     Ok(())
 }
 
 fn received_data<DB: DrawingBackend>(
-    ss: &SeriesStore, proto: &ApplicationProto,
+    ss: &SeriesStore, proto: ApplicationProto,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     let points = match proto {
@@ -133,7 +150,7 @@ fn received_data<DB: DrawingBackend>(
     chart
         .draw_series(LineSeries::new(points.iter().copied(), ORANGE))?
         .label("cumulative received stream data")
-        .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], ORANGE));
+        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], ORANGE));
     Ok(())
 }
 
@@ -150,7 +167,7 @@ fn window_updates<DB: DrawingBackend>(
         chart
             .draw_series(LineSeries::new(points.iter().copied(), BLUE))?
             .label("sent window updates")
-            .legend(|(x, y)| PathElement::new(vec![(x, y), (x + 20, y)], BLUE));
+            .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], BLUE));
         chart.draw_series(
             points.iter().map(|point| Circle::new(*point, 2, BLUE)),
         )?;
@@ -170,7 +187,7 @@ fn draw_series<'a, DB: DrawingBackend + 'a>(
         chart,
     )?;
     blocked_lines(ds, y_max, chart)?;
-    received_data(ss, &ds.application_proto, chart)?;
+    received_data(ss, ds.application_proto, chart)?;
     window_updates(ss, ds, chart)?;
     if params.display_legend {
         chart
@@ -278,13 +295,32 @@ mod tests {
             ],
             ..SeriesStore::default()
         };
-        assert_eq!(XYMinMax::y_max(&series, &ApplicationProto::Http3), 1200);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 1200);
         series.netlog_quic_stream_received_connection_cumulative[0].1 = u64::MAX;
-        assert_eq!(XYMinMax::y_max(&series, &ApplicationProto::Http3), u64::MAX);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), u64::MAX);
         assert_eq!(
-            XYMinMax::y_max(&SeriesStore::default(), &ApplicationProto::Http2),
+            XYMinMax::y_max(&SeriesStore::default(), ApplicationProto::Http2),
             1
         );
+    }
+
+    #[test]
+    fn http2_and_http3_maxima_use_their_own_receive_and_window_series() {
+        let mut series = SeriesStore {
+            netlog_h2_stream_received_connection_cumulative: vec![(1.0, 150)],
+            netlog_quic_stream_received_connection_cumulative: vec![(1.0, 400)],
+            ..SeriesStore::default()
+        };
+        series.h2_send_window_absolute_max.insert(0, 250);
+        series
+            .netlog_quic_client_side_window_updates
+            .insert(-1, vec![(0.0, 500), (2.0, 20)]);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 300);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
+
+        series.h2_send_window_absolute_max.insert(0, 1_000);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 1_200);
+        assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
     }
 
     #[test]
