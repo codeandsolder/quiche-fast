@@ -33,7 +33,6 @@ use crate::plots::packet_sent::draw_packet_sent_received_plot;
 use crate::plots::ChartConfig;
 use crate::plots::ChartOutputType;
 use crate::plots::PlotParameters;
-use plotters::prelude::AsRelative;
 use std::error::Error;
 
 use crate::datastore::Datastore;
@@ -74,8 +73,10 @@ pub fn plot_packet_received(
     #[cfg(target_arch = "wasm32")]
     let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
 
-    let (raw_timings, _remainder) = root.split_vertically((60).percent());
-    draw_packet_sent_received_plot(false, filename, params, ss, &raw_timings)?;
+    // Received packets have only one timeline panel. Reuse the full drawing
+    // area instead of leaving the lower 40% unused (unlike sent packet plots,
+    // which have several additional panels).
+    draw_packet_sent_received_plot(false, filename, params, ss, &root)?;
     root.present()?;
     Ok(())
 }
@@ -89,6 +90,56 @@ mod tests {
     use crate::plots::ChartSize;
     use crate::plots::ClampParams;
     use crate::plots::PlotColors;
+
+    #[test]
+    fn received_timeline_uses_lower_canvas_instead_of_reserving_blank_panel(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = PlotParameters {
+            clamp: ClampParams::default(),
+            cwnd_y_max: None,
+            chart_size: ChartSize {
+                width: 640,
+                height: 480,
+            },
+            colors: PlotColors::default(),
+            chart_margin: ChartMargin::default(),
+            area_margin: AreaMargin { x: 30, y: 40 },
+            display_chart_title: false,
+            display_legend: false,
+            display_minor_lines: false,
+        };
+        let ss = SeriesStore {
+            received_x_min: 0.0,
+            received_x_max: 100.0,
+            y_max_onertt_pkt_received_plot: 10,
+            onertt_packet_received: vec![(10.0, 3), (90.0, 3)],
+            ..SeriesStore::default()
+        };
+        let out = TempCharts::new()?;
+        plot_packet_received(
+            &params,
+            "received-full-area",
+            &ss,
+            &Datastore::default(),
+            &out.output(),
+        )?;
+        let image = image::open(out.only_file()?)?.to_rgb8();
+        let orange = crate::plots::colors::ORANGE;
+        let orange_pixel = [orange.0, orange.1, orange.2];
+        // A packet-number line in the lower 40% of the image is invisible
+        // if the only pane is accidentally restricted to the top 60%.
+        assert!(
+            image.enumerate_pixels().any(|(x, y, p)| {
+                x > 100 &&
+                    x < 500 &&
+                    y >= 3 * image.height() / 5 &&
+                    y < 9 * image.height() / 10 &&
+                    p.0 == orange_pixel
+            }),
+            "packet data should be rendered below the old 60% cutoff"
+        );
+        Ok(())
+    }
 
     #[test]
     fn empty_received_chart_renders_and_invalid_output_fails_cleanly(
