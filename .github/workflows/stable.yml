@@ -34,7 +34,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -110,7 +110,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   qlog-dancer-wasm:
     name: qlog-dancer WASM library (shared sccache)
@@ -123,7 +123,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -149,14 +149,14 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   shared-sccache:
     name: Linux workspace (shared sccache)
     if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@50c4dbb544f008f87ba479324b43a1bd807672bd # main
     with:
       command: |
         sudo apt-get update -qq
@@ -184,7 +184,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -203,7 +203,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   quiche_ios:
     if: startsWith(github.ref, 'refs/tags/')
@@ -218,7 +218,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -240,7 +240,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   quiche_windows:
     if: startsWith(github.ref, 'refs/tags/')
@@ -270,7 +270,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -345,7 +345,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   quiche_multiarch:
     if: startsWith(github.ref, 'refs/tags/')
@@ -379,7 +379,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -397,7 +397,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
 
   docker:
     if: startsWith(github.ref, 'refs/tags/')
@@ -431,7 +431,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
         with:
           rust-toolchain: "1.100.0"
 
@@ -449,4 +449,4 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@4b748f18ffb855f167486cb978187ea1c08fbcbb # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@50c4dbb544f008f87ba479324b43a1bd807672bd # main
