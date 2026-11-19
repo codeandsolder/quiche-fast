@@ -34,12 +34,29 @@ use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_pixel;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::error::Error;
 use std::io;
 
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::PathElement;
+use plotters::prelude::RGBColor;
+use plotters::prelude::TriangleMarker;
+
 use crate::datastore::VantagePoint;
-use crate::plots::colors::*;
-use crate::plots::*;
+use crate::plots::chart_label_style;
+use crate::plots::chart_title_style;
+use crate::plots::colors::ColorCycle;
+use crate::plots::colors::PlotColors;
+use crate::plots::AreaMargin;
+use crate::plots::ChartConfig;
+use crate::plots::ChartMargin;
+use crate::plots::ChartOutputType;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::ChartSize;
+use crate::plots::ClampParams;
+use crate::QlogPointu64;
 
 use crate::datastore::Datastore;
 use crate::request_stub::HttpRequestStub;
@@ -166,7 +183,7 @@ impl MultiplexLayout {
         })
     }
 
-    fn row_y(&self, offset: u32, step: u32, row: usize) -> io::Result<i32> {
+    fn row_y(offset: u32, step: u32, row: usize) -> io::Result<i32> {
         let row = u64::try_from(row)
             .map_err(|_| invalid_chart("row index exceeds u64"))?;
         let y = row
@@ -190,13 +207,35 @@ fn request_data_frames(
     }
 }
 
+/// Assign one deterministic color to every visible stream ID represented by
+/// either the request list or the STREAM/DATA frame series. Some streams appear
+/// in only one source; independent palette iteration would shift the colors
+/// of later streams between combined and per-request panels.
+fn colors_for_visible_streams(
+    params: &MultiplexPlotsParams, ds: &Datastore,
+    stream_frame_series: &BTreeMap<u64, Vec<QlogPointu64>>,
+) -> BTreeMap<u64, RGBColor> {
+    let ids: BTreeSet<u64> = ds
+        .http_requests
+        .keys()
+        .chain(stream_frame_series.keys())
+        .copied()
+        .filter(|&id| visible_stream(params, ds.application_proto, id))
+        .collect();
+
+    let mut palette = ColorCycle::default();
+    ids.into_iter()
+        .map(|id| (id, palette.next_color()))
+        .collect()
+}
+
 /// Draw per-stream DATA and STREAM events across combined and individual lanes.
 ///
 /// # Errors
 /// Returns invalid layout, nonfinite times, output filesystem/canvas, and
 /// backend/drawing failures as errors rather than panicking.
 pub fn plot_stream_multiplexing(
-    params: &MultiplexPlotsParams, _filename: &str, ss: &SeriesStore,
+    params: &MultiplexPlotsParams, filename: &str, ss: &SeriesStore,
     ds: &Datastore, ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
     let requests = ds.http_requests.iter().filter(|(stream_id, _)| {
@@ -259,7 +298,7 @@ pub fn plot_stream_multiplexing(
     let x_range = checked_time_range(start, end, &params.clamp)?;
 
     let config =
-        ChartConfig::new("stream-multiplexing", _filename, &params.clamp, ds, ty);
+        ChartConfig::new("stream-multiplexing", filename, &params.clamp, ds, ty);
     let margin = ChartMargin {
         top: 20,
         bottom: 20,
@@ -293,7 +332,8 @@ pub fn plot_stream_multiplexing(
     #[cfg(target_arch = "wasm32")]
     let root = canvas_area(&canvas_id, params.colors, margin)?;
 
-    let mut palette = ColorCycle::default();
+    let stream_colors =
+        colors_for_visible_streams(params, ds, stream_frame_series);
     let combined_data_area = root
         .clone()
         .shrink((0, 0), (layout.chart_width, params.combined_plot_height));
@@ -311,15 +351,14 @@ pub fn plot_stream_multiplexing(
         .axis_style(params.colors.axis)
         .label_style(chart_label_style(&params.colors.caption))
         .draw()?;
-    for (_, request) in requests.clone() {
+    for (stream_id, request) in requests.clone() {
         let points = request_data_frames(request, ds.vantage_point);
-        let color = palette.next_color();
+        let color = stream_colors[stream_id];
         combined_data.draw_series(points.iter().map(|(time, _)| {
             PathElement::new([(*time, 2), (*time, 0)], color)
         }))?;
     }
 
-    palette.reset();
     let combined_stream_area = root.clone().shrink(
         (0, checked_pixel(u64::from(layout.stream_combined_y))?),
         (layout.chart_width, params.combined_plot_height),
@@ -338,17 +377,16 @@ pub fn plot_stream_multiplexing(
         .axis_style(params.colors.axis)
         .label_style(chart_label_style(&params.colors.caption))
         .draw()?;
-    for (_, points) in stream_frame_series
+    for (stream_id, points) in stream_frame_series
         .iter()
         .filter(|(id, _)| visible_stream(params, ds.application_proto, **id))
     {
-        let color = palette.next_color();
+        let color = stream_colors[stream_id];
         combined_stream.draw_series(points.iter().map(|(time, _)| {
             PathElement::new([(*time, 2), (*time, 0)], color)
         }))?;
     }
 
-    palette.reset();
     let max_data = requests
         .clone()
         .flat_map(|(_, request)| {
@@ -361,11 +399,13 @@ pub fn plot_stream_multiplexing(
         .max(1);
     for (row, (stream_id, request)) in requests.enumerate() {
         let points = request_data_frames(request, ds.vantage_point);
-        let color = palette.next_color();
-        let frame_y = layout.row_y(layout.data_mini_y, layout.frame_step, row)?;
+        let color = stream_colors[stream_id];
+        let frame_y =
+            MultiplexLayout::row_y(layout.data_mini_y, layout.frame_step, row)?;
         let stream_y =
-            layout.row_y(layout.stream_mini_y, layout.frame_step, row)?;
-        let bubble_y = layout.row_y(layout.bubbles_y, layout.bubble_step, row)?;
+            MultiplexLayout::row_y(layout.stream_mini_y, layout.frame_step, row)?;
+        let bubble_y =
+            MultiplexLayout::row_y(layout.bubbles_y, layout.bubble_step, row)?;
         let data_area = root.clone().shrink(
             (0, frame_y),
             (layout.chart_width, params.frame_swimlane_height),
@@ -465,6 +505,51 @@ mod tests {
             area_margin: AreaMargin { x: 26, y: 10 },
             ..MultiplexPlotsParams::default()
         }
+    }
+
+    #[test]
+    fn stream_colors_use_union_of_visible_request_and_frame_ids() {
+        let params = test_params();
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http3,
+            ..Datastore::default()
+        };
+        // A frame-only stream 1 shifts the positional palette: stream 9
+        // would be color #2 in request lanes but color #3 in frame lanes.
+        // QUIC unidirectional IDs 2 and 6 are excluded by bidi_only.
+        for stream_id in [9, 2, 5] {
+            ds.http_requests
+                .insert(stream_id, HttpRequestStub::default());
+        }
+        let frame_series = BTreeMap::from([
+            (1, vec![(0.0, 2)]),
+            (5, vec![(0.2, 2)]),
+            (6, vec![(0.5, 2)]),
+            (9, vec![(1.0, 2)]),
+        ]);
+
+        let colors = colors_for_visible_streams(&params, &ds, &frame_series);
+        assert_eq!(colors.keys().copied().collect::<Vec<_>>(), vec![1, 5, 9]);
+
+        let mut expected = ColorCycle::default();
+        for stream_id in [1, 5, 9] {
+            assert_eq!(colors[&stream_id], expected.next_color());
+        }
+        let mut former_request_palette = ColorCycle::default();
+        let _first_request_color = former_request_palette.next_color();
+        assert_ne!(colors[&9], former_request_palette.next_color());
+
+        // The mapping is independent of insertion order and remains stable
+        // when we repeat the same selection for all three plot sections.
+        assert_eq!(
+            colors_for_visible_streams(&params, &ds, &frame_series),
+            colors
+        );
+
+        // HTTP/2 has no QUIC direction bits: IDs 2 and 6 become visible.
+        ds.application_proto = ApplicationProto::Http2;
+        let h2 = colors_for_visible_streams(&params, &ds, &frame_series);
+        assert_eq!(h2.keys().copied().collect::<Vec<_>>(), vec![1, 2, 5, 6, 9]);
     }
 
     #[test]
