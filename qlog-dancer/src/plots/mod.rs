@@ -34,8 +34,6 @@ use colors::PlotColors;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::prelude::*;
-#[cfg(target_arch = "wasm32")]
-use plotters_canvas::CanvasBackend;
 
 #[derive(Clone, Debug)]
 pub enum ChartOutputType {
@@ -256,7 +254,7 @@ fn draw_line<DB: DrawingBackend>(
         chart.draw_series(LineSeries::new(data.iter().copied(), colour))?;
     if let Some(label) = label {
         drawn.label(label).legend(move |(x, y)| {
-            PathElement::new(vec![(x, y), (x + 20, y)], colour)
+            PathElement::new([(x, y), (x + 20, y)], colour)
         });
     }
     Ok(())
