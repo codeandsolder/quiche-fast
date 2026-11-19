@@ -73,11 +73,7 @@ impl XYMinMax {
     fn init(
         params: &PlotParameters, ss: &SeriesStore, ds: &Datastore,
     ) -> io::Result<Self> {
-        let x = checked_time_range(
-            ss.received_x_min,
-            ss.received_x_max,
-            &params.clamp,
-        )?;
+        let x = flow_control_time_range(ss, ds, &params.clamp)?;
         Ok(Self {
             x,
             y_min: 0,
@@ -121,11 +117,80 @@ impl XYMinMax {
     }
 }
 
+/// Only one protocol's series is represented by this chart at a time.
+fn received_series(ss: &SeriesStore, proto: ApplicationProto) -> &[(f64, u64)] {
+    match proto {
+        ApplicationProto::Http2 =>
+            &ss.netlog_h2_stream_received_connection_cumulative,
+        ApplicationProto::Http3 =>
+            &ss.netlog_quic_stream_received_connection_cumulative,
+    }
+}
+
+fn window_series(
+    ss: &SeriesStore, proto: ApplicationProto,
+) -> Option<&[(f64, u64)]> {
+    match proto {
+        ApplicationProto::Http2 => ss.h2_send_window_series_absolute.get(&0),
+        ApplicationProto::Http3 =>
+            ss.netlog_quic_client_side_window_updates.get(&-1),
+    }
+    .map(Vec::as_slice)
+}
+
+fn blocked_connection_events(ds: &Datastore) -> Option<&[f64]> {
+    match ds.application_proto {
+        ApplicationProto::Http2 => None,
+        ApplicationProto::Http3 => ds
+            .netlog_quic_server_window_blocked
+            .get(&-1)
+            .map(Vec::as_slice),
+    }
+    .filter(|events| !events.is_empty())
+}
+
+/// Base the X-axis on the exact points and markers being drawn, rather than
+/// unrelated received-packet timestamps. Window-update series are populated
+/// separately from packet timeline extrema and can extend past them.
+fn flow_control_time_range(
+    ss: &SeriesStore, ds: &Datastore, clamp: &crate::plots::ClampParams,
+) -> io::Result<Range<f64>> {
+    let times = received_series(ss, ds.application_proto)
+        .iter()
+        .map(|(time, _)| *time)
+        .chain(
+            window_series(ss, ds.application_proto)
+                .into_iter()
+                .flatten()
+                .map(|(time, _)| *time),
+        )
+        .chain(blocked_connection_events(ds).into_iter().flatten().copied());
+
+    // A fallible reduction rejects invalid samples before they reach Plotters,
+    // while preserving true extrema independent of event ordering.
+    let bounds = times.into_iter().try_fold(
+        None,
+        |bounds: Option<(f64, f64)>, time| {
+            if !time.is_finite() {
+                return Err(invalid_chart(
+                    "flow-control event timestamps must be finite",
+                ));
+            }
+            Ok::<_, io::Error>(Some(match bounds {
+                Some((min, max)) => (min.min(time), max.max(time)),
+                None => (time, time),
+            }))
+        },
+    )?;
+    let (min, max) = bounds.unwrap_or((ss.received_x_min, ss.received_x_max));
+    checked_time_range(min, max, clamp)
+}
+
 fn blocked_lines<DB: DrawingBackend>(
     ds: &Datastore, y_max: u64,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    if let Some(blocked) = ds.netlog_quic_server_window_blocked.get(&-1) {
+    if let Some(blocked) = blocked_connection_events(ds) {
         let lines = blocked
             .iter()
             .map(|time| PathElement::new([(*time, 0), (*time, y_max)], GREEN));
@@ -141,12 +206,7 @@ fn received_data<DB: DrawingBackend>(
     ss: &SeriesStore, proto: ApplicationProto,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let points = match proto {
-        ApplicationProto::Http2 =>
-            &ss.netlog_h2_stream_received_connection_cumulative,
-        ApplicationProto::Http3 =>
-            &ss.netlog_quic_stream_received_connection_cumulative,
-    };
+    let points = received_series(ss, proto);
     chart
         .draw_series(LineSeries::new(points.iter().copied(), ORANGE))?
         .label("cumulative received stream data")
@@ -158,11 +218,7 @@ fn window_updates<DB: DrawingBackend>(
     ss: &SeriesStore, ds: &Datastore,
     chart: &mut ChartContext<'_, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
-    let points = match ds.application_proto {
-        ApplicationProto::Http2 => ss.h2_send_window_series_absolute.get(&0),
-        ApplicationProto::Http3 =>
-            ss.netlog_quic_client_side_window_updates.get(&-1),
-    };
+    let points = window_series(ss, ds.application_proto);
     if let Some(points) = points {
         chart
             .draw_series(LineSeries::new(points.iter().copied(), BLUE))?
@@ -285,6 +341,95 @@ mod tests {
     use super::*;
     use crate::plots::fallible::test_support::chart_params;
     use crate::plots::fallible::test_support::TempCharts;
+    use plotters::drawing::IntoDrawingArea;
+
+    #[test]
+    fn flow_control_time_axis_uses_visible_protocol_series_not_packet_times(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = chart_params();
+        let mut series = SeriesStore {
+            received_x_min: 0.0,
+            received_x_max: 2.0,
+            netlog_h2_stream_received_connection_cumulative: vec![(12.0, 15)],
+            netlog_quic_stream_received_connection_cumulative: vec![(20.0, 20)],
+            ..SeriesStore::default()
+        };
+        series
+            .h2_send_window_series_absolute
+            .insert(0, vec![(85.0, 60)]);
+        series
+            .netlog_quic_client_side_window_updates
+            .insert(-1, vec![(60.0, 80)]);
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
+        ds.netlog_quic_server_window_blocked.insert(-1, vec![80.0]);
+        assert_eq!(XYMinMax::init(&params, &series, &ds)?.x, 12.0..85.0);
+
+        ds.application_proto = ApplicationProto::Http3;
+        assert_eq!(XYMinMax::init(&params, &series, &ds)?.x, 20.0..80.0);
+        assert!(blocked_connection_events(&ds).is_some());
+        ds.application_proto = ApplicationProto::Http2;
+        assert!(blocked_connection_events(&ds).is_none());
+
+        // Verify the shared native/browser renderer uses exactly this axis,
+        // not the unrelated received-packet range.
+        let mut pixels = vec![0_u8; 640 * 480 * 3];
+        let root = plotters::prelude::BitMapBackend::with_buffer(
+            &mut pixels,
+            (640, 480),
+        )
+        .into_drawing_area();
+        let chart = draw_flow_control(&params, "h2", &series, &ds, &root)?;
+        assert_eq!(chart.x_range(), 12.0..85.0);
+        drop(chart);
+
+        let mut clamped = chart_params();
+        clamped.clamp.start = Some(30.0);
+        clamped.clamp.end = Some(70.0);
+        assert_eq!(XYMinMax::init(&clamped, &series, &ds)?.x, 30.0..70.0);
+        Ok(())
+    }
+
+    #[test]
+    fn flow_control_time_axis_handles_single_empty_and_invalid_series(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = chart_params();
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http3,
+            ..Datastore::default()
+        };
+        let mut series = SeriesStore {
+            received_x_min: 3.0,
+            received_x_max: 4.0,
+            ..SeriesStore::default()
+        };
+        assert_eq!(XYMinMax::init(&params, &series, &ds)?.x, 3.0..4.0);
+
+        ds.netlog_quic_server_window_blocked.insert(-1, vec![40.0]);
+        let range = XYMinMax::init(&params, &series, &ds)?.x;
+        assert!(range.start < 40.0 && range.end > 40.0);
+
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            ds.netlog_quic_server_window_blocked
+                .insert(-1, vec![invalid]);
+            assert!(XYMinMax::init(&params, &series, &ds).is_err());
+        }
+        ds.netlog_quic_server_window_blocked.clear();
+        series
+            .netlog_quic_stream_received_connection_cumulative
+            .push((f64::NAN, 1));
+        assert!(XYMinMax::init(&params, &series, &ds).is_err());
+        series
+            .netlog_quic_stream_received_connection_cumulative
+            .clear();
+        series
+            .netlog_quic_client_side_window_updates
+            .insert(-1, vec![(f64::INFINITY, 1)]);
+        assert!(XYMinMax::init(&params, &series, &ds).is_err());
+        Ok(())
+    }
 
     #[test]
     fn flow_control_max_follows_all_samples_and_saturates_large_values() {
