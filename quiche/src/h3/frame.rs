@@ -107,16 +107,30 @@ impl Frame {
     pub fn from_bytes(
         frame_type: u64, payload_length: u64, bytes: &[u8],
     ) -> Result<Frame> {
+        // Validate the entire wire length before narrowing to usize. On a
+        // 32-bit target a large varint must never wrap into a short payload.
+        // SETTINGS is rejected for excessive size independently of the data
+        // buffer, including when its length cannot fit in usize.
+        if frame_type == SETTINGS_FRAME_TYPE_ID &&
+            payload_length > MAX_SETTINGS_PAYLOAD_SIZE as u64
+        {
+            return Err(super::Error::ExcessiveLoad);
+        }
+
+        let payload_length = usize::try_from(payload_length)
+            .map_err(|_| super::Error::BufferTooShort)?;
+        let bytes = bytes
+            .get(..payload_length)
+            .ok_or(super::Error::BufferTooShort)?;
         let mut b = octets::Octets::with_slice(bytes);
 
-        // TODO: handling of 0-length frames
         let frame = match frame_type {
             DATA_FRAME_TYPE_ID => Frame::Data {
-                payload: b.get_bytes(payload_length as usize)?.to_vec(),
+                payload: b.get_bytes(payload_length)?.to_vec(),
             },
 
             HEADERS_FRAME_TYPE_ID => Frame::Headers {
-                header_block: b.get_bytes(payload_length as usize)?.to_vec(),
+                header_block: b.get_bytes(payload_length)?.to_vec(),
             },
 
             CANCEL_PUSH_FRAME_TYPE_ID => Frame::CancelPush {
@@ -124,7 +138,7 @@ impl Frame {
             },
 
             SETTINGS_FRAME_TYPE_ID =>
-                parse_settings_frame(&mut b, payload_length as usize)?,
+                parse_settings_frame(&mut b, payload_length)?,
 
             PUSH_PROMISE_FRAME_TYPE_ID =>
                 parse_push_promise(payload_length, &mut b)?,
@@ -143,7 +157,7 @@ impl Frame {
 
             _ => Frame::Unknown {
                 raw_type: frame_type,
-                payload: b.get_bytes(payload_length as usize)?.to_vec(),
+                payload: b.get_bytes(payload_length)?.to_vec(),
             },
         };
 
@@ -646,25 +660,35 @@ fn parse_settings_frame(
 /// Parses the payload of a frame that carries a single varint, making sure the
 /// varint covers the whole payload.
 fn parse_single_varint(
-    payload_length: u64, b: &mut octets::Octets,
+    payload_length: usize, b: &mut octets::Octets,
 ) -> Result<u64> {
     let before = b.off();
     let v = b.get_varint()?;
 
-    if (b.off() - before) as u64 != payload_length {
+    if b.off() - before != payload_length {
         return Err(super::Error::FrameError);
     }
 
     Ok(v)
 }
 
-fn parse_push_promise(
-    payload_length: u64, b: &mut octets::Octets,
-) -> Result<Frame> {
+/// Decode a required leading ID and its remaining, frame-bounded payload.
+/// Both PUSH_PROMISE and PRIORITY_UPDATE have the same wire structure.
+fn parse_id_and_payload(
+    payload_length: usize, b: &mut octets::Octets,
+) -> Result<(u64, Vec<u8>)> {
     let before = b.off();
-    let push_id = b.get_varint()?;
-    let header_block_length = payload_length - (b.off() - before) as u64;
-    let header_block = b.get_bytes(header_block_length as usize)?.to_vec();
+    let id = b.get_varint()?;
+    let remaining = payload_length
+        .checked_sub(b.off() - before)
+        .ok_or(super::Error::FrameError)?;
+    Ok((id, b.get_bytes(remaining)?.to_vec()))
+}
+
+fn parse_push_promise(
+    payload_length: usize, b: &mut octets::Octets,
+) -> Result<Frame> {
+    let (push_id, header_block) = parse_id_and_payload(payload_length, b)?;
 
     Ok(Frame::PushPromise {
         push_id,
@@ -673,13 +697,10 @@ fn parse_push_promise(
 }
 
 fn parse_priority_update(
-    frame_type: u64, payload_length: u64, b: &mut octets::Octets,
+    frame_type: u64, payload_length: usize, b: &mut octets::Octets,
 ) -> Result<Frame> {
-    let before = b.off();
-    let prioritized_element_id = b.get_varint()?;
-    let priority_field_value_length = payload_length - (b.off() - before) as u64;
-    let priority_field_value =
-        b.get_bytes(priority_field_value_length as usize)?.to_vec();
+    let (prioritized_element_id, priority_field_value) =
+        parse_id_and_payload(payload_length, b)?;
 
     match frame_type {
         PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID =>
@@ -1418,6 +1439,71 @@ mod tests {
             prioritized_element_id: 37,
             priority_field_value: priority_field.to_vec(),
         });
+    }
+
+    #[test]
+    fn oversized_declared_lengths_are_rejected_on_all_target_widths() {
+        // 2^32 previously narrowed to zero on 32-bit targets, allowing an
+        // empty DATA/HEADERS/UNKNOWN frame to be accepted as valid.
+        for length in [u64::from(u32::MAX) + 1, u64::MAX] {
+            for frame_type in [
+                DATA_FRAME_TYPE_ID,
+                HEADERS_FRAME_TYPE_ID,
+                CANCEL_PUSH_FRAME_TYPE_ID,
+                PUSH_PROMISE_FRAME_TYPE_ID,
+                GOAWAY_FRAME_TYPE_ID,
+                MAX_PUSH_FRAME_TYPE_ID,
+                PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID,
+                PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
+                0xff,
+            ] {
+                assert_eq!(
+                    Frame::from_bytes(frame_type, length, &[0]),
+                    Err(crate::h3::Error::BufferTooShort),
+                    "unexpected frame type {frame_type:#x}, length {length}",
+                );
+            }
+            assert_eq!(
+                Frame::from_bytes(SETTINGS_FRAME_TYPE_ID, length, &[0]),
+                Err(crate::h3::Error::ExcessiveLoad),
+            );
+        }
+    }
+
+    #[test]
+    fn frames_cannot_read_past_the_declared_payload_boundary() {
+        // A two-byte varint cannot borrow its trailing byte from the next
+        // frame, even when those bytes are present in the caller's slice.
+        for frame_type in [
+            CANCEL_PUSH_FRAME_TYPE_ID,
+            SETTINGS_FRAME_TYPE_ID,
+            PUSH_PROMISE_FRAME_TYPE_ID,
+            GOAWAY_FRAME_TYPE_ID,
+            MAX_PUSH_FRAME_TYPE_ID,
+            PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID,
+            PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
+        ] {
+            assert_eq!(
+                Frame::from_bytes(frame_type, 1, &[0x40, 0x01]),
+                Err(crate::h3::Error::BufferTooShort),
+                "frame type {frame_type:#x} crossed its declared boundary",
+            );
+        }
+
+        // A frame carrying no payload is legal for DATA and unknown types,
+        // but not for types requiring an ID or priority varint.
+        assert_eq!(
+            Frame::from_bytes(DATA_FRAME_TYPE_ID, 0, &[]),
+            Ok(Frame::Data { payload: vec![] }),
+        );
+        assert_eq!(
+            Frame::from_bytes(PUSH_PROMISE_FRAME_TYPE_ID, 0, &[0]),
+            Err(crate::h3::Error::BufferTooShort),
+        );
+        assert_eq!(
+            Frame::from_bytes(PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID, 0, &[0]),
+            Err(crate::h3::Error::BufferTooShort),
+        );
     }
 
     #[test]
