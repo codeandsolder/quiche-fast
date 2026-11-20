@@ -29,11 +29,11 @@
 //! represents a single stream, so it is easier to see how they all compare
 //! at a glance.
 
-use full_palette::PURPLE_500;
 use plotters::coord::ranged1d::ValueFormatter;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::drawing::DrawingAreaErrorKind;
+use plotters::style::full_palette::PURPLE_500;
 #[cfg(target_arch = "wasm32")]
 use plotters_canvas::CanvasBackend;
 use std::borrow::Cow;
@@ -47,9 +47,37 @@ use tabled::Tabled;
 
 use crate::datastore::ApplicationProto;
 use crate::datastore::VantagePoint;
-use crate::plots::colors::*;
-use crate::plots::*;
+use crate::plots::chart_label_style;
+use crate::plots::colors::PlotColors;
+use crate::plots::colors::BROWN;
+use crate::plots::colors::MUSTARD;
+use crate::plots::colors::ORANGE;
+use crate::plots::ChartConfig;
+use crate::plots::ChartMargin;
+use crate::plots::ChartOutputType;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::ChartSize;
+use crate::plots::ClampParams;
 use crate::request_stub::HttpRequestStub;
+#[cfg(not(target_arch = "wasm32"))]
+use plotters::prelude::BitMapBackend;
+use plotters::prelude::Cartesian2d;
+use plotters::prelude::ChartBuilder;
+use plotters::prelude::ChartContext;
+use plotters::prelude::Circle;
+use plotters::prelude::DrawingArea;
+use plotters::prelude::DrawingBackend;
+use plotters::prelude::IntoDrawingArea;
+use plotters::prelude::IntoTextStyle;
+use plotters::prelude::LabelAreaPosition;
+use plotters::prelude::LineSeries;
+use plotters::prelude::PathElement;
+use plotters::prelude::RGBColor;
+use plotters::prelude::Ranged;
+use plotters::prelude::TriangleMarker;
+use plotters::prelude::CYAN;
+use plotters::prelude::GREEN;
+use plotters::prelude::MAGENTA;
 
 use crate::datastore::Datastore;
 use crate::seriesstore::SeriesStore;
@@ -122,7 +150,7 @@ impl<T> SparkOutputs<T> {
         })
     }
 
-    fn as_ref(&self) -> SparkOutputs<&T> {
+    const fn as_ref(&self) -> SparkOutputs<&T> {
         SparkOutputs {
             download: SparkPair {
                 absolute: &self.download.absolute,
@@ -382,7 +410,7 @@ impl SparkCaption {
             "d_tx_data_first_tx_data_last:  ",
         );
 
-        SparkCaption::RequestAtClient {
+        Self::RequestAtClient {
             summary,
             method: format!("method= {}", req.method),
             path: format!("path= {}", req.path),
@@ -443,7 +471,7 @@ impl SparkCaption {
             "d_tx_data_first_tx_data_last:  ",
         );
 
-        SparkCaption::RequestAtServer {
+        Self::RequestAtServer {
             summary,
             method: format!("method= {}", req.method),
             path: format!("path= {}", req.path),
@@ -484,23 +512,20 @@ impl SparkCaption {
         };
 
         if is_request {
-            if let Some(req) = ds.http_requests.get(&stream_id) {
-                match ds.vantage_point {
-                    VantagePoint::Client =>
-                        Some(SparkCaption::request_at_client_from_stub(
-                            ds.application_proto,
-                            req,
-                        )),
-                    VantagePoint::Server => Some(
-                        SparkCaption::request_at_server_from_stub(stream_id, req),
+            ds.http_requests
+                .get(&stream_id)
+                .map(|req| match ds.vantage_point {
+                    VantagePoint::Client => Self::request_at_client_from_stub(
+                        ds.application_proto,
+                        req,
                     ),
-                }
-            } else {
-                None
-            }
+                    VantagePoint::Server =>
+                        Self::request_at_server_from_stub(stream_id, req),
+                })
         } else {
-            let summary = format!("ID= {}", stream_id);
-            Some(SparkCaption::UniStream { summary })
+            Some(Self::UniStream {
+                summary: format!("ID= {stream_id}"),
+            })
         }
     }
 
@@ -577,99 +602,96 @@ impl SparkCaption {
     }
 
     fn draw<DB: DrawingBackend>(
-        &self, color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>,
+        &self, color: RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>,
         x: i32, y: i32,
     ) -> SparkDrawingResult<DB> {
-        let style = ("monospace", 12).into_text_style(root).color(color);
+        let style = ("monospace", 12).into_text_style(root).color(&color);
         self.for_each_row(|row, line| {
             root.draw_text(line, &style, (x + 20, y + row * 10))
         })
     }
 }
 
+/// Keep the legend faithful to what the corresponding panel can draw.
+/// Download panes show buffered data and request timing markers; upload
+/// panes show STREAM frames, a stream limit and possibly HTTP/2 send credit.
+/// The fixed-size array avoids a heap allocation even with optional entries.
+#[must_use]
+const fn spark_legend_entries(
+    transmission_type: TransmissionType, vantage: VantagePoint,
+    proto: ApplicationProto,
+) -> [Option<(&'static str, RGBColor)>; 6] {
+    let stream_limit = match (vantage, transmission_type) {
+        (VantagePoint::Client, TransmissionType::Download) |
+        (VantagePoint::Server, TransmissionType::Upload) =>
+            "Max stream data sent",
+        (VantagePoint::Client, TransmissionType::Upload) |
+        (VantagePoint::Server, TransmissionType::Download) =>
+            "Max stream data received",
+    };
+    match transmission_type {
+        TransmissionType::Download => {
+            let (first_data, last_data) = match vantage {
+                VantagePoint::Client =>
+                    ("First data frame read", "Last data frame read"),
+                VantagePoint::Server =>
+                    ("First data frame sent", "Last data frame sent"),
+            };
+            [
+                Some(("Stream data read", PURPLE_500)),
+                Some(("Stream data buffered", MAGENTA)),
+                Some((stream_limit, MUSTARD)),
+                Some(("Request headers sent", CYAN)),
+                Some((first_data, ORANGE)),
+                Some((last_data, BROWN)),
+            ]
+        },
+        TransmissionType::Upload => {
+            let window = match proto {
+                ApplicationProto::Http2 => Some(("HTTP/2 send window", ORANGE)),
+                ApplicationProto::Http3 => None,
+            };
+            [
+                Some(("Stream data sent", PURPLE_500)),
+                Some((stream_limit, MUSTARD)),
+                window,
+                None,
+                None,
+                None,
+            ]
+        },
+    }
+}
+
 fn plot_legend<DB: DrawingBackend>(
-    color: &RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>, x: i32,
-    y: i32, transmission_type: TransmissionType,
+    color: RGBColor, root: &DrawingArea<DB, plotters::coord::Shift>, x: i32,
+    y: i32, transmission_type: TransmissionType, vantage: VantagePoint,
+    proto: ApplicationProto,
 ) -> SparkDrawingResult<DB> {
-    let style = &("monospace", 12).into_text_style(root).color(color);
-    let line_len: i32 = 50;
-    let nl_off: i32 = 20;
+    const LINE_LEN: i32 = 50;
+    const ROW_HEIGHT: i32 = 20;
+    let style = ("monospace", 12).into_text_style(root).color(&color);
+    root.draw_text("Legend", &style, (x, y))?;
 
-    root.draw_text("Legend", style, (x, y))?;
-
-    // stream data
-    let label = match transmission_type {
-        TransmissionType::Download => "Stream data read",
-        TransmissionType::Upload => "Stream data sent",
-    };
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off), (x + line_len, y + nl_off)],
-        PURPLE_500,
-    ))?;
-    root.draw_text(label, style, (x + line_len + 10, y + (nl_off) - 5))?;
-
-    // stream data buffered
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off * 2), (x + line_len, y + nl_off * 2)],
-        MAGENTA,
-    ))?;
-    root.draw_text(
-        "Stream data buffered",
-        style,
-        (x + line_len + 10, y + (nl_off * 2) - 5),
-    )?;
-
-    // max stream data
-    let label = match transmission_type {
-        TransmissionType::Download => "Max stream data sent",
-        TransmissionType::Upload => "Max stream data received",
-    };
-
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off * 3), (x + line_len, y + nl_off * 3)],
-        MUSTARD,
-    ))?;
-    root.draw_text(label, style, (x + line_len + 10, y + (nl_off * 3) - 5))?;
-
-    // headers transmitted
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off * 4), (x + line_len, y + nl_off * 4)],
-        CYAN,
-    ))?;
-    root.draw_text(
-        "Request headers sent",
-        style,
-        (x + line_len + 10, y + (nl_off * 4) - 5),
-    )?;
-
-    // first data frame
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off * 5), (x + line_len, y + nl_off * 5)],
-        ORANGE,
-    ))?;
-    root.draw_text(
-        "First data frame read",
-        style,
-        (x + line_len + 10, y + (nl_off * 5) - 5),
-    )?;
-
-    // last data frame
-    root.draw(&PathElement::new(
-        vec![(x, y + nl_off * 6), (x + line_len, y + nl_off * 6)],
-        BROWN,
-    ))?;
-    root.draw_text(
-        "Last data frame read",
-        style,
-        (x + line_len + 10, y + (nl_off * 6) - 5),
-    )?;
+    for (row, (label, marker_color)) in (1_i32..).zip(
+        spark_legend_entries(transmission_type, vantage, proto)
+            .into_iter()
+            .flatten(),
+    ) {
+        let line_y = y + row * ROW_HEIGHT;
+        root.draw(&PathElement::new(
+            [(x, line_y), (x + LINE_LEN, line_y)],
+            marker_color,
+        ))?;
+        root.draw_text(label, &style, (x + LINE_LEN + 10, line_y - 5))?;
+    }
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spark_bitmap_area<'a>(
-    path: &'a str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
-) -> Result<DrawingArea<BitMapBackend<'a>, plotters::coord::Shift>, Box<dyn Error>>
+fn spark_bitmap_area(
+    path: &str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
+) -> Result<DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>, Box<dyn Error>>
 {
     let area =
         BitMapBackend::new(path, (size.width, size.height)).into_drawing_area();
@@ -706,7 +728,7 @@ fn spark_canvas_area(
 
 /// Pick the data direction by transport and capture vantage, independently
 /// of the output chart's absolute/relative time coordinate system.
-fn frame_series_for_vantage<'a>(
+const fn frame_series_for_vantage<'a>(
     ss: &'a SeriesStore, ds: &Datastore,
 ) -> SparkDirections<&'a BTreeMap<u64, Vec<(f64, u64)>>> {
     let (download, upload) = match (ds.application_proto, ds.vantage_point) {
@@ -938,11 +960,13 @@ pub fn plot_sparks(
         (&roots.upload.relative, TransmissionType::Upload),
     ] {
         plot_legend(
-            &params.colors.caption,
+            params.colors.caption,
             root,
             legend_x,
             legend_y,
             transmission,
+            ds.vantage_point,
+            ds.application_proto,
         )?;
     }
 
@@ -1135,7 +1159,7 @@ pub fn plot_sparks(
                 draw_stream_max_line(
                     stream_id,
                     ss,
-                    &ds.vantage_point,
+                    ds.vantage_point,
                     TransmissionType::Upload,
                     &mut charts.absolute,
                     &mut charts.relative,
@@ -1152,7 +1176,7 @@ pub fn plot_sparks(
         draw_buffered_data_line(
             stream_id,
             ss,
-            &ds.vantage_point,
+            ds.vantage_point,
             &mut download_charts.absolute,
             &mut download_charts.relative,
         )?;
@@ -1160,7 +1184,7 @@ pub fn plot_sparks(
         draw_stream_max_line(
             stream_id,
             ss,
-            &ds.vantage_point,
+            ds.vantage_point,
             TransmissionType::Download,
             &mut download_charts.absolute,
             &mut download_charts.relative,
@@ -1211,12 +1235,12 @@ fn draw_captions<DB: DrawingBackend>(
 ) -> SparkDrawingResult<DB> {
     if let Some(caption) = SparkCaption::from_data_store(ds, stream_id) {
         for root in [&roots.download.absolute, &roots.download.relative] {
-            caption.draw(&params.colors.caption, root, caption_x, caption_y)?;
+            caption.draw(params.colors.caption, root, caption_x, caption_y)?;
         }
         if upload_data {
             for root in [&roots.upload.absolute, &roots.upload.relative] {
                 caption.draw(
-                    &params.colors.caption,
+                    params.colors.caption,
                     root,
                     caption_x,
                     caption_y,
@@ -1247,7 +1271,7 @@ fn draw_stream_frames_line<DB: DrawingBackend>(
 }
 
 fn draw_buffered_data_line<DB: DrawingBackend>(
-    stream_id: u64, ss: &SeriesStore, vantage_point: &VantagePoint,
+    stream_id: u64, ss: &SeriesStore, vantage_point: VantagePoint,
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> SparkDrawingResult<DB> {
@@ -1273,22 +1297,31 @@ fn draw_buffered_data_line<DB: DrawingBackend>(
     Ok(())
 }
 
+/// The peer's MAX_STREAM_DATA limits are sourced from the opposite direction
+/// at each capture vantage. Do not confuse transport RX/TX with spark DL/UL.
+fn stream_max_series(
+    ss: &SeriesStore, stream_id: u64, vantage_point: VantagePoint,
+    transmission_type: TransmissionType,
+) -> Option<&[(f64, u64)]> {
+    match (vantage_point, transmission_type) {
+        (VantagePoint::Client, TransmissionType::Download) |
+        (VantagePoint::Server, TransmissionType::Upload) =>
+            ss.sent_stream_max_data.get(&stream_id),
+        (VantagePoint::Client, TransmissionType::Upload) |
+        (VantagePoint::Server, TransmissionType::Download) =>
+            ss.received_stream_max_data.get(&stream_id),
+    }
+    .map(Vec::as_slice)
+}
+
 fn draw_stream_max_line<DB: DrawingBackend>(
-    stream_id: u64, ss: &SeriesStore, vantage_point: &VantagePoint,
+    stream_id: u64, ss: &SeriesStore, vantage_point: VantagePoint,
     transmission_type: TransmissionType,
     abs_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     rel_chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
 ) -> SparkDrawingResult<DB> {
-    let stream_max_data_to_plot = match (vantage_point, transmission_type) {
-        (VantagePoint::Client, TransmissionType::Download) =>
-            ss.sent_stream_max_data.get(&stream_id),
-        (VantagePoint::Client, TransmissionType::Upload) =>
-            ss.received_stream_max_data.get(&stream_id),
-        (VantagePoint::Server, TransmissionType::Download) =>
-            ss.received_stream_max_data.get(&stream_id),
-        (VantagePoint::Server, TransmissionType::Upload) =>
-            ss.sent_stream_max_data.get(&stream_id),
-    };
+    let stream_max_data_to_plot =
+        stream_max_series(ss, stream_id, vantage_point, transmission_type);
 
     if let Some(stream_max_data) = stream_max_data_to_plot {
         let points = chronological(stream_max_data);
@@ -1347,11 +1380,17 @@ mod tests {
     use super::cell_origin;
     use super::format_delta;
     use super::plot_sparks;
+    use super::spark_legend_entries;
+    use super::stream_max_series;
     use super::stream_y_max;
     use super::time_range;
     use super::visible_stream_ids;
     use super::SparkCaption;
     use super::SparkPlotsParams;
+    use super::TransmissionType;
+    use super::BROWN;
+    use super::MUSTARD;
+    use super::ORANGE;
     use super::PURPLE_500;
     use crate::datastore::ApplicationProto;
     use crate::datastore::Datastore;
@@ -1632,6 +1671,77 @@ mod tests {
         });
         assert!(matches!(failed, Err("backend initialization failed")));
         assert_eq!(visited, [1, 2, 3]);
+    }
+
+    #[test]
+    fn spark_legend_matches_direction_vantage_and_protocol() {
+        let entries = |direction, vantage, proto| {
+            spark_legend_entries(direction, vantage, proto)
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        let client_dl = entries(
+            TransmissionType::Download,
+            VantagePoint::Client,
+            ApplicationProto::Http3,
+        );
+        assert_eq!(client_dl.len(), 6);
+        assert_eq!(client_dl[0], ("Stream data read", PURPLE_500));
+        assert_eq!(client_dl[2], ("Max stream data sent", MUSTARD));
+        assert_eq!(client_dl[4], ("First data frame read", ORANGE));
+        assert_eq!(client_dl[5], ("Last data frame read", BROWN));
+
+        let server_dl = entries(
+            TransmissionType::Download,
+            VantagePoint::Server,
+            ApplicationProto::Http3,
+        );
+        assert_eq!(server_dl[2], ("Max stream data received", MUSTARD));
+        assert_eq!(server_dl[4], ("First data frame sent", ORANGE));
+        assert_eq!(server_dl[5], ("Last data frame sent", BROWN));
+
+        let client_ul = entries(
+            TransmissionType::Upload,
+            VantagePoint::Client,
+            ApplicationProto::Http3,
+        );
+        assert_eq!(client_ul, [
+            ("Stream data sent", PURPLE_500),
+            ("Max stream data received", MUSTARD),
+        ]);
+        let server_ul = entries(
+            TransmissionType::Upload,
+            VantagePoint::Server,
+            ApplicationProto::Http3,
+        );
+        assert_eq!(server_ul[1], ("Max stream data sent", MUSTARD));
+        let h2_ul = entries(
+            TransmissionType::Upload,
+            VantagePoint::Client,
+            ApplicationProto::Http2,
+        );
+        assert_eq!(h2_ul.len(), 3);
+        assert_eq!(h2_ul[2], ("HTTP/2 send window", ORANGE));
+    }
+
+    #[test]
+    fn stream_max_series_respects_vantage_and_direction() {
+        let mut ss = SeriesStore::default();
+        ss.sent_stream_max_data.insert(4, vec![(1.0, 123)]);
+        ss.received_stream_max_data.insert(4, vec![(2.0, 456)]);
+        for (vantage, direction, expected) in [
+            (VantagePoint::Client, TransmissionType::Download, 123),
+            (VantagePoint::Server, TransmissionType::Upload, 123),
+            (VantagePoint::Client, TransmissionType::Upload, 456),
+            (VantagePoint::Server, TransmissionType::Download, 456),
+        ] {
+            assert_eq!(
+                stream_max_series(&ss, 4, vantage, direction),
+                Some(&[(if expected == 123 { 1.0 } else { 2.0 }, expected)][..])
+            );
+            assert_eq!(stream_max_series(&ss, 8, vantage, direction), None);
+        }
     }
 
     #[test]
