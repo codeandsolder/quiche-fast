@@ -73,3 +73,4 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 - `BORING_BSSL_PATH` env var (consumed by `boring-sys`) points at a custom BoringSSL source tree.
 - Crate-type: `lib` + `staticlib` + `cdylib` — the latter two for C consumers.
 - `BufFactory` trait (`buffers.rs`) enables zero-copy buffer creation; `Connection<F>` is generic over it.
+- `flowcontrol.rs` maintains monotone receive-side flow-control limits; counters and window multiplication saturate at `u64::MAX`, half-window thresholds round upward for odd/one-byte windows, and autotuning ignores timestamps earlier than the last advertised limit. Keep boundary and out-of-order regression coverage.

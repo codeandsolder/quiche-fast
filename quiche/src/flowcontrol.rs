@@ -83,9 +83,10 @@ impl FlowControl {
         self.consumed
     }
 
-    /// Update consumed bytes.
+    /// Adds consumed bytes, saturating if the cumulative counter reaches
+    /// `u64::MAX` rather than wrapping or panicking.
     pub fn add_consumed(&mut self, consumed: u64) {
-        self.consumed += consumed;
+        self.consumed = self.consumed.saturating_add(consumed);
     }
 
     /// Returns true if the flow control needs to update max_data.
@@ -93,14 +94,18 @@ impl FlowControl {
     /// This happens when the available window is smaller than the half
     /// of the current window.
     pub fn should_update_max_data(&self) -> bool {
-        let available_window = self.max_data - self.consumed;
+        let available_window = self.max_data.saturating_sub(self.consumed);
 
-        available_window < (self.window / 2)
+        // For odd windows (including a one-byte window), rounding half up
+        // makes exhausted credit trigger an update instead of stalling.
+        available_window < self.window.div_ceil(2) &&
+            self.max_data_next() > self.max_data
     }
 
-    /// Returns the new max_data limit.
+    /// Returns the next flow-control limit. Credit is monotonic even if this
+    /// is called before enough bytes have been consumed to raise the limit.
     pub fn max_data_next(&self) -> u64 {
-        self.consumed + self.window
+        self.consumed.saturating_add(self.window).max(self.max_data)
     }
 
     /// Commits the new max_data limit.
@@ -113,9 +118,14 @@ impl FlowControl {
     /// within RTT x 2, bump the window x 2, capped by
     /// max_window.
     pub fn autotune_window(&mut self, now: Instant, rtt: Duration) {
-        if let Some(last_update) = self.last_update {
-            if now - last_update < rtt * WINDOW_TRIGGER_FACTOR {
-                self.set_window(self.window * WINDOW_INCREASE_FACTOR);
+        if let Some(elapsed) = self
+            .last_update
+            .and_then(|last| now.checked_duration_since(last))
+        {
+            if elapsed < rtt.saturating_mul(WINDOW_TRIGGER_FACTOR) {
+                self.set_window(
+                    self.window.saturating_mul(WINDOW_INCREASE_FACTOR),
+                );
             }
         }
     }
@@ -217,6 +227,66 @@ mod tests {
 
         let max_data_next = fc.max_data_next();
         assert_eq!(max_data_next, consumed + consumed_inc + w);
+    }
+
+    #[test]
+    fn exhausted_small_windows_trigger_credit_update() {
+        let mut one = FlowControl::new(1, 1, 1);
+        assert!(!one.should_update_max_data());
+        one.add_consumed(1);
+        assert!(one.should_update_max_data());
+        assert_eq!(one.max_data_next(), 2);
+
+        let mut odd = FlowControl::new(5, 3, 3);
+        odd.add_consumed(4);
+        assert!(odd.should_update_max_data());
+        odd.update_max_data(Instant::now());
+        assert_eq!(odd.max_data(), 7);
+    }
+
+    #[test]
+    fn flow_control_counters_saturate_and_limits_never_decrease() {
+        let mut fc = FlowControl::new(u64::MAX - 4, 8, u64::MAX);
+        assert_eq!(fc.max_data_next(), u64::MAX - 4);
+        fc.update_max_data(Instant::now());
+        assert_eq!(fc.max_data(), u64::MAX - 4);
+        fc.add_consumed(u64::MAX - 2);
+        assert!(fc.should_update_max_data());
+        assert_eq!(fc.max_data_next(), u64::MAX);
+        fc.update_max_data(Instant::now());
+        assert_eq!(fc.max_data(), u64::MAX);
+        fc.add_consumed(12);
+        assert_eq!(fc.consumed(), u64::MAX);
+        assert_eq!(fc.max_data_next(), u64::MAX);
+        // No new flow-control credit is possible at the saturated limit.
+        // In particular, do not schedule repeated identical MAX_DATA frames.
+        assert!(!fc.should_update_max_data());
+
+        let mut overconsumed = FlowControl::new(5, 2, 4);
+        overconsumed.add_consumed(6);
+        assert!(overconsumed.should_update_max_data());
+        assert_eq!(overconsumed.max_data_next(), 8);
+        overconsumed.update_max_data(Instant::now());
+        assert_eq!(overconsumed.max_data(), 8);
+    }
+
+    #[test]
+    fn autotune_handles_large_windows_rtts_and_out_of_order_instants() {
+        let base = Instant::now();
+        let mut large = FlowControl::new(0, u64::MAX - 1, u64::MAX);
+        large.update_max_data(base);
+        large.autotune_window(base + Duration::from_millis(1), Duration::MAX);
+        assert_eq!(large.window(), u64::MAX);
+
+        let mut out_of_order = FlowControl::new(100, 10, 100);
+        out_of_order.update_max_data(base + Duration::from_secs(10));
+        out_of_order.autotune_window(base, Duration::from_secs(1));
+        assert_eq!(out_of_order.window(), 10);
+        out_of_order.autotune_window(
+            base + Duration::from_secs(11),
+            Duration::from_secs(1),
+        );
+        assert_eq!(out_of_order.window(), 20);
     }
 
     #[test]
