@@ -72,7 +72,7 @@ jobs:
           cargo update -p boring --precise 4.19.0
 
       - name: Unused dependency check
-        uses: bnjbvr/cargo-machete@431e75731b681a69a4cfdeb1315b505778bb5c70 # main
+        uses: bnjbvr/cargo-machete@e63e5dc335b5b238aca9fd9b79650a1f5ee45f42 # main
 
       - name: Keep Foundations on one ABI
         shell: bash
