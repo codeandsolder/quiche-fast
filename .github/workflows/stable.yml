@@ -299,7 +299,7 @@ jobs:
       # picks up the wrong `gcc`). Mirrors `boring`'s CI workflow.
       - name: Set up MinGW for 32 bit
         if: matrix.target == 'i686-pc-windows-gnu'
-        uses: msys2/setup-msys2@ec48f7c5447b3140e2b088413ae3a55687bccb6e # v2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         id: msys2
         with:
           msystem: MINGW32
