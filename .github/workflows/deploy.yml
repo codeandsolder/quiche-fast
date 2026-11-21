@@ -7,7 +7,7 @@ name: Deploy
 
 env:
   RUSTDOCFLAGS: "--cfg docsrs"
-  RUST_NIGHTLY_TOOLCHAIN: "nightly-2026-11-16"
+  RUST_NIGHTLY_TOOLCHAIN: "nightly-2026-11-21"
 
 concurrency:
   group: deploy-${{ github.ref }}
