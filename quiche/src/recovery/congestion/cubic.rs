@@ -57,11 +57,6 @@ pub static CUBIC: CongestionControlOps = CongestionControlOps {
     debug_fmt,
 };
 
-/// CUBIC Constants.
-///
-/// These are recommended value in RFC8312.
-const BETA_CUBIC: f64 = 0.7;
-
 // RFC 9438 specifies beta = 0.7. Byte counts use the rational 7/10
 // rather than the nearest binary64 representation of that constant.
 fn beta_reduce(bytes: usize) -> usize {
@@ -77,8 +72,100 @@ const ROLLBACK_THRESHOLD_PERCENT: usize = 20;
 /// Minimum threshold for rolling back state, as number of packets.
 const MIN_ROLLBACK_THRESHOLD: usize = 2;
 
-/// Default value of `alpha_aimd` in the beginning of congestion avoidance.
-const ALPHA_AIMD: f64 = 3.0 * (1.0 - BETA_CUBIC) / (1.0 + BETA_CUBIC);
+/// RFC 9438 Reno-friendliness gain before and after reaching `W_max`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RenoGain {
+    #[default]
+    Reduced,
+    Full,
+}
+
+impl RenoGain {
+    const fn ratio(self) -> (u128, u128) {
+        match self {
+            Self::Reduced => (9, 17),
+            Self::Full => (1, 1),
+        }
+    }
+}
+
+/// Byte count with 32 fractional bits; a full usize window remains exact.
+/// Floating-point curve evaluation supplies only a displacement from the
+/// exact byte anchor, not an approximation of the entire congestion window.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+struct Window(u128);
+
+impl Window {
+    const MAX: u128 = (usize::MAX as u128) * Self::ONE;
+    const ONE: u128 = 1 << 32;
+
+    const fn bytes(bytes: usize) -> Self {
+        Self((bytes as u128) * Self::ONE)
+    }
+
+    fn whole(self) -> usize {
+        usize::try_from(self.0 / Self::ONE).unwrap_or(usize::MAX)
+    }
+
+    /// Convert a curve *difference* to floating point for the cube root.
+    /// Each limb is representable exactly; the final sum has the precision
+    /// of binary64, as required by the continuous CUBIC time model.
+    fn continuous(self) -> f64 {
+        let raw = self.0.to_le_bytes();
+        let (words, _) = raw.as_chunks::<4>();
+        let high = f64::from(u32::from_le_bytes(words[2]));
+        let low = f64::from(u32::from_le_bytes(words[1]));
+        let fraction = f64::from(u32::from_le_bytes(words[0]));
+        high.mul_add(4_294_967_296.0, low + fraction / 4_294_967_296.0)
+    }
+
+    fn add_curve(self, mss: usize, coefficient: f64) -> Self {
+        use crate::scale::scale_wide;
+        use crate::scale::Rounding;
+        let magnitude = coefficient.abs() * 4_294_967_296.0;
+        let mss = u64::try_from(mss).unwrap_or(u64::MAX);
+        if coefficient < 0.0 {
+            Self(
+                self.0
+                    .saturating_sub(scale_wide(mss, magnitude, Rounding::Up)),
+            )
+        } else {
+            Self(
+                self.0
+                    .saturating_add(scale_wide(mss, magnitude, Rounding::Down))
+                    .min(Self::MAX),
+            )
+        }
+    }
+
+    fn reno_increment(
+        acked: usize, cwnd: usize, mss: usize, gain: RenoGain,
+    ) -> Self {
+        if cwnd == 0 {
+            return Self::default();
+        }
+        let (numerator, denominator) = gain.ratio();
+        let product = (acked as u128) * (mss as u128);
+        let divisor = cwnd as u128;
+        let factor = Self::ONE * numerator;
+        let scaled = if let Some(product) = product.checked_mul(factor) {
+            product / divisor
+        } else {
+            // Divide before multiplying by the fractional scale when the
+            // intermediate would overflow. Retain the exact remainder.
+            let whole = product / divisor;
+            let remainder = product % divisor;
+            whole
+                .saturating_mul(factor)
+                .saturating_add(remainder * factor / divisor)
+        };
+        Self((scaled / denominator).min(Self::MAX))
+    }
+
+    fn add(self, other: Self) -> Self {
+        Self(self.0.saturating_add(other.0).min(Self::MAX))
+    }
+}
 
 /// CUBIC State Variables.
 ///
@@ -109,9 +196,9 @@ struct CurveState {
     // packet-send-time cutoff of the latest congestion event.
     epoch_start: Option<Instant>,
     k: f64,
-    w_max: f64,
-    w_est: f64,
-    alpha_aimd: f64,
+    w_max: Window,
+    w_est: Window,
+    reno_gain: RenoGain,
     cwnd_inc: usize,
 }
 
@@ -132,27 +219,32 @@ struct PriorState {
 /// not packets.
 /// Unit of t (duration) and RTT are based on seconds (f64).
 impl CurveState {
-    // K = cubic_root ((w_max - cwnd) / C) (Eq. 2)
+    // K = cubic_root ((W_max - cwnd) / MSS / C) (Eq. 2).
     fn cubic_k(&self, cwnd: usize, max_datagram_size: usize) -> f64 {
-        let w_max = self.w_max / max_datagram_size as f64;
-        let cwnd = cwnd as f64 / max_datagram_size as f64;
-
-        libm::cbrt((w_max - cwnd) / C)
+        let difference =
+            Window(self.w_max.0.saturating_sub(Window::bytes(cwnd).0));
+        libm::cbrt(
+            difference.continuous() /
+                (C * Window::bytes(max_datagram_size).continuous()),
+        )
     }
 
-    // W_cubic(t) = C * (t - K)^3 + w_max (Eq. 1)
-    fn w_cubic(&self, t: Duration, max_datagram_size: usize) -> f64 {
-        let w_max = self.w_max / max_datagram_size as f64;
-
-        (C * (t.as_secs_f64() - self.k).powi(3) + w_max) *
-            max_datagram_size as f64
+    // W_cubic(t) = W_max + MSS * C * (t - K)^3 (Eq. 1).
+    fn w_cubic(&self, t: Duration, max_datagram_size: usize) -> Window {
+        self.w_max
+            .add_curve(max_datagram_size, C * (t.as_secs_f64() - self.k).powi(3))
     }
 
-    // W_est = W_est + alpha_aimd * (segments_acked / cwnd)  (Eq. 4)
-    fn w_est_inc(
-        &self, acked: usize, cwnd: usize, max_datagram_size: usize,
-    ) -> f64 {
-        self.alpha_aimd * (acked as f64 / cwnd as f64) * max_datagram_size as f64
+    fn update_reno_estimate(&mut self, acked: usize, cwnd: usize, mss: usize) {
+        self.w_est = self.w_est.add(Window::reno_increment(
+            acked,
+            cwnd,
+            mss,
+            self.reno_gain,
+        ));
+        if self.w_est >= self.w_max {
+            self.reno_gain = RenoGain::Full;
+        }
     }
 }
 
@@ -286,10 +378,10 @@ fn congestion_avoidance_ack(
 ) {
     let curve = &mut r.cubic_state.curve;
     let ca_start_time = *curve.epoch_start.get_or_insert_with(|| {
-        curve.w_max = r.congestion_window as f64;
+        curve.w_max = Window::bytes(r.congestion_window);
         curve.k = 0.0;
-        curve.w_est = r.congestion_window as f64;
-        curve.alpha_aimd = ALPHA_AIMD;
+        curve.w_est = Window::bytes(r.congestion_window);
+        curve.reno_gain = RenoGain::Reduced;
         r.hystart.css_start_time().unwrap_or(now)
     });
 
@@ -299,23 +391,19 @@ fn congestion_avoidance_ack(
     let target = r
         .cubic_state
         .curve
-        .w_cubic(t + *rtt_stats.min_rtt, r.max_datagram_size);
+        .w_cubic(t.saturating_add(*rtt_stats.min_rtt), r.max_datagram_size);
 
-    // Clipping target to [cwnd, 1.5 x cwnd]
-    let target = f64::max(target, r.congestion_window as f64);
-    let target = f64::min(target, r.congestion_window as f64 * 1.5);
+    // Clip to [cwnd, 1.5 * cwnd] in the exact integer byte domain.
+    let target = target.whole().clamp(
+        r.congestion_window,
+        r.congestion_window.saturating_add(r.congestion_window / 2),
+    );
 
-    // Update w_est.
-    let w_est_inc = r.cubic_state.curve.w_est_inc(
+    r.cubic_state.curve.update_reno_estimate(
         packet.size,
         r.congestion_window,
         r.max_datagram_size,
     );
-    r.cubic_state.curve.w_est += w_est_inc;
-
-    if r.cubic_state.curve.w_est >= r.cubic_state.curve.w_max {
-        r.cubic_state.curve.alpha_aimd = 1.0;
-    }
 
     let mut cubic_cwnd = r.congestion_window;
 
@@ -323,10 +411,10 @@ fn congestion_avoidance_ack(
         r.cubic_state.curve.w_est
     {
         // AIMD friendly region (W_cubic(t) < W_est)
-        cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.curve.w_est as usize);
+        cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.curve.w_est.whole());
     } else {
         // Concave region or convex region use same increment.
-        let delta = (target as usize).saturating_sub(cubic_cwnd);
+        let delta = target.saturating_sub(cubic_cwnd);
         // The product may exceed the address width before division,
         // especially for multi-megabyte congestion windows on 32-bit.
         let cubic_inc = if cubic_cwnd == 0 {
@@ -370,13 +458,13 @@ fn congestion_event(
         r.congestion_recovery_start_time = Some(now);
         r.cubic_state.curve.epoch_start = Some(now);
 
-        // Fast convergence
-        if (r.congestion_window as f64) < r.cubic_state.curve.w_max {
-            r.cubic_state.curve.w_max =
-                r.congestion_window as f64 * (1.0 + BETA_CUBIC) / 2.0;
+        // Fast convergence uses the exact rational (1 + beta) / 2 = 17/20.
+        let window = Window::bytes(r.congestion_window);
+        r.cubic_state.curve.w_max = if window < r.cubic_state.curve.w_max {
+            Window(window.0 * 17 / 20)
         } else {
-            r.cubic_state.curve.w_max = r.congestion_window as f64;
-        }
+            window
+        };
 
         let ssthresh = beta_reduce(r.congestion_window);
         let ssthresh = cmp::max(
@@ -387,7 +475,7 @@ fn congestion_event(
         r.congestion_window = ssthresh;
 
         r.cubic_state.curve.k =
-            if r.cubic_state.curve.w_max < r.congestion_window as f64 {
+            if r.cubic_state.curve.w_max < Window::bytes(r.congestion_window) {
                 0.0
             } else {
                 r.cubic_state
@@ -397,8 +485,8 @@ fn congestion_event(
 
         r.cubic_state.curve.cwnd_inc = beta_reduce(r.cubic_state.curve.cwnd_inc);
 
-        r.cubic_state.curve.w_est = r.congestion_window as f64;
-        r.cubic_state.curve.alpha_aimd = ALPHA_AIMD;
+        r.cubic_state.curve.w_est = Window::bytes(r.congestion_window);
+        r.cubic_state.curve.reno_gain = RenoGain::Reduced;
 
         if r.hystart.in_css() {
             r.hystart.congestion_event();
@@ -434,7 +522,7 @@ fn rollback(r: &mut Congestion) -> bool {
     r.ssthresh.update(prior.ssthresh, false);
     r.cubic_state.curve = prior.curve;
     r.congestion_recovery_start_time = prior.recovery_start;
-    r.prr = Default::default();
+    r.prr = super::prr::PRR::default();
     r.cubic_state.prior = None;
 
     true
@@ -449,7 +537,8 @@ fn debug_fmt(r: &Congestion, f: &mut std::fmt::Formatter) -> std::fmt::Result {
     write!(
         f,
         "cubic={{ k={} w_max={} }} ",
-        r.cubic_state.curve.k, r.cubic_state.curve.w_max
+        r.cubic_state.curve.k,
+        r.cubic_state.curve.w_max.whole()
     )
 }
 
@@ -470,6 +559,59 @@ mod tests {
 
     fn hystart_test_sender() -> TestSender {
         TestSender::new(CongestionControlAlgorithm::CUBIC, true)
+    }
+
+    #[test]
+    fn fixed_window_retains_fractional_growth_at_full_width() {
+        let anchor = usize::MAX - 4096;
+        let original = Window::bytes(anchor);
+        assert_eq!(original.add_curve(1200, 0.125).whole(), anchor + 150);
+        assert_eq!(original.add_curve(1200, -0.125).whole(), anchor - 150);
+        assert_eq!(original.add_curve(1200, 0.000_125).whole(), anchor);
+        assert_eq!(original.add_curve(1200, -0.000_125).whole(), anchor - 1);
+        assert_eq!(original.add_curve(1200, f64::MAX).whole(), usize::MAX);
+        assert_eq!(original.add_curve(1200, -f64::MAX).whole(), 0);
+
+        let half = Window::reno_increment(1000, 2000, 1, RenoGain::Full);
+        assert_eq!(half.0, Window::ONE / 2);
+        assert_eq!(original.add(half).add(half).whole(), anchor + 1);
+        let reduced = Window::reno_increment(17, 9, 1, RenoGain::Reduced);
+        assert_eq!(reduced, Window::bytes(1));
+        assert_eq!(
+            Window::reno_increment(usize::MAX, 1, usize::MAX, RenoGain::Reduced)
+                .whole(),
+            usize::MAX
+        );
+        assert_eq!(
+            Window::reno_increment(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                RenoGain::Full
+            )
+            .whole(),
+            usize::MAX
+        );
+    }
+
+    #[test]
+    fn fixed_window_reno_increment_matches_rational_oracle() {
+        for acked in [0, 1, 1300, 9000, 65_527] {
+            for cwnd in [1, 12_000, 8_000_000, usize::MAX] {
+                for mss in [1200, 9000, 65_527] {
+                    for gain in [RenoGain::Reduced, RenoGain::Full] {
+                        let (num, den) = gain.ratio();
+                        let exact =
+                            (acked as u128) * (mss as u128) * Window::ONE * num /
+                                ((cwnd as u128) * den);
+                        assert_eq!(
+                            Window::reno_increment(acked, cwnd, mss, gain).0,
+                            exact.min(Window::MAX)
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -497,10 +639,10 @@ mod tests {
         let cwnd = 8 * 1024 * 1024;
         sender.congestion_window = cwnd;
         sender.ssthresh.update(cwnd, false);
-        sender.cubic_state.curve.w_max = cwnd as f64;
-        sender.cubic_state.curve.w_est = cwnd as f64;
+        sender.cubic_state.curve.w_max = Window::bytes(cwnd);
+        sender.cubic_state.curve.w_est = Window::bytes(cwnd);
         sender.cubic_state.curve.k = 0.0;
-        sender.cubic_state.curve.alpha_aimd = 1.0;
+        sender.cubic_state.curve.reno_gain = RenoGain::Full;
         sender.cubic_state.curve.epoch_start =
             Some(sender.time - Duration::from_secs(100));
         sender.send_packet(mss);
@@ -867,9 +1009,9 @@ mod tests {
         sender.cubic_state.curve = CurveState {
             epoch_start: Some(sender.time - Duration::from_secs(2)),
             k: 1.5,
-            w_max: 100_000.0,
-            w_est: 50_000.0,
-            alpha_aimd: 1.0,
+            w_max: Window::bytes(100_000),
+            w_est: Window::bytes(50_000),
+            reno_gain: RenoGain::Full,
             cwnd_inc: size / 2,
         };
         let prior = sender.cubic_state.curve;
@@ -890,18 +1032,9 @@ mod tests {
         assert_eq!(sender.congestion_recovery_start_time, Some(epoch));
         assert_eq!(sender.cubic_state.curve.epoch_start, prior.epoch_start);
         assert_eq!(sender.cubic_state.curve.k.to_bits(), prior.k.to_bits());
-        assert_eq!(
-            sender.cubic_state.curve.w_max.to_bits(),
-            prior.w_max.to_bits()
-        );
-        assert_eq!(
-            sender.cubic_state.curve.w_est.to_bits(),
-            prior.w_est.to_bits()
-        );
-        assert_eq!(
-            sender.cubic_state.curve.alpha_aimd.to_bits(),
-            prior.alpha_aimd.to_bits()
-        );
+        assert_eq!(sender.cubic_state.curve.w_max, prior.w_max);
+        assert_eq!(sender.cubic_state.curve.w_est, prior.w_est);
+        assert_eq!(sender.cubic_state.curve.reno_gain, prior.reno_gain);
         assert_eq!(sender.cubic_state.curve.cwnd_inc, prior.cwnd_inc);
         assert_eq!(sender.cubic_state.last_ack_time, Some(last_ack));
         sender.congestion_window = beta_reduce(cwnd);
@@ -966,7 +1099,7 @@ mod tests {
         // w_max will be further reduced, not prev_cwnd
         assert_eq!(
             sender.cubic_state.curve.w_max,
-            prev_cwnd as f64 * (1.0 + BETA_CUBIC) / 2.0
+            Window(Window::bytes(prev_cwnd).0 * 17 / 20)
         );
     }
 
@@ -1083,9 +1216,9 @@ mod tests {
         sender.cubic_state.curve = CurveState {
             epoch_start: Some(sender.time),
             k: 1.5,
-            w_max: cwnd as f64,
-            w_est: cwnd as f64,
-            alpha_aimd: 1.0,
+            w_max: Window::bytes(cwnd),
+            w_est: Window::bytes(cwnd),
+            reno_gain: RenoGain::Full,
             cwnd_inc: size / 2,
         };
         checkpoint(&mut sender);
