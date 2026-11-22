@@ -114,9 +114,10 @@ impl FieldListSizeTracker {
         Ok(())
     }
 
-    /// The remaining number of bytes in the tracker.
-    fn left(&self) -> u64 {
-        self.remaining
+    /// The addressable portion of the remaining decoded-size budget.
+    /// A larger wire-domain limit cannot constrain an in-memory string.
+    fn addressable_remaining(&self) -> usize {
+        usize::try_from(self.remaining).unwrap_or(usize::MAX)
     }
 }
 
@@ -188,26 +189,19 @@ impl Decoder {
                 },
 
                 Representation::Literal => {
-                    let name_huff = b.as_ref()[0] & 0x08 == 0x08;
-                    let name_len = decode_int(&mut b, 3)? as usize;
-
-                    let mut name = b.get_bytes(name_len)?;
-
-                    let name = if name_huff {
-                        name.get_huffman_decoded_with_max_length(
-                            size_tracker.left() as usize,
-                        )
-                        .map_err(|_| Error::HeaderListTooLarge)?
-                    } else {
-                        if name_len > size_tracker.left() as usize {
-                            return Err(Error::HeaderListTooLarge);
-                        }
-                        name.to_vec()
-                    };
+                    let name = decode_str(
+                        &mut b,
+                        3,
+                        size_tracker.addressable_remaining(),
+                    )?;
 
                     size_tracker.on_field_part_decoded(name.len() as u64)?;
 
-                    let value = decode_str(&mut b, size_tracker.left() as usize)?;
+                    let value = decode_str(
+                        &mut b,
+                        7,
+                        size_tracker.addressable_remaining(),
+                    )?;
 
                     trace!(
                         "Literal Without Name Reference name={name:?} value={value:?}",
@@ -237,7 +231,11 @@ impl Decoder {
 
                     size_tracker.on_field_part_decoded(name.len() as u64)?;
 
-                    let value = decode_str(&mut b, size_tracker.left() as usize)?;
+                    let value = decode_str(
+                        &mut b,
+                        7,
+                        size_tracker.addressable_remaining(),
+                    )?;
 
                     trace!(
                         "Literal name_idx={name_idx} static={s} value={value:?}"
@@ -287,8 +285,10 @@ fn decode_int(b: &mut octets::Octets, prefix: usize) -> Result<u64> {
     while b.cap() > 0 {
         let byte = b.get_u8()?;
 
+        // Checking the shift count alone does not detect discarded high bits.
+        let place = 1_u64.checked_shl(shift).ok_or(Error::BufferTooShort)?;
         let inc = u64::from(byte & 0x7f)
-            .checked_shl(shift)
+            .checked_mul(place)
             .ok_or(Error::BufferTooShort)?;
 
         val = val.checked_add(inc).ok_or(Error::BufferTooShort)?;
@@ -303,12 +303,15 @@ fn decode_int(b: &mut octets::Octets, prefix: usize) -> Result<u64> {
     Err(Error::BufferTooShort)
 }
 
-fn decode_str(b: &mut octets::Octets, max_len: usize) -> Result<Vec<u8>> {
+fn decode_str(
+    b: &mut octets::Octets, prefix: usize, max_len: usize,
+) -> Result<Vec<u8>> {
     let first = b.peek_u8()?;
 
-    let huff = first & 0x80 == 0x80;
+    let huff = first & (1 << prefix) != 0;
 
-    let len = decode_int(b, 7)? as usize;
+    let len = usize::try_from(decode_int(b, prefix)?)
+        .map_err(|_| Error::BufferTooShort)?;
 
     let mut val = b.get_bytes(len)?;
 
@@ -351,6 +354,66 @@ mod tests {
         let mut b = octets::Octets::with_slice(&encoded);
 
         assert_eq!(decode_int(&mut b, 8), Ok(42));
+    }
+
+    #[test]
+    fn prefixed_integer_boundaries() {
+        for prefix in 1..=8 {
+            let mut storage = [0_u8; 16];
+            let mut writer = octets::OctetsMut::with_slice(&mut storage);
+            super::super::encode_int(u64::MAX, 0, prefix, &mut writer).unwrap();
+            let used = writer.off();
+            let mut reader = octets::Octets::with_slice(&storage[..used]);
+            assert_eq!(decode_int(&mut reader, prefix), Ok(u64::MAX));
+            assert_eq!(reader.cap(), 0);
+        }
+
+        // The last base-128 digit occupies bit 63; values >= 2 are not
+        // representable. The old checked_shl silently discarded their bits.
+        for final_digit in [2, 3, 126, 127] {
+            let mut wire = [0x80_u8; 11];
+            wire[0] = 0xff;
+            wire[10] = final_digit;
+            let mut reader = octets::Octets::with_slice(&wire);
+            assert_eq!(decode_int(&mut reader, 8), Err(Error::BufferTooShort));
+        }
+        // A representable shifted digit may still overflow the accumulator.
+        let mut wire = [0xff_u8; 11];
+        wire[10] = 1;
+        let mut reader = octets::Octets::with_slice(&wire);
+        assert_eq!(decode_int(&mut reader, 8), Err(Error::BufferTooShort));
+    }
+
+    #[test]
+    fn oversized_literal_string_lengths_cannot_wrap() {
+        // Exercise both length-prefix widths, Huffman and plain literals.
+        for (prefix, first) in [(3, 0x20), (3, 0x28), (7, 0), (7, 0x80)] {
+            let mut storage = [0_u8; 16];
+            let mut writer = octets::OctetsMut::with_slice(&mut storage);
+            super::super::encode_int(1_u64 << 32, first, prefix, &mut writer)
+                .unwrap();
+            let used = writer.off();
+            let mut reader = octets::Octets::with_slice(&storage[..used]);
+            assert_eq!(
+                decode_str(&mut reader, prefix, usize::MAX),
+                Err(Error::BufferTooShort)
+            );
+        }
+    }
+
+    #[test]
+    fn large_field_budget_preserves_addressable_capacity() {
+        // The remaining budget is exactly 2^32 after charging the overhead.
+        // On 32-bit the previous cast made it zero.
+        let wire = [0x00, 0x00, 0x21, b'x', 0x01, b'y'];
+        assert_eq!(
+            Decoder::new().decode(&wire, (1_u64 << 32) + 32),
+            Ok(vec![Header::new(b"x", b"y")])
+        );
+        assert_eq!(
+            Decoder::new().decode(&wire, u64::MAX),
+            Ok(vec![Header::new(b"x", b"y")])
+        );
     }
 
     /// LiteralWithNameRef with the dynamic table flag (S=0) must be
