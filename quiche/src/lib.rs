@@ -5436,7 +5436,7 @@ impl<F: BufFactory> Connection<F> {
                 let (len, _) = crypto_ctx
                     .crypto_stream
                     .send
-                    .emit(&mut crypto_payload.as_mut()[..max_len])?;
+                    .emit(&mut crypto_payload.as_mut()[..max_len]);
 
                 // Encode the frame's header.
                 //
@@ -5639,7 +5639,7 @@ impl<F: BufFactory> Connection<F> {
 
                 // Write stream data into the packet buffer.
                 let (len, fin) =
-                    stream.send.emit(&mut stream_payload.as_mut()[..max_len])?;
+                    stream.send.emit(&mut stream_payload.as_mut()[..max_len]);
 
                 // ACK processing can leave a stream in the flushable queue
                 // after removing all of its retransmission data. Unlink the
