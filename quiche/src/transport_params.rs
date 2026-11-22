@@ -72,8 +72,7 @@ impl<T> UnknownTransportParameter<T> {
     ///
     /// See Section 18.1 in [RFC9000](https://datatracker.ietf.org/doc/html/rfc9000#name-reserved-transport-paramete).
     pub const fn is_reserved(&self) -> bool {
-        let n = (self.id - 27) / 31;
-        self.id == 31 * n + 27
+        self.id >= 27 && (self.id - 27).is_multiple_of(31)
     }
 }
 
@@ -86,21 +85,6 @@ impl From<UnknownTransportParameter<Vec<u8>>>
             id: value.id,
             value: qlog::HexSlice::maybe_string(Some(value.value.as_slice()))
                 .unwrap_or_default(),
-        }
-    }
-}
-
-impl From<UnknownTransportParameter<&[u8]>>
-    for UnknownTransportParameter<Vec<u8>>
-{
-    // When an instance of an UnknownTransportParameter is actually
-    // stored in UnknownTransportParameters, then we make a copy
-    // of the bytes if the source is an instance of an UnknownTransportParameter
-    // whose value is not owned.
-    fn from(value: UnknownTransportParameter<&[u8]>) -> Self {
-        Self {
-            id: value.id,
-            value: value.value.to_vec(),
         }
     }
 }
@@ -121,44 +105,38 @@ impl UnknownTransportParameters {
     /// # Errors
     ///
     /// Returns `Error::BufferTooShort` if the parameter plus its identifier
-    /// would consume all or more of the remaining tracking capacity.
+    /// exceeds the remaining tracking capacity or storage cannot be reserved.
     pub fn push(&mut self, new: UnknownTransportParameter<&[u8]>) -> Result<()> {
-        let new_unknown_tp_size = new.value.len() + size_of::<u64>();
-        if new_unknown_tp_size < self.capacity {
-            self.capacity -= new_unknown_tp_size;
-            self.parameters.push(new.into());
-            Ok(())
-        } else {
-            Err(octets::BufferTooShortError.into())
-        }
+        let cost = new
+            .value
+            .len()
+            .checked_add(size_of::<u64>())
+            .ok_or(Error::BufferTooShort)?;
+        let remaining = self
+            .capacity
+            .checked_sub(cost)
+            .ok_or(Error::BufferTooShort)?;
+        let mut value = Vec::new();
+        value
+            .try_reserve_exact(new.value.len())
+            .map_err(|_| Error::BufferTooShort)?;
+        self.parameters
+            .try_reserve(1)
+            .map_err(|_| Error::BufferTooShort)?;
+        value.extend_from_slice(new.value);
+        self.parameters
+            .push(UnknownTransportParameter { id: new.id, value });
+        self.capacity = remaining;
+        Ok(())
     }
-}
-
-/// An Iterator over unknown transport parameters.
-pub struct UnknownTransportParameterIterator<'a> {
-    index: usize,
-    parameters: &'a Vec<UnknownTransportParameter<Vec<u8>>>,
 }
 
 impl<'a> IntoIterator for &'a UnknownTransportParameters {
-    type IntoIter = UnknownTransportParameterIterator<'a>;
+    type IntoIter = std::slice::Iter<'a, UnknownTransportParameter<Vec<u8>>>;
     type Item = &'a UnknownTransportParameter<Vec<u8>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        UnknownTransportParameterIterator {
-            index: 0,
-            parameters: &self.parameters,
-        }
-    }
-}
-
-impl<'a> Iterator for UnknownTransportParameterIterator<'a> {
-    type Item = &'a UnknownTransportParameter<Vec<u8>>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let result = self.parameters.get(self.index);
-        self.index += 1;
-        result
+        self.parameters.iter()
     }
 }
 
@@ -244,6 +222,33 @@ fn decode_integer(mut value: octets::Octets<'_>) -> Result<u64> {
     Ok(v)
 }
 
+/// Decode a connection ID only after checking its wire length.
+fn decode_cid(value: octets::Octets<'_>) -> Result<ConnectionId<'static>> {
+    if value.cap() > MAX_CONN_ID_LEN {
+        return Err(Error::InvalidTransportParam);
+    }
+    Ok(value.to_vec().into())
+}
+
+/// Validate the preferred-address layout even though migration to a
+/// preferred address is not implemented.
+fn validate_preferred_address(value: octets::Octets<'_>) -> Result<()> {
+    const ADDRESS_BYTES: usize = 4 + 2 + 16 + 2;
+    const FIXED_BYTES: usize = ADDRESS_BYTES + 1 + 16;
+    let bytes = value.buf();
+    let cid_len = usize::from(
+        *bytes
+            .get(ADDRESS_BYTES)
+            .ok_or(Error::InvalidTransportParam)?,
+    );
+    if !(1..=MAX_CONN_ID_LEN).contains(&cid_len) ||
+        bytes.len() != FIXED_BYTES + cid_len
+    {
+        return Err(Error::InvalidTransportParam);
+    }
+    Ok(())
+}
+
 impl TransportParams {
     fn validate(&self) -> Result<()> {
         for (value, min, max) in [
@@ -300,157 +305,105 @@ impl TransportParams {
         buf: &[u8], is_server: bool, unknown_size: Option<usize>,
     ) -> Result<Self> {
         let mut params = octets::Octets::with_slice(buf);
-        let mut seen_params = HashSet::new();
-
-        let mut tp = Self::default();
-
-        if let Some(unknown_transport_param_tracking_size) = unknown_size {
-            tp.unknown_params = Some(UnknownTransportParameters {
-                capacity: unknown_transport_param_tracking_size,
-                parameters: vec![],
-            });
-        }
+        let mut seen_small = 0_u64;
+        let mut seen_large = HashSet::new();
+        let mut tp = Self {
+            unknown_params: unknown_size.map(|capacity| {
+                UnknownTransportParameters {
+                    capacity,
+                    parameters: Vec::new(),
+                }
+            }),
+            ..Self::default()
+        };
 
         while params.cap() > 0 {
-            let id = params.get_varint()?;
-
-            if !seen_params.insert(id) {
-                return Err(Error::InvalidTransportParam);
+            let id = params
+                .get_varint()
+                .map_err(|_| Error::InvalidTransportParam)?;
+            // The usual transport parameter IDs fit into a single word.
+            // Larger extension IDs still participate in global duplicate
+            // detection, even when unknown parameter tracking is disabled.
+            if id < u64::from(u64::BITS) {
+                let bit = 1_u64 << id;
+                if seen_small & bit != 0 {
+                    return Err(Error::InvalidTransportParam);
+                }
+                seen_small |= bit;
+            } else {
+                seen_large
+                    .try_reserve(1)
+                    .map_err(|_| Error::InvalidTransportParam)?;
+                if !seen_large.insert(id) {
+                    return Err(Error::InvalidTransportParam);
+                }
             }
 
-            let mut val = params.get_bytes_with_varint_length()?;
-
-            match id {
-                0x0000 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.original_destination_connection_id =
-                        Some(val.to_vec().into());
-                },
-
-                0x0001 => {
-                    tp.max_idle_timeout = decode_integer(val)?;
-                },
-
-                0x0002 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    if val.cap() != 16 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.stateless_reset_token = Some(u128::from_be_bytes(
-                        val.get_bytes(16)?
-                            .to_vec()
-                            .try_into()
-                            .map_err(|_| Error::BufferTooShort)?,
-                    ));
-                },
-
-                0x0003 => {
-                    tp.max_udp_payload_size = decode_integer(val)?;
-                },
-
-                0x0004 => {
-                    tp.initial_max_data = decode_integer(val)?;
-                },
-
-                0x0005 => {
-                    tp.initial_max_stream_data_bidi_local = decode_integer(val)?;
-                },
-
-                0x0006 => {
-                    tp.initial_max_stream_data_bidi_remote = decode_integer(val)?;
-                },
-
-                0x0007 => {
-                    tp.initial_max_stream_data_uni = decode_integer(val)?;
-                },
-
-                0x0008 => {
-                    tp.initial_max_streams_bidi = decode_integer(val)?;
-                },
-
-                0x0009 => {
-                    tp.initial_max_streams_uni = decode_integer(val)?;
-                },
-
-                0x000a => {
-                    tp.ack_delay_exponent = decode_integer(val)?;
-                },
-
-                0x000b => {
-                    tp.max_ack_delay = decode_integer(val)?;
-                },
-
-                0x000c => {
-                    if val.cap() != 0 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-                    tp.disable_active_migration = true;
-                },
-
-                0x000d => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    // This implementation does not use preferred addresses.
-                    // Still validate their RFC 9000 wire layout (IPv4, IPv6,
-                    // CID length + CID, and a 16-byte stateless reset token).
-                    let bytes = val.buf();
-                    let cid_len = bytes
-                        .get(24)
-                        .copied()
-                        .map(usize::from)
-                        .ok_or(Error::InvalidTransportParam)?;
-                    if cid_len == 0 ||
-                        cid_len > MAX_CONN_ID_LEN ||
-                        bytes.len() != 41 + cid_len
-                    {
-                        return Err(Error::InvalidTransportParam);
-                    }
-                },
-
-                0x000e => {
-                    tp.active_conn_id_limit = decode_integer(val)?;
-                },
-
-                0x000f => {
-                    tp.initial_source_connection_id = Some(val.to_vec().into());
-                },
-
-                0x00010 => {
-                    if is_server {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.retry_source_connection_id = Some(val.to_vec().into());
-                },
-
-                0x0020 => {
-                    tp.max_datagram_frame_size = Some(decode_integer(val)?);
-                },
-
-                // Track unknown transport parameters specially.
-                unknown_tp_id => {
-                    if let Some(unknown_params) = &mut tp.unknown_params {
-                        // Failing to track an unknown parameter is harmless.
-                        let _ = unknown_params.push(UnknownTransportParameter {
-                            id: unknown_tp_id,
-                            value: val.buf(),
-                        });
-                    }
-                },
-            }
+            let value = params
+                .get_bytes_with_varint_length()
+                .map_err(|_| Error::InvalidTransportParam)?;
+            tp.decode_parameter(id, value, is_server)?;
         }
 
         tp.validate()?;
         Ok(tp)
+    }
+
+    /// Decode one parameter value, applying the sender role and its wire
+    /// schema.
+    fn decode_parameter(
+        &mut self, id: u64, value: octets::Octets<'_>, is_server: bool,
+    ) -> Result<()> {
+        // Parameters that can only be received from a server.
+        if is_server && matches!(id, 0x0000 | 0x0002 | 0x000d | 0x0010) {
+            return Err(Error::InvalidTransportParam);
+        }
+        match id {
+            0x0000 =>
+                self.original_destination_connection_id = Some(decode_cid(value)?),
+            0x0001 => self.max_idle_timeout = decode_integer(value)?,
+            0x0002 =>
+                self.stateless_reset_token = Some(u128::from_be_bytes(
+                    value
+                        .buf()
+                        .try_into()
+                        .map_err(|_| Error::InvalidTransportParam)?,
+                )),
+            0x0003 => self.max_udp_payload_size = decode_integer(value)?,
+            0x0004 => self.initial_max_data = decode_integer(value)?,
+            0x0005 =>
+                self.initial_max_stream_data_bidi_local = decode_integer(value)?,
+            0x0006 =>
+                self.initial_max_stream_data_bidi_remote = decode_integer(value)?,
+            0x0007 => self.initial_max_stream_data_uni = decode_integer(value)?,
+            0x0008 => self.initial_max_streams_bidi = decode_integer(value)?,
+            0x0009 => self.initial_max_streams_uni = decode_integer(value)?,
+            0x000a => self.ack_delay_exponent = decode_integer(value)?,
+            0x000b => self.max_ack_delay = decode_integer(value)?,
+            0x000c => {
+                if value.cap() != 0 {
+                    return Err(Error::InvalidTransportParam);
+                }
+                self.disable_active_migration = true;
+            },
+            0x000d => validate_preferred_address(value)?,
+            0x000e => self.active_conn_id_limit = decode_integer(value)?,
+            0x000f =>
+                self.initial_source_connection_id = Some(decode_cid(value)?),
+            0x0010 => self.retry_source_connection_id = Some(decode_cid(value)?),
+            0x0020 => self.max_datagram_frame_size = Some(decode_integer(value)?),
+            _ => {
+                if let Some(unknown) = &mut self.unknown_params {
+                    // Tracking is optional and can be exhausted without
+                    // invalidating an otherwise valid peer parameter.
+                    let _ = unknown.push(UnknownTransportParameter {
+                        id,
+                        value: value.buf(),
+                    });
+                }
+            },
+        }
+        Ok(())
     }
 
     pub(crate) fn encode_param(
@@ -606,6 +559,67 @@ impl TransportParams {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_parameter_reservation_and_exact_capacity() {
+        for id in 0u64..100 {
+            let param = UnknownTransportParameter {
+                id,
+                value: &b"abc"[..],
+            };
+            assert_eq!(param.is_reserved(), matches!(id, 27 | 58 | 89));
+        }
+        let mut tracked = UnknownTransportParameters {
+            capacity: 11,
+            parameters: Vec::new(),
+        };
+        let param = UnknownTransportParameter {
+            id: 17,
+            value: &b"abc"[..],
+        };
+        assert_eq!(tracked.push(param.clone()), Ok(()));
+        assert_eq!(tracked.capacity, 0);
+        assert_eq!(tracked.push(param), Err(Error::BufferTooShort));
+        assert_eq!(tracked.parameters.len(), 1);
+        assert_eq!(tracked.into_iter().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_parameter_ids_across_width_classes() {
+        for id in [17, 27, 58, 63, 64, 1 << 14, octets::MAX_VAR_INT] {
+            let mut wire = [0; 32];
+            let mut writer = octets::OctetsMut::with_slice(&mut wire);
+            writer.put_varint(id).unwrap();
+            writer.put_varint(0).unwrap();
+            let first = writer.off();
+            writer.put_varint_with_len(id, 8).unwrap();
+            writer.put_varint(0).unwrap();
+            let end = writer.off();
+            for tracking in [None, Some(0), Some(16)] {
+                assert!(TransportParams::decode(&wire[..first], false, tracking)
+                    .is_ok());
+                assert_eq!(
+                    TransportParams::decode(&wire[..end], false, tracking),
+                    Err(Error::InvalidTransportParam)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_parameter_envelopes_have_transport_parameter_error() {
+        for wire in [
+            &[0x40][..],
+            &[0x11][..],
+            &[0x11, 0x40][..],
+            &[0x11, 2, 0][..],
+        ] {
+            assert_eq!(
+                TransportParams::decode(wire, false, None),
+                Err(Error::InvalidTransportParam)
+            );
+        }
+    }
 
     #[test]
     fn stateless_reset_token_requires_exact_length() {

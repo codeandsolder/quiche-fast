@@ -823,20 +823,17 @@ fn handshake_resumption(
     invalid_params.extend_from_slice(&1_u64.to_be_bytes());
     invalid_params.push(0x40);
 
-    for malformed in [
-        oversized_session.as_slice(),
-        oversized_params.as_slice(),
-        invalid_params.as_slice(),
-        &session[..params_offset + 7],
-        &session[..session.len() - 1],
+    for (malformed, expected) in [
+        (oversized_session.as_slice(), Error::BufferTooShort),
+        (oversized_params.as_slice(), Error::BufferTooShort),
+        (invalid_params.as_slice(), Error::InvalidTransportParam),
+        (&session[..params_offset + 7], Error::BufferTooShort),
+        (&session[..session.len() - 1], Error::BufferTooShort),
     ] {
         let mut rejected =
             test_utils::Pipe::with_server_config(&mut config).unwrap();
         let original_params = rejected.client.peer_transport_params.clone();
-        assert_eq!(
-            rejected.client.set_session(malformed),
-            Err(Error::BufferTooShort),
-        );
+        assert_eq!(rejected.client.set_session(malformed), Err(expected),);
         assert_eq!(rejected.client.peer_transport_params, original_params);
         rejected.handshake().unwrap();
         assert!(!rejected.client.is_resumed());
