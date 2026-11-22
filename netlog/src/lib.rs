@@ -272,7 +272,7 @@ pub fn read_netlog_constants<R: BufRead>(
 ///
 /// Returns `None` at end of input, for non-event lines, or if the underlying
 /// reader reports an I/O error.
-#[must_use]
+#[must_use = "the returned record has been consumed from the input reader"]
 pub fn read_netlog_record<R: BufRead>(reader: &mut R) -> Option<Vec<u8>> {
     let mut buf = Vec::<u8>::new();
 
@@ -319,7 +319,7 @@ fn decode_event<T: DeserializeOwned>(event: &[u8]) -> Option<T> {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
-#[must_use]
+#[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 pub fn parse_event(event_hdr: &EventHeader, event: &[u8]) -> Option<Event> {
     if event_hdr.ty_string.starts_with("HTTP_") {
         return http::parse_event(event_hdr, event);

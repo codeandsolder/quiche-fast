@@ -122,7 +122,7 @@ pub struct Http3DataFrameReceivedEvent {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
-#[must_use]
+#[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {

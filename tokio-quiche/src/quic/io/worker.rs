@@ -1069,7 +1069,7 @@ where
 ///
 /// `Flush` carries the on-demand buffer the handshake data was gathered into so
 /// the caller can flush it and then return it to the pool or drop it.
-#[must_use]
+#[must_use = "the worker must process the returned directive to flush pending output"]
 enum WaitForDataOrHandshakeDirective {
     Noop,
     Flush(TransientSendBuf),

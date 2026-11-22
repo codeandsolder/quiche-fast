@@ -27,7 +27,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
         with:
           rust-toolchain: "nightly"
 
@@ -69,7 +69,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
 
   fuzz:
     runs-on: ubuntu-latest
@@ -88,7 +88,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
         with:
           rust-toolchain: "nightly"
 
@@ -111,7 +111,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
 
   http3_test_nightly:
     runs-on: ubuntu-latest
@@ -120,7 +120,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
         with:
           rust-toolchain: "nightly"
 
@@ -134,7 +134,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@6d34275dcd0018efd209389b95d83a3dc9b52ba1 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
 
   fmt:
     runs-on: ubuntu-latest

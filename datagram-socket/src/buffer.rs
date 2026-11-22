@@ -38,14 +38,14 @@ pub struct DgramBuffer {
 
 impl DgramBuffer {
     /// Creates an empty `DgramBuffer` with no allocated capacity.
-    #[must_use]
+    #[must_use = "the returned buffer is ready to receive datagram bytes"]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Creates a `DgramBuffer` by copying `data`; the read cursor starts at
     /// the beginning.
-    #[must_use]
+    #[must_use = "the returned buffer owns a copy of the input bytes"]
     pub fn from_slice(data: &[u8]) -> Self {
         Self {
             data: data.into(),
@@ -55,7 +55,7 @@ impl DgramBuffer {
 
     /// Creates an empty `DgramBuffer` pre-allocated for at least `capacity`
     /// bytes.
-    #[must_use]
+    #[must_use = "the returned buffer owns the allocated storage"]
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: Vec::with_capacity(capacity),
@@ -73,7 +73,7 @@ impl DgramBuffer {
     /// Panics if `headroom > capacity`.
     ///
     /// [`try_add_prefix`]: DgramBuffer::try_add_prefix
-    #[must_use]
+    #[must_use = "the returned buffer owns storage with the requested headroom"]
     pub fn with_capacity_and_headroom(capacity: usize, headroom: usize) -> Self {
         assert!(capacity >= headroom);
         let mut v = Vec::with_capacity(capacity);
@@ -91,7 +91,7 @@ impl DgramBuffer {
     /// # Panics
     ///
     /// Panics if `headroom > v.len()`.
-    #[must_use]
+    #[must_use = "the returned buffer owns the vector and its read position"]
     pub fn from_vec_with_headroom(v: Vec<u8>, headroom: usize) -> Self {
         assert!(headroom <= v.len());
         Self {
@@ -156,19 +156,19 @@ impl DgramBuffer {
     }
 
     /// Returns the number of readable bytes (i.e. `data.len() - pos`).
-    #[must_use]
+    #[must_use = "the returned length describes the buffer bounds"]
     pub const fn len(&self) -> usize {
         self.data.len() - self.start
     }
 
     /// Returns `true` if there are no readable bytes.
-    #[must_use]
+    #[must_use = "the result indicates whether the buffer contains any bytes"]
     pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
     /// Returns the readable bytes as a slice (i.e. `data[pos..]`).
-    #[must_use]
+    #[must_use = "the returned slice provides access to the readable bytes"]
     pub fn as_slice(&self) -> &[u8] {
         &self.data[self.start..]
     }
@@ -180,14 +180,14 @@ impl DgramBuffer {
 
     /// Returns the number of bytes the underlying `Vec` can accept before
     /// reallocating (i.e. `capacity - len`).
-    #[must_use]
+    #[must_use = "the result bounds additional writes without reallocating"]
     pub const fn spare_capacity(&self) -> usize {
         self.data.capacity() - self.data.len()
     }
 
     /// Consumes the buffer and returns the inner `Vec<u8>` and the current
     /// read position as `(data, pos)`.
-    #[must_use]
+    #[must_use = "the returned parts contain the consumed buffer storage and cursor"]
     pub fn into_parts(self) -> (Vec<u8>, usize) {
         (self.data, self.start)
     }

@@ -119,7 +119,7 @@ impl QlogStreamer {
     /// JSON-SEQ format.
     ///
     /// [`Write`]: https://doc.rust-lang.org/std/io/trait.Write.html
-    #[must_use]
+    #[must_use = "the returned streamer owns the writer and trace configuration"]
     pub fn new(
         title: Option<String>, description: Option<String>,
         start_time: std::time::Instant, trace: TraceSeq,
@@ -460,12 +460,12 @@ impl QlogStreamer {
         clippy::borrowed_box,
         reason = "Preserve the established public writer accessor return type for source compatibility"
     )]
-    #[must_use]
+    #[must_use = "the returned reference provides access to the underlying writer"]
     pub fn writer(&self) -> &Box<dyn std::io::Write + Send + Sync> {
         &self.writer
     }
 
-    #[must_use]
+    #[must_use = "the result is the reference instant for relative log timestamps"]
     pub const fn start_time(&self) -> std::time::Instant {
         self.start_time
     }

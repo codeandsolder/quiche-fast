@@ -2005,7 +2005,7 @@ pub fn retry(
 
 /// Returns true if the given protocol version is supported.
 #[inline]
-#[must_use]
+#[must_use = "the result determines whether the wire version can be negotiated"]
 pub const fn version_is_supported(version: u32) -> bool {
     matches!(version, PROTOCOL_VERSION_V1)
 }
@@ -5927,7 +5927,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns the desired send time for the next packet.
     #[inline]
-    #[must_use]
+    #[must_use = "the result determines the next packet release time"]
     pub fn get_next_release_time(&self) -> Option<ReleaseDecision> {
         Some(
             self.paths
@@ -5940,7 +5940,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns whether gcongestion is enabled.
     #[inline]
-    #[must_use]
+    #[must_use = "the result identifies the active path congestion controller"]
     pub fn gcongestion_enabled(&self) -> Option<bool> {
         Some(self.paths.get_active().ok()?.recovery.gcongestion_enabled())
     }
@@ -5949,7 +5949,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Equals 1/8 of the smoothed RTT, but at least 1ms and not greater than
     /// 5ms.
-    #[must_use]
+    #[must_use = "the result bounds how far ahead to schedule packet release"]
     pub fn max_release_into_future(&self) -> Duration {
         self.paths
             .get_active()
@@ -5962,7 +5962,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns whether pacing is enabled.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether pacing is configured"]
     pub const fn pacing_enabled(&self) -> bool {
         self.recovery_config.pacing
     }
@@ -5976,7 +5976,7 @@ impl<F: BufFactory> Connection<F> {
     /// offloading mechanisms as the maximum limit for outgoing aggregates of
     /// multiple packets.
     #[inline]
-    #[must_use]
+    #[must_use = "the result bounds the next packet burst"]
     pub fn send_quantum(&self) -> usize {
         match self.paths.get_active() {
             Ok(p) => p.recovery.send_quantum(),
@@ -5995,7 +5995,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If the (`local_addr`, `peer_addr`) 4-tuple relates to a non-existing
     /// path, this method returns 0.
-    #[must_use]
+    #[must_use = "the result bounds the next packet burst on the selected path"]
     pub fn send_quantum_on_path(
         &self, local_addr: SocketAddr, peer_addr: SocketAddr,
     ) -> usize {
@@ -6757,7 +6757,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     /// Returns true if the stream has data that can be read.
-    #[must_use]
+    #[must_use = "the result indicates whether the stream can currently be read"]
     pub fn stream_readable(&self, stream_id: u64) -> bool {
         let stream = match self.streams.get(stream_id) {
             Some(v) => v,
@@ -6787,7 +6787,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`stream_recv`]: struct.Connection.html#method.stream_recv
     /// [`stream_readable`]: struct.Connection.html#method.stream_readable
-    #[must_use]
+    #[must_use = "the result bounds the immediately readable stream data"]
     pub fn stream_readable_len(&self, stream_id: u64, max_len: usize) -> usize {
         match self.streams.get(stream_id) {
             Some(s) => s.recv.readable_len(max_len),
@@ -6899,7 +6899,7 @@ impl<F: BufFactory> Connection<F> {
     /// Basically this returns true when the peer either set the `fin` flag
     /// for the stream, or sent `RESET_STREAM`.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether the stream receive side is complete"]
     pub fn stream_finished(&self, stream_id: u64) -> bool {
         let stream = match self.streams.get(stream_id) {
             Some(v) => v,
@@ -6920,7 +6920,7 @@ impl<F: BufFactory> Connection<F> {
     /// This also returns true if the stream has already been collected, but
     /// returns false if the stream was never opened.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether the stream is closed"]
     pub fn stream_closed(&self, stream_id: u64) -> bool {
         let Some(stream) = self.streams.get(stream_id) else {
             return self.streams.is_collected(stream_id);
@@ -6947,7 +6947,7 @@ impl<F: BufFactory> Connection<F> {
     /// This can be useful to know if it's possible to create a bidirectional
     /// stream without trying it first.
     #[inline]
-    #[must_use]
+    #[must_use = "the result bounds additional bidirectional streams"]
     pub const fn peer_streams_left_bidi(&self) -> u64 {
         self.streams.peer_streams_left_bidi()
     }
@@ -6958,7 +6958,7 @@ impl<F: BufFactory> Connection<F> {
     /// This can be useful to know if it's possible to create a unidirectional
     /// stream without trying it first.
     #[inline]
-    #[must_use]
+    #[must_use = "the result bounds additional unidirectional streams"]
     pub const fn peer_streams_left_uni(&self) -> u64 {
         self.streams.peer_streams_left_uni()
     }
@@ -6990,7 +6990,7 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    #[must_use]
+    #[must_use = "the returned iterator identifies readable streams"]
     pub fn readable(&self) -> StreamIter {
         self.streams.readable()
     }
@@ -7038,7 +7038,7 @@ impl<F: BufFactory> Connection<F> {
     /// [`stream_priority()`]: struct.Connection.html#method.stream_priority
     /// [`StreamStopped`]: enum.Error.html#variant.StreamStopped
     #[inline]
-    #[must_use]
+    #[must_use = "the returned iterator identifies writable streams"]
     pub fn writable(&self) -> StreamIter {
         // Stopped streams must be reported even without send capacity.
         if self.tx_cap == 0 {
@@ -7061,7 +7061,7 @@ impl<F: BufFactory> Connection<F> {
     /// [`set_max_send_udp_payload_size()`]:
     ///     struct.Config.html#method.set_max_send_udp_payload_size
     /// [`send()`]: struct.Connection.html#method.send
-    #[must_use]
+    #[must_use = "the result bounds the outgoing UDP payload size"]
     pub fn max_send_udp_payload_size(&self) -> usize {
         let max_datagram_size = self
             .paths
@@ -7232,49 +7232,49 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns the length of the first stored DATAGRAM.
     #[inline]
-    #[must_use]
+    #[must_use = "the result gives the next datagram size if one is queued"]
     pub fn dgram_recv_front_len(&self) -> Option<usize> {
         self.dgram_recv_queue.peek_front_len()
     }
 
     /// Returns the number of items in the DATAGRAM receive queue.
     #[inline]
-    #[must_use]
+    #[must_use = "the result describes the incoming datagram queue occupancy"]
     pub fn dgram_recv_queue_len(&self) -> usize {
         self.dgram_recv_queue.len()
     }
 
     /// Returns the total size of all items in the DATAGRAM receive queue.
     #[inline]
-    #[must_use]
+    #[must_use = "the result describes the incoming datagram queue byte occupancy"]
     pub const fn dgram_recv_queue_byte_size(&self) -> usize {
         self.dgram_recv_queue.byte_size()
     }
 
     /// Returns the number of items in the DATAGRAM send queue.
     #[inline]
-    #[must_use]
+    #[must_use = "the result describes the outgoing datagram queue occupancy"]
     pub fn dgram_send_queue_len(&self) -> usize {
         self.dgram_send_queue.len()
     }
 
     /// Returns the total size of all items in the DATAGRAM send queue.
     #[inline]
-    #[must_use]
+    #[must_use = "the result describes the outgoing datagram queue byte occupancy"]
     pub const fn dgram_send_queue_byte_size(&self) -> usize {
         self.dgram_send_queue.byte_size()
     }
 
     /// Returns whether or not the DATAGRAM send queue is full.
     #[inline]
-    #[must_use]
+    #[must_use = "the result determines whether more datagrams can be queued"]
     pub fn is_dgram_send_queue_full(&self) -> bool {
         self.dgram_send_queue.is_full()
     }
 
     /// Returns whether or not the DATAGRAM recv queue is full.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates incoming datagram queue saturation"]
     pub fn is_dgram_recv_queue_full(&self) -> bool {
         self.dgram_recv_queue.is_full()
     }
@@ -7400,7 +7400,7 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    #[must_use]
+    #[must_use = "the result bounds the next outgoing datagram payload"]
     pub fn dgram_max_writable_len(&self) -> Option<usize> {
         match self.peer_transport_params.max_datagram_frame_size {
             None => None,
@@ -7444,7 +7444,7 @@ impl<F: BufFactory> Connection<F> {
     /// disarmed.
     ///
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
-    #[must_use]
+    #[must_use = "the result determines when connection timeout handling is due"]
     pub fn timeout_instant(&self) -> Option<Instant> {
         if self.is_closed() {
             return None;
@@ -7483,7 +7483,7 @@ impl<F: BufFactory> Connection<F> {
     /// be called. A timeout of `None` means that the timer should be disarmed.
     ///
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
-    #[must_use]
+    #[must_use = "the result determines how long to wait before timeout handling"]
     pub fn timeout(&self) -> Option<Duration> {
         self.timeout_instant().map(|timeout| {
             let now = Instant::now();
@@ -7789,7 +7789,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns the number of source Connection IDs that are active. This is
     /// only meaningful if the host uses non-zero length Source Connection IDs.
-    #[must_use]
+    #[must_use = "the result counts active source connection IDs"]
     pub fn active_scids(&self) -> usize {
         self.ids.active_source_cids()
     }
@@ -7811,7 +7811,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`peer_active_conn_id_limit`]: struct.Stats.html#structfield.peer_active_conn_id_limit
     #[inline]
-    #[must_use]
+    #[must_use = "the result bounds additional source connection IDs"]
     pub fn scids_left(&self) -> usize {
         self.ids
             .scids_left(self.local_transport_params.active_conn_id_limit)
@@ -7897,7 +7897,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     /// Returns the number of source Connection IDs that are retired.
-    #[must_use]
+    #[must_use = "the result counts retired source connection IDs"]
     pub fn retired_scids(&self) -> usize {
         self.ids.retired_source_cids()
     }
@@ -7917,7 +7917,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Note that this function returns 0 if the host uses zero length
     /// Destination Connection IDs.
-    #[must_use]
+    #[must_use = "the result counts unused destination connection IDs"]
     pub fn available_dcids(&self) -> usize {
         self.ids.available_dcids()
     }
@@ -7969,7 +7969,7 @@ impl<F: BufFactory> Connection<F> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    #[must_use]
+    #[must_use = "the returned iterator identifies known paths for the source address"]
     pub fn paths_iter(&self, from: SocketAddr) -> SocketAddrIter {
         // Instead of trying to identify whether packets will be sent on the
         // given 4-tuple, simply filter paths that cannot be used.
@@ -8057,7 +8057,7 @@ impl<F: BufFactory> Connection<F> {
     /// This can be used for logging purposes to differentiate between multiple
     /// connections.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned identifier correlates connection log events"]
     pub fn trace_id(&self) -> &str {
         &self.trace_id
     }
@@ -8066,21 +8066,21 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If no protocol has been negotiated, the returned value is empty.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned protocol identifies the negotiated ALPN"]
     pub fn application_proto(&self) -> &[u8] {
         self.alpn.as_ref()
     }
 
     /// Returns the server name requested by the client.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned name identifies the TLS server if supplied"]
     pub fn server_name(&self) -> Option<&str> {
         self.handshake.server_name()
     }
 
     /// Returns the peer's leaf certificate (if any) as a DER-encoded buffer.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned certificate can be used to inspect the peer identity"]
     pub fn peer_cert(&self) -> Option<&[u8]> {
         self.handshake.peer_cert()
     }
@@ -8092,7 +8092,7 @@ impl<F: BufFactory> Connection<F> {
     /// certificates (if any) are the chain certificate authorities used to
     /// sign the leaf certificate.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned chain can be used to inspect the peer certificates"]
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
         self.handshake.peer_cert_chain()
     }
@@ -8104,7 +8104,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`set_session()`]: struct.Connection.html#method.set_session
     #[inline]
-    #[must_use]
+    #[must_use = "the returned session data is needed for session resumption"]
     pub fn session(&self) -> Option<&[u8]> {
         self.session.as_deref()
     }
@@ -8117,7 +8117,7 @@ impl<F: BufFactory> Connection<F> {
     /// Note that the value returned can change throughout the connection's
     /// lifetime.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned identifier identifies the local connection"]
     pub fn source_id(&self) -> ConnectionId<'_> {
         let sequence = self
             .paths
@@ -8142,7 +8142,7 @@ impl<F: BufFactory> Connection<F> {
     /// Note that the value returned can change throughout the connection's
     /// lifetime.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned identifier identifies the peer connection"]
     pub fn destination_id(&self) -> ConnectionId<'_> {
         let sequence = self
             .paths
@@ -8158,7 +8158,7 @@ impl<F: BufFactory> Connection<F> {
     /// This requires no additonal packets to be sent but simply checks if PMTUD
     /// has completed and has found a valid PMTU.
     #[inline]
-    #[must_use]
+    #[must_use = "the result describes the discovered path MTU"]
     pub fn pmtu(&self) -> Option<usize> {
         if let Ok(path) = self.paths.get_active() {
             path.pmtud.as_ref().and_then(pmtud::Pmtud::get_pmtu)
@@ -8204,14 +8204,14 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns true if the connection handshake is complete.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether handshake establishment is complete"]
     pub const fn is_established(&self) -> bool {
         self.handshake_completed
     }
 
     /// Returns true if the connection is resumed.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether the TLS session was resumed"]
     pub fn is_resumed(&self) -> bool {
         self.handshake.is_resumed()
     }
@@ -8219,7 +8219,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns true if the connection has a pending handshake that has
     /// progressed enough to send or receive early data.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether early data can be used"]
     pub fn is_in_early_data(&self) -> bool {
         self.handshake.is_in_early_data()
     }
@@ -8231,7 +8231,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [BoringSSL]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#ssl_early_data_reason_t
     #[inline]
-    #[must_use]
+    #[must_use = "the result identifies the TLS early data outcome"]
     pub fn early_data_reason(&self) -> u32 {
         self.handshake.early_data_reason()
     }
@@ -8241,14 +8241,14 @@ impl<F: BufFactory> Connection<F> {
     /// Applications must recreate state bound to early streams and replay
     /// requests after the handshake completes.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether early requests must be replayed"]
     pub const fn early_data_rejected(&self) -> bool {
         self.handshake.early_data_rejected()
     }
 
     /// Returns whether there is stream or DATAGRAM data available to read.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether application data is available"]
     pub fn is_readable(&self) -> bool {
         self.streams.has_readable() || self.dgram_recv_front_len().is_some()
     }
@@ -8291,7 +8291,7 @@ impl<F: BufFactory> Connection<F> {
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether the connection is draining"]
     pub const fn is_draining(&self) -> bool {
         self.draining_timer.is_some()
     }
@@ -8300,14 +8300,14 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If this returns true, the connection object can be dropped.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether the connection can be cleaned up"]
     pub const fn is_closed(&self) -> bool {
         self.closed
     }
 
     /// Returns true if the connection was closed due to the idle timeout.
     #[inline]
-    #[must_use]
+    #[must_use = "the result indicates whether timeout closed the connection"]
     pub const fn is_timed_out(&self) -> bool {
         self.timed_out
     }
@@ -8319,7 +8319,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    #[must_use]
+    #[must_use = "the returned error describes why the peer closed the connection"]
     pub const fn peer_error(&self) -> Option<&ConnectionError> {
         self.peer_error.as_ref()
     }
@@ -8335,14 +8335,14 @@ impl<F: BufFactory> Connection<F> {
     /// [`close()`]: struct.Connection.html#method.close
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    #[must_use]
+    #[must_use = "the returned error describes why the local endpoint closed the connection"]
     pub const fn local_error(&self) -> Option<&ConnectionError> {
         self.local_error.as_ref()
     }
 
     /// Collects and returns statistics about the connection.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned snapshot contains connection statistics"]
     pub fn stats(&self) -> Stats {
         Stats {
             recv: self.recv_count,
@@ -8395,7 +8395,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns reference to peer's transport parameters. Returns `None` if we
     /// have not yet processed the peer's transport parameters.
-    #[must_use]
+    #[must_use = "the returned parameters describe negotiated peer limits"]
     pub const fn peer_transport_params(&self) -> Option<&TransportParams> {
         if !self.parsed_peer_transport_params {
             return None;
@@ -8410,7 +8410,7 @@ impl<F: BufFactory> Connection<F> {
     /// until the peer's parameters have been validated. The data is borrowed
     /// from the TLS handshake and remains valid only while this connection
     /// lives.
-    #[must_use]
+    #[must_use = "the returned bytes contain the peer transport parameter encoding"]
     pub fn peer_transport_params_wire(&self) -> Option<&[u8]> {
         self.parsed_peer_transport_params
             .then(|| self.handshake.quic_transport_params())
@@ -8423,7 +8423,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     /// Returns whether or not this is a server-side connection.
-    #[must_use]
+    #[must_use = "the result identifies the local connection role"]
     pub const fn is_server(&self) -> bool {
         self.is_server
     }

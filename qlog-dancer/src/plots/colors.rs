@@ -52,7 +52,7 @@ pub struct ColorCycle<'a> {
 impl<'a> ColorCycle<'a> {
     /// An initial position outside the palette (including an empty palette)
     /// cannot produce a color and is rejected at construction.
-    #[must_use]
+    #[must_use = "the result contains the initialized palette or indicates an invalid initial index"]
     pub const fn with_colors(
         colors: &'a [RGBColor], initial_index: usize,
     ) -> Option<Self> {

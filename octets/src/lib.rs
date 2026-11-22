@@ -25,8 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Zero-copy abstraction for parsing and constructing network packets.
-use std::mem;
-use std::ptr;
 
 /// Maximum value that can be encoded via varint.
 pub const MAX_VAR_INT: u64 = 4_611_686_018_427_387_903;
@@ -112,77 +110,191 @@ pub trait OctetsWriter {
     }
 }
 
-/// Helper macro that asserts at compile time. It requires that
-/// `cond` is a const expression.
-macro_rules! static_assert {
-    ($cond:expr) => {{
-        const _: () = assert!($cond);
-    }};
-}
-
 macro_rules! peek_u {
     ($b:expr, $ty:ty, $len:expr) => {{
-        let len = $len;
-        let src = &$b.buf[$b.off..];
-
-        if src.len() < len {
-            return Err(BufferTooShortError);
-        }
-
-        static_assert!($len <= mem::size_of::<$ty>());
-        let mut out: $ty = 0;
-        let dst = ptr::addr_of_mut!(out).cast::<u8>();
-        let off = mem::size_of::<$ty>() - len;
-
-        // SAFETY: src contains at least len bytes, dst points to a live $ty
-        // object with off + len <= size_of::<$ty>(), and the source slice
-        // cannot overlap the stack-local destination.
-        unsafe {
-            ptr::copy_nonoverlapping(src.as_ptr(), dst.add(off), len);
-        }
-
-        Ok(<$ty>::from_be(out))
+        let src = $b.buf[$b.off..].get(..$len).ok_or(BufferTooShortError)?;
+        let mut bytes = [0; std::mem::size_of::<$ty>()];
+        bytes[std::mem::size_of::<$ty>() - $len..].copy_from_slice(src);
+        Result::Ok(<$ty>::from_be_bytes(bytes))
     }};
 }
 
 macro_rules! get_u {
     ($b:expr, $ty:ty, $len:expr) => {{
-        let out = peek_u!($b, $ty, $len);
-
+        let out = peek_u!($b, $ty, $len)?;
         $b.off += $len;
-
-        out
+        Ok(out)
     }};
 }
 
 macro_rules! put_u {
     ($b:expr, $ty:ty, $v:expr, $len:expr) => {{
-        let len = $len;
-
-        if $b.buf.len() < $b.off + len {
+        if $len > $b.cap() {
             return Err(BufferTooShortError);
         }
-
-        let v = $v;
-
-        let dst = &mut $b.buf[$b.off..($b.off + len)];
-
-        static_assert!($len <= mem::size_of::<$ty>());
-        let value = <$ty>::to_be(v);
-        let src = ptr::addr_of!(value).cast::<u8>();
-        let off = mem::size_of::<$ty>() - len;
-
-        // SAFETY: src points to a live $ty object, off + len is bounded by
-        // size_of::<$ty>(), dst contains exactly len writable bytes, and the
-        // stack-local source cannot overlap the caller-provided destination.
-        unsafe {
-            ptr::copy_nonoverlapping(src.add(off), dst.as_mut_ptr(), len);
-        }
-
+        let dst = &mut $b.buf[$b.off..$b.off + $len];
+        let bytes = <$ty>::to_be_bytes($v);
+        dst.copy_from_slice(&bytes[std::mem::size_of::<$ty>() - $len..]);
         $b.off += $len;
-
         Ok(dst)
     }};
+}
+
+// Both cursor types have identical read and positioning operations.
+// Keep their implementations together while preserving the slice-specific
+// borrow lifetimes and const methods, with no extra stored length.
+macro_rules! cursor_operations {
+    () => {
+        /// Reads an unsigned 8-bit integer from the current offset and advances
+        /// the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_u8(&mut self) -> Result<u8> {
+            get_u!(self, u8, 1)
+        }
+
+        /// Reads an unsigned 8-bit integer from the current offset without
+        /// advancing the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn peek_u8(&self) -> Result<u8> {
+            peek_u!(self, u8, 1)
+        }
+
+        /// Reads an unsigned 16-bit integer in network byte-order from the
+        /// current offset and advances the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_u16(&mut self) -> Result<u16> {
+            get_u!(self, u16, 2)
+        }
+
+        /// Reads an unsigned 24-bit integer in network byte-order from the
+        /// current offset and advances the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_u24(&mut self) -> Result<u32> {
+            get_u!(self, u32, 3)
+        }
+
+        /// Reads an unsigned 32-bit integer in network byte-order from the
+        /// current offset and advances the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_u32(&mut self) -> Result<u32> {
+            get_u!(self, u32, 4)
+        }
+
+        /// Reads an unsigned 64-bit integer in network byte-order from the
+        /// current offset and advances the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_u64(&mut self) -> Result<u64> {
+            get_u!(self, u64, 8)
+        }
+
+        /// Reads an unsigned variable-length integer in network byte-order from
+        /// the current offset and advances the buffer.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub fn get_varint(&mut self) -> Result<u64> {
+            let first = self.peek_u8()?;
+
+            let len = varint_parse_len(first);
+
+            if len > self.cap() {
+                return Err(BufferTooShortError);
+            }
+
+            let out = match len {
+                1 => u64::from(self.get_u8()?),
+
+                2 => u64::from(self.get_u16()? & 0x3fff),
+
+                4 => u64::from(self.get_u32()? & 0x3fff_ffff),
+
+                8 => self.get_u64()? & 0x3fff_ffffffffffff,
+
+                _ => unreachable!(),
+            };
+
+            Ok(out)
+        }
+
+        /// Rewinds the buffer offset by `len` elements.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub const fn rewind(&mut self, len: usize) -> Result<()> {
+            if self.off() < len {
+                return Err(BufferTooShortError);
+            }
+
+            self.off -= len;
+
+            Ok(())
+        }
+
+        /// Advances the buffer's offset.
+        ///
+        /// # Errors
+        /// Returns [`BufferTooShortError`] when the requested operation cannot be
+        /// completed within the available buffer or encoding width.
+        pub const fn skip(&mut self, skip: usize) -> Result<()> {
+            if skip > self.cap() {
+                return Err(BufferTooShortError);
+            }
+
+            self.off += skip;
+
+            Ok(())
+        }
+
+        /// Returns the remaining capacity in the buffer.
+        #[must_use = "the result bounds reads or writes at the current cursor"]
+        pub const fn cap(&self) -> usize {
+            self.buf.len() - self.off
+        }
+
+        /// Returns the total length of the buffer.
+        #[must_use = "the returned length describes the buffer bounds"]
+        pub const fn len(&self) -> usize {
+            self.buf.len()
+        }
+
+        /// Returns `true` if the buffer is empty.
+        #[must_use = "the result indicates whether the buffer contains any bytes"]
+        pub const fn is_empty(&self) -> bool {
+            self.buf.len() == 0
+        }
+
+        /// Returns the current offset of the buffer.
+        #[must_use = "the result identifies the current cursor position"]
+        pub const fn off(&self) -> usize {
+            self.off
+        }
+
+        /// Copies the buffer from the current offset into a new `Vec<u8>`.
+        #[must_use = "the returned vector contains a copy of the remaining bytes"]
+        pub fn to_vec(&self) -> Vec<u8> {
+            self.as_ref().to_vec()
+        }
+    };
 }
 
 /// A zero-copy immutable byte buffer.
@@ -202,103 +314,15 @@ pub struct Octets<'a> {
 }
 
 impl<'a> Octets<'a> {
+    cursor_operations!();
+
     /// Creates an `Octets` from the given slice, without copying.
     ///
     /// Since the `Octets` is immutable, the input slice needs to be
     /// immutable.
-    #[must_use]
+    #[must_use = "the returned cursor borrows the input bytes"]
     pub const fn with_slice(buf: &'a [u8]) -> Self {
         Octets { buf, off: 0 }
-    }
-
-    /// Reads an unsigned 8-bit integer from the current offset and advances
-    /// the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u8(&mut self) -> Result<u8> {
-        get_u!(self, u8, 1)
-    }
-
-    /// Reads an unsigned 8-bit integer from the current offset without
-    /// advancing the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn peek_u8(&self) -> Result<u8> {
-        peek_u!(self, u8, 1)
-    }
-
-    /// Reads an unsigned 16-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u16(&mut self) -> Result<u16> {
-        get_u!(self, u16, 2)
-    }
-
-    /// Reads an unsigned 24-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u24(&mut self) -> Result<u32> {
-        get_u!(self, u32, 3)
-    }
-
-    /// Reads an unsigned 32-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u32(&mut self) -> Result<u32> {
-        get_u!(self, u32, 4)
-    }
-
-    /// Reads an unsigned 64-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u64(&mut self) -> Result<u64> {
-        get_u!(self, u64, 8)
-    }
-
-    /// Reads an unsigned variable-length integer in network byte-order from
-    /// the current offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_varint(&mut self) -> Result<u64> {
-        let first = self.peek_u8()?;
-
-        let len = varint_parse_len(first);
-
-        if len > self.cap() {
-            return Err(BufferTooShortError);
-        }
-
-        let out = match len {
-            1 => u64::from(self.get_u8()?),
-
-            2 => u64::from(self.get_u16()? & 0x3fff),
-
-            4 => u64::from(self.get_u32()? & 0x3fff_ffff),
-
-            8 => self.get_u64()? & 0x3fff_ffffffffffff,
-
-            _ => unreachable!(),
-        };
-
-        Ok(out)
     }
 
     /// Reads `len` bytes from the current offset without copying and advances
@@ -446,21 +470,6 @@ impl<'a> Octets<'a> {
         Ok(out)
     }
 
-    /// Rewinds the buffer offset by `len` elements.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub const fn rewind(&mut self, len: usize) -> Result<()> {
-        if self.off() < len {
-            return Err(BufferTooShortError);
-        }
-
-        self.off -= len;
-
-        Ok(())
-    }
-
     /// Returns a slice of `len` elements from the current offset.
     ///
     /// # Errors
@@ -488,55 +497,10 @@ impl<'a> Octets<'a> {
         Ok(&self.buf[end - len..end])
     }
 
-    /// Advances the buffer's offset.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub const fn skip(&mut self, skip: usize) -> Result<()> {
-        if skip > self.cap() {
-            return Err(BufferTooShortError);
-        }
-
-        self.off += skip;
-
-        Ok(())
-    }
-
-    /// Returns the remaining capacity in the buffer.
-    #[must_use]
-    pub const fn cap(&self) -> usize {
-        self.buf.len() - self.off
-    }
-
-    /// Returns the total length of the buffer.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.buf.len()
-    }
-
-    /// Returns `true` if the buffer is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.buf.len() == 0
-    }
-
-    /// Returns the current offset of the buffer.
-    #[must_use]
-    pub const fn off(&self) -> usize {
-        self.off
-    }
-
     /// Returns a reference to the internal buffer.
-    #[must_use]
+    #[must_use = "the returned slice exposes the underlying buffer"]
     pub const fn buf(&self) -> &'a [u8] {
         self.buf
-    }
-
-    /// Copies the buffer from the current offset into a new `Vec<u8>`.
-    #[must_use]
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.as_ref().to_vec()
     }
 }
 
@@ -556,32 +520,14 @@ pub struct OctetsMut<'a> {
 }
 
 impl<'a> OctetsMut<'a> {
+    cursor_operations!();
+
     /// Creates an `OctetsMut` from the given slice, without copying.
     ///
     /// Since there's no copy, the input slice needs to be mutable to allow
     /// modifications.
     pub const fn with_slice(buf: &'a mut [u8]) -> Self {
         OctetsMut { buf, off: 0 }
-    }
-
-    /// Reads an unsigned 8-bit integer from the current offset and advances
-    /// the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u8(&mut self) -> Result<u8> {
-        get_u!(self, u8, 1)
-    }
-
-    /// Reads an unsigned 8-bit integer from the current offset without
-    /// advancing the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn peek_u8(&self) -> Result<u8> {
-        peek_u!(self, u8, 1)
     }
 
     /// Writes an unsigned 8-bit integer at the current offset and advances
@@ -594,16 +540,6 @@ impl<'a> OctetsMut<'a> {
         put_u!(self, u8, v, 1)
     }
 
-    /// Reads an unsigned 16-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u16(&mut self) -> Result<u16> {
-        get_u!(self, u16, 2)
-    }
-
     /// Writes an unsigned 16-bit integer in network byte-order at the current
     /// offset and advances the buffer.
     ///
@@ -612,16 +548,6 @@ impl<'a> OctetsMut<'a> {
     /// completed within the available buffer or encoding width.
     pub fn put_u16(&mut self, v: u16) -> Result<&mut [u8]> {
         put_u!(self, u16, v, 2)
-    }
-
-    /// Reads an unsigned 24-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u24(&mut self) -> Result<u32> {
-        get_u!(self, u32, 3)
     }
 
     /// Writes an unsigned 24-bit integer in network byte-order at the current
@@ -634,16 +560,6 @@ impl<'a> OctetsMut<'a> {
         put_u!(self, u32, v, 3)
     }
 
-    /// Reads an unsigned 32-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u32(&mut self) -> Result<u32> {
-        get_u!(self, u32, 4)
-    }
-
     /// Writes an unsigned 32-bit integer in network byte-order at the current
     /// offset and advances the buffer.
     ///
@@ -654,16 +570,6 @@ impl<'a> OctetsMut<'a> {
         put_u!(self, u32, v, 4)
     }
 
-    /// Reads an unsigned 64-bit integer in network byte-order from the current
-    /// offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_u64(&mut self) -> Result<u64> {
-        get_u!(self, u64, 8)
-    }
-
     /// Writes an unsigned 64-bit integer in network byte-order at the current
     /// offset and advances the buffer.
     ///
@@ -672,36 +578,6 @@ impl<'a> OctetsMut<'a> {
     /// completed within the available buffer or encoding width.
     pub fn put_u64(&mut self, v: u64) -> Result<&mut [u8]> {
         put_u!(self, u64, v, 8)
-    }
-
-    /// Reads an unsigned variable-length integer in network byte-order from
-    /// the current offset and advances the buffer.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_varint(&mut self) -> Result<u64> {
-        let first = self.peek_u8()?;
-
-        let len = varint_parse_len(first);
-
-        if len > self.cap() {
-            return Err(BufferTooShortError);
-        }
-
-        let out = match len {
-            1 => u64::from(self.get_u8()?),
-
-            2 => u64::from(self.get_u16()? & 0x3fff),
-
-            4 => u64::from(self.get_u32()? & 0x3fff_ffff),
-
-            8 => self.get_u64()? & 0x3fff_ffffffffffff,
-
-            _ => unreachable!(),
-        };
-
-        Ok(out)
     }
 
     /// Writes an unsigned variable-length integer in network byte-order at the
@@ -916,21 +792,6 @@ impl<'a> OctetsMut<'a> {
         <Self as OctetsWriter>::put_huffman_encoded::<LOWER_CASE>(self, v)
     }
 
-    /// Rewinds the buffer offset by `len` elements.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub const fn rewind(&mut self, len: usize) -> Result<()> {
-        if self.off() < len {
-            return Err(BufferTooShortError);
-        }
-
-        self.off -= len;
-
-        Ok(())
-    }
-
     /// Splits the buffer in two at the given absolute offset.
     ///
     /// # Errors
@@ -979,55 +840,10 @@ impl<'a> OctetsMut<'a> {
         Ok(&mut self.buf[end - len..end])
     }
 
-    /// Advances the buffer's offset.
-    ///
-    /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub const fn skip(&mut self, skip: usize) -> Result<()> {
-        if skip > self.cap() {
-            return Err(BufferTooShortError);
-        }
-
-        self.off += skip;
-
-        Ok(())
-    }
-
-    /// Returns the remaining capacity in the buffer.
-    #[must_use]
-    pub const fn cap(&self) -> usize {
-        self.buf.len() - self.off
-    }
-
-    /// Returns the total length of the buffer.
-    #[must_use]
-    pub const fn len(&self) -> usize {
-        self.buf.len()
-    }
-
-    /// Returns `true` if the buffer is empty.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.buf.len() == 0
-    }
-
-    /// Returns the current offset of the buffer.
-    #[must_use]
-    pub const fn off(&self) -> usize {
-        self.off
-    }
-
     /// Returns a reference to the internal buffer.
-    #[must_use]
+    #[must_use = "the returned slice exposes the underlying buffer"]
     pub const fn buf(&self) -> &[u8] {
         self.buf
-    }
-
-    /// Copies the buffer from the current offset into a new `Vec<u8>`.
-    #[must_use]
-    pub fn to_vec(&self) -> Vec<u8> {
-        self.as_ref().to_vec()
     }
 }
 
@@ -1065,7 +881,7 @@ impl OctetsWriter for Vec<u8> {
 ///
 /// Values above [`MAX_VAR_INT`] also map to 8 bytes; encoding APIs reject
 /// those values rather than panicking.
-#[must_use]
+#[must_use = "the result determines the required wire encoding width"]
 pub const fn varint_len(v: u64) -> usize {
     if v <= 63 {
         1
@@ -1079,7 +895,7 @@ pub const fn varint_len(v: u64) -> usize {
 }
 
 /// Returns how long the variable-length integer is, given its first byte.
-#[must_use]
+#[must_use = "the result determines the encoded width from the leading byte"]
 pub const fn varint_parse_len(first: u8) -> usize {
     match first >> 6 {
         0 => 1,

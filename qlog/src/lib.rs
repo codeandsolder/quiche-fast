@@ -515,7 +515,7 @@ pub struct Trace {
 /// Helper functions for using a qlog [Trace].
 impl Trace {
     /// Creates a new qlog [Trace]
-    #[must_use]
+    #[must_use = "the returned trace contains the supplied metadata"]
     pub const fn new(
         title: Option<String>, description: Option<String>,
         common_fields: Option<CommonFields>, vantage_point: Option<VantagePoint>,
@@ -550,7 +550,7 @@ pub struct TraceSeq {
 /// Helper functions for using a qlog [`TraceSeq`].
 impl TraceSeq {
     /// Creates a new qlog [`TraceSeq`]
-    #[must_use]
+    #[must_use = "the returned sequential trace contains the supplied metadata"]
     pub const fn new(
         title: Option<String>, description: Option<String>,
         common_fields: Option<CommonFields>, vantage_point: Option<VantagePoint>,
@@ -609,7 +609,7 @@ impl ReferenceTime {
     ///
     /// If `wall_clock_time` is specified, it will be added as the optional
     /// `wall_clock_time` field of `ReferenceTime`.
-    #[must_use]
+    #[must_use = "the returned clock metadata describes monotonic timestamps"]
     pub fn new_monotonic(wall_clock_time: Option<SystemTime>) -> Self {
         let wall_clock_time =
             wall_clock_time.map(|t| humantime::format_rfc3339(t).to_string());
@@ -655,7 +655,7 @@ pub struct Token {
 pub struct HexSlice<'a>(&'a [u8]);
 
 impl<'a> HexSlice<'a> {
-    #[must_use]
+    #[must_use = "the returned view formats the supplied bytes as hexadecimal"]
     pub fn new<T>(data: &'a T) -> Self
     where
         T: ?Sized + AsRef<[u8]> + 'a,
@@ -663,7 +663,7 @@ impl<'a> HexSlice<'a> {
         HexSlice(data.as_ref())
     }
 
-    #[must_use]
+    #[must_use = "the returned string is the hexadecimal representation of the optional bytes"]
     #[expect(
         clippy::single_option_map,
         reason = "Public convenience API centralizes optional byte-to-hex formatting across callers"

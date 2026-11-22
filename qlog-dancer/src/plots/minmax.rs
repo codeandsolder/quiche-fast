@@ -31,7 +31,7 @@ pub struct XMinMax {
 }
 
 impl XMinMax {
-    #[must_use]
+    #[must_use = "the returned bounds contain the clipped plot axis range"]
     pub const fn new(
         min: f64, max: f64, start: Option<f64>, end: Option<f64>,
     ) -> Self {
@@ -48,7 +48,7 @@ impl XMinMax {
         minmax
     }
 
-    #[must_use]
+    #[must_use = "the returned range contains the plot axis bounds"]
     pub const fn range(&self) -> std::ops::Range<f64> {
         self.min..self.max
     }
@@ -60,7 +60,7 @@ pub struct XYMinMax<Y> {
 }
 
 impl<Y> XYMinMax<Y> {
-    #[must_use]
+    #[must_use = "the returned bounds configure both plot axes"]
     pub const fn init(
         x_data_range: std::ops::Range<f64>, x_start: Option<f64>,
         x_end: Option<f64>, y_range: std::ops::Range<Y>,
