@@ -9604,6 +9604,67 @@ fn dgram_send_max_size(
 }
 
 #[rstest]
+fn large_udp_payloads_preserve_frame_lengths(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(16_383, 16_425, 16_426, 32_768, 65_527)] mtu: usize,
+) {
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_max_send_udp_payload_size(mtu);
+    config.set_max_recv_udp_payload_size(mtu);
+    config.set_initial_max_data(1_000_000);
+    config.set_initial_max_stream_data_bidi_local(1_000_000);
+    config.set_initial_max_stream_data_bidi_remote(1_000_000);
+    config.enable_dgram(true, 10, 10);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    pipe.handshake().unwrap();
+    pipe.advance().unwrap();
+    assert_eq!(pipe.client.max_send_udp_payload_size(), mtu);
+
+    let payload_len = pipe.client.dgram_max_writable_len().unwrap();
+    let payload = vec![0x37; payload_len];
+    assert_eq!(
+        pipe.client.dgram_send(&vec![0; payload_len + 1]),
+        Err(Error::BufferTooShort)
+    );
+    pipe.client.dgram_send(&payload).unwrap();
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    assert_eq!(flight.len(), 1);
+    let (packet, _) = &flight[0];
+    assert!(packet.len() <= mtu);
+    assert!(packet.len() >= payload_len);
+    test_utils::process_flight(&mut pipe.server, flight).unwrap();
+    let mut recv = vec![0; payload_len];
+    assert_eq!(pipe.server.dgram_recv(&mut recv), Ok(payload_len));
+    assert_eq!(recv, payload);
+    pipe.advance().unwrap();
+
+    assert_eq!(pipe.client.stream_send(0, &payload, true), Ok(payload_len));
+    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
+    assert_eq!(flight.len(), 1);
+    let (packet, _) = &flight[0];
+    assert!(packet.len() <= mtu);
+    test_utils::process_flight(&mut pipe.server, flight).unwrap();
+    assert_eq!(
+        pipe.server.stream_recv(0, &mut recv),
+        Ok((payload_len, true))
+    );
+    assert_eq!(recv, payload);
+}
+
+#[test]
+fn outbound_udp_size_configuration_stays_within_udp_limits() {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    for (requested, expected) in [
+        (0, MIN_CLIENT_INITIAL_LEN),
+        (16_384, 16_384),
+        (usize::MAX, MAX_SEND_UDP_PAYLOAD_SIZE),
+    ] {
+        config.set_max_send_udp_payload_size(requested);
+        assert_eq!(config.max_send_udp_payload_size, expected);
+    }
+}
+
+#[rstest]
 fn large_peer_datagram_limits_do_not_truncate(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     #[values(false, true)] discover_pmtu: bool,
@@ -10692,7 +10753,7 @@ fn in_handshake_config(
     );
     assert_eq!(
         pipe.server.recovery_config.max_send_udp_payload_size,
-        MAX_SEND_UDP_PAYLOAD_SIZE
+        DEFAULT_SEND_UDP_PAYLOAD_SIZE
     );
     assert_eq!(
         pipe.server.paths.get_active().unwrap().recovery.cwnd(),

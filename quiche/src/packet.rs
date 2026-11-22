@@ -1440,7 +1440,7 @@ impl PktNumWindow {
 mod tests {
     use super::*;
     use crate::test_utils;
-    use crate::MAX_SEND_UDP_PAYLOAD_SIZE;
+    use crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE;
 
     #[test]
     fn packet_writer_publishes_only_initialized_successful_prefixes() {
@@ -2742,7 +2742,7 @@ mod tests {
         // Arm `skip_pn_counter`
         skip_manager.on_packet_sent(
             cwnd,
-            MAX_SEND_UDP_PAYLOAD_SIZE,
+            DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             handshake_completed,
         );
         assert_eq!(next_pn, 0);
@@ -2757,7 +2757,7 @@ mod tests {
 
             skip_manager.on_packet_sent(
                 cwnd,
-                MAX_SEND_UDP_PAYLOAD_SIZE,
+                DEFAULT_SEND_UDP_PAYLOAD_SIZE,
                 handshake_completed,
             );
         }
@@ -2789,7 +2789,7 @@ mod tests {
         // expired)
         skip_manager.on_packet_sent(
             cwnd,
-            MAX_SEND_UDP_PAYLOAD_SIZE,
+            DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             handshake_completed,
         );
         assert!(skip_manager.skip_pn.is_some());
@@ -2799,7 +2799,7 @@ mod tests {
         skip_manager.skip_pn = None;
         skip_manager.on_packet_sent(
             cwnd,
-            MAX_SEND_UDP_PAYLOAD_SIZE,
+            DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             handshake_completed,
         );
         assert!(skip_manager.skip_pn.is_none());
@@ -2816,7 +2816,7 @@ mod tests {
         let mut handshake_completed = false;
         skip_manager.on_packet_sent(
             cwnd,
-            MAX_SEND_UDP_PAYLOAD_SIZE,
+            DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             handshake_completed,
         );
         assert!(skip_manager.skip_pn_counter.is_none());
@@ -2825,7 +2825,7 @@ mod tests {
         handshake_completed = true;
         skip_manager.on_packet_sent(
             cwnd,
-            MAX_SEND_UDP_PAYLOAD_SIZE,
+            DEFAULT_SEND_UDP_PAYLOAD_SIZE,
             handshake_completed,
         );
         assert!(skip_manager.skip_pn_counter.is_some());

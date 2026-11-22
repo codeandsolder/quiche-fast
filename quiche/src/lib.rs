@@ -457,7 +457,10 @@ const MAX_ACK_RANGES: usize = 68;
 const MAX_STREAM_COUNT: u64 = 1 << 60;
 
 // The default max_datagram_size used in congestion control.
-const MAX_SEND_UDP_PAYLOAD_SIZE: usize = 1200;
+const DEFAULT_SEND_UDP_PAYLOAD_SIZE: usize = MIN_CLIENT_INITIAL_LEN;
+
+// Maximum non-jumbogram UDP payload (RFC 9000 default receive limit).
+const MAX_SEND_UDP_PAYLOAD_SIZE: usize = 65_527;
 
 // The default length of DATAGRAM queues.
 const DEFAULT_MAX_DGRAM_QUEUE_LEN: usize = 0;
@@ -468,9 +471,6 @@ const DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN: usize = 3;
 // The DATAGRAM standard recommends either none or 65536 as maximum DATAGRAM
 // frames size. We enforce the recommendation for forward compatibility.
 const MAX_DGRAM_FRAME_SIZE: u64 = 65536;
-
-// The length of the payload length field.
-const PAYLOAD_LENGTH_LEN: usize = 2;
 
 // The number of undecryptable that can be buffered.
 const MAX_UNDECRYPTABLE_PACKETS: usize = 10;
@@ -677,7 +677,7 @@ impl Config {
             path_challenge_recv_max_queue_len:
                 DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN,
 
-            max_send_udp_payload_size: MAX_SEND_UDP_PAYLOAD_SIZE,
+            max_send_udp_payload_size: DEFAULT_SEND_UDP_PAYLOAD_SIZE,
 
             max_connection_window: MAX_CONNECTION_WINDOW,
             max_stream_window: stream::MAX_STREAM_WINDOW,
@@ -984,9 +984,10 @@ impl Config {
 
     /// Sets the maximum outgoing UDP payload size.
     ///
-    /// The default and minimum value is `1200`.
+    /// The default and minimum value is `1200`; the maximum is `65527`.
     pub fn set_max_send_udp_payload_size(&mut self, v: usize) {
-        self.max_send_udp_payload_size = cmp::max(v, MAX_SEND_UDP_PAYLOAD_SIZE);
+        self.max_send_udp_payload_size =
+            v.clamp(MIN_CLIENT_INITIAL_LEN, MAX_SEND_UDP_PAYLOAD_SIZE);
     }
 
     /// Sets the `initial_max_data` transport parameter.
@@ -2831,7 +2832,7 @@ impl<F: BufFactory> Connection<F> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
         ex_data.recovery_config.max_send_udp_payload_size =
-            cmp::max(v, MAX_SEND_UDP_PAYLOAD_SIZE);
+            v.clamp(MIN_CLIENT_INITIAL_LEN, MAX_SEND_UDP_PAYLOAD_SIZE);
 
         Ok(())
     }
@@ -4297,7 +4298,7 @@ impl<F: BufFactory> Connection<F> {
         let peer_limit =
             usize::try_from(self.peer_transport_params.max_udp_payload_size)
                 .unwrap_or(usize::MAX)
-                .min(16383);
+                .min(MAX_SEND_UDP_PAYLOAD_SIZE);
         let handshake_ready =
             self.handshake_confirmed && self.handshake_completed;
         let mut limit = if self.handshake_completed {
@@ -4840,11 +4841,19 @@ impl<F: BufFactory> Connection<F> {
         // the payload length, the packet number and the AEAD overhead.
         let mut overhead = b.off() + pn_len + crypto_overhead;
 
-        // We assume that the payload length, which is only present in long
-        // header packets, can always be encoded with a 2-byte varint.
-        if pkt_type != Type::Short {
-            overhead += PAYLOAD_LENGTH_LEN;
-        }
+        // Reserve enough space for the long-header length including the
+        // packet number and AEAD tag. Limit the packet at width transitions.
+        let payload_length_width = if pkt_type != Type::Short {
+            let (capacity, width) = frame::payload_capacity(
+                left.checked_sub(b.off()).ok_or(Error::Done)?,
+            )
+            .ok_or(Error::Done)?;
+            left = b.off() + width + capacity;
+            overhead += width;
+            width
+        } else {
+            0
+        };
 
         // Make sure we have enough space left for the packet overhead.
         if let Some(v) = left.checked_sub(overhead) {
@@ -4883,12 +4892,11 @@ impl<F: BufFactory> Connection<F> {
 
         let header_offset = b.off();
 
-        // Reserve space for payload length in advance. Since we don't yet know
-        // what the final length will be, we reserve 2 bytes in all cases.
+        // Reserve the selected width before the payload is emitted.
         //
         // Only long header packets have an explicit length field.
         if pkt_type != Type::Short {
-            frame::FrameSink::put_padding(b, PAYLOAD_LENGTH_LEN)?;
+            frame::FrameSink::put_padding(b, payload_length_width)?;
         }
 
         packet::encode_pkt_num(pn, pn_len, b)?;
@@ -5381,10 +5389,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Create CRYPTO frame.
-        if crypto_ctx.crypto_stream.is_flushable() &&
-            left > frame::MAX_CRYPTO_OVERHEAD &&
-            !is_closing &&
-            path.active()
+        if crypto_ctx.crypto_stream.is_flushable() && !is_closing && path.active()
         {
             let crypto_off = crypto_ctx.crypto_stream.send.off_front();
 
@@ -5394,19 +5399,22 @@ impl<F: BufFactory> Connection<F> {
             // directly into the packet buffer.
             //
             // First we reserve some space in the output buffer for writing the
-            // frame header (we assume the length field is always a 2-byte
-            // varint as we don't know the value yet).
+            // frame header, with a length width selected from the available
+            // packet space.
             //
             // Then we emit the data from the crypto stream's send buffer.
             //
             // Finally we go back and encode the frame header with the now
             // available information.
             let hdr_off = b.off();
-            let hdr_len = 1 + // frame type
-                octets::varint_len(crypto_off) + // offset
-                2; // length, always encode as 2-byte varint
+            let fixed = 1 + octets::varint_len(crypto_off);
 
-            if let Some(max_len) = left.checked_sub(hdr_len) {
+            if let Some((max_len, width)) = left
+                .checked_sub(fixed)
+                .and_then(frame::payload_capacity)
+                .filter(|(capacity, _)| *capacity > 0)
+            {
+                let hdr_len = fixed + width;
                 frame::FrameSink::put_padding(b, hdr_len)?;
                 let emission = crypto_ctx
                     .crypto_stream
@@ -5418,6 +5426,7 @@ impl<F: BufFactory> Connection<F> {
                 frame::encode_crypto_header(
                     crypto_off,
                     len as u64,
+                    width,
                     &mut crypto_hdr,
                 )?;
 
@@ -5452,15 +5461,14 @@ impl<F: BufFactory> Connection<F> {
 
         // Create DATAGRAM frame.
         if (pkt_type == Type::Short || pkt_type == Type::ZeroRTT) &&
-            left > frame::MAX_DGRAM_OVERHEAD &&
+            left >= 3 &&
             !is_closing &&
             path.active() &&
             do_dgram
         {
             if let Some(max_dgram_payload) = max_dgram_len {
                 while let Some(len) = self.dgram_send_queue.peek_front_len() {
-                    let hdr_len = 1 + // frame type
-                        2; // length, always encode as 2-byte varint
+                    let hdr_len = 1 + frame::payload_length_width(len as u64);
 
                     if (hdr_len + len) <= left {
                         // Front of the queue fits this packet, send it.
@@ -5528,24 +5536,27 @@ impl<F: BufFactory> Connection<F> {
                 // directly into the packet buffer.
                 //
                 // First we reserve some space in the output buffer for writing
-                // the frame header (we assume the length field is always a
-                // 2-byte varint as we don't know the value yet).
+                // the frame header, choosing a length width that can encode
+                // the largest payload fitting in the remaining space.
                 //
                 // Then we emit the data from the stream's send buffer.
                 //
                 // Finally we go back and encode the frame header with the now
                 // available information.
                 let hdr_off = b.off();
-                let hdr_len = 1 + // frame type
-                    octets::varint_len(stream_id) + // stream_id
-                    octets::varint_len(stream_off) + // offset
-                    2; // length, always encode as 2-byte varint
+                let fixed = 1 +
+                    octets::varint_len(stream_id) +
+                    octets::varint_len(stream_off);
 
                 // A non-FIN STREAM frame must carry at least one byte. If the
                 // header and payload don't fit, leave the stream flushable for
                 // a later packet. Empty FIN frames only need the header.
-                let max_len = match left.checked_sub(hdr_len) {
-                    Some(v) if v > 0 || stream.send.empty_fin_next() => v,
+                let (max_len, width) = match left
+                    .checked_sub(fixed)
+                    .and_then(frame::payload_capacity)
+                {
+                    Some((v, width)) if v > 0 || stream.send.empty_fin_next() =>
+                        (v, width),
                     _ => {
                         stream_data_skipped = true;
 
@@ -5562,6 +5573,7 @@ impl<F: BufFactory> Connection<F> {
                     },
                 };
 
+                let hdr_len = fixed + width;
                 frame::FrameSink::put_padding(b, hdr_len)?;
                 let emission =
                     stream.send.emit(bytes::BufMut::limit(&mut *b, max_len));
@@ -5585,6 +5597,7 @@ impl<F: BufFactory> Connection<F> {
                     stream_off,
                     len as u64,
                     fin,
+                    width,
                     &mut stream_hdr,
                 )?;
 
@@ -5720,9 +5733,9 @@ impl<F: BufFactory> Connection<F> {
             let len = pn_len + payload_len + crypto_overhead;
 
             let mut payload_with_len =
-                b.patch(header_offset, PAYLOAD_LENGTH_LEN)?;
+                b.patch(header_offset, payload_length_width)?;
             payload_with_len
-                .put_varint_with_len(len as u64, PAYLOAD_LENGTH_LEN)?;
+                .put_varint_with_len(len as u64, payload_length_width)?;
         }
 
         trace!(
@@ -7086,9 +7099,13 @@ impl<F: BufFactory> Connection<F> {
 
         if let Some(max_datagram_size) = max_datagram_size {
             if self.is_established() {
-                // Cap the packet size at 16,383 bytes so a two-byte varint can
-                // always encode it.
-                return cmp::min(16383, max_datagram_size);
+                let peer = usize::try_from(
+                    self.peer_transport_params.max_udp_payload_size,
+                )
+                .unwrap_or(usize::MAX);
+                return max_datagram_size
+                    .min(peer)
+                    .min(MAX_SEND_UDP_PAYLOAD_SIZE);
             }
         }
 
@@ -7439,9 +7456,9 @@ impl<F: BufFactory> Connection<F> {
                     usize::try_from(peer_frame_len).unwrap_or(usize::MAX),
                     max_len,
                 );
-                // ...subtract frame overhead, checked for underflow.
-                // (1 byte of frame type + len of length )
-                max_len.checked_sub(1 + frame::MAX_DGRAM_OVERHEAD)
+                // ...account for the type and the variable-width length.
+                frame::payload_capacity(max_len.checked_sub(1)?)
+                    .map(|(payload, _)| payload)
             },
         }
     }

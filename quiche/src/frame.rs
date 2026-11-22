@@ -42,8 +42,6 @@ use qlog::events::quic::QuicFrame;
 #[cfg(feature = "qlog")]
 use qlog::events::quic::StreamType;
 
-pub const MAX_CRYPTO_OVERHEAD: usize = 8;
-pub const MAX_DGRAM_OVERHEAD: usize = 2;
 pub const MAX_STREAM_SIZE: u64 = 1 << 62;
 
 /// Output of the shared frame encoding schema. A size-only sink validates
@@ -507,7 +505,12 @@ impl Frame {
             },
 
             Self::Crypto { data } => {
-                encode_crypto_header(data.off(), data.len() as u64, b)?;
+                encode_crypto_header(
+                    data.off(),
+                    data.len() as u64,
+                    payload_length_width(data.len() as u64),
+                    b,
+                )?;
 
                 b.put_bytes(data)?;
             },
@@ -525,6 +528,7 @@ impl Frame {
                     data.off(),
                     data.len() as u64,
                     data.fin(),
+                    payload_length_width(data.len() as u64),
                     b,
                 )?;
 
@@ -1157,21 +1161,44 @@ fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
     })
 }
 
+/// Payload lengths are at least two bytes, permitting reservation before
+/// emission. Larger lengths use the next representable width.
+pub fn payload_length_width(length: u64) -> usize {
+    octets::varint_len(length).max(2)
+}
+
+/// Largest payload that fits in the available bytes including its length
+/// field, and the exact reserved width. At a width transition there may be
+/// one or more unused bytes rather than room for another payload byte.
+pub fn payload_capacity(available: usize) -> Option<(usize, usize)> {
+    for width in [8, 4, 2] {
+        let Some(capacity) = available.checked_sub(width) else {
+            continue;
+        };
+        let limit = (1_u64 << (width * 8 - 2)) - 1;
+        let capacity = capacity.min(usize::try_from(limit).unwrap_or(usize::MAX));
+        if payload_length_width(capacity as u64) == width {
+            return Some((capacity, width));
+        }
+    }
+    None
+}
+
 pub fn encode_crypto_header(
-    offset: u64, length: u64, b: &mut impl FrameSink,
+    offset: u64, length: u64, length_width: usize, b: &mut impl FrameSink,
 ) -> Result<()> {
     b.put_varint(0x06)?;
 
     b.put_varint(offset)?;
 
-    // Always encode length field as 2-byte varint.
-    b.put_varint_with_len(length, 2)?;
+    b.put_varint_with_len(length, length_width)?;
 
     Ok(())
 }
 
 pub fn encode_stream_header(
-    stream_id: u64, offset: u64, length: u64, fin: bool, b: &mut impl FrameSink,
+    stream_id: u64, offset: u64, length: u64, fin: bool, length_width: usize,
+    b: &mut impl FrameSink,
 ) -> Result<()> {
     let mut ty: u8 = 0x08;
 
@@ -1190,8 +1217,7 @@ pub fn encode_stream_header(
     b.put_varint(stream_id)?;
     b.put_varint(offset)?;
 
-    // Always encode length field as 2-byte varint.
-    b.put_varint_with_len(length, 2)?;
+    b.put_varint_with_len(length, length_width)?;
 
     Ok(())
 }
@@ -1204,8 +1230,7 @@ pub fn encode_dgram_header(length: u64, b: &mut impl FrameSink) -> Result<()> {
 
     b.put_varint(u64::from(ty))?;
 
-    // Always encode length field as 2-byte varint.
-    b.put_varint_with_len(length, 2)?;
+    b.put_varint_with_len(length, payload_length_width(length))?;
 
     Ok(())
 }
@@ -1394,12 +1419,6 @@ mod tests {
                 Error::InvalidFrame,
             ),
             (
-                Frame::Datagram {
-                    data: vec![0; 16_384],
-                },
-                Error::BufferTooShort,
-            ),
-            (
                 Frame::CryptoHeader {
                     offset: 0,
                     length: 4,
@@ -1422,6 +1441,63 @@ mod tests {
             assert_eq!(frame.wire_len(), Err(error));
             let mut b = octets::OctetsMut::with_slice(&mut out);
             assert_eq!(frame.to_bytes(&mut b), Err(error));
+        }
+    }
+
+    #[test]
+    fn payload_capacity_is_maximal_at_width_transitions() {
+        for available in (0..=65_535)
+            .chain((1_073_741_810..=1_073_741_840).chain([usize::MAX]))
+        {
+            if let Some((payload, width)) = payload_capacity(available) {
+                assert_eq!(width, payload_length_width(payload as u64));
+                assert!(payload + width <= available);
+                if let Some(next) = payload.checked_add(1) {
+                    assert!(
+                        next as u64 > octets::MAX_VAR_INT ||
+                            next.checked_add(payload_length_width(
+                                next as u64
+                            ))
+                            .is_none_or(|size| size > available)
+                    );
+                }
+            } else {
+                assert!(available < 2);
+            }
+        }
+    }
+
+    #[test]
+    fn large_data_frames_roundtrip() {
+        for length in [16_383, 16_384, 65_000] {
+            let data = vec![0x5a; length];
+            let width = payload_length_width(length as u64);
+            let frames = [
+                (
+                    Frame::Crypto {
+                        data: <RangeBuf>::from(&data, 0, false),
+                    },
+                    2,
+                ),
+                (
+                    Frame::Stream {
+                        stream_id: 0,
+                        data: <RangeBuf>::from(&data, 0, true),
+                    },
+                    3,
+                ),
+                (Frame::Datagram { data }, 1),
+            ];
+            for (frame, fixed) in frames {
+                let mut output = vec![0; fixed + width + length];
+                assert_eq!(encode_checked(&frame, &mut output), output.len());
+                let mut reader = octets::Octets::with_slice(&output);
+                assert_eq!(
+                    Frame::from_bytes(&mut reader, packet::Type::Short),
+                    Ok(frame)
+                );
+                assert_eq!(reader.cap(), 0);
+            }
         }
     }
 
