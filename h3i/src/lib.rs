@@ -54,7 +54,7 @@
 //! use h3i::config::Config;
 //! use quiche::h3::frame::Frame;
 //! use quiche::h3::Header;
-//! //!
+//!
 //! fn main() {
 //!    /// The QUIC stream to send the frames on. See
 //!    /// https://datatracker.ietf.org/doc/html/rfc9000#name-streams and
