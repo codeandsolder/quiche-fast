@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@a6ad66ddbd7c11edf904f7b59364cfe5fd2cdf14 # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7cdeeb9e1921a778e85dec30a2d611ccc1589555 # main
     with:
       # Stage strict Clippy package-by-package. Legacy packages migrate in
       # #52/#54/#55; source-policy scanning still covers the whole repository.
