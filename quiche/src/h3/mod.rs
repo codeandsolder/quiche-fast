@@ -2194,28 +2194,15 @@ impl Connection {
             return Err(Error::Done);
         }
 
-        // Process control streams first.
-        if let Some(stream_id) = self.peer_control_stream_id {
-            match self.process_control_stream(conn, stream_id) {
-                Ok(ev) => return Ok(ev),
-
-                Err(Error::Done) => (),
-
-                Err(e) => return Err(e),
-            }
-        }
-
-        if let Some(stream_id) = self.peer_qpack_streams.encoder_stream_id {
-            match self.process_control_stream(conn, stream_id) {
-                Ok(ev) => return Ok(ev),
-
-                Err(Error::Done) => (),
-
-                Err(e) => return Err(e),
-            }
-        }
-
-        if let Some(stream_id) = self.peer_qpack_streams.decoder_stream_id {
+        // Process critical streams first, in control/encoder/decoder order.
+        for stream_id in [
+            self.peer_control_stream_id,
+            self.peer_qpack_streams.encoder_stream_id,
+            self.peer_qpack_streams.decoder_stream_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
             match self.process_control_stream(conn, stream_id) {
                 Ok(ev) => return Ok(ev),
 
@@ -2665,6 +2652,54 @@ impl Connection {
         Err(Error::Done)
     }
 
+    /// Register a peer unidirectional stream after decoding its type.
+    fn register_peer_stream<F: BufFactory>(
+        &mut self, conn: &mut super::Connection<F>, stream_id: u64,
+        ty: stream::Type,
+    ) -> Result<()> {
+        let (slot, duplicate_reason): (&mut Option<u64>, &[u8]) = match ty {
+            stream::Type::Control => (
+                &mut self.peer_control_stream_id,
+                b"Received multiple control streams",
+            ),
+            stream::Type::QpackEncoder => (
+                &mut self.peer_qpack_streams.encoder_stream_id,
+                b"Received multiple QPACK encoder streams",
+            ),
+            stream::Type::QpackDecoder => (
+                &mut self.peer_qpack_streams.decoder_stream_id,
+                b"Received multiple QPACK decoder streams",
+            ),
+            stream::Type::Unknown => return Ok(()),
+            stream::Type::Push | stream::Type::Request => {
+                conn.close(
+                    true,
+                    Error::StreamCreationError.to_wire(),
+                    b"Unexpected unidirectional stream type.",
+                )?;
+                return Err(Error::StreamCreationError);
+            },
+        };
+
+        if slot.is_some() {
+            conn.close(
+                true,
+                Error::StreamCreationError.to_wire(),
+                duplicate_reason,
+            )?;
+            return Err(Error::StreamCreationError);
+        }
+
+        close_conn_if_critical_stream_finished(conn, stream_id)?;
+        *slot = Some(stream_id);
+        trace!(
+            "{} opened peer critical stream {stream_id} {ty:?}",
+            conn.trace_id()
+        );
+
+        Ok(())
+    }
+
     fn process_readable_stream<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64, polling: bool,
     ) -> Result<(u64, Event)> {
@@ -2714,93 +2749,7 @@ impl Connection {
                         q.add_event_data_now(ev_data).ok();
                     });
 
-                    match &ty {
-                        stream::Type::Control => {
-                            // Only one control stream allowed.
-                            if self.peer_control_stream_id.is_some() {
-                                conn.close(
-                                    true,
-                                    Error::StreamCreationError.to_wire(),
-                                    b"Received multiple control streams",
-                                )?;
-
-                                return Err(Error::StreamCreationError);
-                            }
-
-                            trace!(
-                                "{} open peer's control stream {stream_id}",
-                                conn.trace_id()
-                            );
-
-                            close_conn_if_critical_stream_finished(
-                                conn, stream_id,
-                            )?;
-
-                            self.peer_control_stream_id = Some(stream_id);
-                        },
-
-                        stream::Type::Push => {
-                            // Server push is not supported, so push streams at
-                            // either client or server is a critical protocol
-                            // error.
-                            conn.close(
-                                true,
-                                Error::StreamCreationError.to_wire(),
-                                b"Received push stream.",
-                            )?;
-
-                            return Err(Error::StreamCreationError);
-                        },
-
-                        stream::Type::QpackEncoder => {
-                            // Only one qpack encoder stream allowed.
-                            if self.peer_qpack_streams.encoder_stream_id.is_some()
-                            {
-                                conn.close(
-                                    true,
-                                    Error::StreamCreationError.to_wire(),
-                                    b"Received multiple QPACK encoder streams",
-                                )?;
-
-                                return Err(Error::StreamCreationError);
-                            }
-
-                            close_conn_if_critical_stream_finished(
-                                conn, stream_id,
-                            )?;
-
-                            self.peer_qpack_streams.encoder_stream_id =
-                                Some(stream_id);
-                        },
-
-                        stream::Type::QpackDecoder => {
-                            // Only one qpack decoder allowed.
-                            if self.peer_qpack_streams.decoder_stream_id.is_some()
-                            {
-                                conn.close(
-                                    true,
-                                    Error::StreamCreationError.to_wire(),
-                                    b"Received multiple QPACK decoder streams",
-                                )?;
-
-                                return Err(Error::StreamCreationError);
-                            }
-
-                            close_conn_if_critical_stream_finished(
-                                conn, stream_id,
-                            )?;
-
-                            self.peer_qpack_streams.decoder_stream_id =
-                                Some(stream_id);
-                        },
-
-                        stream::Type::Unknown => {
-                            // Unknown stream types are ignored.
-                            // TODO: we MAY send STOP_SENDING
-                        },
-
-                        stream::Type::Request => unreachable!(),
-                    }
+                    self.register_peer_stream(conn, stream_id, ty)?;
                 },
 
                 stream::State::PushId => {
@@ -2930,24 +2879,27 @@ impl Connection {
                 },
 
                 stream::State::QpackInstruction => {
-                    let mut d = [0; 4096];
+                    let bytes = match stream.ty() {
+                        Some(stream::Type::QpackEncoder) =>
+                            &mut self.peer_qpack_streams.encoder_stream_bytes,
+                        Some(stream::Type::QpackDecoder) =>
+                            &mut self.peer_qpack_streams.decoder_stream_bytes,
+                        _ => return Err(Error::InternalError),
+                    };
 
-                    // Read data from the stream and discard immediately.
+                    // Dynamic table instructions are currently ignored.
+                    // Discard directly from the receive buffer rather than
+                    // copying them into an unused stack buffer.
                     loop {
-                        let (recv, fin) = conn.stream_recv(stream_id, &mut d)?;
-
-                        match stream.ty() {
-                            Some(stream::Type::QpackEncoder) =>
-                                self.peer_qpack_streams.encoder_stream_bytes +=
-                                    recv as u64,
-                            Some(stream::Type::QpackDecoder) =>
-                                self.peer_qpack_streams.decoder_stream_bytes +=
-                                    recv as u64,
-                            _ => unreachable!(),
-                        }
+                        let (recv, fin) =
+                            conn.stream_discard(stream_id, usize::MAX)?;
+                        *bytes = bytes.saturating_add(recv as u64);
 
                         if fin {
                             close_conn_critical_stream(conn)?;
+                        }
+                        if recv == 0 {
+                            break;
                         }
                     }
                 },
@@ -5678,9 +5630,12 @@ mod tests {
         assert_eq!(h3_srv.next_uni_stream_id, 3);
     }
 
-    #[test]
-    /// Client opens multiple control streams, which is forbidden.
-    fn open_multiple_control_streams() {
+    #[rstest::rstest]
+    #[case(stream::HTTP3_CONTROL_STREAM_TYPE_ID)]
+    #[case(stream::QPACK_ENCODER_STREAM_TYPE_ID)]
+    #[case(stream::QPACK_DECODER_STREAM_TYPE_ID)]
+    /// Client duplicates a critical stream, which is forbidden.
+    fn open_multiple_critical_streams(#[case] ty: u64) {
         let mut s = Session::new().unwrap();
         s.handshake().unwrap();
 
@@ -5691,11 +5646,7 @@ mod tests {
 
         s.pipe
             .client
-            .stream_send(
-                stream_id,
-                b.put_varint(stream::HTTP3_CONTROL_STREAM_TYPE_ID).unwrap(),
-                false,
-            )
+            .stream_send(stream_id, b.put_varint(ty).unwrap(), false)
             .unwrap();
 
         s.advance().ok();
@@ -5902,39 +5853,34 @@ mod tests {
     }
 
     #[test]
-    /// Client sends QPACK data.
+    /// QPACK bytes are accounted for even when discarded across QUIC packets.
     fn qpack_data() {
-        // TODO: QPACK instructions are ignored until dynamic table support is
-        // added so we just test that the data is safely ignored.
-        let mut s = Session::new().unwrap();
+        // Dynamic table instructions are currently ignored.
+        let (mut config, h3_config) = Session::default_configs().unwrap();
+        config.set_initial_max_data(100_000);
+        config.set_initial_max_stream_data_uni(40_000);
+        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         s.handshake().unwrap();
 
-        let e_stream_id = s.client.local_qpack_streams.encoder_stream_id.unwrap();
-        let d_stream_id = s.client.local_qpack_streams.decoder_stream_id.unwrap();
-        let d = [0; 20];
+        let encoder = s.client.local_qpack_streams.encoder_stream_id.unwrap();
+        let decoder = s.client.local_qpack_streams.decoder_stream_id.unwrap();
 
-        s.pipe.client.stream_send(e_stream_id, &d, false).unwrap();
-        s.advance().ok();
-
-        s.pipe.client.stream_send(d_stream_id, &d, false).unwrap();
-        s.advance().ok();
-
-        match s.server.poll(&mut s.pipe.server) {
-            Ok(_) => panic!(),
-
-            Err(Error::Done) => {
-                assert_eq!(s.server.peer_qpack_streams.encoder_stream_bytes, 20);
-                assert_eq!(s.server.peer_qpack_streams.decoder_stream_bytes, 20);
-            },
-
-            Err(_) => {
-                panic!();
-            },
+        // Larger than the former discard scratch buffer.
+        let data = vec![0; 8192];
+        for stream_id in [encoder, decoder] {
+            for _ in 0..2 {
+                assert_eq!(
+                    s.pipe.client.stream_send(stream_id, &data, false),
+                    Ok(data.len()),
+                );
+                s.advance().unwrap();
+                assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
+            }
         }
 
         let stats = s.server.stats();
-        assert_eq!(stats.qpack_encoder_stream_recv_bytes, 20);
-        assert_eq!(stats.qpack_decoder_stream_recv_bytes, 20);
+        assert_eq!(stats.qpack_encoder_stream_recv_bytes, 16384);
+        assert_eq!(stats.qpack_decoder_stream_recv_bytes, 16384);
     }
 
     #[test]
