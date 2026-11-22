@@ -6785,6 +6785,38 @@ fn stream_data_blocked_validates_stream_opening_and_direction(
 }
 
 #[rstest]
+fn late_fin_on_consumed_data_is_readable_once(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let mut packet = [0; 1500];
+    for (index, fin) in [false, true, true].into_iter().enumerate() {
+        let frame = frame::Frame::Stream {
+            stream_id: 0,
+            data: <RangeBuf>::from(b"hello", 0, fin),
+        };
+        assert!(pipe
+            .send_pkt_to_server(Type::Short, &[frame], &mut packet)
+            .is_ok());
+        if !fin {
+            assert_eq!(pipe.server.readable().next(), Some(0));
+            let mut buf = [0; 5];
+            assert_eq!(pipe.server.stream_recv(0, &mut buf), Ok((5, false)));
+            assert_eq!(&buf, b"hello");
+        } else if index == 1 {
+            assert_eq!(pipe.server.readable().next(), Some(0));
+            assert_eq!(pipe.server.stream_recv(0, &mut []), Ok((0, true)));
+        } else {
+            assert_eq!(pipe.server.readable().next(), None);
+        }
+    }
+    assert_eq!(pipe.server.readable().next(), None);
+    assert_eq!(pipe.server.stream_recv(0, &mut []), Err(Error::Done));
+    assert_eq!(pipe.server.flow_control.consumed(), 5);
+}
+
+#[rstest]
 fn reset_after_out_of_order_fin_delivers_error(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
