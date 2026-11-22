@@ -358,11 +358,6 @@ impl<F: BufFactory> SendBuf<F> {
         self.blocked_at
     }
 
-    /// Increments the acked data offset.
-    pub fn ack(&mut self, off: u64, len: usize) {
-        self.acked.insert(off..off + len as u64);
-    }
-
     /// Marks the stream's final size as acknowledged by the peer.
     pub(crate) const fn ack_fin(&mut self) {
         if let FinalSize::Pending(offset) | FinalSize::InFlight(offset) =
@@ -372,31 +367,50 @@ impl<F: BufFactory> SendBuf<F> {
         }
     }
 
+    /// Retire acknowledged byte ranges, including sparse acknowledgments.
+    /// Returns the number of pending bytes removed from the send queue.
     pub fn ack_and_drop(&mut self, off: u64, len: usize) -> u64 {
-        self.ack(off, len);
+        let end = off.saturating_add(len as u64).min(self.emit_off);
+        if off >= end {
+            return 0;
+        }
+        self.acked.insert(off..end);
 
-        let ack_off = self.ack_off();
-        if off > ack_off {
+        // Acknowledgment can only remove pending data, never move it
+        // earlier. Remember the cursor before changing chunk indices.
+        let next_pending = self.off_front();
+        let mut first = self.data.partition_point(|buf| buf.max_off() <= off);
+        let Some(buf) = self.data.get_mut(first) else {
+            return 0;
+        };
+        if buf.start_offset() >= end {
             return 0;
         }
 
-        let mut dropped = 0;
-        let mut removed = 0;
-        while let Some(buf) = self.data.front_mut() {
-            if buf.start_offset() >= ack_off {
-                break;
+        // Retain any unacknowledged prefix of the first overlapping chunk.
+        if buf.start_offset() < off {
+            if let Some(tail) = buf.split_off(off) {
+                first += 1;
+                self.data.insert(first, tail);
             }
-            if buf.max_off() > ack_off {
-                dropped += buf.acknowledge_prefix(ack_off);
-                break;
-            }
-            dropped += buf.len() as u64;
-            self.data.pop_front();
-            removed += 1;
         }
 
-        self.pos = self.pos.saturating_sub(removed);
-        self.buffered_bytes = self.buffered_bytes.saturating_sub(dropped);
+        // Remove whole chunks, and trim a partially covered last chunk
+        // without copying its backing allocation.
+        let last = self.data.partition_point(|buf| buf.max_off() <= end);
+        let mut dropped = self
+            .data
+            .drain(first..last)
+            .map(|buf| buf.len() as u64)
+            .sum::<u64>();
+        if let Some(buf) = self.data.get_mut(first) {
+            dropped += buf.acknowledge_prefix(end);
+        }
+
+        self.pos = self
+            .data
+            .partition_point(|buf| buf.max_off() <= next_pending);
+        self.buffered_bytes -= dropped;
         dropped
     }
 
@@ -408,17 +422,19 @@ impl<F: BufFactory> SendBuf<F> {
         }
 
         let mut total_retransmitted = 0;
-        for i in 0..self.data.len() {
+        let first = self.data.partition_point(|buf| buf.max_off() <= start);
+        for i in first..self.data.len() {
             let buf = &mut self.data[i];
             if buf.start_offset() >= end {
                 break;
             }
-            if start >= buf.max_off() {
+            if start >= buf.off() {
                 continue;
             }
 
-            // Preserve the pending cursor of any suffix outside this loss.
-            let tail = if end < buf.max_off() {
+            // Split only when an already emitted suffix lies outside the
+            // loss. An existing pending suffix can stay in the same chunk.
+            let tail = if end < buf.off() {
                 buf.split_off(end)
             } else {
                 None
@@ -1025,6 +1041,119 @@ mod tests {
         assert_eq!(&out[..3], b"llo");
         assert_eq!(send.retransmit(0, 5), 3);
         assert_eq!(send.off_front(), 2);
+    }
+
+    #[test]
+    fn sparse_ack_removes_only_matching_pending_bytes() {
+        let mut send = <SendBuf>::new(30);
+        let mut out = [0; 15];
+        assert_eq!(send.write(b"abcdefghijklmno", true), Ok(15));
+        assert_eq!(send.emit(&mut out[..]), (15, true));
+        assert_eq!(send.retransmit(0, 15), 15);
+        assert_eq!(send.ack_and_drop(3, 9), 9);
+        assert_eq!(send.ack_and_drop(5, 4), 0);
+        assert_eq!(send.retransmit(0, 15), 0);
+        assert_emission(&mut send, 15, b"abc", false, 3, 12);
+        assert_emission(&mut send, 15, b"mno", true, 0, 15);
+        assert_eq!(send.retransmit(2, 11), 2);
+        assert_eq!(send.ack_and_drop(0, 3), 1);
+        assert_eq!(send.ack_off(), 12);
+        assert_emission(&mut send, 15, b"m", false, 0, 15);
+        assert_eq!(send.ack_and_drop(12, 3), 0);
+        send.ack_fin();
+        assert!(send.is_complete());
+        assert!(send.is_empty());
+    }
+
+    #[test]
+    fn sparse_ack_and_loss_match_byte_state_model() {
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        enum ByteState {
+            Pending,
+            InFlight,
+            Acked,
+        }
+        use ByteState::Acked;
+        use ByteState::InFlight;
+        use ByteState::Pending;
+        const DATA: &[u8] = b"abcdefghijklmnopqrstuvwxy";
+        for seed in 1_u32..=128 {
+            let mut send = <SendBuf>::new(DATA.len() as u64);
+            let mut model = [Pending; DATA.len()];
+            let mut highest = 0;
+            let mut rng = seed;
+            assert_eq!(send.write(DATA, false), Ok(DATA.len()));
+            for _ in 0..160 {
+                // Deterministic, dependency-free operation sequence.
+                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                let first = (rng >> 8) as usize % (DATA.len() + 1);
+                let len = (rng >> 16) as usize % (DATA.len() + 1);
+                let end = (first + len).min(highest);
+                let start = first.min(end);
+                match rng % 3 {
+                    0 => {
+                        let expected = model[start..end]
+                            .iter()
+                            .filter(|&&s| s == Pending)
+                            .count();
+                        model[start..end].fill(Acked);
+                        assert_eq!(
+                            send.ack_and_drop(first as u64, len),
+                            expected as u64
+                        );
+                    },
+                    1 => {
+                        let mut expected = 0;
+                        for state in &mut model[start..end] {
+                            if *state == InFlight {
+                                *state = Pending;
+                                expected += 1;
+                            }
+                        }
+                        assert_eq!(send.retransmit(first as u64, len), expected);
+                    },
+                    _ => {
+                        let start = model
+                            .iter()
+                            .position(|&s| s == Pending)
+                            .unwrap_or(DATA.len());
+                        let count = model[start..]
+                            .iter()
+                            .take(len)
+                            .take_while(|&&s| s == Pending)
+                            .count();
+                        let mut out = [0; DATA.len()];
+                        assert_eq!(send.emit(&mut out[..len]), (count, false));
+                        assert_eq!(&out[..count], &DATA[start..start + count]);
+                        model[start..start + count].fill(InFlight);
+                        highest = highest.max(start + count);
+                    },
+                }
+                assert_eq!(
+                    send.buffered_bytes(),
+                    model.iter().filter(|&&s| s == Pending).count() as u64,
+                    "seed {seed}"
+                );
+                assert_eq!(
+                    send.off_front(),
+                    model
+                        .iter()
+                        .position(|&s| s == Pending)
+                        .unwrap_or(DATA.len()) as u64,
+                    "seed {seed}"
+                );
+                assert_eq!(
+                    send.ack_off(),
+                    model.iter().take_while(|&&s| s == Acked).count() as u64,
+                    "seed {seed}"
+                );
+                for buf in &send.data {
+                    let start = buf.start_offset() as usize;
+                    let end = buf.max_off() as usize;
+                    assert!(model[start..end].iter().all(|&s| s != Acked));
+                }
+            }
+        }
     }
 
     #[test]
