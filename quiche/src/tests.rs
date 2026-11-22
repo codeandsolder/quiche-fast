@@ -2439,63 +2439,43 @@ fn stream_flow_control_update(
 }
 
 #[rstest]
-fn stream_left_bidi(
+fn stream_left(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert_eq!(3, pipe.client.peer_streams_left_bidi());
-    assert_eq!(3, pipe.server.peer_streams_left_bidi());
+    let remaining = |c: &Connection| {
+        if uni {
+            c.peer_streams_left_uni()
+        } else {
+            c.peer_streams_left_bidi()
+        }
+    };
+    assert_eq!(remaining(&pipe.client), 3);
+    assert_eq!(remaining(&pipe.server), 3);
 
-    pipe.server.stream_send(1, b"a", false).ok();
-    assert_eq!(2, pipe.server.peer_streams_left_bidi());
-    pipe.server.stream_send(5, b"a", false).ok();
-    assert_eq!(1, pipe.server.peer_streams_left_bidi());
+    for i in 0..3 {
+        let id = 4 * i + if uni { 3 } else { 1 };
+        assert_eq!(pipe.server.stream_send(id, b"a", false), Ok(1));
+        assert_eq!(remaining(&pipe.server), 2 - i);
+    }
 
-    pipe.server.stream_send(9, b"a", false).ok();
-    assert_eq!(0, pipe.server.peer_streams_left_bidi());
-
-    let frames = [frame::Frame::MaxStreamsBidi {
-        max: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    assert_eq!(MAX_STREAM_COUNT - 3, pipe.server.peer_streams_left_bidi());
-}
-
-#[rstest]
-fn stream_left_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    assert_eq!(3, pipe.client.peer_streams_left_uni());
-    assert_eq!(3, pipe.server.peer_streams_left_uni());
-
-    pipe.server.stream_send(3, b"a", false).ok();
-    assert_eq!(2, pipe.server.peer_streams_left_uni());
-    pipe.server.stream_send(7, b"a", false).ok();
-    assert_eq!(1, pipe.server.peer_streams_left_uni());
-
-    pipe.server.stream_send(11, b"a", false).ok();
-    assert_eq!(0, pipe.server.peer_streams_left_uni());
-
-    let frames = [frame::Frame::MaxStreamsUni {
-        max: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    assert_eq!(MAX_STREAM_COUNT - 3, pipe.server.peer_streams_left_uni());
+    let frame = if uni {
+        frame::Frame::MaxStreamsUni {
+            max: MAX_STREAM_COUNT,
+        }
+    } else {
+        frame::Frame::MaxStreamsBidi {
+            max: MAX_STREAM_COUNT,
+        }
+    };
+    assert!(pipe
+        .send_pkt_to_server(Type::Short, &[frame], &mut buf)
+        .is_ok());
+    assert_eq!(remaining(&pipe.server), MAX_STREAM_COUNT - 3);
 }
 
 #[rstest]
@@ -2546,28 +2526,33 @@ fn stream_limit_bidi(
 }
 
 #[rstest]
-fn stream_limit_max_bidi(
+fn stream_count_frame_bounds(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool, #[values(false, true)] blocked: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    let frames = [frame::Frame::MaxStreamsBidi {
-        max: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::MaxStreamsBidi {
-        max: MAX_STREAM_COUNT + 1,
-    }];
-
-    let pkt_type = Type::Short;
+    let make_frame = |count| match (uni, blocked) {
+        (false, false) => frame::Frame::MaxStreamsBidi { max: count },
+        (true, false) => frame::Frame::MaxStreamsUni { max: count },
+        (false, true) => frame::Frame::StreamsBlockedBidi { limit: count },
+        (true, true) => frame::Frame::StreamsBlockedUni { limit: count },
+    };
+    assert!(pipe
+        .send_pkt_to_server(
+            Type::Short,
+            &[make_frame(MAX_STREAM_COUNT)],
+            &mut buf
+        )
+        .is_ok());
     assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+        pipe.send_pkt_to_server(
+            Type::Short,
+            &[make_frame(MAX_STREAM_COUNT + 1)],
+            &mut buf
+        ),
         Err(Error::InvalidFrame),
     );
 }
@@ -2616,33 +2601,6 @@ fn stream_limit_uni(
     assert_eq!(
         pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
         Err(Error::StreamLimit),
-    );
-}
-
-#[rstest]
-fn stream_limit_max_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::MaxStreamsUni {
-        max: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::MaxStreamsUni {
-        max: MAX_STREAM_COUNT + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
     );
 }
 
@@ -2860,60 +2818,6 @@ fn stream_stop_counts(
     assert_eq!(stats.stopped_stream_count_remote, 0);
     assert_eq!(stats.reset_stream_count_local, 0);
     assert_eq!(stats.reset_stream_count_remote, 4);
-}
-
-#[rstest]
-fn streams_blocked_max_bidi(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::StreamsBlockedBidi {
-        limit: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::StreamsBlockedBidi {
-        limit: MAX_STREAM_COUNT + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
-    );
-}
-
-#[rstest]
-fn streams_blocked_max_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::StreamsBlockedUni {
-        limit: MAX_STREAM_COUNT,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::StreamsBlockedUni {
-        limit: MAX_STREAM_COUNT + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
-    );
 }
 
 #[rstest]
