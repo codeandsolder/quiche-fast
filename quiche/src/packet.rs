@@ -365,6 +365,9 @@ impl<'a> Header<'a> {
 
         if !Header::is_long(first) {
             // Decode short header.
+            if dcid_len > usize::from(MAX_CID_LEN) {
+                return Err(Error::InvalidPacket);
+            }
             let dcid = b.get_bytes(dcid_len)?;
 
             return Ok(Header {
@@ -457,13 +460,16 @@ impl<'a> Header<'a> {
     }
 
     pub(crate) fn to_bytes(&self, out: &mut octets::OctetsMut) -> Result<()> {
-        let mut first = 0;
-
-        // Encode pkt num length.
-        first |= self.pkt_num_len.saturating_sub(1) as u8;
+        if self.pkt_num_len > MAX_PKT_NUM_LEN {
+            return Err(Error::InvalidPacket);
+        }
+        // Zero is used for unprotected header-only packets (e.g. Retry).
+        let mut first = u8::try_from(self.pkt_num_len.saturating_sub(1))
+            .map_err(|_| Error::InvalidPacket)?;
 
         // Encode short header.
         if self.ty == Type::Short {
+            checked_cid_len(&self.dcid, MAX_CID_LEN)?;
             // Unset form bit for short header.
             first &= !FORM_BIT;
 
@@ -492,16 +498,29 @@ impl<'a> Header<'a> {
             _ => return Err(Error::InvalidPacket),
         };
 
+        // Supported versions have a 20-byte CID limit; version-independent
+        // long headers have an eight-bit CID length field.
+        let max_cid_len = if crate::version_is_supported(self.version) {
+            MAX_CID_LEN
+        } else {
+            u8::MAX
+        };
+        let dcid_len = checked_cid_len(&self.dcid, max_cid_len)?;
+        let scid_len = checked_cid_len(&self.scid, max_cid_len)?;
+        if self.ty == Type::Retry && self.token.is_none() {
+            return Err(Error::InvalidPacket);
+        }
+
         first |= FORM_BIT | FIXED_BIT | (ty << 4);
 
         out.put_u8(first)?;
 
         out.put_u32(self.version)?;
 
-        out.put_u8(self.dcid.len() as u8)?;
+        out.put_u8(dcid_len)?;
         out.put_bytes(&self.dcid)?;
 
-        out.put_u8(self.scid.len() as u8)?;
+        out.put_u8(scid_len)?;
         out.put_bytes(&self.scid)?;
 
         // Only Initial and Retry packets have a token.
@@ -522,7 +541,9 @@ impl<'a> Header<'a> {
 
             Type::Retry => {
                 // Retry packets don't have a token length.
-                out.put_bytes(self.token.as_ref().unwrap())?;
+                out.put_bytes(
+                    self.token.as_deref().ok_or(Error::InvalidPacket)?,
+                )?;
             },
 
             _ => (),
@@ -748,24 +769,27 @@ pub fn encrypt_pkt(
 pub fn encode_pkt_num(
     pn: u64, pn_len: usize, b: &mut octets::OctetsMut,
 ) -> Result<()> {
-    match pn_len {
-        1 => b.put_u8(pn as u8)?,
-
-        2 => b.put_u16(pn as u16)?,
-
-        3 => b.put_u24(pn as u32)?,
-
-        4 => b.put_u32(pn as u32)?,
-
-        _ => return Err(Error::InvalidPacket),
-    };
-
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || pn > octets::MAX_VAR_INT {
+        return Err(Error::InvalidPacket);
+    }
+    // QUIC transmits the least significant bytes of the full packet number.
+    let bytes = pn.to_be_bytes();
+    b.put_bytes(&bytes[bytes.len() - pn_len..])?;
     Ok(())
+}
+
+fn checked_cid_len(cid: &[u8], max_len: u8) -> Result<u8> {
+    u8::try_from(cid.len())
+        .ok()
+        .filter(|&len| len <= max_len)
+        .ok_or(Error::InvalidPacket)
 }
 
 pub fn negotiate_version(
     scid: &[u8], dcid: &[u8], out: &mut [u8],
 ) -> Result<usize> {
+    let scid_len = checked_cid_len(scid, u8::MAX)?;
+    let dcid_len = checked_cid_len(dcid, u8::MAX)?;
     let mut b = octets::OctetsMut::with_slice(out);
 
     let first = rand::rand_u8() | FORM_BIT;
@@ -773,9 +797,9 @@ pub fn negotiate_version(
     b.put_u8(first)?;
     b.put_u32(0)?;
 
-    b.put_u8(scid.len() as u8)?;
+    b.put_u8(scid_len)?;
     b.put_bytes(scid)?;
-    b.put_u8(dcid.len() as u8)?;
+    b.put_u8(dcid_len)?;
     b.put_bytes(dcid)?;
     b.put_u32(crate::PROTOCOL_VERSION_V1)?;
 
@@ -791,6 +815,7 @@ pub fn retry(
     if !crate::version_is_supported(version) {
         return Err(Error::UnknownVersion);
     }
+    checked_cid_len(dcid, MAX_CID_LEN)?;
 
     let hdr = Header {
         ty: Type::Retry,
@@ -818,9 +843,10 @@ pub fn verify_retry_integrity(
 ) -> Result<()> {
     const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
 
+    let received = b.as_ref().get(..TAG_LEN).ok_or(Error::InvalidPacket)?;
     let tag = compute_retry_integrity_tag(b, odcid, version)?;
 
-    crypto::verify_slices_are_equal(&b.as_ref()[..TAG_LEN], tag.as_ref())
+    crypto::verify_slices_are_equal(received, tag.as_ref())
 }
 
 fn compute_retry_integrity_tag(
@@ -838,12 +864,11 @@ fn compute_retry_integrity_tag(
         0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
     ];
 
-    let (key, nonce) = match version {
-        crate::PROTOCOL_VERSION_V1 =>
-            (&RETRY_INTEGRITY_KEY_V1, RETRY_INTEGRITY_NONCE_V1),
-
-        _ => (&RETRY_INTEGRITY_KEY_V1, RETRY_INTEGRITY_NONCE_V1),
-    };
+    if version != crate::PROTOCOL_VERSION_V1 {
+        return Err(Error::UnknownVersion);
+    }
+    let odcid_len = checked_cid_len(odcid, MAX_CID_LEN)?;
+    let (key, nonce) = (&RETRY_INTEGRITY_KEY_V1, RETRY_INTEGRITY_NONCE_V1);
 
     let hdr_len = b.off();
 
@@ -851,7 +876,7 @@ fn compute_retry_integrity_tag(
 
     let mut pb = octets::OctetsMut::with_slice(&mut pseudo);
 
-    pb.put_u8(odcid.len() as u8)?;
+    pb.put_u8(odcid_len)?;
     pb.put_bytes(odcid)?;
     pb.put_bytes(&b.buf()[..hdr_len])?;
 
@@ -1107,7 +1132,7 @@ impl PktNumManager {
             // Never overwrite skip_pn until the previous one has been verified
             debug_assert!(self.skip_pn.is_none());
             // The skip_pn_counter should be expired
-            debug_assert_eq!(self.skip_pn_counter.unwrap(), 0);
+            debug_assert_eq!(self.skip_pn_counter, Some(0));
         }
 
         self.skip_pn = skip_pn;
@@ -1256,7 +1281,7 @@ mod tests {
     fn initial_v1_dcid_too_long() {
         let hdr = Header {
             ty: Type::Initial,
-            version: crate::PROTOCOL_VERSION,
+            version: 0xafafafaf,
             dcid: vec![
                 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
                 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
@@ -1274,6 +1299,7 @@ mod tests {
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert!(hdr.to_bytes(&mut b).is_ok());
+        d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert_eq!(Header::from_bytes(&mut b, 21), Err(Error::InvalidPacket));
@@ -1283,7 +1309,7 @@ mod tests {
     fn initial_v1_scid_too_long() {
         let hdr = Header {
             ty: Type::Initial,
-            version: crate::PROTOCOL_VERSION,
+            version: 0xafafafaf,
             dcid: vec![0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba]
                 .into(),
             scid: vec![
@@ -1302,6 +1328,7 @@ mod tests {
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert!(hdr.to_bytes(&mut b).is_ok());
+        d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert_eq!(Header::from_bytes(&mut b, 9), Err(Error::InvalidPacket));
@@ -1381,6 +1408,85 @@ mod tests {
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
+    }
+
+    #[test]
+    fn packet_encoders_reject_unrepresentable_fields() {
+        let mut out = [0; 600];
+        let cid = [0; 256];
+        let max_cid = [1; 255];
+        assert_eq!(
+            super::negotiate_version(&cid, &[], &mut out),
+            Err(Error::InvalidPacket)
+        );
+        assert_eq!(
+            super::negotiate_version(&[], &cid, &mut out),
+            Err(Error::InvalidPacket)
+        );
+        let len = super::negotiate_version(&max_cid, &max_cid, &mut out).unwrap();
+        let hdr = Header::from_slice(&mut out[..len], 0).unwrap();
+        assert_eq!(hdr.scid.as_ref(), max_cid);
+        assert_eq!(hdr.dcid.as_ref(), max_cid);
+
+        let mut hdr = Header {
+            ty: Type::Initial,
+            version: crate::PROTOCOL_VERSION,
+            dcid: ConnectionId::from_ref(&cid[..21]),
+            scid: ConnectionId::default(),
+            pkt_num: 0,
+            pkt_num_len: 2,
+            token: None,
+            versions: None,
+            key_phase: false,
+        };
+        let mut b = octets::OctetsMut::with_slice(&mut out);
+        assert_eq!(hdr.to_bytes(&mut b), Err(Error::InvalidPacket));
+        assert_eq!(b.off(), 0);
+        hdr.scid = hdr.dcid.clone();
+        hdr.dcid = ConnectionId::default();
+        assert_eq!(hdr.to_bytes(&mut b), Err(Error::InvalidPacket));
+        hdr.scid = ConnectionId::default();
+        hdr.pkt_num_len = MAX_PKT_NUM_LEN + 1;
+        assert_eq!(hdr.to_bytes(&mut b), Err(Error::InvalidPacket));
+        hdr.pkt_num_len = 0;
+        hdr.ty = Type::Retry;
+        assert_eq!(hdr.to_bytes(&mut b), Err(Error::InvalidPacket));
+        assert_eq!(b.off(), 0);
+        assert_eq!(
+            super::retry(
+                &[],
+                &cid[..21],
+                &[],
+                &[],
+                crate::PROTOCOL_VERSION,
+                &mut out
+            ),
+            Err(Error::InvalidPacket)
+        );
+    }
+
+    #[test]
+    fn packet_number_encoding_keeps_only_the_requested_low_bytes() {
+        let pn = 0x1234_5678_9abc_def0;
+        for width in 1..=MAX_PKT_NUM_LEN {
+            let mut out = [0; MAX_PKT_NUM_LEN];
+            let mut b = octets::OctetsMut::with_slice(&mut out);
+            assert_eq!(encode_pkt_num(pn, width, &mut b), Ok(()));
+            assert_eq!(b.off(), width);
+            assert_eq!(&out[..width], &pn.to_be_bytes()[8 - width..]);
+        }
+        let mut out = [0; MAX_PKT_NUM_LEN];
+        let mut b = octets::OctetsMut::with_slice(&mut out);
+        assert_eq!(encode_pkt_num(pn, 0, &mut b), Err(Error::InvalidPacket));
+        assert_eq!(
+            encode_pkt_num(pn, MAX_PKT_NUM_LEN + 1, &mut b),
+            Err(Error::InvalidPacket)
+        );
+        assert_eq!(
+            encode_pkt_num(octets::MAX_VAR_INT + 1, 4, &mut b),
+            Err(Error::InvalidPacket)
+        );
+        assert_eq!(b.off(), 0);
     }
 
     #[test]
