@@ -4571,7 +4571,10 @@ impl<F: BufFactory> Connection<F> {
                         // queued.
                         if stream.is_flushable() && !was_flushable {
                             let priority_key = Arc::clone(stream.priority_key());
-                            self.streams.insert_flushable(&priority_key);
+                            self.streams.enqueue(
+                                &priority_key,
+                                stream::PriorityQueue::Flushable,
+                            );
                         }
 
                         // Update tx_buffered when data is marked for
@@ -5644,7 +5647,10 @@ impl<F: BufFactory> Connection<F> {
                         if stream.incremental() {
                             let priority_key = Arc::clone(stream.priority_key());
                             self.streams.remove_flushable(&priority_key);
-                            self.streams.insert_flushable(&priority_key);
+                            self.streams.enqueue(
+                                &priority_key,
+                                stream::PriorityQueue::Flushable,
+                            );
                         }
 
                         break;
@@ -5708,7 +5714,8 @@ impl<F: BufFactory> Connection<F> {
                     // Shuffle the incremental stream to the back of the
                     // queue.
                     self.streams.remove_flushable(&priority_key);
-                    self.streams.insert_flushable(&priority_key);
+                    self.streams
+                        .enqueue(&priority_key, stream::PriorityQueue::Flushable);
                 }
 
                 // Update tx_buffered when data is emitted.
@@ -6319,7 +6326,8 @@ impl<F: BufFactory> Connection<F> {
         if priority_key.incremental && readable {
             // Shuffle the incremental stream to the back of the queue.
             self.streams.remove_readable(&priority_key);
-            self.streams.insert_readable(&priority_key);
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Readable);
         }
 
         Ok((read, fin))
@@ -6509,7 +6517,8 @@ impl<F: BufFactory> Connection<F> {
                 // again once the capacity increases.
                 //
                 // Since the stream is writable already, mark it here instead.
-                self.streams.insert_writable(&priority_key);
+                self.streams
+                    .enqueue(&priority_key, stream::PriorityQueue::Writable);
             }
 
             return Err(Error::Done);
@@ -6552,7 +6561,8 @@ impl<F: BufFactory> Connection<F> {
         // If the stream is now flushable push it to the flushable queue, but
         // only if it wasn't already queued.
         if flushable && !was_flushable {
-            self.streams.insert_flushable(&priority_key);
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Flushable);
         }
 
         if !writable {
@@ -6564,7 +6574,8 @@ impl<F: BufFactory> Connection<F> {
             // again once the capacity increases.
             //
             // Since the stream is writable already, mark it here instead.
-            self.streams.insert_writable(&priority_key);
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Writable);
         }
 
         self.tx_cap -= sent;
@@ -6600,7 +6611,8 @@ impl<F: BufFactory> Connection<F> {
         if incremental && writable {
             // Shuffle the incremental stream to the back of the queue.
             self.streams.remove_writable(&priority_key);
-            self.streams.insert_writable(&priority_key);
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Writable);
         }
 
         Ok(ret)
@@ -6951,7 +6963,8 @@ impl<F: BufFactory> Connection<F> {
             // again once the capacity increases.
             //
             // Since the stream is writable already, mark it here instead.
-            self.streams.insert_writable(&priority_key);
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Writable);
         }
 
         Ok(false)
@@ -9041,7 +9054,8 @@ impl<F: BufFactory> Connection<F> {
                 let local = stream.local;
 
                 if !was_readable && stream.is_readable() {
-                    self.streams.insert_readable(&priority_key);
+                    self.streams
+                        .enqueue(&priority_key, stream::PriorityQueue::Readable);
                 }
 
                 self.rx_data += max_data_delta;
@@ -9132,7 +9146,10 @@ impl<F: BufFactory> Connection<F> {
 
                     self.streams.insert_reset(stream_id, error_code, final_size);
 
-                    self.streams.insert_stopped_writable(&priority_key);
+                    self.streams.enqueue(
+                        &priority_key,
+                        stream::PriorityQueue::StoppedWritable,
+                    );
 
                     self.stopped_stream_remote_count =
                         self.stopped_stream_remote_count.saturating_add(1);
@@ -9224,7 +9241,8 @@ impl<F: BufFactory> Connection<F> {
                 let local = stream.local;
 
                 if !was_readable && stream.is_readable() {
-                    self.streams.insert_readable(&priority_key);
+                    self.streams
+                        .enqueue(&priority_key, stream::PriorityQueue::Readable);
                 }
 
                 self.rx_data += max_off_delta;
@@ -9288,11 +9306,13 @@ impl<F: BufFactory> Connection<F> {
                 // is already present.
                 if stream.is_flushable() && !was_flushable {
                     let priority_key = Arc::clone(stream.priority_key());
-                    self.streams.insert_flushable(&priority_key);
+                    self.streams
+                        .enqueue(&priority_key, stream::PriorityQueue::Flushable);
                 }
 
                 if writable {
-                    self.streams.insert_writable(&priority_key);
+                    self.streams
+                        .enqueue(&priority_key, stream::PriorityQueue::Writable);
                 }
             },
 
