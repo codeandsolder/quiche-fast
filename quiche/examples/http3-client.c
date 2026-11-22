@@ -109,8 +109,8 @@ static int for_each_setting(uint64_t identifier, uint64_t value,
     return 0;
 }
 
-static int for_each_header(uint8_t *name, size_t name_len,
-                           uint8_t *value, size_t value_len,
+static int for_each_header(const uint8_t *name, size_t name_len,
+                           const uint8_t *value, size_t value_len,
                            void *argp) {
     fprintf(stderr, "got HTTP header: %.*s=%.*s\n",
             (int) name_len, name, (int) value_len, value);

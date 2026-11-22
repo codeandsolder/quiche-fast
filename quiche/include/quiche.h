@@ -145,7 +145,7 @@ enum quiche_error {
 // Returns a human readable string with the quiche version number.
 const char *quiche_version(void);
 
-// Enables logging. |cb| will be called with log messages
+// Enables logging. |cb| will be called with log messages; NULL is invalid.
 int quiche_enable_debug_logging(void (*cb)(const char *line, void *argp),
                                 void *argp);
 
@@ -347,14 +347,16 @@ quiche_conn *quiche_conn_new_with_tls_and_client_dcid(const uint8_t *scid, size_
 bool quiche_conn_set_keylog_path(quiche_conn *conn, const char *path);
 
 // Enables keylog to the specified file descriptor. Unix only.
-void quiche_conn_set_keylog_fd(quiche_conn *conn, int fd);
+// Returns true if ownership of fd was accepted; on false the caller retains it.
+bool quiche_conn_set_keylog_fd(quiche_conn *conn, int fd);
 
 // Enables qlog to the specified file path. Returns true on success.
 bool quiche_conn_set_qlog_path(quiche_conn *conn, const char *path,
                           const char *log_title, const char *log_desc);
 
 // Enables qlog to the specified file descriptor. Unix only.
-void quiche_conn_set_qlog_fd(quiche_conn *conn, int fd, const char *log_title,
+// Returns true if ownership of fd was accepted; on false the caller retains it.
+bool quiche_conn_set_qlog_fd(quiche_conn *conn, int fd, const char *log_title,
                              const char *log_desc);
 
 // Configures the given session for resumption.
@@ -1178,9 +1180,10 @@ uint32_t quiche_h3_event_type(const quiche_h3_event *ev);
 // the validity of pseudo-headers and headers. If `cb` returns any value other
 // than `0`, processing will be interrupted and the value is returned to the
 // caller.
+// A NULL callback is rejected before processing.
 int quiche_h3_event_for_each_header(quiche_h3_event *ev,
-                                    int (*cb)(uint8_t *name, size_t name_len,
-                                              uint8_t *value, size_t value_len,
+                                    int (*cb)(const uint8_t *name, size_t name_len,
+                                              const uint8_t *value, size_t value_len,
                                               void *argp),
                                     void *argp);
 
@@ -1189,6 +1192,7 @@ int quiche_h3_event_for_each_header(quiche_h3_event *ev,
 // The `cb` callback will be called for each setting in `conn`.
 // If `cb` returns any value other than `0`, processing will be interrupted and
 // the value is returned to the caller.
+// A NULL callback is rejected before processing.
 int quiche_h3_for_each_setting(quiche_h3_conn *conn,
                                int (*cb)(uint64_t identifier,
                                          uint64_t value, void *argp),
@@ -1269,10 +1273,11 @@ int quiche_h3_send_priority_update_for_request(quiche_h3_conn *conn,
 // The `cb` callback will be called once. `cb` should check the validity of
 // priority field value contents. If `cb` returns any value other than `0`,
 // processing will be interrupted and the value is returned to the caller.
+// A NULL callback is rejected before processing.
 int quiche_h3_take_last_priority_update(quiche_h3_conn *conn,
                                         uint64_t prioritized_element_id,
-                                        int (*cb)(uint8_t  *priority_field_value,
-                                                  uint64_t priority_field_value_len,
+                                        int (*cb)(const uint8_t *priority_field_value,
+                                                  size_t priority_field_value_len,
                                                   void *argp),
                                         void *argp);
 

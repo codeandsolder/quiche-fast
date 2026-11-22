@@ -41,6 +41,7 @@ use crate::h3::Priority;
 
 const H3_FFI_ERR_INVALID_ARGUMENT: i16 = -21;
 
+use crate::ffi::ffi_free;
 use crate::ffi::ffi_mut;
 use crate::ffi::ffi_out;
 use crate::ffi::ffi_ref;
@@ -108,9 +109,7 @@ pub extern "C" fn quiche_h3_config_set_max_priority_update_size(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_free(config: *mut h3::Config) {
-    if !config.is_null() {
-        drop(unsafe { Box::from_raw(config) });
-    }
+    ffi_free!(config);
 }
 
 #[no_mangle]
@@ -130,9 +129,14 @@ pub extern "C" fn quiche_h3_conn_new_with_transport(
 #[no_mangle]
 pub extern "C" fn quiche_h3_for_each_setting(
     conn: *const h3::Connection,
-    cb: extern "C" fn(identifier: u64, value: u64, argp: *mut c_void) -> c_int,
+    cb: Option<
+        extern "C" fn(identifier: u64, value: u64, argp: *mut c_void) -> c_int,
+    >,
     argp: *mut c_void,
 ) -> c_int {
+    let Some(cb) = cb else {
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
+    };
     let conn = ffi_ref!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.peer_settings_raw() {
@@ -196,17 +200,22 @@ pub extern "C" fn quiche_h3_event_type(ev: *const h3::Event) -> u32 {
 #[no_mangle]
 pub extern "C" fn quiche_h3_event_for_each_header(
     ev: *const h3::Event,
-    cb: extern "C" fn(
-        name: *const u8,
-        name_len: size_t,
+    cb: Option<
+        extern "C" fn(
+            name: *const u8,
+            name_len: size_t,
 
-        value: *const u8,
-        value_len: size_t,
+            value: *const u8,
+            value_len: size_t,
 
-        argp: *mut c_void,
-    ) -> c_int,
+            argp: *mut c_void,
+        ) -> c_int,
+    >,
     argp: *mut c_void,
 ) -> c_int {
+    let Some(cb) = cb else {
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
+    };
     let ev = ffi_ref!(ev, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match ev {
@@ -255,9 +264,7 @@ pub extern "C" fn quiche_h3_extended_connect_enabled_by_peer(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_event_free(ev: *mut h3::Event) {
-    if !ev.is_null() {
-        drop(unsafe { Box::from_raw(ev) });
-    }
+    ffi_free!(ev);
 }
 
 #[repr(C)]
@@ -269,24 +276,41 @@ pub struct Header {
     value_len: usize,
 }
 
+// The header-sending C entry points all validate the same two connection
+// pointers and borrowed header array before invoking their Rust operation.
+fn header_operation<T>(
+    conn: *mut h3::Connection, quic_conn: *mut Connection,
+    headers: *const Header, headers_len: size_t,
+    op: impl FnOnce(
+        &mut h3::Connection,
+        &mut Connection,
+        &[h3::HeaderRef<'_>],
+    ) -> h3::Result<T>,
+) -> std::result::Result<T, i16> {
+    let conn = ffi_mut!(conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
+    // SAFETY: the C entry points require the header array and its fields
+    // to remain readable for this call; no borrow escapes the operation.
+    let headers = unsafe { headers_from_ptr(headers, headers_len) }
+        .map_err(|()| H3_FFI_ERR_INVALID_ARGUMENT)?;
+    op(conn, quic_conn, &headers).map_err(|e| e.to_c())
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_request(
     conn: *mut h3::Connection, quic_conn: *mut Connection,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> i64 {
-    let conn = ffi_mut!(conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(req_headers) = headers_from_ptr(headers, headers_len) else {
-        return i64::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_request(quic_conn, &req_headers, fin) {
-        Ok(v) =>
-            i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT)),
-
-        Err(e) => i64::from(e.to_c()),
-    }
+    header_operation(
+        conn,
+        quic_conn,
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| conn.send_request(quic_conn, headers, fin),
+    )
+    .map_or_else(i64::from, |v| {
+        i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
+    })
 }
 
 #[no_mangle]
@@ -294,18 +318,16 @@ pub extern "C" fn quiche_h3_send_response(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(resp_headers) = headers_from_ptr(headers, headers_len) else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_response(quic_conn, stream_id, &resp_headers, fin) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    header_operation(
+        conn,
+        quic_conn,
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_response(quic_conn, stream_id, headers, fin)
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
@@ -314,25 +336,19 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
     headers: *const Header, headers_len: size_t, priority: *const Priority,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
     let priority = ffi_ref!(priority, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(resp_headers) = headers_from_ptr(headers, headers_len) else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_response_with_priority(
+    header_operation(
+        conn,
         quic_conn,
-        stream_id,
-        &resp_headers,
-        priority,
-        fin,
-    ) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_response_with_priority(
+                quic_conn, stream_id, headers, priority, fin,
+            )
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
@@ -341,24 +357,22 @@ pub extern "C" fn quiche_h3_send_additional_headers(
     headers: *const Header, headers_len: size_t, is_trailer_section: bool,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(headers) = headers_from_ptr(headers, headers_len) else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_additional_headers(
+    header_operation(
+        conn,
         quic_conn,
-        stream_id,
-        &headers,
-        is_trailer_section,
-        fin,
-    ) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_additional_headers(
+                quic_conn,
+                stream_id,
+                headers,
+                is_trailer_section,
+                fin,
+            )
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
@@ -463,13 +477,18 @@ pub extern "C" fn quiche_h3_send_priority_update_for_request(
 #[no_mangle]
 pub extern "C" fn quiche_h3_take_last_priority_update(
     conn: *mut h3::Connection, prioritized_element_id: u64,
-    cb: extern "C" fn(
-        priority_field_value: *const u8,
-        priority_field_value_len: size_t,
-        argp: *mut c_void,
-    ) -> c_int,
+    cb: Option<
+        extern "C" fn(
+            priority_field_value: *const u8,
+            priority_field_value_len: size_t,
+            argp: *mut c_void,
+        ) -> c_int,
+    >,
     argp: *mut c_void,
 ) -> c_int {
+    let Some(cb) = cb else {
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
+    };
     let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.take_last_priority_update(prioritized_element_id) {
@@ -499,21 +518,26 @@ pub extern "C" fn quiche_h3_dgram_enabled_by_peer(
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_conn_free(conn: *mut h3::Connection) {
-    if !conn.is_null() {
-        drop(unsafe { Box::from_raw(conn) });
-    }
+    ffi_free!(conn);
 }
 
-fn headers_from_ptr<'a>(
+/// # Safety
+/// The header array and all nonempty name/value slices must remain readable
+/// for the returned borrow; the caller must not mutate them during that time.
+unsafe fn headers_from_ptr<'a>(
     ptr: *const Header, len: size_t,
 ) -> std::result::Result<Vec<h3::HeaderRef<'a>>, ()> {
+    // SAFETY: the caller supplies the readable header array.
     let headers = unsafe { ffi_slice_from_raw_parts(ptr, len) }.ok_or(())?;
 
-    let mut out = Vec::with_capacity(headers.len());
+    let mut out = Vec::new();
+    out.try_reserve_exact(headers.len()).map_err(|_| ())?;
 
     for h in headers {
+        // SAFETY: each nonempty field is readable for the returned borrow.
         let name =
             unsafe { ffi_slice_from_raw_parts(h.name, h.name_len) }.ok_or(())?;
+        // SAFETY: same caller contract for the value field.
         let value =
             unsafe { ffi_slice_from_raw_parts(h.value, h.value_len) }.ok_or(())?;
 
@@ -568,11 +592,40 @@ mod tests {
     }
 
     #[test]
+    fn null_callbacks_are_rejected() {
+        let ev = h3::Event::Headers {
+            list: Vec::new(),
+            more_frames: false,
+        };
+        assert_eq!(
+            quiche_h3_event_for_each_header(&ev, None, ptr::null_mut()),
+            c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
+        );
+        assert_eq!(
+            quiche_h3_for_each_setting(ptr::null(), None, ptr::null_mut()),
+            c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
+        );
+        assert_eq!(
+            quiche_h3_take_last_priority_update(
+                ptr::null_mut(),
+                0,
+                None,
+                ptr::null_mut()
+            ),
+            c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
     fn mismatched_h3_header_event_accessor_is_safe() {
         let ev = h3::Event::Data;
 
         assert_eq!(
-            quiche_h3_event_for_each_header(&ev, count_header, ptr::null_mut(),),
+            quiche_h3_event_for_each_header(
+                &ev,
+                Some(count_header),
+                ptr::null_mut(),
+            ),
             c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert!(!quiche_h3_event_headers_has_more_frames(&ev));
@@ -601,7 +654,7 @@ mod tests {
         assert_eq!(
             quiche_h3_event_for_each_header(
                 ptr::null(),
-                count_header,
+                Some(count_header),
                 ptr::null_mut(),
             ),
             c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
@@ -646,8 +699,12 @@ mod tests {
 
     #[test]
     fn h3_header_slices_accept_null_zero_and_reject_bad_parts() {
-        assert!(headers_from_ptr(ptr::null(), 0).unwrap().is_empty());
-        assert!(headers_from_ptr(ptr::null(), 1).is_err());
+        // SAFETY: valid local storage or null inputs rejected on validation.
+        assert!(unsafe { headers_from_ptr(ptr::null(), 0) }
+            .unwrap()
+            .is_empty());
+        // SAFETY: valid local storage or null inputs rejected on validation.
+        assert!(unsafe { headers_from_ptr(ptr::null(), 1) }.is_err());
 
         let empty = Header {
             name: ptr::null_mut(),
@@ -655,7 +712,8 @@ mod tests {
             value: ptr::null_mut(),
             value_len: 0,
         };
-        let headers = headers_from_ptr(&empty, 1).unwrap();
+        // SAFETY: valid local storage or null inputs rejected on validation.
+        let headers = unsafe { headers_from_ptr(&empty, 1) }.unwrap();
         assert_eq!(headers.len(), 1);
         assert!(headers[0].name().is_empty());
         assert!(headers[0].value().is_empty());
@@ -666,7 +724,8 @@ mod tests {
             value: ptr::null_mut(),
             value_len: 0,
         };
-        assert!(headers_from_ptr(&bad_name, 1).is_err());
+        // SAFETY: valid local storage or null inputs rejected on validation.
+        assert!(unsafe { headers_from_ptr(&bad_name, 1) }.is_err());
 
         let bad_value = Header {
             name: ptr::null_mut(),
@@ -674,6 +733,7 @@ mod tests {
             value: ptr::null_mut(),
             value_len: 1,
         };
-        assert!(headers_from_ptr(&bad_value, 1).is_err());
+        // SAFETY: valid local storage or null inputs rejected on validation.
+        assert!(unsafe { headers_from_ptr(&bad_value, 1) }.is_err());
     }
 }
