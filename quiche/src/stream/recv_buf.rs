@@ -158,7 +158,8 @@ impl RecvBuf {
             // get stuck when a buffer with lower offset than the stream's is
             // buffered.
             if self.off_front() > buf.off() {
-                buf = buf.split_off((self.off_front() - buf.off()) as usize);
+                buf =
+                    buf.split_off(self.off_front()).ok_or(Error::InvalidState)?;
             }
 
             // Handle overlapping data. If the incoming data's starting offset
@@ -183,13 +184,16 @@ impl RecvBuf {
 
                     // New buffer's start overlaps existing buffer.
                     if off >= b.off() && off < b.max_off() {
-                        buf = buf.split_off((b.max_off() - off) as usize);
+                        buf = buf
+                            .split_off(b.max_off())
+                            .ok_or(Error::InvalidState)?;
                     }
 
                     // New buffer's end overlaps existing buffer.
                     if off < b.off() && buf.max_off() > b.off() {
-                        tmp_bufs
-                            .push_back(buf.split_off((b.off() - off) as usize));
+                        tmp_bufs.push_back(
+                            buf.split_off(b.off()).ok_or(Error::InvalidState)?,
+                        );
                     }
                 }
             }

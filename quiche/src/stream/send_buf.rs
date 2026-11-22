@@ -355,109 +355,65 @@ impl<F: BufFactory> SendBuf<F> {
         self.ack(off, len);
 
         let ack_off = self.ack_off();
-
-        if self.data.is_empty() {
-            return 0;
-        }
-
         if off > ack_off {
             return 0;
         }
 
-        let mut drop_until = None;
-
-        // Drop contiguously acked data from the front of the buffer.
-        for (i, buf) in self.data.iter_mut().enumerate() {
-            // Newly acked range is past highest contiguous acked range, so we
-            // can't drop it.
-            if buf.off >= ack_off {
+        let mut dropped = 0;
+        let mut removed = 0;
+        while let Some(buf) = self.data.front_mut() {
+            if buf.start_offset() >= ack_off {
                 break;
             }
-
-            // Highest contiguous acked range falls within newly acked range,
-            // so we can't drop it.
-            if buf.off < ack_off && ack_off < buf.max_off() {
+            if buf.max_off() > ack_off {
+                dropped += buf.acknowledge_prefix(ack_off);
                 break;
             }
-
-            // Newly acked range can be dropped.
-            drop_until = Some(i);
+            dropped += buf.len() as u64;
+            self.data.pop_front();
+            removed += 1;
         }
 
-        if let Some(drop) = drop_until {
-            // Calculate the total length of buffers being dropped and subtract
-            // from buffered_bytes.
-            let dropped_len: u64 =
-                (0..=drop).map(|i| self.data[i].len() as u64).sum();
-            self.buffered_bytes = self.buffered_bytes.saturating_sub(dropped_len);
-
-            self.data.drain(..=drop);
-
-            // When a buffer is marked for retransmission, but then acked before
-            // it could be retransmitted, we might end up decreasing the SendBuf
-            // position too much, so make sure that doesn't happen.
-            self.pos = self.pos.saturating_sub(drop + 1);
-
-            dropped_len
-        } else {
-            0
-        }
+        self.pos = self.pos.saturating_sub(removed);
+        self.buffered_bytes = self.buffered_bytes.saturating_sub(dropped);
+        dropped
     }
 
     pub fn retransmit(&mut self, off: u64, len: usize) -> u64 {
-        let max_off = off + len as u64;
-        let ack_off = self.ack_off();
-
-        if self.data.is_empty() {
-            return 0;
-        }
-
-        if max_off <= ack_off {
+        let end = off.saturating_add(len as u64).min(self.emit_off);
+        let start = off.max(self.ack_off());
+        if start >= end {
             return 0;
         }
 
         let mut total_retransmitted = 0;
-
         for i in 0..self.data.len() {
             let buf = &mut self.data[i];
-
-            if buf.off >= max_off {
+            if buf.start_offset() >= end {
                 break;
             }
-
-            if off > buf.max_off() {
+            if start >= buf.max_off() {
                 continue;
             }
 
-            // Split the buffer into 2 if the retransmit range ends before the
-            // buffer's final offset.
-            let new_buf = if buf.off < max_off && max_off < buf.max_off() {
-                Some(buf.split_off((max_off - buf.off) as usize))
+            // Preserve the pending cursor of any suffix outside this loss.
+            let tail = if end < buf.max_off() {
+                buf.split_off(end)
             } else {
                 None
             };
+            let retransmitted = buf.rewind_to(start);
+            if retransmitted != 0 {
+                self.pos = self.pos.min(i);
+                self.buffered_bytes += retransmitted;
+                total_retransmitted += retransmitted;
+            }
 
-            let prev_pos = buf.pos;
-
-            // Expand the buffer by moving its position back when the retransmit
-            // range starts after the buffer offset.
-            buf.pos = if off > buf.off && off <= buf.max_off() {
-                cmp::min(buf.pos, buf.start + (off - buf.off) as usize)
-            } else {
-                buf.start
-            };
-
-            self.pos = cmp::min(self.pos, i);
-
-            let retransmitted = (prev_pos - buf.pos) as u64;
-            self.buffered_bytes += retransmitted;
-            total_retransmitted += retransmitted;
-
-            if let Some(b) = new_buf {
-                self.data.insert(i + 1, b);
+            if let Some(tail) = tail {
+                self.data.insert(i + 1, tail);
+                break;
             }
         }
-
         total_retransmitted
     }
 
@@ -1045,6 +1001,24 @@ mod tests {
         send.retransmit(3, 5);
         assert_eq!(send.buffered_bytes, 6);
         assert_eq!(send.off_front(), 3);
+    }
+
+    #[test]
+    fn contiguous_partial_ack_releases_pending_prefix() {
+        let mut send = <SendBuf>::new(u64::MAX);
+        let mut out = [0; 5];
+        assert_eq!(send.write(b"hello", true), Ok(5));
+        assert_eq!(send.emit(&mut out), Ok((5, true)));
+        assert_eq!(send.retransmit(0, 5), 5);
+
+        assert_eq!(send.ack_and_drop(0, 2), 2);
+        assert_eq!(send.buffered_bytes(), 3);
+        assert_eq!(send.off_front(), 2);
+        assert_eq!(send.retransmit(0, 5), 0);
+        assert_eq!(send.emit(&mut out), Ok((3, true)));
+        assert_eq!(&out[..3], b"llo");
+        assert_eq!(send.retransmit(0, 5), 3);
+        assert_eq!(send.off_front(), 2);
     }
 
     #[test]
