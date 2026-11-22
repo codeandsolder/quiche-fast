@@ -156,27 +156,32 @@ impl<F: BufFactory> SendBuf<F> {
     fn reserve_for_write(
         &mut self, mut len: usize, mut fin: bool,
     ) -> Result<SendReserve<'_, F>> {
-        let max_off = self.off + len as u64;
+        let requested_end = self.off.checked_add(len as u64);
 
         // Get the stream send capacity. This will return an error if the stream
-        // was stopped.
-        if len > self.cap()? {
-            len = self.cap()?;
+        // was stopped. Clamp before calculating the accepted end offset.
+        let cap = self.cap()?;
+        if len > cap {
+            len = cap;
             fin = false;
         }
 
         if let Some(fin_off) = self.fin_off {
+            let requested_end = requested_end.ok_or(Error::FinalSize)?;
             // Can't write past final offset.
-            if max_off > fin_off {
+            if requested_end > fin_off {
                 return Err(Error::FinalSize);
             }
 
             // Can't "undo" final offset.
-            if max_off == fin_off && !fin {
+            if requested_end == fin_off && !fin {
                 return Err(Error::FinalSize);
             }
         }
 
+        // The accepted length is bounded by the remaining u64 credit, even
+        // when that credit exceeds usize::MAX on this target.
+        let max_off = self.off + len as u64;
         if fin && self.fin_off.is_none() {
             self.fin_off = Some(max_off);
             self.fin_pending = true;
@@ -484,7 +489,9 @@ impl<F: BufFactory> SendBuf<F> {
 
         // Mark relevant data as acked.
         self.off = unsent_off;
-        self.ack(0, self.off as usize);
+        // This covers the entire logical stream, not a single in-memory
+        // buffer. Keep the ACK range in the u64 stream-offset domain.
+        self.acked.insert(0..self.off);
 
         self.pos = 0;
         self.buffered_bytes = 0;
@@ -622,14 +629,18 @@ impl<F: BufFactory> SendBuf<F> {
         }
     }
 
-    /// Returns the outgoing flow control capacity.
+    /// Returns the outgoing flow control capacity, capped at `usize::MAX`.
+    ///
+    /// # Errors
+    /// Returns [`Error::StreamStopped`] if the peer stopped the stream.
     pub fn cap(&self) -> Result<usize> {
         // The stream was stopped, so return the error code instead.
         if let Some(e) = self.error {
             return Err(Error::StreamStopped(e));
         }
 
-        Ok((self.max_data - self.off) as usize)
+        Ok(usize::try_from(self.max_data.saturating_sub(self.off))
+            .unwrap_or(usize::MAX))
     }
 
     /// Returns the number of separate buffers stored.
@@ -668,6 +679,56 @@ mod tests {
         let (written, fin) = send.emit(&mut buf).unwrap();
         assert_eq!(written, 0);
         assert!(!fin);
+    }
+
+    #[test]
+    fn send_credit_preserves_large_remaining_windows() {
+        const LARGE: u64 = 1_u64 << 32;
+        let mut send = <SendBuf>::new(LARGE);
+        assert_eq!(send.cap(), Ok(usize::try_from(LARGE).unwrap_or(usize::MAX)));
+        assert_eq!(send.write(b"hello", false), Ok(5));
+        assert_eq!(send.off_back(), 5);
+
+        let mut send = <SendBuf>::new(LARGE + 8);
+        send.seed_offsets_for_test(LARGE + 3);
+        assert_eq!(send.cap(), Ok(5));
+        assert_eq!(send.write(b"hello!", true), Ok(5));
+        assert_eq!(send.off_back(), LARGE + 8);
+        assert!(!send.is_fin_pending());
+        assert_eq!(send.cap(), Ok(0));
+        send.update_max_data(LARGE + 9);
+        assert_eq!(send.write(b"!", true), Ok(1));
+        assert!(send.is_fin_pending());
+    }
+
+    #[test]
+    fn stream_reset_keeps_full_logical_ack_range() {
+        const OFFSET: u64 = (1_u64 << 32) + 17;
+        let mut send = <SendBuf>::new(OFFSET + 10);
+        send.seed_offsets_for_test(OFFSET);
+        assert_eq!(send.write(b"hello", false), Ok(5));
+        let mut output = [0; 2];
+        assert_eq!(send.emit(&mut output), Ok((2, false)));
+        assert_eq!(send.shutdown(), Ok((OFFSET + 2, 3)));
+        assert_eq!(send.ack_off(), OFFSET + 2);
+        assert_eq!(send.off_back(), OFFSET + 2);
+        assert!(send.is_complete());
+        assert!(send.is_empty());
+        assert_eq!(send.buffered_bytes(), 0);
+    }
+
+    #[test]
+    fn write_clamps_before_computing_the_accepted_offset() {
+        let mut send = <SendBuf>::new(u64::MAX);
+        send.seed_offsets_for_test(u64::MAX - 2);
+        assert_eq!(send.write(b"hello", true), Ok(2));
+        assert_eq!(send.off_back(), u64::MAX);
+        assert_eq!(send.cap(), Ok(0));
+        assert!(!send.is_fin_pending());
+        assert_eq!(send.write(b"more", false), Ok(0));
+        assert_eq!(send.write(b"", true), Ok(0));
+        assert!(send.is_fin_pending());
+        assert_eq!(send.write(b"more", true), Err(Error::FinalSize));
     }
 
     #[test]
