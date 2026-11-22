@@ -42,6 +42,7 @@ use crate::h3::Priority;
 const H3_FFI_ERR_INVALID_ARGUMENT: i16 = -21;
 
 use crate::ffi::ffi_mut;
+use crate::ffi::ffi_out;
 use crate::ffi::ffi_ref;
 use crate::ffi::ffi_slice;
 use crate::ffi::ffi_slice_from_raw_parts;
@@ -158,13 +159,15 @@ pub extern "C" fn quiche_h3_conn_poll(
 ) -> i64 {
     let conn = ffi_mut!(conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
     let quic_conn = ffi_mut!(quic_conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let ev = ffi_mut!(ev, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let ev = ffi_out!(ev, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.poll(quic_conn) {
         Ok((id, v)) => {
-            *ev = Box::into_raw(Box::new(v));
-
-            i64::try_from(id).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
+            let Ok(id) = i64::try_from(id) else {
+                return i64::from(H3_FFI_ERR_INVALID_ARGUMENT);
+            };
+            ev.write(Box::into_raw(Box::new(v)));
+            id
         },
 
         Err(e) => i64::from(e.to_c()),
@@ -423,7 +426,7 @@ pub extern "C" fn quiche_h3_send_goaway(
 pub extern "C" fn quiche_h3_parse_extensible_priority(
     priority: *const u8, priority_len: size_t, parsed: *mut Priority,
 ) -> c_int {
-    let parsed = ffi_mut!(parsed, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let parsed = ffi_out!(parsed, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     let priority = ffi_slice!(
         priority,
@@ -433,8 +436,7 @@ pub extern "C" fn quiche_h3_parse_extensible_priority(
 
     match Priority::try_from(priority) {
         Ok(v) => {
-            parsed.urgency = v.urgency;
-            parsed.incremental = v.incremental;
+            parsed.write(v);
             0
         },
 
@@ -532,12 +534,14 @@ pub extern "C" fn quiche_h3_conn_stats(
     conn: *const h3::Connection, out: *mut Stats,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
+    let out = ffi_out!(out);
 
     let stats = conn.stats();
 
-    out.qpack_encoder_stream_recv_bytes = stats.qpack_encoder_stream_recv_bytes;
-    out.qpack_decoder_stream_recv_bytes = stats.qpack_decoder_stream_recv_bytes;
+    out.write(Stats {
+        qpack_encoder_stream_recv_bytes: stats.qpack_encoder_stream_recv_bytes,
+        qpack_decoder_stream_recv_bytes: stats.qpack_decoder_stream_recv_bytes,
+    });
 }
 
 #[cfg(test)]
