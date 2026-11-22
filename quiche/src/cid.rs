@@ -270,8 +270,7 @@ impl ConnectionIdentifiers {
         // Record the zero-length SCID status.
         let zero_length_scid = initial_scid.is_empty();
 
-        let initial_scid =
-            ConnectionId::from_ref(initial_scid.as_ref()).into_owned();
+        let initial_scid = ConnectionId::copy_from_slice(initial_scid.as_ref());
 
         // We need to track up to (2 * source_conn_id_limit - 1) source
         // Connection IDs when the host wants to force their renewal.
@@ -586,7 +585,7 @@ impl ConnectionIdentifiers {
     }
 
     /// Returns an iterator over the source connection IDs.
-    pub fn scids_iter(&self) -> impl Iterator<Item = &ConnectionId<'_>> {
+    pub fn scids_iter(&self) -> impl Iterator<Item = &ConnectionId<'static>> {
         self.scids.iter().map(|e| &e.cid)
     }
 
@@ -694,7 +693,7 @@ impl ConnectionIdentifiers {
     /// of the same direction when that path has no usable identifier.
     pub fn active_or_oldest(
         &self, direction: CidDirection, sequence: Option<u64>,
-    ) -> ConnectionId<'_> {
+    ) -> &ConnectionId<'static> {
         let entries = match direction {
             CidDirection::Source => &self.scids,
             CidDirection::Destination => &self.dcids,
@@ -702,7 +701,7 @@ impl ConnectionIdentifiers {
         let entry = sequence
             .and_then(|seq| entries.get(seq))
             .unwrap_or_else(|| entries.get_oldest());
-        ConnectionId::from_ref(entry.cid.as_ref())
+        &entry.cid
     }
 
     /// Adds or remove the source Connection ID sequence number from the
@@ -799,7 +798,7 @@ impl ConnectionIdentifiers {
         Ok(frame::Frame::NewConnectionId {
             seq_num,
             retire_prior_to: self.retire_prior_to,
-            conn_id: e.cid.to_vec(),
+            conn_id: e.cid.clone(),
             reset_token: e.reset_token.ok_or(Error::InvalidState)?.to_be_bytes(),
         })
     }

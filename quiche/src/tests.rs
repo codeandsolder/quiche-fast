@@ -5574,8 +5574,8 @@ fn invalid_initial_payload(
     let hdr = Header {
         ty: Type::Initial,
         version: pipe.client.version,
-        dcid: ConnectionId::from_ref(&dcid),
-        scid: ConnectionId::from_ref(&scid),
+        dcid: ConnectionId::from_ref(dcid.as_ref()),
+        scid: ConnectionId::from_ref(scid.as_ref()),
         pkt_num: 0,
         pkt_num_len: pn_len,
         token: pipe.client.token.clone(),
@@ -11184,7 +11184,7 @@ fn connection_id_handling(
     assert_eq!(pipe.server.path_event_next(), None);
     assert_eq!(pipe.client.scids_left(), 1);
 
-    let scid = pipe.client.source_id().into_owned();
+    let scid = pipe.client.source_id().clone();
 
     let (scid_1, reset_token_1) = test_utils::create_cid_and_reset_token(16);
     assert_eq!(pipe.client.new_scid(&scid_1, reset_token_1, false), Ok(1));
@@ -11222,7 +11222,7 @@ fn connection_id_handling(
 
     // The active Destination Connection ID of the server should now be the
     // one with sequence number 1.
-    assert_eq!(pipe.server.destination_id(), scid_1);
+    assert_eq!(pipe.server.destination_id(), &scid_1);
 
     // Now tries to experience CID retirement. If the server tries to remove
     // non-existing DCIDs, it fails.
@@ -11239,7 +11239,7 @@ fn connection_id_handling(
     assert_eq!(pipe.client.retired_scid_next(), Some(scid_1));
     assert_eq!(pipe.client.retired_scid_next(), None);
 
-    assert_eq!(pipe.server.destination_id(), scid_2);
+    assert_eq!(pipe.server.destination_id(), &scid_2);
     assert_eq!(pipe.server.available_dcids(), 0);
 
     // Trying to remove the last DCID triggers an error.
@@ -11267,7 +11267,7 @@ fn lost_connection_id_frames(
     let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    let scid = pipe.client.source_id().into_owned();
+    let scid = pipe.client.source_id().clone();
 
     let (scid_1, reset_token_1) = test_utils::create_cid_and_reset_token(16);
     assert_eq!(pipe.client.new_scid(&scid_1, reset_token_1, false), Ok(1));
@@ -11403,7 +11403,7 @@ fn connection_id_retire_limit(
         frames.push(frame::Frame::NewConnectionId {
             seq_num: i,
             retire_prior_to: i,
-            conn_id: scid.to_vec(),
+            conn_id: scid.clone(),
             reset_token: reset_token.to_be_bytes(),
         });
     }
@@ -11513,31 +11513,31 @@ fn connection_id_retire_exotic_sequence(
         frame::Frame::NewConnectionId {
             seq_num: 8,
             retire_prior_to: 1,
-            conn_id: vec![0],
+            conn_id: ConnectionId::copy_from_slice(&[0]),
             reset_token: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         },
         frame::Frame::NewConnectionId {
             seq_num: 1,
             retire_prior_to: 0,
-            conn_id: vec![2],
+            conn_id: ConnectionId::copy_from_slice(&[2]),
             reset_token: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2],
         },
         frame::Frame::NewConnectionId {
             seq_num: 6,
             retire_prior_to: 6,
-            conn_id: vec![0x15],
+            conn_id: ConnectionId::copy_from_slice(&[0x15]),
             reset_token: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3],
         },
         frame::Frame::NewConnectionId {
             seq_num: 8,
             retire_prior_to: 1,
-            conn_id: vec![0],
+            conn_id: ConnectionId::copy_from_slice(&[0]),
             reset_token: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
         },
         frame::Frame::NewConnectionId {
             seq_num: 48,
             retire_prior_to: 8,
-            conn_id: vec![1],
+            conn_id: ConnectionId::copy_from_slice(&[1]),
             reset_token: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5],
         },
     ];

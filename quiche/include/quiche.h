@@ -490,22 +490,24 @@ int quiche_conn_close(quiche_conn *conn, bool app, uint64_t err,
 // Returns a string uniquely representing the connection.
 void quiche_conn_trace_id(const quiche_conn *conn, const uint8_t **out, size_t *out_len);
 
-// Returns the source connection ID.
+// Returns the source connection ID. The bytes are borrowed from conn and
+// remain valid until conn is mutated or freed.
 void quiche_conn_source_id(const quiche_conn *conn, const uint8_t **out, size_t *out_len);
 
 typedef struct quiche_connection_id_iter quiche_connection_id_iter;
 
-// Returns all active source connection IDs.
-quiche_connection_id_iter *quiche_conn_source_ids(quiche_conn *conn);
+// Returns an owned snapshot of all active source connection IDs.
+quiche_connection_id_iter *quiche_conn_source_ids(const quiche_conn *conn);
 
-// Fetches the next id from the given iterator. Returns false if there are
-// no more elements in the iterator.
+// Fetches the next id from the given iterator. Returned bytes remain valid
+// until the iterator is freed. Returns false when the iterator is exhausted.
 bool quiche_connection_id_iter_next(quiche_connection_id_iter *iter,  const uint8_t **out, size_t *out_len);
 
-// Frees the given path iterator object.
+// Frees the given connection ID iterator object.
 void quiche_connection_id_iter_free(quiche_connection_id_iter *iter);
 
-// Returns the destination connection ID.
+// Returns the destination connection ID. The bytes are borrowed from conn and
+// remain valid until conn is mutated or freed.
 void quiche_conn_destination_id(const quiche_conn *conn, const uint8_t **out, size_t *out_len);
 
 // Returns the negotiated ALPN protocol.

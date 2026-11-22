@@ -57,10 +57,10 @@ pub struct SimpleConnectionIdGenerator;
 
 impl ConnectionIdGenerator<'static> for SimpleConnectionIdGenerator {
     fn new_connection_id(&self) -> ConnectionId<'static> {
-        let mut buf = vec![0; 20];
+        let mut buf = [0; 20];
         btls::rand::rand_bytes(&mut buf).unwrap();
 
-        ConnectionId::from_vec(buf)
+        ConnectionId::copy_from_slice(&buf)
     }
 
     /// Performs no verification, because this generator can create
