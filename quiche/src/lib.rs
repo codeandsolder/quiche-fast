@@ -4494,36 +4494,13 @@ impl<F: BufFactory> Connection<F> {
         )
     }
 
-    fn send_single_for_type(
-        &mut self, b: &mut packet::PacketWriter<'_>, send_pid: usize,
-        has_initial: bool, now: Instant, pkt_type: Type, bypass_cwnd: bool,
-    ) -> Result<(Type, usize)> {
-        let is_closing = self.local_error.is_some();
-
-        b.reset();
-        let out_len = b.cap();
-
-        let max_dgram_len = if self.dgram_send_queue.is_empty() {
-            None
-        } else {
-            self.dgram_max_writable_len()
-        };
-
-        let epoch = pkt_type.to_epoch()?;
-        if self.next_pkt_num >= octets::MAX_VAR_INT {
-            self.mark_closed();
-            return Err(Error::Done);
-        }
-        // Don't skip the final usable packet number. The next increment
-        // will exhaust the number space and silently close the connection.
-        let should_skip = self.next_pkt_num < octets::MAX_VAR_INT - 1 &&
-            self.pkt_num_manager
-                .should_skip_pn(self.handshake_completed);
-        let pn = self.next_pkt_num + u64::from(should_skip);
-        let pn_len = packet::pkt_num_len(
-            pn,
-            self.pkt_num_spaces[epoch].largest_acked_pkt_num,
-        )?;
+    /// Consume loss notifications across paths and restore pending frame state
+    /// before packet construction. This does not write to the packet buffer.
+    fn requeue_lost_frames(
+        &mut self, epoch: packet::Epoch, now: Instant,
+    ) -> Result<()> {
+        #[cfg(not(feature = "qlog"))]
+        let _ = now;
 
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
@@ -4536,11 +4513,14 @@ impl<F: BufFactory> Connection<F> {
                     frame::Frame::CryptoHeader { offset, length } => {
                         crypto_ctx.crypto_stream.send.retransmit(offset, length);
 
-                        self.stream_retrans_bytes += length as u64;
-                        p.stream_retrans_bytes += length as u64;
+                        self.stream_retrans_bytes = self
+                            .stream_retrans_bytes
+                            .saturating_add(length as u64);
+                        p.stream_retrans_bytes =
+                            p.stream_retrans_bytes.saturating_add(length as u64);
 
-                        self.retrans_count += 1;
-                        p.retrans_count += 1;
+                        self.retrans_count = self.retrans_count.saturating_add(1);
+                        p.retrans_count = p.retrans_count.saturating_add(1);
                     },
 
                     frame::Frame::StreamHeader {
@@ -4608,11 +4588,14 @@ impl<F: BufFactory> Connection<F> {
                         // already acked.
                         self.streams.add_tx_buffered(retransmitted);
 
-                        self.stream_retrans_bytes += length as u64;
-                        p.stream_retrans_bytes += length as u64;
+                        self.stream_retrans_bytes = self
+                            .stream_retrans_bytes
+                            .saturating_add(length as u64);
+                        p.stream_retrans_bytes =
+                            p.stream_retrans_bytes.saturating_add(length as u64);
 
-                        self.retrans_count += 1;
-                        p.retrans_count += 1;
+                        self.retrans_count = self.retrans_count.saturating_add(1);
+                        p.retrans_count = p.retrans_count.saturating_add(1);
                     },
 
                     frame::Frame::ACK { .. } => {
@@ -4747,29 +4730,18 @@ impl<F: BufFactory> Connection<F> {
                         );
                     },
 
-                    // Data blocked frames are an optional advisory
-                    // signal. We choose to not retransmit them to
-                    // avoid unnecessary network usage.
+                    // Advisory blocked frames are not retransmitted.
+                    // Path challenges and responses have their own retry logic
+                    // (RFC 9000, section 8.2.2).
+                    // Connection close retransmission is governed by closing
+                    // state, not packet loss (sections 10 and 13.3).
+                    // Padding never needs retransmission.
                     frame::Frame::DataBlocked { .. } |
-                    frame::Frame::StreamDataBlocked { .. } => (),
-
-                    // Path challenge and response have their own
-                    // retry logic. They should not be retransmitted
-                    // normally since according to RFC 9000 Section
-                    // 8.2.2: "An endpoint MUST NOT send more than one
-                    // PATH_RESPONSE frame in response to one
-                    // PATH_CHALLENGE frame".
+                    frame::Frame::StreamDataBlocked { .. } |
                     frame::Frame::PathChallenge { .. } |
-                    frame::Frame::PathResponse { .. } => (),
-
-                    // From RFC 9000 Section 13.3: CONNECTION_CLOSE
-                    // frames, are not sent again when packet loss is
-                    // detected. Resending these signals is described
-                    // in Section 10.
+                    frame::Frame::PathResponse { .. } |
                     frame::Frame::ConnectionClose { .. } |
-                    frame::Frame::ApplicationClose { .. } => (),
-
-                    // Padding doesn't require retransmission.
+                    frame::Frame::ApplicationClose { .. } |
                     frame::Frame::Padding { .. } => (),
 
                     frame::Frame::DatagramHeader { .. } |
@@ -4787,6 +4759,42 @@ impl<F: BufFactory> Connection<F> {
 
         #[cfg(debug_assertions)]
         self.streams.debug_check_tx_buffered_consistency();
+
+        Ok(())
+    }
+
+    fn send_single_for_type(
+        &mut self, b: &mut packet::PacketWriter<'_>, send_pid: usize,
+        has_initial: bool, now: Instant, pkt_type: Type, bypass_cwnd: bool,
+    ) -> Result<(Type, usize)> {
+        let is_closing = self.local_error.is_some();
+
+        b.reset();
+        let out_len = b.cap();
+
+        let max_dgram_len = if self.dgram_send_queue.is_empty() {
+            None
+        } else {
+            self.dgram_max_writable_len()
+        };
+
+        let epoch = pkt_type.to_epoch()?;
+        if self.next_pkt_num >= octets::MAX_VAR_INT {
+            self.mark_closed();
+            return Err(Error::Done);
+        }
+        // Don't skip the final usable packet number. The next increment
+        // will exhaust the number space and silently close the connection.
+        let should_skip = self.next_pkt_num < octets::MAX_VAR_INT - 1 &&
+            self.pkt_num_manager
+                .should_skip_pn(self.handshake_completed);
+        let pn = self.next_pkt_num + u64::from(should_skip);
+        let pn_len = packet::pkt_num_len(
+            pn,
+            self.pkt_num_spaces[epoch].largest_acked_pkt_num,
+        )?;
+
+        self.requeue_lost_frames(epoch, now)?;
 
         let is_app_limited = self.delivery_rate_check_if_app_limited();
         let n_paths = self.paths.len();
