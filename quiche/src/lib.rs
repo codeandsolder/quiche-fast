@@ -359,8 +359,8 @@
 //! quiche defines a number of [feature flags] to reduce the amount of compiled
 //! code and dependencies:
 //!
-//! * `boringssl-boring-crate` (default): Use the BoringSSL library provided by
-//!   the [boring] crate.
+//! * `boringssl-boring-crate` (default): Use the `BoringSSL` library provided
+//!   by the [boring] crate.
 //!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!
@@ -617,6 +617,11 @@ fn is_reserved_version(version: u32) -> bool {
 impl Config {
     /// Creates a config object with the given version.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::UnknownVersion` for an unsupported, non-reserved
+    /// version, or a TLS error if the TLS context cannot be initialized.
+    ///
     /// ## Examples:
     ///
     /// ```
@@ -632,6 +637,11 @@ impl Config {
     ///
     /// This is useful for applications that wish to manually configure
     /// [`SslContextBuilder`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::UnknownVersion` for an unsupported, non-reserved
+    /// version, or `Error::TlsFail` if the TLS context cannot be created.
     ///
     /// [`SslContextBuilder`]: https://docs.rs/boring/latest/boring/ssl/struct.SslContextBuilder.html
     #[cfg(feature = "boringssl-boring-crate")]
@@ -693,6 +703,11 @@ impl Config {
     /// The content of `file` is parsed as a PEM-encoded leaf certificate,
     /// followed by optional intermediate certificates.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the path contains a NUL byte or the TLS
+    /// backend cannot load the certificate chain.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -707,6 +722,11 @@ impl Config {
     /// Configures the given private key.
     ///
     /// The content of `file` is parsed as a PEM-encoded private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the path contains a NUL byte or the TLS
+    /// backend cannot load the private key.
     ///
     /// ## Examples:
     ///
@@ -724,6 +744,11 @@ impl Config {
     ///
     /// The content of `file` is parsed as a PEM-encoded certificate chain.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the path contains a NUL byte or the TLS
+    /// backend cannot load the trust store file.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -739,6 +764,11 @@ impl Config {
     /// purposes of certificate verification.
     ///
     /// The content of `dir` a set of PEM-encoded certificate chains.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the path contains a NUL byte or the TLS
+    /// backend rejects the trust store directory.
     ///
     /// ## Examples:
     ///
@@ -759,6 +789,11 @@ impl Config {
     /// order of preference, e.g. `"X25519MLKEM768:X25519:P-256:P-384"`.
     /// Corresponds to `SSL_CTX_set1_curves_list` (a.k.a.
     /// `SSL_CTX_set1_groups_list`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the list contains a NUL byte or is rejected
+    /// by the TLS backend.
     pub fn set_curves_list(&mut self, curves: &str) -> Result<()> {
         self.tls_ctx.set_curves_list(curves)
     }
@@ -830,6 +865,11 @@ impl Config {
     /// specific key (e.g. in order to support resumption across multiple
     /// servers), in which case the application is also responsible for
     /// rotating the key to provide forward secrecy.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS backend rejects the supplied key
+    /// material, for example because its length is incorrect.
     pub fn set_ticket_key(&mut self, key: &[u8]) -> Result<()> {
         self.tls_ctx.set_ticket_key(key)
     }
@@ -849,11 +889,17 @@ impl Config {
     ///
     /// Applications must set a value, but no default is provided.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the list is empty, a protocol name is empty
+    /// or exceeds 255 bytes, the encoded list exceeds the extension's size
+    /// limit, or the TLS backend rejects the list.
+    ///
     /// ## Examples:
     ///
     /// ```
     /// # let mut config = quiche::Config::new(0xbabababa)?;
-    /// config.set_application_protos(&[b"http/1.1", b"http/0.9"]);
+    /// config.set_application_protos(&[b"http/1.1", b"http/0.9"])?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn set_application_protos(
@@ -873,6 +919,12 @@ impl Config {
     ///
     /// See [`set_application_protos`](Self::set_application_protos) for more
     /// background about application protocols.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the wire-format list is truncated or
+    /// invalid, or if the decoded protocols are rejected by
+    /// [`Config::set_application_protos`].
     ///
     /// ## Examples:
     ///
@@ -1120,11 +1172,15 @@ impl Config {
     /// The default value is `cubic`. On error `Error::CongestionControl`
     /// will be returned.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::CongestionControl` if the algorithm name is unknown.
+    ///
     /// ## Examples:
     ///
     /// ```
     /// # let mut config = quiche::Config::new(0xbabababa)?;
-    /// config.set_cc_algorithm_name("reno");
+    /// config.set_cc_algorithm_name("reno")?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn set_cc_algorithm_name(&mut self, name: &str) -> Result<()> {
@@ -1158,9 +1214,9 @@ impl Config {
         self.enable_cubic_idle_restart_fix = enable;
     }
 
-    /// Configure whether to enable sending STREAMS_BLOCKED frames.
+    /// Configure whether to enable sending `STREAMS_BLOCKED` frames.
     ///
-    /// STREAMS_BLOCKED frames are an optional advisory signal in the QUIC
+    /// `STREAMS_BLOCKED` frames are an optional advisory signal in the QUIC
     /// protocol which SHOULD be sent when the sender wishes to open a stream
     /// but is unable to do so due to the maximum stream limit set by its peer.
     ///
@@ -1169,7 +1225,7 @@ impl Config {
         self.enable_send_streams_blocked = enable;
     }
 
-    /// Configures whether to enable HyStart++.
+    /// Configures whether to enable `HyStart`++.
     ///
     /// The default value is `true`.
     pub fn enable_hystart(&mut self, v: bool) {
@@ -1208,10 +1264,10 @@ impl Config {
         self.dgram_send_max_queue_len = send_queue_len;
     }
 
-    /// Configures the max number of queued received PATH_CHALLENGE frames.
+    /// Configures the max number of queued received `PATH_CHALLENGE` frames.
     ///
-    /// When an endpoint receives a PATH_CHALLENGE frame and the queue is full,
-    /// the frame is discarded.
+    /// When an endpoint receives a `PATH_CHALLENGE` frame and the queue is
+    /// full, the frame is discarded.
     ///
     /// The default is 3.
     pub fn set_path_challenge_recv_max_queue_len(&mut self, queue_len: usize) {
@@ -1220,14 +1276,14 @@ impl Config {
 
     /// Sets the maximum size of the connection window.
     ///
-    /// The default value is MAX_CONNECTION_WINDOW (24MBytes).
+    /// The default value is `MAX_CONNECTION_WINDOW` (24MBytes).
     pub fn set_max_connection_window(&mut self, v: u64) {
         self.max_connection_window = v;
     }
 
     /// Sets the maximum size of the stream window.
     ///
-    /// The default value is MAX_STREAM_WINDOW (16MBytes).
+    /// The default value is `MAX_STREAM_WINDOW` (16MBytes).
     pub fn set_max_stream_window(&mut self, v: u64) {
         self.max_stream_window = v;
     }
@@ -1277,7 +1333,7 @@ impl Config {
     pub fn set_use_initial_max_data_as_flow_control_win(&mut self, _v: bool) {}
 }
 
-/// Tracks the health of the tx_buffered value.
+/// Tracks the health of the `tx_buffered` value.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum TxBufferTrackingState {
     /// The send buffer is in a good state
@@ -1290,21 +1346,21 @@ pub enum TxBufferTrackingState {
 }
 
 /// Tracks if the connection hit the peer stream limit and which
-/// STREAMS_BLOCKED frames have been sent.
+/// `STREAMS_BLOCKED` frames have been sent.
 #[derive(Default)]
 struct StreamsBlockedState {
-    /// The peer's max_streams limit at which we last became blocked on
+    /// The peer's `max_streams` limit at which we last became blocked on
     /// opening new local streams, if any.
     blocked_at: Option<u64>,
 
-    /// The stream limit sent on the most recently sent STREAMS_BLOCKED
-    /// frame. If != to blocked_at, the connection has pending STREAMS_BLOCKED
-    /// frames to send.
+    /// The stream limit sent on the most recently sent `STREAMS_BLOCKED`
+    /// frame. If != to `blocked_at`, the connection has pending
+    /// `STREAMS_BLOCKED` frames to send.
     blocked_sent: Option<u64>,
 }
 
 impl StreamsBlockedState {
-    /// Returns true if there is a STREAMS_BLOCKED frame that needs sending.
+    /// Returns true if there is a `STREAMS_BLOCKED` frame that needs sending.
     fn has_pending_stream_blocked_frame(&self) -> bool {
         self.blocked_sent < self.blocked_at
     }
@@ -1314,8 +1370,8 @@ impl StreamsBlockedState {
         self.blocked_at = self.blocked_at.max(Some(limit));
     }
 
-    /// Clear blocked_sent to force retransmission of the most recently sent
-    /// STREAMS_BLOCKED frame.
+    /// Clear `blocked_sent` to force retransmission of the most recently sent
+    /// `STREAMS_BLOCKED` frame.
     fn force_retransmit_sent_limit_eq(&mut self, limit: u64) {
         // Only clear blocked_sent if the lost frame had the most recently sent
         // limit.
@@ -1380,10 +1436,10 @@ where
     /// The path manager.
     paths: path::PathMap,
 
-    /// PATH_CHALLENGE receive queue max length.
+    /// `PATH_CHALLENGE` receive queue max length.
     path_challenge_recv_max_queue_len: usize,
 
-    /// Total number of received PATH_CHALLENGE frames.
+    /// Total number of received `PATH_CHALLENGE` frames.
     path_challenge_rx_count: u64,
 
     /// List of supported application protocols.
@@ -1416,13 +1472,13 @@ where
     /// Receiver flow controller.
     flow_control: flowcontrol::FlowControl,
 
-    /// Whether we send MAX_DATA frame.
+    /// Whether we send `MAX_DATA` frame.
     should_send_max_data: bool,
 
-    /// True if there is a pending MAX_STREAMS_BIDI frame to send.
+    /// True if there is a pending `MAX_STREAMS_BIDI` frame to send.
     should_send_max_streams_bidi: bool,
 
-    /// True if there is a pending MAX_STREAMS_UNI frame to send.
+    /// True if there is a pending `MAX_STREAMS_UNI` frame to send.
     should_send_max_streams_uni: bool,
 
     /// Number of stream data bytes that can be buffered.
@@ -1437,7 +1493,7 @@ where
     /// Peer's flow control limit for the connection.
     max_tx_data: u64,
 
-    /// Last tx_data before running a full send() loop.
+    /// Last `tx_data` before running a full `send()` loop.
     last_tx_data: u64,
 
     /// Total number of bytes retransmitted over the connection.
@@ -1470,11 +1526,11 @@ where
     /// Received address verification token.
     token: Option<Vec<u8>>,
 
-    /// Error code and reason to be sent to the peer in a CONNECTION_CLOSE
+    /// Error code and reason to be sent to the peer in a `CONNECTION_CLOSE`
     /// frame.
     local_error: Option<ConnectionError>,
 
-    /// Error code and reason received from the peer in a CONNECTION_CLOSE
+    /// Error code and reason received from the peer in a `CONNECTION_CLOSE`
     /// frame.
     peer_error: Option<ConnectionError>,
 
@@ -1518,10 +1574,10 @@ where
     /// Whether the connection handshake has been completed.
     handshake_completed: bool,
 
-    /// Whether the HANDSHAKE_DONE frame has been sent.
+    /// Whether the `HANDSHAKE_DONE` frame has been sent.
     handshake_done_sent: bool,
 
-    /// Whether the HANDSHAKE_DONE frame has been acked.
+    /// Whether the `HANDSHAKE_DONE` frame has been acked.
     handshake_done_acked: bool,
 
     /// Whether the connection handshake has been confirmed.
@@ -1543,7 +1599,7 @@ where
     /// Whether to send GREASE.
     grease: bool,
 
-    /// Whether to send STREAMS_BLOCKED frames when bidi or uni stream quota
+    /// Whether to send `STREAMS_BLOCKED` frames when bidi or uni stream quota
     /// exhausted.
     enable_send_streams_blocked: bool,
 
@@ -1576,35 +1632,35 @@ where
     /// The number of streams stopped by remote.
     stopped_stream_remote_count: u64,
 
-    /// The number of DATA_BLOCKED frames sent due to hitting the connection
+    /// The number of `DATA_BLOCKED` frames sent due to hitting the connection
     /// flow control limit.
     data_blocked_sent_count: u64,
 
-    /// The number of STREAM_DATA_BLOCKED frames sent due to a stream hitting
+    /// The number of `STREAM_DATA_BLOCKED` frames sent due to a stream hitting
     /// the stream flow control limit.
     stream_data_blocked_sent_count: u64,
 
-    /// The number of DATA_BLOCKED frames received from the remote endpoint.
+    /// The number of `DATA_BLOCKED` frames received from the remote endpoint.
     data_blocked_recv_count: u64,
 
-    /// The number of STREAM_DATA_BLOCKED frames received from the remote
+    /// The number of `STREAM_DATA_BLOCKED` frames received from the remote
     /// endpoint.
     stream_data_blocked_recv_count: u64,
 
-    /// The number of STREAMS_BLOCKED frames received from the remote endpoint
+    /// The number of `STREAMS_BLOCKED` frames received from the remote endpoint
     /// indicating the peer is blocked on opening new bidirectional streams.
     streams_blocked_bidi_recv_count: u64,
 
-    /// The number of STREAMS_BLOCKED frames received from the remote endpoint
+    /// The number of `STREAMS_BLOCKED` frames received from the remote endpoint
     /// indicating the peer is blocked on opening new unidirectional streams.
     streams_blocked_uni_recv_count: u64,
 
-    /// The number of times send() was blocked because the anti-amplification
-    /// budget (bytes received × max_amplification_factor) was exhausted.
+    /// The number of times `send()` was blocked because the anti-amplification
+    /// budget (bytes received × `max_amplification_factor`) was exhausted.
     amplification_limited_count: u64,
 
     /// Tracks if the connection hit the peer's bidi or uni stream limit, and if
-    /// STREAMS_BLOCKED frames are pending transmission.
+    /// `STREAMS_BLOCKED` frames are pending transmission.
     streams_blocked_bidi_state: StreamsBlockedState,
     streams_blocked_uni_state: StreamsBlockedState,
 
@@ -1619,6 +1675,11 @@ where
 /// client sent before a Retry packet (this is only required when using the
 /// [`retry()`] function). See also the [`accept_with_retry()`] function for
 /// more advanced retry cases.
+///
+/// # Errors
+///
+/// Returns an error if the TLS handshake or connection state cannot be
+/// initialized, including failure to encode local transport parameters.
 ///
 /// [`retry()`]: fn.retry.html
 ///
@@ -1644,6 +1705,10 @@ pub fn accept(
 ///
 /// The buffers generated can be anything that can be dereferenced as a byte
 /// slice. See [`accept`] and [`BufFactory`] for more information.
+///
+/// # Errors
+///
+/// Returns the same connection-initialization errors as [`accept`].
 #[inline]
 pub fn accept_with_buf_factory<F: BufFactory>(
     scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
@@ -1685,6 +1750,10 @@ pub struct RetryConnectionIds<'a> {
 /// DCID for the `scid` parameter carries risks. Applications are advised to
 /// implement their own DCID validation steps before using the DCID in that
 /// manner.
+///
+/// # Errors
+///
+/// Returns the same connection-initialization errors as [`accept`].
 #[inline]
 pub fn accept_with_retry<F: BufFactory>(
     scid: &ConnectionId, retry_cids: RetryConnectionIds, local: SocketAddr,
@@ -1698,6 +1767,11 @@ pub fn accept_with_retry<F: BufFactory>(
 /// The `scid` parameter is used as the connection's source connection ID,
 /// while the optional `server_name` parameter is used to verify the peer's
 /// certificate.
+///
+/// # Errors
+///
+/// Returns an error if connection initialization fails or the TLS backend
+/// rejects the supplied server name.
 ///
 /// ## Examples:
 ///
@@ -1735,6 +1809,12 @@ pub fn connect(
 /// the optional `server_name` parameter is used to verify the peer's
 /// certificate.
 ///
+/// # Errors
+///
+/// Returns `Error::InvalidDcidInitialization` if the supplied destination
+/// connection ID is shorter than eight bytes, or a connection-initialization
+/// or server-name error as in [`connect`].
+///
 /// [RFC 9000]: <https://datatracker.ietf.org/doc/html/rfc9000#section-7.2-3>
 #[cfg(feature = "custom-client-dcid")]
 #[cfg_attr(docsrs, doc(cfg(feature = "custom-client-dcid")))]
@@ -1755,8 +1835,13 @@ pub fn connect_with_dcid(
 /// Creates a new client-side connection, with a custom buffer generation
 /// method.
 ///
-/// The buffers generated can be anything that can be drereferenced as a byte
+/// The buffers generated can be anything that can be dereferenced as a byte
 /// slice. See [`connect`] and [`BufFactory`] for more info.
+///
+/// # Errors
+///
+/// Returns the same connection-initialization and server-name errors as
+/// [`connect`].
 #[inline]
 pub fn connect_with_buffer_factory<F: BufFactory>(
     server_name: Option<&str>, scid: &ConnectionId, local: SocketAddr,
@@ -1775,9 +1860,16 @@ pub fn connect_with_buffer_factory<F: BufFactory>(
 /// method using the given dcid initially.
 /// Be aware the RFC places requirements for unpredictability and length
 /// on the client DCID field.
+///
+/// # Errors
+///
+/// Returns the same errors as [`connect_with_dcid`], including
+/// `Error::InvalidDcidInitialization` for a destination connection ID
+/// shorter than eight bytes.
+///
 /// [`RFC9000`]:  https://datatracker.ietf.org/doc/html/rfc9000#section-7.2-3
 ///
-/// The buffers generated can be anything that can be drereferenced as a byte
+/// The buffers generated can be anything that can be dereferenced as a byte
 /// slice. See [`connect`] and [`BufFactory`] for more info.
 #[cfg(feature = "custom-client-dcid")]
 #[cfg_attr(docsrs, doc(cfg(feature = "custom-client-dcid")))]
@@ -1800,6 +1892,11 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
 /// The `scid` and `dcid` parameters are the source connection ID and the
 /// destination connection ID extracted from the received client's Initial
 /// packet that advertises an unsupported version.
+///
+/// # Errors
+///
+/// Returns `Error::BufferTooShort` if the output buffer cannot hold the
+/// version negotiation packet.
 ///
 /// ## Examples:
 ///
@@ -1837,6 +1934,12 @@ pub fn negotiate_version(
 /// client. The generated token should include the `dcid` parameter, such
 /// that it can be later extracted from the token and passed to the
 /// [`accept()`] function as its `odcid` parameter.
+///
+/// # Errors
+///
+/// Returns `Error::UnknownVersion` for an unsupported version,
+/// `Error::BufferTooShort` if the output buffer is too small, or a
+/// cryptographic error if Retry integrity tag generation fails.
 ///
 /// [`accept()`]: fn.accept.html
 ///
@@ -2461,6 +2564,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// The default value is infinite, that is, no timeout is used unless
     /// already configured when creating the connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the updated transport parameters cannot be encoded
+    /// or installed in the TLS handshake.
     pub fn set_max_idle_timeout(&mut self, v: u64) -> Result<()> {
         self.local_transport_params.max_idle_timeout =
             cmp::min(v, octets::MAX_VAR_INT);
@@ -2470,11 +2578,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the congestion control algorithm used.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_cc_algorithm()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_cc_algorithm()`]: struct.Config.html#method.set_cc_algorithm
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2502,6 +2615,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// See [`Config::set_custom_bbr_settings()`].
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
+    ///
     /// [`Config::set_custom_bbr_settings()`]: struct.Config.html#method.set_custom_bbr_settings
     #[cfg(all(feature = "boringssl-boring-crate", feature = "internal"))]
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
@@ -2518,11 +2636,17 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the congestion control algorithm used by string.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_cc_algorithm_name()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::CongestionControl` for an unknown algorithm name, or
+    /// `Error::TlsFail` if the TLS object has no associated QUIC handshake
+    /// state.
     ///
     /// [`Config::set_cc_algorithm_name()`]: struct.Config.html#method.set_cc_algorithm_name
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2536,11 +2660,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets initial congestion window size in terms of packet count.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_initial_congestion_window_packets()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_initial_congestion_window_packets()`]: struct.Config.html#method.set_initial_congestion_window_packets
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2557,11 +2686,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Configure whether to enable relaxed loss detection on spurious loss.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_enable_relaxed_loss_threshold()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_enable_relaxed_loss_threshold()`]: struct.Config.html#method.set_enable_relaxed_loss_threshold
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2578,11 +2712,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Configure whether to enable the CUBIC idle restart fix.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_enable_cubic_idle_restart_fix()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_enable_cubic_idle_restart_fix()`]: struct.Config.html#method.set_enable_cubic_idle_restart_fix
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2597,13 +2736,18 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
-    /// Configures whether to enable HyStart++.
+    /// Configures whether to enable `HyStart`++.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::enable_hystart()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::enable_hystart()`]: struct.Config.html#method.enable_hystart
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2620,11 +2764,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Configures whether to enable pacing.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::enable_pacing()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::enable_pacing()`]: struct.Config.html#method.enable_pacing
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2641,11 +2790,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the max value for pacing rate.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_max_pacing_rate()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_max_pacing_rate()`]: struct.Config.html#method.set_max_pacing_rate
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2662,11 +2816,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the maximum outgoing UDP payload size.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_max_send_udp_payload_size()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::set_max_send_udp_payload_size()`]: struct.Config.html#method.set_max_send_udp_payload_size
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2684,13 +2843,18 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the send capacity factor.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_send_capacity_factor()`].
     ///
-    /// [`Config::set_max_send_udp_payload_size()`]: struct.Config.html#method.set_send_capacity_factor
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
+    ///
+    /// [`Config::set_send_capacity_factor()`]: struct.Config.html#method.set_send_capacity_factor
     #[cfg(feature = "boringssl-boring-crate")]
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
     pub fn set_send_capacity_factor_in_handshake(
@@ -2705,11 +2869,16 @@ impl<F: BufFactory> Connection<F> {
 
     /// Configures whether to do path MTU discovery.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::discover_pmtu()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state.
     ///
     /// [`Config::discover_pmtu()`]: struct.Config.html#method.discover_pmtu
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2726,11 +2895,17 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the `max_idle_timeout` transport parameter, in milliseconds.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_max_idle_timeout()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state, or an encoding or TLS error when applying the updated
+    /// transport parameters.
     ///
     /// [`Config::set_max_idle_timeout()`]: struct.Config.html#method.set_max_idle_timeout
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2751,11 +2926,17 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the `initial_max_streams_bidi` transport parameter.
     ///
-    /// This function can only be called inside one of BoringSSL's handshake
+    /// This function can only be called inside one of `BoringSSL`'s handshake
     /// callbacks, before any packet has been sent. Calling this function any
     /// other time will have no effect.
     ///
     /// See [`Config::set_initial_max_streams_bidi()`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::TlsFail` if the TLS object has no associated QUIC
+    /// handshake state, or an encoding or TLS error when applying the updated
+    /// transport parameters.
     ///
     /// [`Config::set_initial_max_streams_bidi()`]: struct.Config.html#method.set_initial_max_streams_bidi
     #[cfg(feature = "boringssl-boring-crate")]
@@ -2802,6 +2983,10 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// This is now always enabled and this method is a no-op. It will be
     /// removed in a future release.
+    ///
+    /// # Errors
+    ///
+    /// This deprecated no-op always returns `Ok(())`.
     #[cfg(feature = "boringssl-boring-crate")]
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
     #[deprecated(note = "This is now always enabled. This method is a no-op.")]
@@ -2821,6 +3006,13 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Note that the contents of the input buffer `buf` might be modified by
     /// this function due to, for example, in-place decryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferTooShort` for an empty input buffer. Packet,
+    /// transport, and TLS processing errors are propagated; fatal processing
+    /// errors initiate connection closure. Unauthenticated packets that can be
+    /// silently discarded do not produce an error.
     ///
     /// [`close()`]: struct.Connection.html#method.close
     ///
@@ -2861,9 +3053,9 @@ impl<F: BufFactory> Connection<F> {
     /// consumed synchronously before they are copied into the receive queue.
     ///
     /// The handler returns true when it consumed the DATAGRAM. Returning false
-    /// preserves normal behavior and queues an owned copy for dgram_recv_buf().
-    /// To preserve FIFO delivery, the handler is not called while an older
-    /// DATAGRAM remains in the receive queue.
+    /// preserves normal behavior and queues an owned copy for
+    /// `dgram_recv_buf()`. To preserve FIFO delivery, the handler is not called
+    /// while an older DATAGRAM remains in the receive queue.
     ///
     /// Delivery through the handler is intentionally non-transactional at the
     /// packet level: the handler can be called for an earlier DATAGRAM before a
@@ -2871,6 +3063,11 @@ impl<F: BufFactory> Connection<F> {
     /// error. This matches the normal receive path, which can queue earlier
     /// frames before a later-frame error. Callers that require transactional
     /// side effects should stage handler output until this method returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same receive errors as [`Self::recv`]. Handler side effects
+    /// are not rolled back if a later frame fails processing.
     pub fn recv_with_dgram_handler<H>(
         &mut self, buf: &mut [u8], info: RecvInfo, handler: &mut H,
     ) -> Result<usize>
@@ -3935,6 +4132,12 @@ impl<F: BufFactory> Connection<F> {
     /// Once [`is_draining()`] returns `true`, it is no longer necessary to call
     /// `send()` and all calls will return [`Done`].
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` when no packet can currently be emitted,
+    /// `Error::BufferTooShort` for an empty output buffer, or a path, TLS, or
+    /// packet-generation error.
+    ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`recv()`]: struct.Connection.html#method.recv
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
@@ -4018,6 +4221,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Once [`is_draining()`] returns `true`, it is no longer necessary to call
     /// `send_on_path()` and all calls will return [`Done`].
+    ///
+    /// # Errors
+    ///
+    /// Returns the same send errors as [`Self::send`], including
+    /// `Error::InvalidState` if an explicitly requested path does not exist.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`InvalidState`]: enum.Error.html#InvalidState
@@ -5850,7 +6058,7 @@ impl<F: BufFactory> Connection<F> {
     /// offloading mechanisms as the maximum limit for outgoing aggregates of
     /// multiple packets.
     ///
-    /// If the (`local_addr`, peer_addr`) 4-tuple relates to a non-existing
+    /// If the (`local_addr`, `peer_addr`) 4-tuple relates to a non-existing
     /// path, this method returns 0.
     pub fn send_quantum_on_path(
         &self, local_addr: SocketAddr, peer_addr: SocketAddr,
@@ -5871,7 +6079,13 @@ impl<F: BufFactory> Connection<F> {
     /// is returned as a tuple, or [`Done`] if there is no data to read.
     ///
     /// Reading data from a stream may trigger queueing of control messages
-    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
+    /// (e.g. `MAX_STREAM_DATA`). [`send()`] should be called afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` when no data or final-size event is readable,
+    /// `Error::InvalidStreamState` for a missing or unreadable-direction
+    /// stream, or `Error::StreamReset` with the peer's application error code.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`send()`]: struct.Connection.html#method.send
@@ -5902,10 +6116,11 @@ impl<F: BufFactory> Connection<F> {
     /// Reads contiguous data from a stream into the provided [`bytes::BufMut`].
     ///
     /// **NOTE**:
-    /// The BufMut will be populated with all available data up to its capacity.
-    /// Since some BufMut implementations, e.g., [`Vec<u8>`], dynamically
-    /// allocate additional memory, the caller may use [`BufMut::limit()`]
-    /// to limit the maximum amount of data that can be written.
+    /// The `BufMut` will be populated with all available data up to its
+    /// capacity. Since some `BufMut` implementations, e.g., [`Vec<u8>`],
+    /// dynamically allocate additional memory, the caller may use
+    /// [`BufMut::limit()`] to limit the maximum amount of data that can be
+    /// written.
     ///
     /// On success the amount of bytes read and a flag indicating the fin state
     /// is returned as a tuple, or [`Done`] if there is no data to read.
@@ -5913,7 +6128,11 @@ impl<F: BufFactory> Connection<F> {
     /// total bytes.
     ///
     /// Reading data from a stream may trigger queueing of control messages
-    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
+    /// (e.g. `MAX_STREAM_DATA`). [`send()`] should be called afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same receive errors as [`Self::stream_recv`].
     ///
     /// [`BufMut::limit()`]: bytes::BufMut::limit
     /// [`BufMut::advance_mut()`]: bytes::BufMut::advance_mut
@@ -5953,7 +6172,11 @@ impl<F: BufFactory> Connection<F> {
     /// discard.
     ///
     /// Discarding data from a stream may trigger queueing of control messages
-    /// (e.g. MAX_STREAM_DATA). [`send()`] should be called afterwards.
+    /// (e.g. `MAX_STREAM_DATA`). [`send()`] should be called afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same receive errors as [`Self::stream_recv`].
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`send()`]: struct.Connection.html#method.send
@@ -6122,6 +6345,14 @@ impl<F: BufFactory> Connection<F> {
     /// completed (whenever [`is_established()`] returns `true`) or during
     /// early data if enabled (whenever [`is_in_early_data()`] returns `true`).
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` when nonempty data cannot be buffered,
+    /// `Error::StreamLimit` if opening a new stream exceeds the peer's limit,
+    /// `Error::InvalidStreamState` for a disallowed stream,
+    /// `Error::StreamStopped` if the peer stopped the stream, or
+    /// `Error::FinalSize` for an incompatible final offset.
+    ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`StreamStopped`]: enum.Error.html#variant.StreamStopped
     /// [`is_established()`]: struct.Connection.html#method.is_established
@@ -6161,10 +6392,14 @@ impl<F: BufFactory> Connection<F> {
     /// provided buffer directly to the send queue if the capacity allows
     /// it.
     ///
-    /// When a partial write happens (including when [`Error::Done`] is
-    /// returned) the remaining (unwritten) buffer will also be returned.
-    /// The application should retry the operation once the stream is
-    /// reported as writable again.
+    /// On a successful partial write the remaining, unwritten buffer is
+    /// returned. The application should retry it once the stream is writable
+    /// again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same send errors as [`Self::stream_send`]. On error the
+    /// owned input buffer is not returned.
     pub fn stream_send_zc(
         &mut self, stream_id: u64, buf: F::Buf, fin: bool,
     ) -> Result<(usize, Option<F::Buf>)>
@@ -6371,6 +6606,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// The target stream is created if it did not exist before calling this
     /// method.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::StreamLimit` if creating the stream exceeds the peer's
+    /// limit, or `Error::InvalidStreamState` for an invalid stream identifier.
     pub fn stream_priority(
         &mut self, stream_id: u64, urgency: u8, incremental: bool,
     ) -> Result<()> {
@@ -6426,6 +6666,12 @@ impl<F: BufFactory> Connection<F> {
     /// [`Shutdown::Write`] direction. Remotely-initiated unidirectional streams
     /// can only be closed in the [`Shutdown::Read`] direction. Using an
     /// incorrect direction will return [`InvalidStreamState`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidStreamState` for an unsupported shutdown
+    /// direction, or `Error::Done` if the stream does not exist or the selected
+    /// side has already been shut down.
     ///
     /// [`Shutdown::Read`]: enum.Shutdown.html#variant.Read
     /// [`Shutdown::Write`]: enum.Shutdown.html#variant.Write
@@ -6545,6 +6791,11 @@ impl<F: BufFactory> Connection<F> {
     /// In addition, if the peer has signalled that it doesn't want to receive
     /// any more data from this stream by sending the `STOP_SENDING` frame, the
     /// [`StreamStopped`] error will be returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidStreamState` if the stream is absent, or
+    /// `Error::StreamStopped` if the peer stopped the stream.
     ///
     /// [`InvalidStreamState`]: enum.Error.html#variant.InvalidStreamState
     /// [`StreamStopped`]: enum.Error.html#variant.StreamStopped
@@ -6698,6 +6949,11 @@ impl<F: BufFactory> Connection<F> {
     /// In addition, if the peer has signalled that it doesn't want to receive
     /// any more data from this stream by sending the `STOP_SENDING` frame, the
     /// [`StreamStopped`] error will be returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same stream-state and peer-stop errors as
+    /// [`Self::stream_capacity`].
     ///
     /// [`stream_writable_next()`]: struct.Connection.html#method.stream_writable_next
     /// [`InvalidStreamState`]: enum.Error.html#variant.InvalidStreamState
@@ -6940,6 +7196,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Calling this method multiple times before [`send()`] has no effect.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` if no active path is available. A closed
+    /// or draining connection is a successful no-op.
+    ///
     /// [`send()`]: struct.Connection.html#method.send
     pub fn send_ack_eliciting(&mut self) -> Result<()> {
         if self.is_closed() || self.is_draining() {
@@ -6953,6 +7214,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// See [`send_ack_eliciting()`] for more detail. [`InvalidState`] is
     /// returned if there is no record of the path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` if the requested path is unavailable.
+    /// A closed or draining connection is a successful no-op.
     ///
     /// [`send_ack_eliciting()`]: struct.Connection.html#method.send_ack_eliciting
     /// [`InvalidState`]: enum.Error.html#variant.InvalidState
@@ -6978,6 +7244,12 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`BufferTooShort`] is returned if the provided buffer is too small for
     /// the DATAGRAM.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if the receive queue is empty or
+    /// `Error::BufferTooShort` if the first DATAGRAM does not fit. The DATAGRAM
+    /// is removed from the queue even when the buffer is too small.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`BufferTooShort`]: enum.Error.html#variant.BufferTooShort
@@ -7020,6 +7292,10 @@ impl<F: BufFactory> Connection<F> {
     /// This is the same as [`dgram_recv()`] but returns the DATAGRAM as an
     /// owned buffer instead of copying into the provided buffer.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if the receive queue is empty.
+    ///
     /// [`dgram_recv()`]: struct.Connection.html#method.dgram_recv
     #[inline]
     pub fn dgram_recv_buf(&mut self) -> Result<F::DgramBuf> {
@@ -7036,6 +7312,12 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`BufferTooShort`] is returned if the provided buffer is smaller the
     /// number of bytes to peek.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if the receive queue is empty or
+    /// `Error::BufferTooShort` if the output buffer cannot hold the requested
+    /// portion. The queued DATAGRAM is not removed.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`BufferTooShort`]: enum.Error.html#variant.BufferTooShort
@@ -7099,6 +7381,13 @@ impl<F: BufFactory> Connection<F> {
     /// avoid buffering an infinite amount of frames we apply an internal
     /// limit.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if the send queue has no room,
+    /// `Error::InvalidState` if DATAGRAM support or the active path is
+    /// unavailable, or `Error::BufferTooShort` if the payload exceeds the
+    /// permitted size.
+    ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`InvalidState`]: enum.Error.html#variant.InvalidState
     /// [`BufferTooShort`]: enum.Error.html#variant.BufferTooShort
@@ -7126,6 +7415,10 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// This is the same as [`dgram_send()`] but takes an owned buffer
     /// instead of a slice and avoids copying.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::dgram_send`].
     ///
     /// [`dgram_send()`]: struct.Connection.html#method.dgram_send
     pub fn dgram_send_buf(&mut self, buf: F::DgramBuf) -> Result<()> {
@@ -7390,7 +7683,7 @@ impl<F: BufFactory> Connection<F> {
     /// path, this call raises an [`InvalidState`].
     ///
     /// The caller might also want to probe an existing path. In such case, it
-    /// triggers a PATH_CHALLENGE frame, but it does not require spare CIDs.
+    /// triggers a `PATH_CHALLENGE` frame, but it does not require spare CIDs.
     ///
     /// A server always probes a new path it observes. Calling this method is
     /// hence not required to validate a new path. However, a server can still
@@ -7403,6 +7696,12 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// Returns the Destination Connection ID sequence number associated to that
     /// path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` if the path cannot be used (including an
+    /// unseen path on a server), or `Error::OutOfIdentifiers` if a new path
+    /// requires an unavailable connection ID.
     ///
     /// [`PathEvent::New`]: enum.PathEvent.html#variant.New
     /// [`OutOfIdentifiers`]: enum.Error.html#OutOfIdentifiers
@@ -7431,6 +7730,11 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// See [`migrate()`] for the full specification of this method.
     ///
+    /// # Errors
+    ///
+    /// Returns the same migration errors as [`Self::migrate`], or
+    /// `Error::InvalidState` if there is no active path.
+    ///
     /// [`migrate()`]: struct.Connection.html#method.migrate
     pub fn migrate_source(&mut self, local_addr: SocketAddr) -> Result<u64> {
         let peer_addr = self.paths.get_active()?.peer_addr();
@@ -7448,6 +7752,12 @@ impl<F: BufFactory> Connection<F> {
     /// [`OutOfIdentifiers`].
     ///
     /// Returns the Destination Connection ID associated to that migrated path.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` for server-initiated migration or an
+    /// unusable path, or `Error::OutOfIdentifiers` when insufficient connection
+    /// IDs are available.
     ///
     /// [`OutOfIdentifiers`]: enum.Error.html#OutOfIdentifiers
     /// [`InvalidState`]: enum.Error.html#InvalidState
@@ -7516,7 +7826,7 @@ impl<F: BufFactory> Connection<F> {
     /// Provides additional source Connection IDs that the peer can use to reach
     /// this host.
     ///
-    /// This triggers sending NEW_CONNECTION_ID frames if the provided Source
+    /// This triggers sending `NEW_CONNECTION_ID` frames if the provided Source
     /// Connection ID is not already present. In the case the caller tries to
     /// reuse a Connection ID with a different reset token, this raises an
     /// `InvalidState`.
@@ -7541,6 +7851,12 @@ impl<F: BufFactory> Connection<F> {
     /// [`InvalidState`].
     ///
     /// Returns the sequence number associated to the provided Connection ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` for zero-length IDs or conflicting
+    /// ID/token reuse, or `Error::IdLimit` if the connection ID limit prevents
+    /// insertion.
     ///
     /// [`scids_left()`]: struct.Connection.html#method.scids_left
     /// [`IdLimit`]: enum.Error.html#IdLimit
@@ -7588,7 +7904,7 @@ impl<F: BufFactory> Connection<F> {
     /// Requests the retirement of the destination Connection ID used by the
     /// host to reach its peer.
     ///
-    /// This triggers sending RETIRE_CONNECTION_ID frames.
+    /// This triggers sending `RETIRE_CONNECTION_ID` frames.
     ///
     /// If the application tries to retire a non-existing Destination Connection
     /// ID sequence number, or if it uses zero-length Destination Connection ID,
@@ -7601,6 +7917,12 @@ impl<F: BufFactory> Connection<F> {
     /// network paths, this method returns an [`OutOfIdentifiers`]. This
     /// behavior prevents the caller from stalling the connection due to the
     /// lack of validated path to send non-probing packets.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` for an unknown connection ID, zero-length
+    /// IDs, or unavailable path state; `Error::OutOfIdentifiers` if retirement
+    /// would leave no usable identifiers or path.
     ///
     /// [`InvalidState`]: enum.Error.html#InvalidState
     /// [`OutOfIdentifiers`]: enum.Error.html#OutOfIdentifiers
@@ -7755,7 +8077,7 @@ impl<F: BufFactory> Connection<F> {
     /// send an application error (not established nor in early data), in
     /// accordance with [RFC
     /// 9000](https://www.rfc-editor.org/rfc/rfc9000.html#section-10.2.3-3), the
-    /// error code is changed to APPLICATION_ERROR and the reason phrase is
+    /// error code is changed to `APPLICATION_ERROR` and the reason phrase is
     /// cleared.
     ///
     /// Returns [`Done`] if the connection had already been closed.
@@ -7764,6 +8086,11 @@ impl<F: BufFactory> Connection<F> {
     /// should continue calling the [`recv()`], [`send()`], [`timeout()`] and
     /// [`on_timeout()`] methods as normal, until the [`is_closed()`] method
     /// returns `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if closure was already initiated, or the
+    /// connection is closed or draining.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     /// [`recv()`]: struct.Connection.html#method.recv
@@ -7999,6 +8326,10 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If the 4-tuple does not exist over the connection, returns an
     /// [`InvalidState`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::InvalidState` if the network path does not exist.
     ///
     /// [`InvalidState`]: enum.Error.html#variant.InvalidState
     pub fn is_path_validated(
@@ -9237,7 +9568,7 @@ impl<F: BufFactory> Connection<F> {
         self.flow_control.max_data()
     }
 
-    /// Returns true if the HANDSHAKE_DONE frame needs to be sent.
+    /// Returns true if the `HANDSHAKE_DONE` frame needs to be sent.
     fn should_send_handshake_done(&self) -> bool {
         self.is_established() && !self.handshake_done_sent && self.is_server
     }
@@ -9534,7 +9865,7 @@ impl<F: BufFactory> Connection<F> {
         Err(Error::InvalidState)
     }
 
-    /// Sets the path with identifier 'path_id' to be active.
+    /// Sets the path with identifier '`path_id`' to be active.
     fn set_active_path(&mut self, path_id: usize, now: Instant) -> Result<()> {
         if let Ok(old_active_path) = self.paths.get_active_mut() {
             for &e in packet::Epoch::epochs(
@@ -9866,44 +10197,44 @@ pub struct Stats {
     /// The number of streams stopped by remote.
     pub stopped_stream_count_remote: u64,
 
-    /// The number of DATA_BLOCKED frames sent due to hitting the connection
+    /// The number of `DATA_BLOCKED` frames sent due to hitting the connection
     /// flow control limit.
     pub data_blocked_sent_count: u64,
 
-    /// The number of STREAM_DATA_BLOCKED frames sent due to a stream hitting
+    /// The number of `STREAM_DATA_BLOCKED` frames sent due to a stream hitting
     /// the stream flow control limit.
     pub stream_data_blocked_sent_count: u64,
 
-    /// The number of DATA_BLOCKED frames received from the remote.
+    /// The number of `DATA_BLOCKED` frames received from the remote.
     pub data_blocked_recv_count: u64,
 
-    /// The number of STREAM_DATA_BLOCKED frames received from the remote.
+    /// The number of `STREAM_DATA_BLOCKED` frames received from the remote.
     pub stream_data_blocked_recv_count: u64,
 
-    /// The number of STREAMS_BLOCKED frames for bidirectional streams received
-    /// from the remote, indicating the peer is blocked on opening new
+    /// The number of `STREAMS_BLOCKED` frames for bidirectional streams
+    /// received from the remote, indicating the peer is blocked on opening new
     /// bidirectional streams.
     pub streams_blocked_bidi_recv_count: u64,
 
-    /// The number of STREAMS_BLOCKED frames for unidirectional streams received
-    /// from the remote, indicating the peer is blocked on opening new
+    /// The number of `STREAMS_BLOCKED` frames for unidirectional streams
+    /// received from the remote, indicating the peer is blocked on opening new
     /// unidirectional streams.
     pub streams_blocked_uni_recv_count: u64,
 
-    /// The total number of PATH_CHALLENGE frames that were received.
+    /// The total number of `PATH_CHALLENGE` frames that were received.
     pub path_challenge_rx_count: u64,
 
-    /// The number of times send() was blocked because the anti-amplification
-    /// budget (bytes received × max_amplification_factor) was exhausted.
+    /// The number of times `send()` was blocked because the anti-amplification
+    /// budget (bytes received × `max_amplification_factor`) was exhausted.
     pub amplification_limited_count: u64,
 
     /// Total duration during which this side of the connection was
     /// actively sending bytes or waiting for those bytes to be acked.
     pub bytes_in_flight_duration: Duration,
 
-    /// Health state of the connection's tx_buffered.
+    /// Health state of the connection's `tx_buffered`.
     ///
-    /// Indicates whether the streams.tx_buffered value is consistent with
+    /// Indicates whether the `streams.tx_buffered` value is consistent with
     /// the actual sum of bytes buffered across all stream send buffers.
     /// Returns `Ok` if consistent, `Inconsistent` if there's a mismatch.
     pub tx_buffered_state: TxBufferTrackingState,

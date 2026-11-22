@@ -127,9 +127,9 @@ impl MaxBandwidthFilter {
     }
 }
 
-/// Bbr2NetworkModel takes low level congestion signals(packets sent/acked/lost)
-/// as input and produces BBRv2 model parameters like inflight_(hi|lo),
-/// bandwidth_(hi|lo), bandwidth and rtt estimates, etc.
+/// `Bbr2NetworkModel` takes low level congestion signals(packets
+/// sent/acked/lost) as input and produces `BBRv2` model parameters like
+/// inflight_(hi|lo), bandwidth_(hi|lo), bandwidth and rtt estimates, etc.
 #[derive(Debug)]
 pub(super) struct BBRv2NetworkModel {
     round_trip_counter: RoundTripCounter,
@@ -154,7 +154,8 @@ pub(super) struct BBRv2NetworkModel {
 
     /// The minimum bytes in flight during this round.
     min_bytes_in_flight_in_round: usize,
-    /// True if sending was limited by inflight_hi anytime in the current round.
+    /// True if sending was limited by `inflight_hi` anytime in the current
+    /// round.
     inflight_hi_limited_in_round: bool,
 
     /// Max bandwidth in the current round. Updated once per congestion event.
@@ -176,21 +177,21 @@ pub(super) struct BBRv2NetworkModel {
     /// aggregation epoch.
     cwnd_limited_before_aggregation_epoch: bool,
 
-    /// STARTUP-centric fields which experimentally used by PROBE_UP.
+    /// STARTUP-centric fields which experimentally used by `PROBE_UP`.
     full_bandwidth_reached: bool,
     full_bandwidth_baseline: Bandwidth,
     rounds_without_bandwidth_growth: usize,
 
-    /// Used by STARTUP and PROBE_UP to decide when to exit.
+    /// Used by STARTUP and `PROBE_UP` to decide when to exit.
     rounds_with_queueing: usize,
 
     /// Determines whether app limited rounds with no bandwidth growth count
     /// towards the rounds threshold to exit startup.
     ignore_app_limited_for_no_bandwidth_growth: bool,
 
-    /// The most recent send rate from the BandwidthSampler.
+    /// The most recent send rate from the `BandwidthSampler`.
     latest_send_rate: Option<Bandwidth>,
-    /// The most recent ack rate from the BandwidthSampler.
+    /// The most recent ack rate from the `BandwidthSampler`.
     latest_ack_rate: Option<Bandwidth>,
 
     /// Detector for persistent RTT jump episodes.

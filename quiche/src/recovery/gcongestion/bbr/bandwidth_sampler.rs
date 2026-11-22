@@ -188,7 +188,7 @@ struct BandwidthSample {
     /// <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#name-send-rate>
     send_rate: Option<Bandwidth>,
     // ack_rate tracks the acknowledgment rate for this sample
-    /// `ack_rate` is computed as bytes_acked_delta / time_delta between ack
+    /// `ack_rate` is computed as `bytes_acked_delta` / `time_delta` between ack
     /// points. <https://www.ietf.org/archive/id/draft-ietf-ccwg-bbr-04.html#name-ack-rate>
     ack_rate: Bandwidth,
     /// States captured when the packet was sent.
@@ -270,9 +270,9 @@ pub(crate) struct CongestionEventSample {
     /// INFLIGHT(p), where INFLIGHT(p) is the number of bytes acked while p
     /// is inflight.
     pub sample_max_inflight: usize,
-    /// The send state of the largest packet in acked_packets, unless it is
-    /// empty. If acked_packets is empty, it's the send state of the largest
-    /// packet in lost_packets.
+    /// The send state of the largest packet in `acked_packets`, unless it is
+    /// empty. If `acked_packets` is empty, it's the send state of the largest
+    /// packet in `lost_packets`.
     pub last_packet_send_state: SendTimeState,
     /// The number of extra bytes acked from this ack event, compared to what is
     /// expected from the flow's bandwidth. Larger value means more ack
@@ -280,10 +280,10 @@ pub(crate) struct CongestionEventSample {
     pub extra_acked: usize,
 
     /// The maximum send rate observed across all acked packets in this event.
-    /// Computed as bytes_sent_delta / time_delta between packet send times.
+    /// Computed as `bytes_sent_delta` / `time_delta` between packet send times.
     pub sample_max_send_rate: Option<Bandwidth>,
     /// The maximum ack rate observed across all acked packets in this event.
-    /// Computed as bytes_acked_delta / time_delta between ack times.
+    /// Computed as `bytes_acked_delta` / `time_delta` between ack times.
     pub sample_max_ack_rate: Option<Bandwidth>,
 }
 

@@ -179,12 +179,12 @@ pub struct Stream {
     /// Whether a trailing HEADER field has been received.
     trailers_received: bool,
 
-    /// Max size of QPACK encoded headers carried in HEADERS or PUSH_PROMISE
-    /// frames. Related to SETTINGS_MAX_FIELD_LIST_SIZE; see
+    /// Max size of QPACK encoded headers carried in HEADERS or `PUSH_PROMISE`
+    /// frames. Related to `SETTINGS_MAX_FIELD_LIST_SIZE`; see
     /// <https://datatracker.ietf.org/doc/html/rfc9114#section-7.2.4.1>
     max_encoded_headers_payload_size: u64,
 
-    /// Max PRIORITY_UPDATE frame payload size; see
+    /// Max `PRIORITY_UPDATE` frame payload size; see
     /// <https://datatracker.ietf.org/doc/html/rfc9218#section-7.2>
     max_priority_update_size: u64,
 }

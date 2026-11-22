@@ -136,10 +136,10 @@ where
     /// Ranges of data offsets that have been acked.
     acked: ranges::RangeSet,
 
-    /// The error code received via STOP_SENDING.
+    /// The error code received via `STOP_SENDING`.
     error: Option<u64>,
 
-    /// Whether the STOP_SENDING error was returned to the application.
+    /// Whether the `STOP_SENDING` error was returned to the application.
     error_reported: bool,
 }
 
@@ -325,7 +325,7 @@ impl<F: BufFactory> SendBuf<F> {
         Ok((out.len() - out_len, fin))
     }
 
-    /// Updates the max_data limit to the given value.
+    /// Updates the `max_data` limit to the given value.
     pub fn update_max_data(&mut self, max_data: u64) {
         self.max_data = cmp::max(self.max_data, max_data);
     }
@@ -598,12 +598,12 @@ impl<F: BufFactory> SendBuf<F> {
         self.error.is_some()
     }
 
-    /// Returns true if a STOP_SENDING error still needs to be delivered.
+    /// Returns true if a `STOP_SENDING` error still needs to be delivered.
     pub fn has_unreported_stop(&self) -> bool {
         self.error.is_some() && !self.error_reported && !self.shutdown
     }
 
-    /// Marks the STOP_SENDING error as reported to the application.
+    /// Marks the `STOP_SENDING` error as reported to the application.
     pub fn mark_stop_reported(&mut self) {
         self.error_reported = true;
     }

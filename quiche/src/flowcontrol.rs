@@ -50,7 +50,7 @@ pub struct FlowControl {
     /// The maximum receive window.
     max_window: u64,
 
-    /// Last update time of max_data for autotuning the window.
+    /// Last update time of `max_data` for autotuning the window.
     last_update: Option<Instant>,
 }
 
@@ -89,7 +89,7 @@ impl FlowControl {
         self.consumed = self.consumed.saturating_add(consumed);
     }
 
-    /// Returns true if the flow control needs to update max_data.
+    /// Returns true if the flow control needs to update `max_data`.
     ///
     /// This happens when the available window is smaller than the half
     /// of the current window.
@@ -108,7 +108,7 @@ impl FlowControl {
         self.consumed.saturating_add(self.window).max(self.max_data)
     }
 
-    /// Commits the new max_data limit.
+    /// Commits the new `max_data` limit.
     pub fn update_max_data(&mut self, now: Instant) {
         self.max_data = self.max_data_next();
         self.last_update = Some(now);
@@ -116,7 +116,7 @@ impl FlowControl {
 
     /// Autotune the window size. When there is an another update
     /// within RTT x 2, bump the window x 2, capped by
-    /// max_window.
+    /// `max_window`.
     pub fn autotune_window(&mut self, now: Instant, rtt: Duration) {
         if let Some(elapsed) = self
             .last_update

@@ -265,7 +265,7 @@
 //! Quiche is responsible for managing the HTTP/3 connection, ensuring it is in
 //! a correct state and validating all messages received by a peer. This mainly
 //! takes place in the [`poll()`] method. If an HTTP/3 error occurs, quiche will
-//! close the connection and send an appropriate CONNECTION_CLOSE frame to the
+//! close the connection and send an appropriate `CONNECTION_CLOSE` frame to the
 //! peer. An [`Error`] is returned to the application so that it can perform any
 //! required tidy up such as closing sockets.
 //!
@@ -335,13 +335,13 @@ const PRIORITY_URGENCY_UPPER_BOUND: u8 = 7;
 const PRIORITY_URGENCY_DEFAULT: u8 = 3;
 const PRIORITY_INCREMENTAL_DEFAULT: bool = false;
 
-/// The default value for the maximum size of PRIORITY_UPDATE
+/// The default value for the maximum size of `PRIORITY_UPDATE`
 /// frame payload.
 ///
 /// See <https://datatracker.ietf.org/doc/html/rfc9218#section-7.2>
 pub const PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT: u64 = 256;
 
-/// The default value for SETTINGS_MAX_FIELD_SECTION_SIZE
+/// The default value for `SETTINGS_MAX_FIELD_SECTION_SIZE`
 ///
 /// See <https://datatracker.ietf.org/doc/html/rfc9114#section-4.2.2>.
 pub const SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT: u64 = 32_768;
@@ -588,6 +588,11 @@ pub struct Config {
 
 impl Config {
     /// Creates a new configuration object with default settings.
+    ///
+    /// # Errors
+    ///
+    /// This constructor always succeeds; the result type does not currently
+    /// represent any failure.
     pub const fn new() -> Result<Self> {
         Ok(Self {
             max_field_section_size: Some(SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT),
@@ -605,7 +610,7 @@ impl Config {
     /// The default is [`SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT`]. The value is
     /// measured in units of bytes, it is used as a limit when parsing frames
     /// that contain encoded HTTP headers when [`poll()`] is called. A first
-    /// check is applied when handling HEADERS and PUSH_PROMISE frames
+    /// check is applied when handling HEADERS and `PUSH_PROMISE` frames
     /// themselves, with some margin allowed on top of the provided size. A
     /// second check is applied when decoding QPACK, implementing the rules
     /// described in <https://datatracker.ietf.org/doc/html/rfc9114#section-4.2.2>.
@@ -648,20 +653,26 @@ impl Config {
     /// Sets additional HTTP/3 settings.
     ///
     /// The default value is no additional settings.
-    /// The `additional_settings` parameter must not the following
+    /// The `additional_settings` parameter must not contain the following
     /// settings as they are already handled by this library:
     ///
-    /// - SETTINGS_QPACK_MAX_TABLE_CAPACITY
-    /// - SETTINGS_MAX_FIELD_SECTION_SIZE
-    /// - SETTINGS_QPACK_BLOCKED_STREAMS
-    /// - SETTINGS_ENABLE_CONNECT_PROTOCOL
-    /// - SETTINGS_H3_DATAGRAM
+    /// - `SETTINGS_QPACK_MAX_TABLE_CAPACITY`
+    /// - `SETTINGS_MAX_FIELD_SECTION_SIZE`
+    /// - `SETTINGS_QPACK_BLOCKED_STREAMS`
+    /// - `SETTINGS_ENABLE_CONNECT_PROTOCOL`
+    /// - `SETTINGS_H3_DATAGRAM`
+    /// - `SETTINGS_H3_DATAGRAM_00`
     ///
     /// If such a setting is present in the `additional_settings`,
     /// the method will return the [`Error::SettingsError`] error.
     ///
     /// If a setting identifier is present twice in `additional_settings`,
     /// the method will return the [`Error::SettingsError`] error.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::SettingsError` if an identifier is duplicated or
+    /// already managed by the library, including either DATAGRAM setting.
     ///
     /// [`Error::SettingsError`]: enum.Error.html#variant.SettingsError
     pub fn set_additional_settings(
@@ -688,12 +699,12 @@ impl Config {
         Ok(())
     }
 
-    /// Sets the maximum size for the payload of PRIORITY_UPDATE frames.
+    /// Sets the maximum size for the payload of `PRIORITY_UPDATE` frames.
     ///
     /// The default is [`PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT`]. The
     /// value uses units of bytes.
     ///
-    /// When a PRIORITY_UPDATE frame exceeds the limit set by the application,
+    /// When a `PRIORITY_UPDATE` frame exceeds the limit set by the application,
     /// the call to the [`poll()`] method will return the
     /// [`Error::ExcessiveLoad`] error, and the connection will be closed.
     ///
@@ -822,15 +833,15 @@ pub enum Event {
     /// The associated data represents the error code sent by the peer.
     Reset(u64),
 
-    /// PRIORITY_UPDATE was received.
+    /// `PRIORITY_UPDATE` was received.
     ///
     /// This indicates that the application can use the
     /// [`take_last_priority_update()`] method to take the last received
-    /// PRIORITY_UPDATE for a specified stream.
+    /// `PRIORITY_UPDATE` for a specified stream.
     ///
-    /// This event is triggered once per stream until the last PRIORITY_UPDATE
+    /// This event is triggered once per stream until the last `PRIORITY_UPDATE`
     /// is taken. It is recommended that applications defer taking the
-    /// PRIORITY_UPDATE until after [`poll()`] returns [`Done`].
+    /// `PRIORITY_UPDATE` until after [`poll()`] returns [`Done`].
     ///
     /// [`take_last_priority_update()`]: struct.Connection.html#method.take_last_priority_update
     /// [`poll()`]: struct.Connection.html#method.poll
@@ -845,7 +856,7 @@ pub enum Event {
 ///
 /// The `TryFrom` trait supports constructing this object from the serialized
 /// Structured Fields Dictionary field value. I.e, use `TryFrom` to parse the
-/// value of a Priority header field or a PRIORITY_UPDATE frame. Using this
+/// value of a Priority header field or a `PRIORITY_UPDATE` frame. Using this
 /// trait requires the `sfv` feature to be enabled.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(C)]
@@ -1104,6 +1115,13 @@ impl Connection {
     /// connection is not in a suitable state, or the HTTP/3 control stream
     /// cannot be created due to flow control limits.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::InternalError` if the client transport is not
+    /// established or in early data, or if control-stream setup fails.
+    /// Stream-creation and transport errors, including stream-limit errors, can
+    /// also be propagated.
+    ///
     /// [`StreamLimit`]: ../enum.Error.html#variant.StreamLimit
     /// [`InternalError`]: ../enum.Error.html#variant.InternalError
     pub fn with_transport<F: BufFactory>(
@@ -1156,6 +1174,12 @@ impl Connection {
     /// once the stream is reported as writable again. Any partial state created
     /// by the failed call is rolled back, so repeating the call with the same
     /// arguments is safe.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::FrameUnexpected` after receiving a GOAWAY,
+    /// `Error::StreamBlocked` when the operation must be retried, or an error
+    /// from stream creation or header encoding.
     ///
     /// [`send_body()`]: struct.Connection.html#method.send_body
     /// [`StreamBlocked`]: enum.Error.html#variant.StreamBlocked
@@ -1225,18 +1249,18 @@ impl Connection {
     /// without a body.
     ///
     /// To send a non-final 1xx, then a final 200+ without body:
-    ///   * send_response() with `fin` set to `false`.
+    ///   * `send_response()` with `fin` set to `false`.
     ///   * [`send_additional_headers()`] with fin set to `true` using the same
     ///     `stream_id` value.
     ///
     /// To send a non-final 1xx, then a final 200+ with body:
-    ///   * send_response() with `fin` set to `false`.
+    ///   * `send_response()` with `fin` set to `false`.
     ///   * [`send_additional_headers()`] with fin set to `false` and same
     ///     `stream_id` value.
     ///   * [`send_body()`] with same `stream_id`.
     ///
     /// To send a final 200+ with body:
-    ///   * send_response() with `fin` set to `false`.
+    ///   * `send_response()` with `fin` set to `false`.
     ///   * [`send_body()`] with same `stream_id`.
     ///
     /// Additional headers can only be sent during certain phases of an HTTP/3
@@ -1248,6 +1272,11 @@ impl Connection {
     /// doesn't have enough capacity for the operation to complete. When this
     /// happens the application should retry the operation once the stream is
     /// reported as writable again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same response sequencing, stream-capacity, and transport
+    /// errors as [`Self::send_response_with_priority`].
     ///
     /// [`send_body()`]: struct.Connection.html#method.send_body
     /// [`send_additional_headers()`]:
@@ -1276,18 +1305,18 @@ impl Connection {
     /// without a body.
     ///
     /// To send a non-final 1xx, then a final 200+ without body:
-    ///   * send_response_with_priority() with `fin` set to `false`.
+    ///   * `send_response_with_priority()` with `fin` set to `false`.
     ///   * [`send_additional_headers()`] with fin set to `true` using the same
     ///     `stream_id` value.
     ///
     /// To send a non-final 1xx, then a final 200+ with body:
-    ///   * send_response_with_priority() with `fin` set to `false`.
+    ///   * `send_response_with_priority()` with `fin` set to `false`.
     ///   * [`send_additional_headers()`] with fin set to `false` and same
     ///     `stream_id` value.
     ///   * [`send_body()`] with same `stream_id`.
     ///
     /// To send a final 200+ with body:
-    ///   * send_response_with_priority() with `fin` set to `false`.
+    ///   * `send_response_with_priority()` with `fin` set to `false`.
     ///   * [`send_body()`] with same `stream_id`.
     ///
     /// The `priority` parameter represents [Extensible Priority]
@@ -1303,6 +1332,12 @@ impl Connection {
     /// doesn't have enough capacity for the operation to complete. When this
     /// happens the application should retry the operation once the stream is
     /// reported as writable again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::FrameUnexpected` for an unknown stream or a duplicate
+    /// initial response, `Error::StreamBlocked` when the operation must be
+    /// retried, or header-encoding and transport errors.
     ///
     /// [`send_body()`]: struct.Connection.html#method.send_body
     /// [`send_additional_headers()`]:
@@ -1361,6 +1396,12 @@ impl Connection {
     /// doesn't have enough capacity for the operation to complete. When this
     /// happens the application should retry the operation once the stream is
     /// reported as writable again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::FrameUnexpected` for an invalid message phase or
+    /// unknown stream, `Error::StreamBlocked` when the operation must be
+    /// retried, or header-encoding and transport errors.
     ///
     /// [`send_request()`]: struct.Connection.html#method.send_request
     /// [`send_response()`]: struct.Connection.html#method.send_response
@@ -1431,6 +1472,11 @@ impl Connection {
     /// doesn't have enough capacity for the operation to complete. When this
     /// happens the application should retry the operation once the stream is
     /// reported as writable again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::send_additional_headers`], as well as
+    /// any transport error while applying the stream priority.
     ///
     /// [`send_request()`]: struct.Connection.html#method.send_request
     /// [`send_response()`]: struct.Connection.html#method.send_response
@@ -1576,6 +1622,12 @@ impl Connection {
     /// application should retry the operation once the stream is reported as
     /// writable again.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` when no DATA can be buffered (including an empty
+    /// non-final input), `Error::FrameUnexpected` if DATA is not allowed on the
+    /// stream at this phase, or a transport or frame-encoding error.
+    ///
     /// [`Done`]: enum.Error.html#variant.Done
     pub fn send_body<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64, body: &[u8],
@@ -1613,9 +1665,15 @@ impl Connection {
     /// enough capacity for the operation to complete.
     ///
     /// When a partial write happens (including when [`Done`] is returned) the
-    /// remaining (unwrittent) buffer will also be returned. The application
+    /// remaining (unwritten) buffer will also be returned. The application
     /// should retry the operation once the stream is reported as writable
     /// again.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same body-send errors as [`Self::send_body`]. An unexpected
+    /// partial write that cannot preserve the frame length is an
+    /// `Error::InternalError`.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     pub fn send_body_zc<F>(
@@ -1837,6 +1895,11 @@ impl Connection {
     /// On success the amount of bytes read is returned, or [`Done`] if there
     /// is no data to read.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if no body data is currently readable, or an
+    /// HTTP/3 parsing or transport error.
+    ///
     /// [`poll()`]: struct.Connection.html#method.poll
     /// [`Data`]: enum.Event.html#variant.Data
     /// [`Done`]: enum.Error.html#variant.Done
@@ -1847,12 +1910,12 @@ impl Connection {
         self.recv_body_buf(conn, stream_id, out)
     }
 
-    /// Reads request or response body data into the provided BufMut buffer.
+    /// Reads request or response body data into the provided `BufMut` buffer.
     ///
     /// **NOTE**:
-    /// The BufMut will be populated with all available data up to its capacity.
-    /// Since some BufMut implementations, e.g., [`Vec<u8>`], dynamically
-    /// allocate additional memory, the caller may use
+    /// The `BufMut` will be populated with all available data up to its
+    /// capacity. Since some `BufMut` implementations, e.g., [`Vec<u8>`],
+    /// dynamically allocate additional memory, the caller may use
     /// [`BufMut::limit()`] to limit the maximum amount of data that
     /// can be written.
     ///
@@ -1861,6 +1924,10 @@ impl Connection {
     ///
     /// On success the amount of bytes read is returned, or [`Done`] if there
     /// is no data to read.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same receive errors as [`Self::recv_body`].
     ///
     /// [`BufMut::limit()`]: bytes::BufMut::limit()
     /// [`recv_body()`]: Self::recv_body()
@@ -1960,7 +2027,7 @@ impl Connection {
         Ok(total)
     }
 
-    /// Sends a PRIORITY_UPDATE frame on the control stream with specified
+    /// Sends a `PRIORITY_UPDATE` frame on the control stream with specified
     /// request stream ID and priority.
     ///
     /// The `priority` parameter represents [Extensible Priority]
@@ -1971,6 +2038,12 @@ impl Connection {
     /// doesn't have enough capacity for the operation to complete. When this
     /// happens the application should retry the operation once the stream is
     /// reported as writable again.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::FrameUnexpected` when called by a server, for an invalid
+    /// request stream ID, or without a control stream; `Error::StreamBlocked`
+    /// if the control stream lacks capacity; or a transport/encoding error.
     ///
     /// [`StreamBlocked`]: enum.Error.html#variant.StreamBlocked
     /// [Extensible Priority]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
@@ -2063,16 +2136,20 @@ impl Connection {
         Ok(())
     }
 
-    /// Take the last PRIORITY_UPDATE for a prioritized element ID.
+    /// Take the last `PRIORITY_UPDATE` for a prioritized element ID.
     ///
     /// When the [`poll()`] method returns a [`PriorityUpdate`] event for a
     /// prioritized element, the event has triggered and will not rearm until
     /// applications call this method. It is recommended that applications defer
-    /// taking the PRIORITY_UPDATE until after [`poll()`] returns [`Done`].
+    /// taking the `PRIORITY_UPDATE` until after [`poll()`] returns [`Done`].
     ///
     /// On success the Priority Field Value is returned, or [`Done`] if there is
-    /// no PRIORITY_UPDATE to read (either because there is no value to take, or
-    /// because the prioritized element does not exist).
+    /// no `PRIORITY_UPDATE` to read (either because there is no value to take,
+    /// or because the prioritized element does not exist).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` if there is no pending update for the identifier.
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
     /// [`PriorityUpdate`]: enum.Event.html#variant.PriorityUpdate
@@ -2110,6 +2187,12 @@ impl Connection {
     ///
     /// If an error occurs while processing data, the connection is closed with
     /// the appropriate error code, using the transport's [`close()`] method.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::Done` when no event is available or local closure was
+    /// initiated. Propagates HTTP/3 parsing and transport errors; a stream
+    /// reset may instead be reported as an `Event::Reset`.
     ///
     /// [`Event`]: enum.Event.html
     /// [`Done`]: enum.Error.html#variant.Done
@@ -2219,6 +2302,12 @@ impl Connection {
     ///
     /// This method does not close the QUIC connection. Applications are
     /// required to call [`close()`] themselves.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::IdError` for an invalid server request-stream ID or an
+    /// increase over the previously sent GOAWAY ID, `Error::StreamBlocked` for
+    /// insufficient control-stream capacity, or a transport/encoding error.
     ///
     /// [`close()`]: ../struct.Connection.html#method.close
     pub fn send_goaway<F: BufFactory>(

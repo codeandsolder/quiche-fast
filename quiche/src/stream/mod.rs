@@ -62,7 +62,7 @@ pub struct StreamIdHasher {
 /// Return value type of `RecvBuf::reset()`
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub struct RecvBufResetReturn {
-    /// Returns the difference between the previous max_data offset
+    /// Returns the difference between the previous `max_data` offset
     /// received and the final size reported by the reset
     pub max_data_delta: u64,
 
@@ -201,7 +201,7 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
     stopped_writable: RBTree<StreamStoppedWritablePriorityAdapter>,
 
     /// Set of stream IDs corresponding to streams that are almost out of flow
-    /// control credit and need to send MAX_STREAM_DATA. This is used to
+    /// control credit and need to send `MAX_STREAM_DATA`. This is used to
     /// generate a `StreamIter` of streams without having to iterate over the
     /// full list of streams.
     almost_full: StreamIdHashSet,
@@ -213,12 +213,12 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
 
     /// Set of stream IDs corresponding to streams that are reset. The value
     /// of the map elements is a tuple of the error code and final size values
-    /// to include in the RESET_STREAM frame.
+    /// to include in the `RESET_STREAM` frame.
     reset: StreamIdHashMap<(u64, u64)>,
 
     /// Set of stream IDs corresponding to streams that are shutdown on the
-    /// receive side, and need to send a STOP_SENDING frame. The value of the
-    /// map elements is the error code to include in the STOP_SENDING frame.
+    /// receive side, and need to send a `STOP_SENDING` frame. The value of the
+    /// map elements is the error code to include in the `STOP_SENDING` frame.
     stopped: StreamIdHashMap<u64>,
 
     /// The maximum size of a stream window.
@@ -587,34 +587,34 @@ impl<F: BufFactory> StreamMap<F> {
         self.peer_max_streams_uni = cmp::max(self.peer_max_streams_uni, v);
     }
 
-    /// Commits the new max_streams_bidi limit.
+    /// Commits the new `max_streams_bidi` limit.
     pub fn update_max_streams_bidi(&mut self) {
         self.local_max_streams_bidi = self.local_max_streams_bidi_next;
     }
 
-    /// Sets the max_streams_bidi limit to the given value.
+    /// Sets the `max_streams_bidi` limit to the given value.
     pub fn set_max_streams_bidi(&mut self, max: u64) {
         self.local_max_streams_bidi = max;
         self.local_max_streams_bidi_next = max;
         self.initial_max_streams_bidi = max;
     }
 
-    /// Returns the current max_streams_bidi limit.
+    /// Returns the current `max_streams_bidi` limit.
     pub fn max_streams_bidi(&self) -> u64 {
         self.local_max_streams_bidi
     }
 
-    /// Returns the new max_streams_bidi limit.
+    /// Returns the new `max_streams_bidi` limit.
     pub fn max_streams_bidi_next(&mut self) -> u64 {
         self.local_max_streams_bidi_next
     }
 
-    /// Commits the new max_streams_uni limit.
+    /// Commits the new `max_streams_uni` limit.
     pub fn update_max_streams_uni(&mut self) {
         self.local_max_streams_uni = self.local_max_streams_uni_next;
     }
 
-    /// Returns the new max_streams_uni limit.
+    /// Returns the new `max_streams_uni` limit.
     pub fn max_streams_uni_next(&mut self) -> u64 {
         self.local_max_streams_uni_next
     }
@@ -659,7 +659,7 @@ impl<F: BufFactory> StreamMap<F> {
 
     /// Drops completed stream.
     ///
-    /// This should only be called when Stream::is_collectable() returns true
+    /// This should only be called when `Stream::is_collectable()` returns true
     /// for the given stream.
     pub fn collect(&mut self, stream_id: u64, local: bool) {
         if !local {
@@ -748,22 +748,23 @@ impl<F: BufFactory> StreamMap<F> {
         stream_id >> 2 < opened
     }
 
-    /// Creates an iterator over streams that need to send MAX_STREAM_DATA.
+    /// Creates an iterator over streams that need to send `MAX_STREAM_DATA`.
     pub fn almost_full(&self) -> StreamIter {
         StreamIter::from(&self.almost_full)
     }
 
-    /// Creates an iterator over streams that need to send STREAM_DATA_BLOCKED.
+    /// Creates an iterator over streams that need to send
+    /// `STREAM_DATA_BLOCKED`.
     pub fn blocked(&self) -> hash_map::Iter<'_, u64, u64> {
         self.blocked.iter()
     }
 
-    /// Creates an iterator over streams that need to send RESET_STREAM.
+    /// Creates an iterator over streams that need to send `RESET_STREAM`.
     pub fn reset(&self) -> hash_map::Iter<'_, u64, (u64, u64)> {
         self.reset.iter()
     }
 
-    /// Creates an iterator over streams that need to send STOP_SENDING.
+    /// Creates an iterator over streams that need to send `STOP_SENDING`.
     pub fn stopped(&self) -> hash_map::Iter<'_, u64, u64> {
         self.stopped.iter()
     }
@@ -799,15 +800,15 @@ impl<F: BufFactory> StreamMap<F> {
         !self.reset.is_empty()
     }
 
-    /// Returns true if there are any streams that need to send STOP_SENDING.
+    /// Returns true if there are any streams that need to send `STOP_SENDING`.
     pub fn has_stopped(&self) -> bool {
         !self.stopped.is_empty()
     }
 
     /// Returns true if the max bidirectional streams count needs to be updated
-    /// by sending a MAX_STREAMS frame to the peer.
+    /// by sending a `MAX_STREAMS` frame to the peer.
     ///
-    /// This only sends MAX_STREAMS when available capacity is at or below 50%
+    /// This only sends `MAX_STREAMS` when available capacity is at or below 50%
     /// of the initial maximum streams target.
     pub fn should_update_max_streams_bidi(&self) -> bool {
         let available = self
@@ -818,10 +819,10 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Returns true if the max unidirectional streams count needs to be updated
-    /// by sending a MAX_STREAMS frame to the peer.
+    /// by sending a `MAX_STREAMS` frame to the peer.
     ///
-    /// This only send MAX_STREAMS when available capacity is at or below 50% of
-    /// the initial maximum streams target.
+    /// This only send `MAX_STREAMS` when available capacity is at or below 50%
+    /// of the initial maximum streams target.
     pub fn should_update_max_streams_uni(&self) -> bool {
         let available = self
             .local_max_streams_uni
@@ -842,19 +843,19 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Computes the actual number of bytes in send buffers by summing across
-    /// all streams. This is used for debugging to verify that tx_buffered
+    /// all streams. This is used for debugging to verify that `tx_buffered`
     /// is accurate.
     fn tx_buffered_actual(&self) -> u64 {
         self.streams.values().map(|s| s.send.buffered_bytes()).sum()
     }
 
-    /// Checks if the stored tx_buffered matches the actual value.
+    /// Checks if the stored `tx_buffered` matches the actual value.
     /// Returns true if they match, false otherwise.
     pub(crate) fn tx_buffered_is_consistent(&self) -> bool {
         self.tx_buffered == self.tx_buffered_actual()
     }
 
-    /// Updates the tx_buffered value by adding the delta.
+    /// Updates the `tx_buffered` value by adding the delta.
     pub(crate) fn add_tx_buffered(&mut self, delta: u64) {
         self.tx_buffered += delta;
 
@@ -862,7 +863,7 @@ impl<F: BufFactory> StreamMap<F> {
         self.debug_check_tx_buffered_consistency();
     }
 
-    /// Updates the tx_buffered value by subtracting the delta.
+    /// Updates the `tx_buffered` value by subtracting the delta.
     pub(crate) fn sub_tx_buffered(&mut self, delta: u64) {
         debug_assert!(self.tx_buffered >= delta);
         self.tx_buffered = self.tx_buffered.saturating_sub(delta);
@@ -871,7 +872,7 @@ impl<F: BufFactory> StreamMap<F> {
         self.debug_check_tx_buffered_consistency();
     }
 
-    /// Verifies that the stored tx_buffered value matches the actual bytes in
+    /// Verifies that the stored `tx_buffered` value matches the actual bytes in
     /// send buffers across all streams. Enabled in debug builds to catch
     /// inconsistencies early.
     #[cfg(debug_assertions)]

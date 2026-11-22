@@ -332,6 +332,11 @@ impl<'a> Header<'a> {
     /// The `dcid_len` parameter is the length of the destination connection ID,
     /// required to parse short header packets.
     ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferTooShort` for truncated input, or
+    /// `Error::InvalidPacket` for invalid header fields.
+    ///
     /// ## Examples:
     ///
     /// ```no_run
@@ -997,10 +1002,10 @@ impl CryptoContext {
 /// cause those flows to yield bandwidth on the network. ACKs are the primary
 /// source of recovery signals for a QUIC connection.
 ///
-/// The goal of an OACK attack is to mount a DDoS attack by exploiting recovery
-/// signals and causing a server to expand its sending rate. A server with an
-/// inflated sending rate would then be able to flood a shared network and
-/// cripple all other flows. The fundamental reason that makes OACK
+/// The goal of an OACK attack is to mount a `DDoS` attack by exploiting
+/// recovery signals and causing a server to expand its sending rate. A server
+/// with an inflated sending rate would then be able to flood a shared network
+/// and cripple all other flows. The fundamental reason that makes OACK
 /// attach possible is the use of unvalidated ACK data, which is then used to
 /// modify internal state. Therefore at a high level, a mitigation should
 /// validate the incoming ACK data before use.

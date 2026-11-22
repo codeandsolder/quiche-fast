@@ -38,7 +38,7 @@ use std::collections::VecDeque;
 use smallvec::SmallVec;
 
 /// Used to calculate the cap for the queue of retired connection IDs for which
-/// a RETIRED_CONNECTION_ID frame have not been sent, as a multiple of
+/// a `RETIRED_CONNECTION_ID` frame have not been sent, as a multiple of
 /// `active_conn_id_limit` (see RFC 9000, section 5.1.2).
 const RETIRED_CONN_ID_LIMIT_MULTIPLIER: usize = 3;
 
@@ -446,7 +446,7 @@ impl ConnectionIdentifiers {
     }
 
     /// Adds a new Destination Connection ID (originating from a
-    /// NEW_CONNECTION_ID frame) and process all its related metadata.
+    /// `NEW_CONNECTION_ID` frame) and process all its related metadata.
     ///
     /// Returns an error if the provided Connection ID or its metadata are
     /// invalid.
@@ -744,7 +744,7 @@ impl ConnectionIdentifiers {
 
     /// Adds or remove the source Connection ID sequence number from the
     /// source Connection ID set that need to be advertised to the peer through
-    /// NEW_CONNECTION_ID frames.
+    /// `NEW_CONNECTION_ID` frames.
     #[inline]
     pub fn mark_advertise_new_scid_seq(
         &mut self, scid_seq: u64, advertise: bool,
@@ -762,7 +762,7 @@ impl ConnectionIdentifiers {
 
     /// Adds or remove the destination Connection ID sequence number from the
     /// retired destination Connection ID set that need to be advertised to the
-    /// peer through RETIRE_CONNECTION_ID frames.
+    /// peer through `RETIRE_CONNECTION_ID` frames.
     #[inline]
     pub fn mark_retire_dcid_seq(
         &mut self, dcid_seq: u64, retire: bool,
@@ -777,7 +777,7 @@ impl ConnectionIdentifiers {
     }
 
     /// Gets a source Connection ID's sequence number requiring advertising it
-    /// to the peer through NEW_CONNECTION_ID frame, if any.
+    /// to the peer through `NEW_CONNECTION_ID` frame, if any.
     ///
     /// If `Some`, it always returns the same value until it has been removed
     /// using `mark_advertise_new_scid_seq`.
@@ -787,7 +787,7 @@ impl ConnectionIdentifiers {
     }
 
     /// Returns a copy of the set of destination Connection IDs's sequence
-    /// numbers to send RETIRE_CONNECTION_ID frames.
+    /// numbers to send `RETIRE_CONNECTION_ID` frames.
     ///
     /// Note that the set includes sequence numbers at the time the copy was
     /// created. To account for newly inserted or removed sequence numbers, a
@@ -822,7 +822,7 @@ impl ConnectionIdentifiers {
         self.zero_length_dcid
     }
 
-    /// Gets the NEW_CONNECTION_ID frame related to the source connection ID
+    /// Gets the `NEW_CONNECTION_ID` frame related to the source connection ID
     /// with sequence `seq_num`.
     pub fn get_new_connection_id_frame_for(
         &self, seq_num: u64,

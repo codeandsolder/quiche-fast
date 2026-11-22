@@ -64,7 +64,7 @@ pub struct RecvBuf {
     /// The final stream offset received from the peer, if any.
     fin_off: Option<u64>,
 
-    /// The error code received via RESET_STREAM.
+    /// The error code received via `RESET_STREAM`.
     error: Option<u64>,
 
     /// Whether incoming data is validated but not buffered.
@@ -347,12 +347,12 @@ impl RecvBuf {
         Ok(result)
     }
 
-    /// Commits the new max_data limit.
+    /// Commits the new `max_data` limit.
     pub fn update_max_data(&mut self, now: Instant) {
         self.flow_control.update_max_data(now);
     }
 
-    /// Return the new max_data limit.
+    /// Return the new `max_data` limit.
     pub fn max_data_next(&mut self) -> u64 {
         self.flow_control.max_data_next()
     }

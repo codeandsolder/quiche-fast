@@ -52,9 +52,9 @@ where
 {
     /// The internal buffer holding the data.
     ///
-    /// To avoid needless allocations when a RangeBuf is split, this field
+    /// To avoid needless allocations when a `RangeBuf` is split, this field
     /// should be reference-counted so it can be shared between multiple
-    /// RangeBuf objects, and sliced using the `start` and `len` values.
+    /// `RangeBuf` objects, and sliced using the `start` and `len` values.
     pub(crate) data: F::Buf,
 
     /// The initial offset within the internal buffer.

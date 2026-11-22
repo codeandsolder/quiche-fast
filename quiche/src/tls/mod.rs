@@ -156,7 +156,7 @@ enum ssl_private_key_result_t {
     ssl_private_key_failure,
 }
 
-/// BoringSSL ex_data index for quiche connections.
+/// `BoringSSL` `ex_data` index for quiche connections.
 pub static QUICHE_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
     SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
 });
@@ -409,8 +409,8 @@ impl Drop for Context {
 
 pub struct Handshake {
     ptr: NonNull<SSL>,
-    /// SSL_process_quic_post_handshake should be called when whenever
-    /// SSL_provide_quic_data is called to process the provided data.
+    /// `SSL_process_quic_post_handshake` should be called when whenever
+    /// `SSL_provide_quic_data` is called to process the provided data.
     provided_data_outstanding: bool,
 
     early_data_rejected: bool,
@@ -775,7 +775,7 @@ pub struct ExData<'a> {
 
     pub tx_cap_factor: f64,
 
-    /// PMTUD configuration: (enable, max_probes)
+    /// PMTUD configuration: (enable, `max_probes`)
     pub pmtud: Option<(bool, u8)>,
 
     pub is_server: bool,
