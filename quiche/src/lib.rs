@@ -4830,6 +4830,22 @@ impl<F: BufFactory> Connection<F> {
 
         let hdr_ty = hdr.ty;
 
+        // Capture the header before packet construction can retire a CID.
+        // Do not allocate it for a disabled packet event.
+        #[cfg(feature = "qlog")]
+        let qlog_pkt_hdr = (self.qlog.streamer.is_some() &&
+            EventImportance::from(QLOG_PACKET_TX)
+                .is_contained_in(&self.qlog.level))
+        .then(|| {
+            qlog::events::quic::PacketHeader::with_type(
+                hdr.ty.to_qlog(),
+                Some(pn),
+                Some(hdr.version),
+                Some(&hdr.scid),
+                Some(&hdr.dcid),
+            )
+        });
+
         // Calculate the space required for the packet, including the header
         // the payload length, the packet number and the AEAD overhead.
         let mut overhead = b.off() + pn_len + crypto_overhead;
@@ -5742,14 +5758,8 @@ impl<F: BufFactory> Connection<F> {
             trace!("{} tx frm {frame:?}", self.trace_id);
         }
 
-        qlog_with_type!(QLOG_PACKET_TX, self.qlog, q, {
-            let header = qlog::events::quic::PacketHeader::with_type(
-                hdr.ty.to_qlog(),
-                Some(pn),
-                Some(hdr.version),
-                Some(&hdr.scid),
-                Some(&hdr.dcid),
-            );
+        #[cfg(feature = "qlog")]
+        if let (Some(q), Some(header)) = (&mut self.qlog.streamer, qlog_pkt_hdr) {
             let qlog_frames = frames
                 .iter()
                 .map(|frame| {
@@ -5781,7 +5791,7 @@ impl<F: BufFactory> Connection<F> {
                 });
 
             q.add_event_data_with_instant(ev_data, now).ok();
-        });
+        }
 
         let aead = match crypto_ctx.crypto_seal {
             Some(ref mut v) => v,
