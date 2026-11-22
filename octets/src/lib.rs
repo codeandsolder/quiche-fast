@@ -599,47 +599,10 @@ impl<'a> OctetsMut<'a> {
     pub fn put_varint_with_len(
         &mut self, v: u64, len: usize,
     ) -> Result<&mut [u8]> {
-        let max = match len {
-            1 => 0x3f,
-            2 => 0x3fff,
-            4 => 0x3fff_ffff,
-            8 => MAX_VAR_INT,
-            _ => return Err(BufferTooShortError),
-        };
-
-        if v > max || self.cap() < len {
-            return Err(BufferTooShortError);
-        }
-
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "v is range-checked against the selected QUIC varint width above"
-        )]
-        let buf = match len {
-            1 => self.put_u8(v as u8)?,
-
-            2 => {
-                let buf = self.put_u16(v as u16)?;
-                buf[0] |= 0x40;
-                buf
-            },
-
-            4 => {
-                let buf = self.put_u32(v as u32)?;
-                buf[0] |= 0x80;
-                buf
-            },
-
-            8 => {
-                let buf = self.put_u64(v)?;
-                buf[0] |= 0xc0;
-                buf
-            },
-
-            _ => unreachable!("validated varint length"),
-        };
-
-        Ok(buf)
+        let encoded = EncodedVarint::with_len(v, len)?;
+        let start = self.off;
+        self.put_bytes(encoded.as_ref())?;
+        Ok(&mut self.buf[start..self.off])
     }
 
     /// Reads `len` bytes from the current offset without copying and advances
@@ -877,6 +840,59 @@ impl OctetsWriter for Vec<u8> {
     }
 }
 
+/// An encoded QUIC variable-length integer, including its wire width.
+///
+/// The encoded bytes can be passed directly to an initialized or
+/// uninitialized byte sink. Construction validates the 62-bit wire domain
+/// and the requested width before any destination is modified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EncodedVarint {
+    bytes: [u8; 8],
+    len: usize,
+}
+
+impl EncodedVarint {
+    /// Encode in the shortest available wire width.
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the value exceeds [`MAX_VAR_INT`].
+    #[inline]
+    pub const fn new(value: u64) -> Result<Self> {
+        Self::with_len(value, varint_len(value))
+    }
+
+    /// Encode in a specified wire width (1, 2, 4 or 8 bytes).
+    ///
+    /// # Errors
+    /// Returns [`BufferTooShortError`] when the width is invalid or the value
+    /// does not fit within that width.
+    #[inline]
+    pub const fn with_len(value: u64, len: usize) -> Result<Self> {
+        let prefix: u64 = match len {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            _ => return Err(BufferTooShortError),
+        };
+        let shift = len * 8 - 2;
+        if value >> shift != 0 {
+            return Err(BufferTooShortError);
+        }
+        Ok(Self {
+            bytes: (value | (prefix << shift)).to_be_bytes(),
+            len,
+        })
+    }
+}
+
+impl AsRef<[u8]> for EncodedVarint {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        &self.bytes[8 - self.len..]
+    }
+}
+
 /// Returns the QUIC variable-length integer width class for `v`.
 ///
 /// Values above [`MAX_VAR_INT`] also map to 8 bytes; encoding APIs reject
@@ -897,13 +913,7 @@ pub const fn varint_len(v: u64) -> usize {
 /// Returns how long the variable-length integer is, given its first byte.
 #[must_use = "the result determines the encoded width from the leading byte"]
 pub const fn varint_parse_len(first: u8) -> usize {
-    match first >> 6 {
-        0 => 1,
-        1 => 2,
-        2 => 4,
-        3 => 8,
-        _ => unreachable!(),
-    }
+    1 << (first >> 6)
 }
 
 /// Returns how long the Huffman encoding of the given buffer will be.

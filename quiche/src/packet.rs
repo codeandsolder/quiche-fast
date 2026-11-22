@@ -175,13 +175,6 @@ unsafe impl BufMut for PacketWriter<'_> {
 }
 
 impl FrameSink for PacketWriter<'_> {
-    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
-        let mut bytes = [0; 8];
-        let mut encoded = octets::OctetsMut::with_slice(&mut bytes);
-        let bytes = encoded.put_varint_with_len(value, len)?;
-        FrameSink::put_bytes(self, bytes)
-    }
-
     fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
         if value.len() > self.cap() {
             return Err(Error::BufferTooShort);
