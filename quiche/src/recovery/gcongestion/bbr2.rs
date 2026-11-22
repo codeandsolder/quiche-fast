@@ -440,7 +440,8 @@ fn initial_pacing_rate(
         return Bandwidth::from_bytes_per_second(pacing_rate);
     }
 
-    Bandwidth::from_bytes_and_time_delta(cwnd_in_bytes, smoothed_rtt) * 2.885
+    Bandwidth::from_bytes_and_time_delta(cwnd_in_bytes as u64, smoothed_rtt) *
+        2.885
 }
 
 #[derive(Debug)]
@@ -583,10 +584,10 @@ impl BBRv2 {
             e => e,
         };
 
-        if network_model.total_bytes_acked() == bytes_acked {
+        if network_model.total_bytes_acked() == bytes_acked as u64 {
             // After the first ACK, cwnd is still the initial congestion window.
             self.pacing_rate = Bandwidth::from_bytes_and_time_delta(
-                self.cwnd,
+                self.cwnd as u64,
                 network_model.min_rtt(),
             );
 

@@ -141,7 +141,7 @@ pub(super) struct BBRv2NetworkModel {
     max_bandwidth_filter: MaxBandwidthFilter,
     min_rtt_filter: MinRttFilter,
     /// Bytes lost in the current round. Updated once per congestion event.
-    bytes_lost_in_round: usize,
+    bytes_lost_in_round: u64,
     /// Number of loss marking events in the current round.
     loss_events_in_round: usize,
 
@@ -382,8 +382,11 @@ impl BBRv2NetworkModel {
         self.latest_ack_rate = sample.sample_max_ack_rate;
 
         congestion_event.bytes_acked =
-            self.total_bytes_acked() - prior_bytes_acked;
-        congestion_event.bytes_lost = self.total_bytes_lost() - prior_bytes_lost;
+            usize::try_from(self.total_bytes_acked() - prior_bytes_acked)
+                .unwrap_or(usize::MAX);
+        let bytes_lost = self.total_bytes_lost() - prior_bytes_lost;
+        congestion_event.bytes_lost =
+            usize::try_from(bytes_lost).unwrap_or(usize::MAX);
 
         congestion_event.bytes_in_flight = congestion_event
             .prior_bytes_in_flight
@@ -391,7 +394,7 @@ impl BBRv2NetworkModel {
             .saturating_sub(congestion_event.bytes_lost);
 
         if congestion_event.bytes_lost > 0 {
-            self.bytes_lost_in_round += congestion_event.bytes_lost;
+            self.bytes_lost_in_round += bytes_lost;
             self.loss_events_in_round += 1;
         }
 
@@ -400,8 +403,11 @@ impl BBRv2NetworkModel {
             self.total_bytes_acked() >
                 congestion_event.last_packet_send_state.total_bytes_acked
         {
-            let bytes_delivered = self.total_bytes_acked() -
-                congestion_event.last_packet_send_state.total_bytes_acked;
+            let bytes_delivered = usize::try_from(
+                self.total_bytes_acked() -
+                    congestion_event.last_packet_send_state.total_bytes_acked,
+            )
+            .unwrap_or(usize::MAX);
             self.max_bytes_delivered_in_round =
                 self.max_bytes_delivered_in_round.max(bytes_delivered);
         }
@@ -496,7 +502,7 @@ impl BBRv2NetworkModel {
             BwLoMode::Default => unreachable!("Handled above"),
             BwLoMode::MinRttReduction => {
                 let reduction = Bandwidth::from_bytes_and_time_delta(
-                    congestion_event.bytes_lost,
+                    congestion_event.bytes_lost as u64,
                     self.min_rtt(),
                 );
 
@@ -615,7 +621,7 @@ impl BBRv2NetworkModel {
 
         if inflight_at_send > 0 && bytes_lost_in_round > 0 {
             let lost_in_round_threshold =
-                (inflight_at_send as f32 * params.loss_threshold) as usize;
+                (inflight_at_send as f32 * params.loss_threshold) as u64;
             if bytes_lost_in_round > lost_in_round_threshold {
                 return true;
             }
@@ -701,11 +707,11 @@ impl BBRv2NetworkModel {
         self.max_bytes_delivered_in_round
     }
 
-    pub(super) fn total_bytes_acked(&self) -> usize {
+    pub(super) fn total_bytes_acked(&self) -> u64 {
         self.bandwidth_sampler.total_bytes_acked()
     }
 
-    pub(super) fn total_bytes_lost(&self) -> usize {
+    pub(super) fn total_bytes_lost(&self) -> u64 {
         self.bandwidth_sampler.total_bytes_lost()
     }
 
