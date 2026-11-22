@@ -1619,6 +1619,46 @@ fn update_key_request(
 }
 
 #[rstest]
+fn unauthenticated_key_phase_change_does_not_install_new_keys(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    pipe.handshake().unwrap();
+    pipe.advance().unwrap();
+    let previous_phase = pipe.server.key_phase;
+
+    pipe.client_update_key().unwrap();
+    let frames = [frame::Frame::Stream {
+        stream_id: 4,
+        data: <RangeBuf>::from(b"hello", 0, false),
+    }];
+    let mut buf = [0; 1500];
+    let written =
+        test_utils::encode_pkt(&mut pipe.client, Type::Short, &frames, &mut buf)
+            .unwrap();
+
+    // Flip a tag byte without changing the header protection sample.
+    let mut corrupted = buf[..written].to_vec();
+    corrupted[written - 1] ^= 1;
+    assert_eq!(pipe.server_recv(&mut corrupted), Ok(written));
+    assert_eq!(pipe.server.key_phase, previous_phase);
+    assert!(pipe.server.crypto_ctx[packet::Epoch::Application]
+        .key_update
+        .is_none());
+    assert!(pipe.server.local_error.is_none());
+
+    // The authentic packet must still decrypt and advance the key phase.
+    assert_eq!(pipe.server_recv(&mut buf[..written]), Ok(written));
+    assert_eq!(pipe.server.key_phase, !previous_phase);
+    assert!(pipe.server.crypto_ctx[packet::Epoch::Application]
+        .key_update
+        .is_some());
+    let mut data = [0; 5];
+    assert_eq!(pipe.server.stream_recv(4, &mut data), Ok((5, false)));
+    assert_eq!(&data, b"hello");
+}
+
+#[rstest]
 fn update_key_request_twice_error(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {

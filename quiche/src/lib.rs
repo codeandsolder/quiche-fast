@@ -3519,9 +3519,7 @@ impl<F: BufFactory> Connection<F> {
         };
 
         // Finally, discard packet if no usable key is available.
-        let mut aead = if let Some(v) = aead {
-            v
-        } else {
+        let Some(mut aead) = aead else {
             if hdr.ty == Type::ZeroRTT &&
                 self.undecryptable_pkts.len() < MAX_UNDECRYPTABLE_PACKETS &&
                 !self.is_established()
@@ -3580,7 +3578,7 @@ impl<F: BufFactory> Connection<F> {
         let mut aead_next = None;
 
         if self.handshake_confirmed &&
-            hdr.ty != Type::ZeroRTT &&
+            hdr.ty == Type::Short &&
             hdr.key_phase != self.key_phase
         {
             // Check if this packet arrived before key update.
@@ -3595,22 +3593,28 @@ impl<F: BufFactory> Connection<F> {
             } else {
                 trace!("{} peer-initiated key update", self.trace_id);
 
-                aead_next = Some((
-                    self.crypto_ctx[epoch]
-                        .crypto_open
-                        .as_ref()
-                        .unwrap()
-                        .derive_next_packet_key()?,
-                    self.crypto_ctx[epoch]
+                // Only Short packets carry the application key phase.
+                // The selected current opening key is already known here.
+                // Keep speculative keys separate until packet authentication.
+                let next = (|| {
+                    let seal = self.crypto_ctx[epoch]
                         .crypto_seal
                         .as_ref()
-                        .unwrap()
-                        .derive_next_packet_key()?,
-                ));
-
-                // `aead_next` is always `Some` at this point, so the
-                // `unwrap()` will never fail.
-                aead = &aead_next.as_ref().unwrap().0;
+                        .ok_or(Error::CryptoFail)?;
+                    Ok((
+                        aead.derive_next_packet_key()?,
+                        seal.derive_next_packet_key()?,
+                    ))
+                })()
+                .map_err(|e| {
+                    drop_pkt_on_err(
+                        e,
+                        self.recv_count,
+                        self.is_server,
+                        &self.trace_id,
+                    )
+                })?;
+                aead = &aead_next.insert(next).0;
             }
         }
 
@@ -3670,20 +3674,20 @@ impl<F: BufFactory> Connection<F> {
 
             trace!("{} key update verified", self.trace_id);
 
-            let _ = self.crypto_ctx[epoch].crypto_seal.replace(seal_next);
-
-            let open_prev = self.crypto_ctx[epoch]
-                .crypto_open
-                .replace(open_next)
-                .unwrap();
-
-            let recv_path = self.paths.get_mut(recv_pid)?;
-
-            self.crypto_ctx[epoch].key_update = Some(packet::KeyUpdate {
+            // Resolve all fallible prerequisites before changing key state.
+            let recv_path = self.paths.get(recv_pid)?;
+            let timer = now
+                .checked_add(recv_path.recovery.pto().saturating_mul(3))
+                .ok_or(Error::InvalidState)?;
+            let ctx = &mut self.crypto_ctx[epoch];
+            let open_prev = ctx.crypto_open.take().ok_or(Error::InvalidState)?;
+            ctx.crypto_open = Some(open_next);
+            ctx.crypto_seal = Some(seal_next);
+            ctx.key_update = Some(packet::KeyUpdate {
                 crypto_open: open_prev,
                 pn_on_update: pn,
                 update_acked: false,
-                timer: now + (recv_path.recovery.pto() * 3),
+                timer,
             });
 
             self.key_phase = !self.key_phase;
