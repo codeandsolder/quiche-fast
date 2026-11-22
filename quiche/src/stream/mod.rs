@@ -2075,7 +2075,7 @@ mod tests {
             }
         }
         assert!(!stream.is_flushable());
-        assert_stream_emits(&mut stream, 5, b"", true, 20);
+        assert_stream_emits(&mut stream, 5, b"", false, 20);
         if acknowledge {
             for (off, len) in [(22, 4), (20, 1)] {
                 stream.send.ack_and_drop(off, len);
@@ -2117,7 +2117,7 @@ mod tests {
 
         assert!(!stream.is_flushable());
 
-        assert_stream_emits(&mut stream, 5, b"", true, 20);
+        assert_stream_emits(&mut stream, 5, b"", false, 20);
 
         for acknowledge in [false, true] {
             if acknowledge {
