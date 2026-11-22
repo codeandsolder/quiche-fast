@@ -124,7 +124,7 @@ fn congestion_event(
     if !r.in_congestion_recovery(time_sent) {
         r.congestion_recovery_start_time = Some(now);
 
-        r.congestion_window = r.congestion_window / 2;
+        r.congestion_window /= 2;
 
         r.congestion_window = cmp::max(
             r.congestion_window,
