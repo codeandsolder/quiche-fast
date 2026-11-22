@@ -1160,7 +1160,11 @@ impl PktNumWindow {
             let diff = seq - self.upper();
             self.lower += diff;
 
-            self.window = self.window.checked_shl(diff as u32).unwrap_or(0);
+            self.window = if diff < u64::from(u128::BITS) {
+                self.window << diff
+            } else {
+                0
+            };
         }
 
         let mask = 1_u128 << (self.upper() - seq);
@@ -1183,7 +1187,7 @@ impl PktNumWindow {
     }
 
     fn upper(&self) -> u64 {
-        self.lower.saturating_add(size_of::<u128>() as u64 * 8) - 1
+        self.lower.saturating_add(u64::from(u128::BITS - 1))
     }
 }
 
@@ -1518,6 +1522,35 @@ mod tests {
         assert!(win.contains(1025));
         assert!(win.contains(1026));
         assert!(!win.contains(u64::MAX - 2));
+        assert!(win.contains(u64::MAX - 1));
+    }
+
+    #[test]
+    fn pkt_num_window_large_jumps() {
+        for gap in [128, 129, 1_u64 << 32, (1_u64 << 32) + 1] {
+            let mut win = PktNumWindow::default();
+            win.insert(126);
+            win.insert(127);
+
+            let next = 127 + gap;
+            win.insert(next);
+
+            assert!(win.contains(next));
+            assert!(!win.contains(next - 1));
+            assert!(!win.contains(next - 2));
+            assert!(win.contains(126));
+            win.insert(next - 1);
+            assert!(win.contains(next - 1));
+        }
+    }
+
+    #[test]
+    fn pkt_num_window_maximum_sequence() {
+        let mut win = PktNumWindow::default();
+        win.insert(u64::MAX);
+        assert!(win.contains(u64::MAX));
+        assert!(!win.contains(u64::MAX - 1));
+        win.insert(u64::MAX - 1);
         assert!(win.contains(u64::MAX - 1));
     }
 
