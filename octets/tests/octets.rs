@@ -407,13 +407,13 @@ fn encoded_varint_width_boundaries() {
             if let Ok(encoded) = encoded {
                 let bytes = encoded.as_ref();
                 assert_eq!(bytes.len(), width);
-                assert_eq!(actual.unwrap(), bytes);
+                assert_eq!(actual.as_deref(), Ok(bytes));
                 assert_eq!(writer.off(), width);
                 let mut reader = Octets::with_slice(bytes);
                 assert_eq!(reader.get_varint(), Ok(value));
                 assert_eq!(reader.cap(), 0);
                 assert_eq!(octets::varint_parse_len(bytes[0]), width);
-                assert_eq!(&storage[width..], &vec![0xa5; 9 - width]);
+                assert_eq!(&storage[width..], &[0xa5; 9][width..]);
             } else {
                 assert_eq!(writer.off(), 0);
                 assert_eq!(storage, [0xa5; 9]);
