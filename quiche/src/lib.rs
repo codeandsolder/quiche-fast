@@ -3258,26 +3258,29 @@ impl<F: BufFactory> Connection<F> {
         let payload_len = if hdr.ty == Type::Short {
             b.cap()
         } else {
-            b.get_varint().map_err(|e| {
+            let len = b.get_varint().map_err(|e| {
                 drop_pkt_on_err(
                     e.into(),
                     self.recv_count,
                     self.is_server,
                     &self.trace_id,
                 )
-            })? as usize
-        };
+            })?;
 
-        // Make sure the buffer is same or larger than an explicit
-        // payload length.
-        if payload_len > b.cap() {
-            return Err(drop_pkt_on_err(
-                Error::InvalidPacket,
-                self.recv_count,
-                self.is_server,
-                &self.trace_id,
-            ));
-        }
+            // Reject unrepresentable or oversized lengths before processing
+            // the packet. A wire length must never wrap into a valid slice.
+            usize::try_from(len)
+                .ok()
+                .filter(|&len| len <= b.cap())
+                .ok_or_else(|| {
+                    drop_pkt_on_err(
+                        Error::InvalidPacket,
+                        self.recv_count,
+                        self.is_server,
+                        &self.trace_id,
+                    )
+                })?
+        };
 
         // Derive initial secrets on the server.
         if !self.derived_initial_secrets {

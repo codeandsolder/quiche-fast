@@ -5478,6 +5478,7 @@ fn invalid_coalesced_initial_does_not_hide_valid_initial(
 /// valid packet cause the server to close the connection immediately.
 fn invalid_initial_payload(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] exceeds_address_width: bool,
 ) {
     let mut buf = [0; 65535];
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
@@ -5506,28 +5507,26 @@ fn invalid_initial_payload(
 
     hdr.to_bytes(&mut b).unwrap();
 
-    // Payload length is invalid!!!
-    let payload_len = 4096;
+    let frames = [frame::Frame::Padding {
+        len: MIN_CLIENT_INITIAL_LEN,
+    }];
+    let payload_len = frames.iter().map(frame::Frame::wire_len).sum::<usize>();
+    let crypto_ctx = &mut pipe.client.crypto_ctx[epoch];
+    let aead = crypto_ctx.crypto_seal.as_mut().unwrap();
 
-    let len = pn_len + payload_len;
-    b.put_varint(len as u64).unwrap();
-
+    // In the wide case, narrowing the varint to u32 would make it match
+    // the exact packet size, including the authentication tag.
+    let len = if exceeds_address_width {
+        (1_u64 << 32) + (pn_len + payload_len + aead.alg().tag_len()) as u64
+    } else {
+        (pn_len + 4096) as u64
+    };
+    b.put_varint(len).unwrap();
     packet::encode_pkt_num(pn, pn_len, &mut b).unwrap();
-
     let payload_offset = b.off();
-
-    let frames = [frame::Frame::Padding { len: 10 }];
-
     for frame in &frames {
         frame.to_bytes(&mut b).unwrap();
     }
-
-    let crypto_ctx = &mut pipe.client.crypto_ctx[epoch];
-
-    // Use correct payload length when encrypting the packet.
-    let payload_len = frames.iter().fold(0, |acc, x| acc + x.wire_len());
-
-    let aead = crypto_ctx.crypto_seal.as_mut().unwrap();
 
     let written = packet::encrypt_pkt(
         &mut b,
