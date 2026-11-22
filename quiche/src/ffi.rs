@@ -3312,93 +3312,62 @@ mod tests {
         );
     }
 
-    #[test]
-    fn addr_v4() {
-        let addr = "127.0.0.1:8080".parse().unwrap();
-
+    #[rstest::rstest]
+    #[case("127.0.0.1:8080")]
+    #[case("[2001:db8:85a3::8a2e:370:7334]:8080")]
+    fn address_round_trip(#[case] address: &str) {
+        let addr: SocketAddr = address.parse().unwrap();
+        // SAFETY: sockaddr_storage consists of integer and byte fields.
         let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
+        let len = std_addr_to_c(&addr, &mut out);
 
-        assert_eq!(
-            std_addr_to_c(&addr, &mut out),
-            size_of::<sockaddr_in>() as socklen_t
-        );
-
-        let s = ffi::CString::new("ddd.ddd.ddd.ddd").unwrap();
-
-        let s = unsafe {
-            let in_addr = &out as *const _ as *const sockaddr_in;
-            assert_eq!(u16::from_be((*in_addr).sin_port), addr.port());
-
-            let dst = s.into_raw();
-
-            inet_ntop(
-                AF_INET as _,
-                &((*in_addr).sin_addr) as *const _ as *const c_void,
-                dst as _,
-                16,
-            );
-
-            ffi::CString::from_raw(dst).into_string().unwrap()
+        // Independently verify the C layout using inet_ntop rather than only
+        // round-tripping through our own encoder and decoder.
+        let mut dst = [0u8; 46];
+        // SAFETY: the encoder initialized the matching sockaddr layout.
+        let (family, source, port, expected_len) = unsafe {
+            match addr {
+                SocketAddr::V4(_) => {
+                    let p = (&raw const out).cast::<sockaddr_in>();
+                    (
+                        AF_INET,
+                        (&raw const (*p).sin_addr).cast::<c_void>(),
+                        (*p).sin_port,
+                        size_of::<sockaddr_in>(),
+                    )
+                },
+                SocketAddr::V6(_) => {
+                    let p = (&raw const out).cast::<sockaddr_in6>();
+                    (
+                        AF_INET6,
+                        (&raw const (*p).sin6_addr).cast::<c_void>(),
+                        (*p).sin6_port,
+                        size_of::<sockaddr_in6>(),
+                    )
+                },
+            }
         };
-
-        assert_eq!(s, "127.0.0.1");
-
-        let addr = unsafe {
-            std_addr_from_c(
-                (&raw const out).cast::<sockaddr>(),
-                size_of::<sockaddr_in>() as socklen_t,
+        assert_eq!(usize::try_from(len).unwrap(), expected_len);
+        assert_eq!(u16::from_be(port), addr.port());
+        // SAFETY: both the address and the output buffer have the required
+        // size and remain valid for the call.
+        let result = unsafe {
+            inet_ntop(
+                family as _,
+                source,
+                dst.as_mut_ptr().cast(),
+                dst.len() as _,
             )
         };
+        assert!(!result.is_null());
+        // SAFETY: successful inet_ntop writes a NUL-terminated string.
+        let text = unsafe { ffi::CStr::from_ptr(dst.as_ptr().cast()) };
+        assert_eq!(text.to_str().unwrap(), addr.ip().to_string());
 
-        assert_eq!(addr, Ok("127.0.0.1:8080".parse().unwrap()));
-    }
-
-    #[test]
-    fn addr_v6() {
-        let addr = "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
-            .parse()
-            .unwrap();
-
-        let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
-
+        // SAFETY: out contains the initialized address of length len.
         assert_eq!(
-            std_addr_to_c(&addr, &mut out),
-            size_of::<sockaddr_in6>() as socklen_t
-        );
-
-        let s =
-            ffi::CString::new("dddd:dddd:dddd:dddd:dddd:dddd:dddd:dddd").unwrap();
-
-        let s = unsafe {
-            let in6_addr = &out as *const _ as *const sockaddr_in6;
-            assert_eq!(u16::from_be((*in6_addr).sin6_port), addr.port());
-
-            let dst = s.into_raw();
-
-            inet_ntop(
-                AF_INET6 as _,
-                &((*in6_addr).sin6_addr) as *const _ as *const c_void,
-                dst as _,
-                45,
-            );
-
-            ffi::CString::from_raw(dst).into_string().unwrap()
-        };
-
-        assert_eq!(s, "2001:db8:85a3::8a2e:370:7334");
-
-        let addr = unsafe {
-            std_addr_from_c(
-                (&raw const out).cast::<sockaddr>(),
-                size_of::<sockaddr_in6>() as socklen_t,
-            )
-        };
-
-        assert_eq!(
-            addr,
-            Ok("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
-                .parse()
-                .unwrap())
+            unsafe { std_addr_from_c((&raw const out).cast(), len) },
+            Ok(addr)
         );
     }
 
