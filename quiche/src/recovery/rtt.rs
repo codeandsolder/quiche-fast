@@ -45,18 +45,19 @@ pub struct RttStats {
 
     pub(super) max_ack_delay: Duration,
 
-    pub(super) has_first_rtt_sample: bool,
-
     pub(super) first_rtt_sample_time: Option<Instant>,
 }
 
 impl std::fmt::Debug for RttStats {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         f.debug_struct("RttStats")
-            .field("lastest_rtt", &self.latest_rtt)
-            .field("srtt", &self.smoothed_rtt)
-            .field("minrtt", &*self.min_rtt)
+            .field("latest_rtt", &self.latest_rtt)
+            .field("smoothed_rtt", &self.smoothed_rtt)
+            .field("min_rtt", &*self.min_rtt)
+            .field("max_rtt", &self.max_rtt)
             .field("rttvar", &self.rttvar)
+            .field("max_ack_delay", &self.max_ack_delay)
+            .field("first_rtt_sample_time", &self.first_rtt_sample_time)
             .finish()
     }
 }
@@ -69,7 +70,6 @@ impl RttStats {
             smoothed_rtt: initial_rtt,
             max_rtt: initial_rtt,
             rttvar: initial_rtt / 2,
-            has_first_rtt_sample: false,
             first_rtt_sample_time: None,
             max_ack_delay,
         }
@@ -81,12 +81,11 @@ impl RttStats {
     ) {
         self.latest_rtt = latest_rtt;
 
-        if !self.has_first_rtt_sample {
+        if self.first_rtt_sample_time.is_none() {
             self.min_rtt.reset(now, latest_rtt);
             self.smoothed_rtt = latest_rtt;
             self.max_rtt = latest_rtt;
             self.rttvar = latest_rtt / 2;
-            self.has_first_rtt_sample = true;
             self.first_rtt_sample_time = Some(now);
             return;
         }
@@ -128,7 +127,7 @@ impl RttStats {
     }
 
     pub(crate) fn min_rtt(&self) -> Option<Duration> {
-        if self.has_first_rtt_sample {
+        if self.first_rtt_sample_time.is_some() {
             Some(*self.min_rtt)
         } else {
             None
@@ -136,7 +135,7 @@ impl RttStats {
     }
 
     pub(crate) const fn max_rtt(&self) -> Option<Duration> {
-        if self.has_first_rtt_sample {
+        if self.first_rtt_sample_time.is_some() {
             Some(self.max_rtt)
         } else {
             None

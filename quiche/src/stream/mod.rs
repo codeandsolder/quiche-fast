@@ -1220,6 +1220,7 @@ impl ExactSizeIterator for StreamIter {
 mod tests {
     use rstest::rstest;
 
+    use super::send_buf::Emission;
     use crate::range_buf::RangeBuf;
     use crate::test_utils::Pipe;
 
@@ -1750,47 +1751,17 @@ mod tests {
 
     #[test]
     fn send_flow_control() {
-        let mut buf = [0; 25];
-
         let mut stream = test_stream(0, 15, 0, DEFAULT_STREAM_WINDOW);
-
-        let first = b"hello";
-        let second = b"world";
-        let third = b"something";
-
-        assert!(stream.send.write(first, false).is_ok());
-        assert!(stream.send.write(second, false).is_ok());
-        assert!(stream.send.write(third, false).is_ok());
-
+        for data in [b"hello".as_slice(), b"world", b"something"] {
+            assert!(stream.send.write(data, false).is_ok());
+        }
         assert_eq!(stream.send.off_front(), 0);
-
-        let (written, fin) = stream.send.emit(&mut buf[..25]);
-        assert_eq!(written, 15);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"helloworldsomet");
-
-        assert_eq!(stream.send.off_front(), 15);
-
-        let (written, fin) = stream.send.emit(&mut buf[..25]);
-        assert_eq!(written, 0);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"");
-
-        stream.send.retransmit(0, 15);
-
+        assert_stream_emits(&mut stream, 25, b"helloworldsomet", false, 15);
+        assert_stream_emits(&mut stream, 25, b"", false, 15);
+        assert_eq!(stream.send.retransmit(0, 15), 15);
         assert_eq!(stream.send.off_front(), 0);
-
-        let (written, fin) = stream.send.emit(&mut buf[..10]);
-        assert_eq!(written, 10);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"helloworld");
-
-        assert_eq!(stream.send.off_front(), 10);
-
-        let (written, fin) = stream.send.emit(&mut buf[..10]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"somet");
+        assert_stream_emits(&mut stream, 10, b"helloworld", false, 10);
+        assert_stream_emits(&mut stream, 10, b"somet", false, 15);
     }
 
     #[test]
@@ -1843,7 +1814,9 @@ mod tests {
 
         assert!(stream.send.write(slice, true).is_ok());
 
-        let (written, fin) = stream.send.emit(&mut buf[..15]);
+        let Emission {
+            len: written, fin, ..
+        } = stream.send.emit(&mut buf[..15]);
         assert_eq!(written, 15);
         assert!(fin);
         assert_eq!(&buf[..written], slice);
@@ -1859,79 +1832,38 @@ mod tests {
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.is_fin());
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]);
+        let Emission {
+            len: written, fin, ..
+        } = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 5);
         assert!(fin);
         assert_eq!(&buf[..written], b"hello");
     }
 
-    #[test]
-    fn send_ack() {
-        let mut buf = [0; 5];
-
+    #[rstest]
+    fn send_ack(#[values(false, true)] reordered: bool) {
         let mut stream = test_stream(0, 15, 0, DEFAULT_STREAM_WINDOW);
-
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         assert_eq!(stream.send.write(b"world", false), Ok(5));
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.is_fin());
 
         assert_eq!(stream.send.off_front(), 0);
-
-        let (written, fin) = stream.send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"hello");
-
+        assert_stream_emits(&mut stream, 5, b"hello", false, 5);
+        if reordered {
+            assert_stream_emits(&mut stream, 1, b"w", false, 6);
+            stream.send.ack_and_drop(5, 1);
+        }
         stream.send.ack_and_drop(0, 5);
-
-        stream.send.retransmit(0, 5);
-
-        assert_eq!(stream.send.off_front(), 5);
-
-        let (written, fin) = stream.send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(fin);
-        assert_eq!(&buf[..written], b"world");
-    }
-
-    #[test]
-    fn send_ack_reordering() {
-        let mut buf = [0; 5];
-
-        let mut stream = test_stream(0, 15, 0, DEFAULT_STREAM_WINDOW);
-
-        assert_eq!(stream.send.write(b"hello", false), Ok(5));
-        assert_eq!(stream.send.write(b"world", false), Ok(5));
-        assert_eq!(stream.send.write(b"", true), Ok(0));
-        assert!(stream.send.is_fin());
-
-        assert_eq!(stream.send.off_front(), 0);
-
-        let (written, fin) = stream.send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"hello");
-
-        assert_eq!(stream.send.off_front(), 5);
-
-        let (written, fin) = stream.send.emit(&mut buf[..1]);
-        assert_eq!(written, 1);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"w");
-
-        stream.send.ack_and_drop(5, 1);
-        stream.send.ack_and_drop(0, 5);
-
-        stream.send.retransmit(0, 5);
-        stream.send.retransmit(5, 1);
-
-        assert_eq!(stream.send.off_front(), 6);
-
-        let (written, fin) = stream.send.emit(&mut buf[..5]);
-        assert_eq!(written, 4);
-        assert!(fin);
-        assert_eq!(&buf[..written], b"orld");
+        assert_eq!(stream.send.retransmit(0, 5), 0);
+        if reordered {
+            assert_eq!(stream.send.retransmit(5, 1), 0);
+            assert_eq!(stream.send.off_front(), 6);
+            assert_stream_emits(&mut stream, 5, b"orld", true, 10);
+        } else {
+            assert_eq!(stream.send.off_front(), 5);
+            assert_stream_emits(&mut stream, 5, b"world", true, 10);
+        }
     }
 
     #[test]
@@ -1975,7 +1907,8 @@ mod tests {
         assert!(stream.recv.write(buf).is_ok());
         assert!(!stream.recv.is_fin());
 
-        assert_eq!(stream.send.emit(&mut [0; 10][..]), (10, true));
+        let Emission { len, fin, .. } = stream.send.emit(&mut [0; 10][..]);
+        assert_eq!((len, fin), (10, true));
         stream.send.ack_and_drop(6, 4);
         assert!(!stream.send.is_complete());
 
@@ -2011,7 +1944,9 @@ mod tests {
         assert_eq!(stream.send.off_front(), 0);
         assert!(!stream.send.is_fin());
 
-        let (written, fin) = stream.send.emit(&mut buf[..]);
+        let Emission {
+            len: written, fin, ..
+        } = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"hello");
@@ -2020,7 +1955,9 @@ mod tests {
         assert!(stream.send.is_fin());
         assert_eq!(stream.send.off_front(), 5);
 
-        let (written, fin) = stream.send.emit(&mut buf[..]);
+        let Emission {
+            len: written, fin, ..
+        } = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 0);
         assert!(fin);
         assert_eq!(&buf[..written], b"");
@@ -2052,9 +1989,14 @@ mod tests {
         stream: &mut Stream, capacity: usize, data: &[u8], fin: bool,
         next_off: u64,
     ) {
-        let mut buf = [0; 5];
+        let mut buf = vec![0; capacity];
         assert_eq!(stream_send_ready(stream), !data.is_empty());
-        assert_eq!(stream.send.emit(&mut buf[..capacity]), (data.len(), fin));
+        let Emission {
+            len,
+            fin: emitted_fin,
+            ..
+        } = stream.send.emit(&mut buf[..capacity]);
+        assert_eq!((len, emitted_fin), (data.len(), fin));
         assert_eq!(stream.send.off_front(), next_off);
         assert_eq!(&buf[..data.len()], data);
     }
@@ -2143,14 +2085,16 @@ mod tests {
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
 
         let mut buf = [0; 5];
-        assert_eq!(stream.send.emit(&mut buf[..]), (5, false));
+        let Emission { len, fin, .. } = stream.send.emit(&mut buf[..]);
+        assert_eq!((len, fin), (5, false));
         assert!(!stream.send.empty_fin_next());
 
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.empty_fin_next());
 
         let mut empty = [0_u8; 0];
-        assert_eq!(stream.send.emit(&mut empty[..]), (0, true));
+        let Emission { len, fin, .. } = stream.send.emit(&mut empty[..]);
+        assert_eq!((len, fin), (0, true));
     }
 
     /// RFC9000 2.1: A stream ID that is used out of order results in all
@@ -2600,7 +2544,9 @@ mod tests {
             assert_eq!(stream.send.buffered_bytes(), expected.len() as u64);
         }
         let mut buf = vec![0; expected.len()];
-        let (written, fin) = stream.send.emit(buf.as_mut_slice());
+        let Emission {
+            len: written, fin, ..
+        } = stream.send.emit(buf.as_mut_slice());
         assert_eq!((written, fin), (expected.len(), false));
         assert_eq!(buf, expected);
         assert_eq!(stream.send.buffered_bytes(), 0);
@@ -2704,7 +2650,7 @@ mod tests {
         let mut buf = [0; 10];
         let written = {
             let stream = streams.get_mut(stream_id).unwrap();
-            let (written, _) = stream.send.emit(&mut buf[..]);
+            let Emission { len: written, .. } = stream.send.emit(&mut buf[..]);
             written
         };
         assert_eq!(written, 5);
