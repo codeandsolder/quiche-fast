@@ -8240,16 +8240,13 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use]
     pub fn source_id(&self) -> ConnectionId<'_> {
-        if let Ok(path) = self.paths.get_active() {
-            if let Some(active_scid_seq) = path.active_scid_seq {
-                if let Ok(e) = self.ids.get_scid(active_scid_seq) {
-                    return ConnectionId::from_ref(e.cid.as_ref());
-                }
-            }
-        }
-
-        let e = self.ids.oldest_scid();
-        ConnectionId::from_ref(e.cid.as_ref())
+        let sequence = self
+            .paths
+            .get_active()
+            .ok()
+            .and_then(|path| path.active_scid_seq);
+        self.ids
+            .active_or_oldest(cid::CidDirection::Source, sequence)
     }
 
     /// Returns all active source connection IDs.
@@ -8268,16 +8265,13 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use]
     pub fn destination_id(&self) -> ConnectionId<'_> {
-        if let Ok(path) = self.paths.get_active() {
-            if let Some(active_dcid_seq) = path.active_dcid_seq {
-                if let Ok(e) = self.ids.get_dcid(active_dcid_seq) {
-                    return ConnectionId::from_ref(e.cid.as_ref());
-                }
-            }
-        }
-
-        let e = self.ids.oldest_dcid();
-        ConnectionId::from_ref(e.cid.as_ref())
+        let sequence = self
+            .paths
+            .get_active()
+            .ok()
+            .and_then(|path| path.active_dcid_seq);
+        self.ids
+            .active_or_oldest(cid::CidDirection::Destination, sequence)
     }
 
     /// Returns the PMTU for the active path if it exists.
