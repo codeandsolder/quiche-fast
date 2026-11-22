@@ -5548,10 +5548,7 @@ impl<F: BufFactory> Connection<F> {
                     // ACK processing can remove retransmit data while leaving a
                     // stale flushable node queued. Empty FIN is the one valid
                     // zero-payload case and must remain eligible.
-                    Some(v)
-                        if !v.send.is_stopped() &&
-                            (v.is_flushable() || v.send.empty_fin_next()) =>
-                        v,
+                    Some(v) if v.is_flushable() => v,
                     _ => {
                         self.streams.remove_flushable(&priority_key);
                         continue;

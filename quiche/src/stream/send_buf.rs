@@ -79,6 +79,39 @@ impl<F: BufFactory> Drop for SendReserve<'_, F> {
     }
 }
 
+/// Final-size state is independent of acknowledgment of stream data.
+#[derive(Debug, Default)]
+enum FinalSize {
+    #[default]
+    Open,
+    Pending(u64),
+    InFlight(u64),
+    Acknowledged(u64),
+    Reset {
+        offset: u64,
+        local_shutdown: bool,
+        stop: Option<StopNotice>,
+    },
+}
+
+#[derive(Debug)]
+struct StopNotice {
+    code: u64,
+    reported: bool,
+}
+
+impl FinalSize {
+    const fn offset(&self) -> Option<u64> {
+        match *self {
+            Self::Open => None,
+            Self::Pending(offset) |
+            Self::InFlight(offset) |
+            Self::Acknowledged(offset) |
+            Self::Reset { offset, .. } => Some(offset),
+        }
+    }
+}
+
 /// Send-side stream buffer.
 ///
 /// Stream data scheduled to be sent to the peer is buffered in a list of data
@@ -119,28 +152,11 @@ where
     /// The last offset the stream was blocked at, if any.
     blocked_at: Option<u64>,
 
-    /// The final stream offset written to the stream, if any.
-    fin_off: Option<u64>,
-
-    /// Whether the final size still needs to be sent in a STREAM frame
-    /// carrying FIN, because no such frame has been sent yet or the last one
-    /// was lost.
-    fin_pending: bool,
-
-    /// Whether a STREAM frame carrying FIN has been acknowledged.
-    fin_acked: bool,
-
-    /// Whether the stream's send-side has been shut down.
-    shutdown: bool,
+    /// Final-size transmission state, including reset and peer stop delivery.
+    final_size: FinalSize,
 
     /// Ranges of data offsets that have been acked.
     acked: ranges::RangeSet,
-
-    /// The error code received via `STOP_SENDING`.
-    error: Option<u64>,
-
-    /// Whether the `STOP_SENDING` error was returned to the application.
-    error_reported: bool,
 }
 
 impl<F: BufFactory> SendBuf<F> {
@@ -166,7 +182,7 @@ impl<F: BufFactory> SendBuf<F> {
             fin = false;
         }
 
-        if let Some(fin_off) = self.fin_off {
+        if let Some(fin_off) = self.final_size.offset() {
             let requested_end = requested_end.ok_or(Error::FinalSize)?;
             // Can't write past final offset.
             if requested_end > fin_off {
@@ -182,9 +198,8 @@ impl<F: BufFactory> SendBuf<F> {
         // The accepted length is bounded by the remaining u64 credit, even
         // when that credit exceeds usize::MAX on this target.
         let max_off = self.off + len as u64;
-        if fin && self.fin_off.is_none() {
-            self.fin_off = Some(max_off);
-            self.fin_pending = true;
+        if fin && matches!(self.final_size, FinalSize::Open) {
+            self.final_size = FinalSize::Pending(max_off);
         }
 
         // Don't queue data that was already fully acked.
@@ -308,10 +323,17 @@ impl<F: BufFactory> SendBuf<F> {
         // This is more efficient than tracking `fin` using the range buffers
         // themselves, and lets us avoid queueing empty buffers just so we can
         // propagate the final size.
-        let fin = self.fin_off == Some(next_off);
+        let fin = match self.final_size {
+            FinalSize::Pending(offset) => offset == next_off,
+            // Piggyback the final size on retransmitted data if it has not
+            // been acknowledged. Never emit another empty FIN unless pending.
+            FinalSize::InFlight(offset) =>
+                offset == next_off && out_len < capacity,
+            _ => false,
+        };
 
         if fin {
-            self.fin_pending = false;
+            self.final_size = FinalSize::InFlight(next_off);
         }
 
         // Record the largest offset that has been sent so we can accurately
@@ -343,8 +365,11 @@ impl<F: BufFactory> SendBuf<F> {
 
     /// Marks the stream's final size as acknowledged by the peer.
     pub(crate) const fn ack_fin(&mut self) {
-        self.fin_acked = true;
-        self.fin_pending = false;
+        if let FinalSize::Pending(offset) | FinalSize::InFlight(offset) =
+            self.final_size
+        {
+            self.final_size = FinalSize::Acknowledged(offset);
+        }
     }
 
     pub fn ack_and_drop(&mut self, off: u64, len: usize) -> u64 {
@@ -419,22 +444,24 @@ impl<F: BufFactory> SendBuf<F> {
     /// This is needed even when the frame's data was acknowledged in another
     /// packet, as the FIN still has to reach the peer.
     pub(crate) const fn retransmit_fin(&mut self) {
-        if self.fin_acked || self.shutdown || self.error.is_some() {
-            return;
+        if let FinalSize::InFlight(offset) = self.final_size {
+            self.final_size = FinalSize::Pending(offset);
         }
-
-        self.fin_pending = self.fin_off.is_some();
     }
 
     /// Resets the stream at the current offset and clears all buffered data.
-    pub fn reset(&mut self) -> (u64, u64) {
+    fn reset(
+        &mut self, local_shutdown: bool, stop: Option<StopNotice>,
+    ) -> (u64, u64) {
         let unsent_off = cmp::max(self.off_front(), self.emit_off);
         let unsent_len = self.off_back().saturating_sub(unsent_off);
 
-        self.fin_off = Some(unsent_off);
-
         // The final size is sent in RESET_STREAM instead.
-        self.fin_pending = false;
+        self.final_size = FinalSize::Reset {
+            offset: unsent_off,
+            local_shutdown,
+            stop,
+        };
 
         // Drop all buffered data.
         self.data.clear();
@@ -455,26 +482,30 @@ impl<F: BufFactory> SendBuf<F> {
     ///
     /// Calling this again after the first time has no effect.
     pub fn stop(&mut self, error_code: u64) -> Result<(u64, u64)> {
-        if self.error.is_some() {
+        if self.is_stopped() {
             return Err(Error::Done);
         }
 
-        let (max_off, unsent) = self.reset();
-
-        self.error = Some(error_code);
-
-        Ok((max_off, unsent))
+        Ok(self.reset(
+            self.is_shutdown(),
+            Some(StopNotice {
+                code: error_code,
+                reported: false,
+            }),
+        ))
     }
 
     /// Shuts down sending data.
     pub fn shutdown(&mut self) -> Result<(u64, u64)> {
-        if self.shutdown {
+        if self.is_shutdown() {
             return Err(Error::Done);
         }
 
-        self.shutdown = true;
-
-        Ok(self.reset())
+        let stop = match &mut self.final_size {
+            FinalSize::Reset { stop, .. } => stop.take(),
+            _ => None,
+        };
+        Ok(self.reset(true, stop))
     }
 
     /// Seeds send offsets without buffering the preceding data.
@@ -508,7 +539,7 @@ impl<F: BufFactory> SendBuf<F> {
 
     /// Returns true if the next call to [`Self::emit`] will emit an empty FIN.
     pub fn empty_fin_next(&self) -> bool {
-        self.fin_off == Some(self.off_front())
+        matches!(self.final_size, FinalSize::Pending(offset) if offset == self.off_front())
     }
 
     /// The maximum offset we are allowed to send to the peer.
@@ -521,12 +552,12 @@ impl<F: BufFactory> SendBuf<F> {
     /// This happens when the stream's send final size is known, and the
     /// application has already written data up to that point.
     pub fn is_fin(&self) -> bool {
-        self.fin_off == Some(self.off)
+        self.final_size.offset() == Some(self.off)
     }
 
     /// Returns true if the final size still needs to be sent to the peer.
     pub const fn is_fin_pending(&self) -> bool {
-        self.fin_pending
+        matches!(self.final_size, FinalSize::Pending(_))
     }
 
     /// Returns true if the send-side of the stream is complete.
@@ -534,35 +565,46 @@ impl<F: BufFactory> SendBuf<F> {
     /// This happens when the peer has acknowledged the stream's final size and
     /// all stream data up to that point, or the stream has been reset.
     pub fn is_complete(&self) -> bool {
-        if let Some(fin_off) = self.fin_off {
-            if (self.fin_acked || self.shutdown || self.error.is_some()) &&
-                self.ack_off() == fin_off
-            {
-                return true;
-            }
+        match self.final_size {
+            FinalSize::Acknowledged(offset) | FinalSize::Reset { offset, .. } =>
+                self.ack_off() == offset,
+            _ => false,
         }
-
-        false
     }
 
     /// Returns true if the stream was stopped before completion.
     pub const fn is_stopped(&self) -> bool {
-        self.error.is_some()
+        matches!(self.final_size, FinalSize::Reset { stop: Some(_), .. })
     }
 
     /// Returns true if a `STOP_SENDING` error still needs to be delivered.
     pub const fn has_unreported_stop(&self) -> bool {
-        self.error.is_some() && !self.error_reported && !self.shutdown
+        matches!(self.final_size, FinalSize::Reset {
+            stop: Some(StopNotice {
+                reported: false,
+                ..
+            }),
+            local_shutdown: false,
+            ..
+        })
     }
 
     /// Marks the `STOP_SENDING` error as reported to the application.
     pub const fn mark_stop_reported(&mut self) {
-        self.error_reported = true;
+        if let FinalSize::Reset {
+            stop: Some(notice), ..
+        } = &mut self.final_size
+        {
+            notice.reported = true;
+        }
     }
 
     /// Returns true if the stream was shut down.
     pub const fn is_shutdown(&self) -> bool {
-        self.shutdown
+        matches!(self.final_size, FinalSize::Reset {
+            local_shutdown: true,
+            ..
+        })
     }
 
     /// Returns true if there is no data.
@@ -587,8 +629,12 @@ impl<F: BufFactory> SendBuf<F> {
     /// Returns [`Error::StreamStopped`] if the peer stopped the stream.
     pub fn cap(&self) -> Result<usize> {
         // The stream was stopped, so return the error code instead.
-        if let Some(e) = self.error {
-            return Err(Error::StreamStopped(e));
+        if let FinalSize::Reset {
+            stop: Some(ref notice),
+            ..
+        } = self.final_size
+        {
+            return Err(Error::StreamStopped(notice.code));
         }
 
         Ok(usize::try_from(self.max_data.saturating_sub(self.off))
@@ -1039,6 +1085,53 @@ mod tests {
 
         send.retransmit_fin();
         assert!(!send.is_fin_pending());
+    }
+
+    #[test]
+    fn acknowledged_fin_is_not_emitted_again() {
+        let mut send = <SendBuf>::new(10);
+        let mut out = [0; 5];
+        assert_eq!(send.write(b"hello", true), Ok(5));
+        assert_eq!(send.emit(&mut out[..]), (5, true));
+        assert!(!send.empty_fin_next());
+        assert_eq!(send.emit(&mut out[..]), (0, false));
+        send.ack_fin();
+        assert_eq!(send.retransmit(0, 5), 5);
+        send.retransmit_fin();
+        assert_eq!(send.emit(&mut out[..]), (5, false));
+        assert!(!send.empty_fin_next());
+        assert_eq!(send.emit(&mut out[..]), (0, false));
+        send.ack_and_drop(0, 5);
+        assert!(send.is_complete());
+    }
+
+    #[test]
+    fn peer_stop_and_local_shutdown_preserve_terminal_state() {
+        for local_first in [false, true] {
+            let mut send = <SendBuf>::new(10);
+            assert_eq!(send.write(b"hello", true), Ok(5));
+            if local_first {
+                assert_eq!(send.shutdown(), Ok((0, 5)));
+                assert_eq!(send.stop(42), Ok((0, 0)));
+            } else {
+                assert_eq!(send.stop(42), Ok((0, 5)));
+                assert!(send.has_unreported_stop());
+                send.mark_stop_reported();
+                assert!(!send.has_unreported_stop());
+                assert_eq!(send.shutdown(), Ok((0, 0)));
+            }
+            assert!(send.is_shutdown());
+            assert!(send.is_stopped());
+            assert!(send.is_complete());
+            assert!(!send.has_unreported_stop());
+            assert_eq!(send.cap(), Err(Error::StreamStopped(42)));
+            assert_eq!(send.stop(43), Err(Error::Done));
+            assert_eq!(send.shutdown(), Err(Error::Done));
+            send.ack_fin();
+            send.retransmit_fin();
+            assert!(!send.empty_fin_next());
+            assert_eq!(send.emit(&mut [0; 5][..]), (0, false));
+        }
     }
 
     #[test]
