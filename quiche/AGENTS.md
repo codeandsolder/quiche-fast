@@ -74,3 +74,5 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 - Crate-type: `lib` + `staticlib` + `cdylib` — the latter two for C consumers.
 - `BufFactory` trait (`buffers.rs`) enables zero-copy buffer creation; `Connection<F>` is generic over it.
 - `flowcontrol.rs` maintains monotone receive-side flow-control limits; counters and window multiplication saturate at `u64::MAX`, half-window thresholds round upward for odd/one-byte windows, and autotuning ignores timestamps earlier than the last advertised limit. Keep boundary and out-of-order regression coverage.
+- `h3/frame.rs::Frame::from_bytes()` checks full u64 declared payload lengths before `usize` conversion and restricts the decoder's borrowed slice to the exact frame payload; variable-length IDs and SETTINGS must not consume bytes from a following frame. Keep 32-bit oversized-varint and frame-boundary regressions.
+- `h3/stream.rs::set_frame_payload_len()` and the QUIC `frame.rs` NEW_TOKEN/STREAM/DATAGRAM decoders also validate full varint lengths before converting to `usize`, avoiding 32-bit wraparound; protocol maximum stream offsets are checked in u64 before narrowing.

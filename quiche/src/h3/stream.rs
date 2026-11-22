@@ -521,7 +521,11 @@ impl Stream {
             },
         };
 
-        self.state_transition(state, len as usize, resize)?;
+        // Frame lengths arrive as QUIC varints (u64), but the streaming
+        // state tracks a usize. Never turn a 2^32-byte DATA frame into a
+        // zero-length frame on 32-bit targets.
+        let state_len = usize::try_from(len).map_err(|_| Error::ExcessiveLoad)?;
+        self.state_transition(state, state_len, resize)?;
 
         Ok(())
     }
@@ -1062,6 +1066,33 @@ mod tests {
         assert_eq!(stream.state, State::FrameType);
 
         Ok(())
+    }
+
+    #[test]
+    fn large_data_frame_length_is_not_truncated_to_usize() {
+        let mut stream = open_remote_request_stream();
+        // Simulate an already accepted final HEADERS block. A DATA frame is
+        // otherwise invalid before the initial HEADERS on request streams.
+        stream.remote_initialized = true;
+        stream.set_frame_type(DATA_FRAME_TYPE_ID).unwrap();
+
+        let length = u64::from(u32::MAX) + 1;
+        #[cfg(target_pointer_width = "32")]
+        {
+            assert_eq!(
+                stream.set_frame_payload_len(length),
+                Err(Error::ExcessiveLoad),
+            );
+            assert_eq!(stream.state, State::FramePayloadLen);
+        }
+        #[cfg(target_pointer_width = "64")]
+        {
+            // DATA frames stream incrementally, so this valid large value
+            // doesn't trigger a huge state-buffer allocation on 64-bit.
+            stream.set_frame_payload_len(length).unwrap();
+            assert_eq!(stream.state, State::Data);
+            assert_eq!(stream.state_len as u64, length);
+        }
     }
 
     #[test]

@@ -237,13 +237,14 @@ impl Frame {
             },
 
             0x07 => {
-                let len = b.get_varint()?;
+                let len = usize::try_from(b.get_varint()?)
+                    .map_err(|_| Error::BufferTooShort)?;
                 if len == 0 {
                     return Err(Error::InvalidFrame);
                 }
 
                 Frame::NewToken {
-                    token: b.get_bytes(len as usize)?.to_vec(),
+                    token: b.get_bytes(len)?.to_vec(),
                 }
             },
 
@@ -1385,15 +1386,19 @@ fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
         0
     };
 
-    let len = if first & 0x02 != 0 {
-        b.get_varint()? as usize
+    let declared_len = if first & 0x02 != 0 {
+        b.get_varint()?
     } else {
-        b.cap()
+        b.cap() as u64
     };
 
-    if offset + len as u64 >= MAX_STREAM_SIZE {
+    if offset
+        .checked_add(declared_len)
+        .is_none_or(|end| end >= MAX_STREAM_SIZE)
+    {
         return Err(Error::InvalidFrame);
     }
+    let len = usize::try_from(declared_len).map_err(|_| Error::BufferTooShort)?;
 
     let fin = first & 0x01 != 0;
 
@@ -1408,13 +1413,12 @@ pub(crate) fn parse_datagram_payload<'a>(
 ) -> Result<octets::Octets<'a>> {
     let first = ty as u8;
 
-    let len = if first & 0x01 != 0 {
-        b.get_varint()? as usize
+    if first & 0x01 != 0 {
+        // Octets validates the full QUIC varint before converting to usize.
+        Ok(b.get_bytes_with_varint_length()?)
     } else {
-        b.cap()
-    };
-
-    Ok(b.get_bytes(len)?)
+        Ok(b.get_bytes(b.cap())?)
+    }
 }
 
 fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
@@ -1706,6 +1710,29 @@ mod tests {
 
         let mut b = octets::Octets::with_slice(&d);
         assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+    }
+
+    #[test]
+    fn oversized_wire_frame_lengths_cannot_wrap_to_empty_payloads() {
+        // A 2^32 length is valid QUIC varint syntax, but far larger than
+        // this packet. On 32-bit systems the old `as usize` yielded zero.
+        const OVERSIZED_LENGTH: u64 = 1_u64 << 32;
+        for frame_type in [0x07_u64, 0x0a, 0x31] {
+            let mut wire = [0_u8; 32];
+            let mut writer = octets::OctetsMut::with_slice(&mut wire);
+            writer.put_varint(frame_type).unwrap();
+            if frame_type == 0x0a {
+                writer.put_varint(0).unwrap(); // STREAM ID
+            }
+            writer.put_varint(OVERSIZED_LENGTH).unwrap();
+            let used = 32 - writer.cap();
+            let mut reader = octets::Octets::with_slice(&wire[..used]);
+            assert_eq!(
+                Frame::from_bytes(&mut reader, packet::Type::Short),
+                Err(Error::BufferTooShort),
+                "frame {frame_type:#x} accepted a truncated oversized payload",
+            );
+        }
     }
 
     #[test]
