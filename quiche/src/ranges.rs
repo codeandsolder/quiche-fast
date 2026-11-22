@@ -828,7 +828,7 @@ mod tests {
             ranges.insert(0..1);
             assert_eq!(ranges.iter().collect::<Vec<_>>(), before);
             ranges.insert(2..2);
-            ranges.insert(6..3);
+            ranges.insert(Range { start: 6, end: 3 });
             assert_eq!(ranges.iter().collect::<Vec<_>>(), before);
             assert_eq!(ranges.len(), capacity);
         }
