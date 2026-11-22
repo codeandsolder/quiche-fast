@@ -1706,14 +1706,14 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 0);
 
-        let (written, fin) = stream.send.emit(&mut buf[..25]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..25]);
         assert_eq!(written, 15);
         assert!(!fin);
         assert_eq!(&buf[..written], b"helloworldsomet");
 
         assert_eq!(stream.send.off_front(), 15);
 
-        let (written, fin) = stream.send.emit(&mut buf[..25]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..25]);
         assert_eq!(written, 0);
         assert!(!fin);
         assert_eq!(&buf[..written], b"");
@@ -1722,14 +1722,14 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 0);
 
-        let (written, fin) = stream.send.emit(&mut buf[..10]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..10]);
         assert_eq!(written, 10);
         assert!(!fin);
         assert_eq!(&buf[..written], b"helloworld");
 
         assert_eq!(stream.send.off_front(), 10);
 
-        let (written, fin) = stream.send.emit(&mut buf[..10]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..10]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"somet");
@@ -1785,7 +1785,7 @@ mod tests {
 
         assert!(stream.send.write(slice, true).is_ok());
 
-        let (written, fin) = stream.send.emit(&mut buf[..15]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..15]);
         assert_eq!(written, 15);
         assert!(fin);
         assert_eq!(&buf[..written], slice);
@@ -1801,7 +1801,7 @@ mod tests {
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.is_fin());
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 5);
         assert!(fin);
         assert_eq!(&buf[..written], b"hello");
@@ -1820,7 +1820,7 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 0);
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"hello");
@@ -1831,7 +1831,7 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 5);
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 5);
         assert!(fin);
         assert_eq!(&buf[..written], b"world");
@@ -1850,14 +1850,14 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 0);
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"hello");
 
         assert_eq!(stream.send.off_front(), 5);
 
-        let (written, fin) = stream.send.emit(&mut buf[..1]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..1]);
         assert_eq!(written, 1);
         assert!(!fin);
         assert_eq!(&buf[..written], b"w");
@@ -1870,7 +1870,7 @@ mod tests {
 
         assert_eq!(stream.send.off_front(), 6);
 
-        let (written, fin) = stream.send.emit(&mut buf[..5]).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf[..5]);
         assert_eq!(written, 4);
         assert!(fin);
         assert_eq!(&buf[..written], b"orld");
@@ -1952,7 +1952,7 @@ mod tests {
         assert_eq!(stream.send.off_front(), 0);
         assert!(!stream.send.is_fin());
 
-        let (written, fin) = stream.send.emit(&mut buf).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"hello");
@@ -1961,7 +1961,7 @@ mod tests {
         assert!(stream.send.is_fin());
         assert_eq!(stream.send.off_front(), 5);
 
-        let (written, fin) = stream.send.emit(&mut buf).unwrap();
+        let (written, fin) = stream.send.emit(&mut buf);
         assert_eq!(written, 0);
         assert!(fin);
         assert_eq!(&buf[..written], b"");
@@ -1988,39 +1988,39 @@ mod tests {
         assert!(stream.is_flushable());
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 4);
         assert_eq!(&buf[..4], b"hell");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 8);
         assert_eq!(&buf[..4], b"owor");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
         assert_eq!(stream.send.off_front(), 10);
         assert_eq!(&buf[..2], b"ld");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), Ok((1, false)));
+        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
         assert_eq!(stream.send.off_front(), 11);
         assert_eq!(&buf[..1], b"o");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 16);
         assert_eq!(&buf[..5], b"llehd");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((4, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
         assert_eq!(stream.send.off_front(), 20);
         assert_eq!(&buf[..4], b"lrow");
 
         assert!(!stream.is_flushable());
 
         assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((0, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
         assert_eq!(stream.send.off_front(), 20);
     }
 
@@ -2040,12 +2040,12 @@ mod tests {
         assert!(stream.is_flushable());
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 4);
         assert_eq!(&buf[..4], b"hell");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 8);
         assert_eq!(&buf[..4], b"owor");
 
@@ -2053,7 +2053,7 @@ mod tests {
         assert_eq!(stream.send.bufs_count(), 3);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
         assert_eq!(stream.send.off_front(), 10);
         assert_eq!(&buf[..2], b"ld");
 
@@ -2061,12 +2061,12 @@ mod tests {
         assert_eq!(stream.send.bufs_count(), 3);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), Ok((1, false)));
+        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
         assert_eq!(stream.send.off_front(), 11);
         assert_eq!(&buf[..1], b"o");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 16);
         assert_eq!(&buf[..5], b"llehd");
 
@@ -2074,14 +2074,14 @@ mod tests {
         assert_eq!(stream.send.bufs_count(), 2);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((4, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
         assert_eq!(stream.send.off_front(), 20);
         assert_eq!(&buf[..4], b"lrow");
 
         assert!(!stream.is_flushable());
 
         assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((0, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
         assert_eq!(stream.send.off_front(), 20);
 
         stream.send.ack_and_drop(22, 4);
@@ -2108,12 +2108,12 @@ mod tests {
         assert!(stream.is_flushable());
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 4);
         assert_eq!(&buf[..4], b"hell");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), Ok((4, false)));
+        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
         assert_eq!(stream.send.off_front(), 8);
         assert_eq!(&buf[..4], b"owor");
 
@@ -2121,12 +2121,12 @@ mod tests {
         assert_eq!(stream.send.off_front(), 3);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..3]), Ok((3, false)));
+        assert_eq!(stream.send.emit(&mut buf[..3]), (3, false));
         assert_eq!(stream.send.off_front(), 8);
         assert_eq!(&buf[..3], b"low");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
         assert_eq!(stream.send.off_front(), 10);
         assert_eq!(&buf[..2], b"ld");
 
@@ -2135,52 +2135,52 @@ mod tests {
         stream.send.retransmit(8, 2);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
         assert_eq!(stream.send.off_front(), 10);
         assert_eq!(&buf[..2], b"ld");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), Ok((1, false)));
+        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
         assert_eq!(stream.send.off_front(), 11);
         assert_eq!(&buf[..1], b"o");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 16);
         assert_eq!(&buf[..5], b"llehd");
 
         stream.send.retransmit(12, 2);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
         assert_eq!(stream.send.off_front(), 16);
         assert_eq!(&buf[..2], b"le");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((4, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
         assert_eq!(stream.send.off_front(), 20);
         assert_eq!(&buf[..4], b"lrow");
 
         assert!(!stream.is_flushable());
 
         assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((0, true)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
         assert_eq!(stream.send.off_front(), 20);
 
         stream.send.retransmit(7, 12);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 12);
         assert_eq!(&buf[..5], b"rldol");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 17);
         assert_eq!(&buf[..5], b"lehdl");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (2, false));
         assert_eq!(stream.send.off_front(), 20);
         assert_eq!(&buf[..2], b"ro");
 
@@ -2189,17 +2189,17 @@ mod tests {
         stream.send.retransmit(7, 12);
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 12);
         assert_eq!(&buf[..5], b"rldol");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
         assert_eq!(stream.send.off_front(), 17);
         assert_eq!(&buf[..5], b"lehdl");
 
         assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), Ok((2, false)));
+        assert_eq!(stream.send.emit(&mut buf[..5]), (2, false));
         assert_eq!(stream.send.off_front(), 20);
         assert_eq!(&buf[..2], b"ro");
     }
@@ -2212,14 +2212,14 @@ mod tests {
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
 
         let mut buf = [0; 5];
-        assert_eq!(stream.send.emit(&mut buf), Ok((5, false)));
+        assert_eq!(stream.send.emit(&mut buf), (5, false));
         assert!(!stream.send.empty_fin_next());
 
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.empty_fin_next());
 
         let mut empty = [];
-        assert_eq!(stream.send.emit(&mut empty), Ok((0, true)));
+        assert_eq!(stream.send.emit(&mut empty), (0, true));
     }
 
     /// RFC9000 2.1: A stream ID that is used out of order results in all
@@ -2668,7 +2668,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 5);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2696,7 +2696,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 10);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 10);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2727,7 +2727,7 @@ mod tests {
 
         // Emit it.
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2752,7 +2752,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 10);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 10);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2779,7 +2779,7 @@ mod tests {
         // Write and emit data.
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 5);
 
         // Ack data that's already been fully emitted and not retransmitted.
@@ -2836,7 +2836,7 @@ mod tests {
         let mut buf = [0; 10];
         let written = {
             let stream = streams.get_mut(stream_id).unwrap();
-            let (written, _) = stream.send.emit(&mut buf).unwrap();
+            let (written, _) = stream.send.emit(&mut buf);
             written
         };
         assert_eq!(written, 5);
@@ -2882,7 +2882,7 @@ mod tests {
 
         // After emit.
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf).unwrap();
+        let (written, _) = stream.send.emit(&mut buf);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
