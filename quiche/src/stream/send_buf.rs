@@ -429,7 +429,7 @@ impl<F: BufFactory> SendBuf<F> {
             .map(|buf| buf.len() as u64)
             .sum::<u64>();
         if let Some(buf) = self.data.get_mut(first) {
-            dropped += buf.acknowledge_prefix(end);
+            dropped += buf.discard_prefix(end);
         }
 
         self.pos = self
