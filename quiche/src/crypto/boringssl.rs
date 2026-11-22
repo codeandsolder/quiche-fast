@@ -1,9 +1,5 @@
 use super::*;
 
-use std::convert::TryFrom;
-
-use std::mem::MaybeUninit;
-
 use std::ptr::NonNull;
 
 use libc::c_int;
@@ -23,15 +19,19 @@ struct EVP_AEAD_CTX {
 #[repr(C)]
 pub(crate) struct AES_KEY {
     rd_key: [u32; 4 * (14 + 1)],
-    rounds: c_int,
+    rounds: c_uint,
 }
 
 impl Algorithm {
     fn get_evp_aead(self) -> *const EVP_AEAD {
-        match self {
-            Self::AES128_GCM => unsafe { EVP_aead_aes_128_gcm_tls13() },
-            Self::AES256_GCM => unsafe { EVP_aead_aes_256_gcm_tls13() },
-            Self::ChaCha20_Poly1305 => unsafe { EVP_aead_chacha20_poly1305() },
+        // SAFETY: These parameterless BoringSSL functions return pointers to
+        // static AEAD descriptors owned by the library.
+        unsafe {
+            match self {
+                Self::AES128_GCM => EVP_aead_aes_128_gcm_tls13(),
+                Self::AES256_GCM => EVP_aead_aes_256_gcm_tls13(),
+                Self::ChaCha20_Poly1305 => EVP_aead_chacha20_poly1305(),
+            }
         }
     }
 }
@@ -41,17 +41,18 @@ pub(crate) struct PacketKey {
 
     ctx: NonNull<EVP_AEAD_CTX>,
 
-    nonce: Vec<u8>,
+    nonce: [u8; MAX_NONCE_LEN],
 }
 
 impl PacketKey {
     pub fn new(
         alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, _enc: u32,
     ) -> Result<Self> {
+        let nonce = iv.try_into().map_err(|_| Error::CryptoFail)?;
         Ok(Self {
             alg,
             ctx: make_aead_ctx(alg, &key)?,
-            nonce: iv,
+            nonce,
         })
     }
 
@@ -92,15 +93,19 @@ impl PacketKey {
 
         let nonce = make_nonce(&self.nonce, counter);
 
+        let ptr = buf.as_mut_ptr();
+        // SAFETY: The context is live, the nonce has the required length,
+        // all slices remain valid for the call, and BoringSSL explicitly
+        // permits in-place decryption with identical input/output pointers.
         let rc = unsafe {
             EVP_AEAD_CTX_open(
                 self.ctx.as_ptr(),  // ctx
-                buf.as_mut_ptr(),   // out
+                ptr,                // out
                 &mut out_len,       // out_len
                 max_out_len,        // max_out_len
                 nonce[..].as_ptr(), // nonce
                 nonce.len(),        // nonce_len
-                buf.as_ptr(),       // inp
+                ptr.cast_const(),   // inp
                 buf.len(),          // in_len
                 ad.as_ptr(),        // ad
                 ad.len(),           // ad_len
@@ -129,27 +134,36 @@ impl PacketKey {
         };
 
         // Make sure all the outputs combined fit in the buffer.
-        if in_len + tag_len + extra_in_len > buf.len() {
+        let tag_capacity =
+            tag_len.checked_add(extra_in_len).ok_or(Error::CryptoFail)?;
+        let (data, tag) =
+            buf.split_at_mut_checked(in_len).ok_or(Error::CryptoFail)?;
+        if tag.len() < tag_capacity {
             return Err(Error::CryptoFail);
         }
 
         let nonce = make_nonce(&self.nonce, counter);
+        let ptr = data.as_mut_ptr();
 
+        // SAFETY: The context and nonce are valid. The data and tag buffers
+        // are disjoint and large enough for all output, and the primary
+        // input/output pointers are identical as permitted by seal_scatter.
+        // Any extra input and associated data are valid shared slices.
         let rc = unsafe {
             EVP_AEAD_CTX_seal_scatter(
-                self.ctx.as_ptr(),          // ctx
-                buf.as_mut_ptr(),           // out
-                buf[in_len..].as_mut_ptr(), // out_tag
-                &mut out_tag_len,           // out_tag_len
-                tag_len + extra_in_len,     // max_out_tag_len
-                nonce[..].as_ptr(),         // nonce
-                nonce.len(),                // nonce_len
-                buf.as_ptr(),               // inp
-                in_len,                     // in_len
-                extra_in_ptr,               // extra_in
-                extra_in_len,               // extra_in_len
-                ad.as_ptr(),                // ad
-                ad.len(),                   // ad_len
+                self.ctx.as_ptr(),  // ctx
+                ptr,                // out
+                tag.as_mut_ptr(),   // out_tag
+                &mut out_tag_len,   // out_tag_len
+                tag_capacity,       // max_out_tag_len
+                nonce[..].as_ptr(), // nonce
+                nonce.len(),        // nonce_len
+                ptr.cast_const(),   // inp
+                in_len,             // in_len
+                extra_in_ptr,       // extra_in
+                extra_in_len,       // extra_in_len
+                ad.as_ptr(),        // ad
+                ad.len(),           // ad_len
             )
         };
 
@@ -161,13 +175,17 @@ impl PacketKey {
     }
 }
 
-// PacketKey uniquely owns the context. Its API requires exclusive access for
-// stateful seal operations, while open operations support shared access.
+// SAFETY: PacketKey uniquely owns its context; moving it transfers ownership
+// without moving the BoringSSL allocation or borrowing thread-local state.
 unsafe impl Send for PacketKey {}
+// SAFETY: BoringSSL documents concurrent open/seal calls on the same context
+// as safe. Rust additionally requires exclusive access for stateful sealing.
 unsafe impl Sync for PacketKey {}
 
 impl Drop for PacketKey {
     fn drop(&mut self) {
+        // SAFETY: This context was allocated by EVP_AEAD_CTX_new and is
+        // uniquely owned by self, so it is freed exactly once.
         unsafe { EVP_AEAD_CTX_free(self.ctx.as_ptr()) }
     }
 }
@@ -180,40 +198,55 @@ impl Drop for PacketKey {
 pub(crate) enum HeaderProtectionKey {
     Aes(AES_KEY),
 
-    ChaCha(Vec<u8>),
+    ChaCha([u8; 32]),
 }
 
 impl HeaderProtectionKey {
     pub fn new(alg: Algorithm, hp_key: Vec<u8>) -> Result<Self> {
+        if hp_key.len() != alg.key_len() {
+            return Err(Error::CryptoFail);
+        }
         match alg {
-            Algorithm::AES128_GCM | Algorithm::AES256_GCM => unsafe {
-                let key_len_bits = alg.key_len() as u32 * 8;
-
-                let mut aes_key = MaybeUninit::<AES_KEY>::uninit();
-
-                let rc = AES_set_encrypt_key(
-                    hp_key.as_ptr(),
-                    key_len_bits,
-                    aes_key.as_mut_ptr(),
-                );
-
+            Algorithm::AES128_GCM | Algorithm::AES256_GCM => {
+                let key_len_bits = if alg == Algorithm::AES128_GCM {
+                    128
+                } else {
+                    256
+                };
+                // Initialize all round-key storage, including unused words for
+                // AES-128, before passing it to the C key schedule function.
+                let mut aes_key = AES_KEY {
+                    rd_key: [0; 4 * (14 + 1)],
+                    rounds: 0,
+                };
+                // SAFETY: The key length was checked against the selected
+                // algorithm, and aes_key is writable storage matching AES_KEY.
+                let rc = unsafe {
+                    AES_set_encrypt_key(
+                        hp_key.as_ptr(),
+                        key_len_bits,
+                        &mut aes_key,
+                    )
+                };
                 if rc != 0 {
                     return Err(Error::CryptoFail);
                 }
-
-                let aes_key = aes_key.assume_init();
                 Ok(Self::Aes(aes_key))
             },
-
-            Algorithm::ChaCha20_Poly1305 => Ok(Self::ChaCha(hp_key)),
+            Algorithm::ChaCha20_Poly1305 => Ok(Self::ChaCha(
+                hp_key.try_into().map_err(|_| Error::CryptoFail)?,
+            )),
         }
     }
 
     pub fn new_mask(&self, sample: &[u8]) -> Result<HeaderProtectionMask> {
+        let sample = sample.get(..16).ok_or(Error::CryptoFail)?;
         match self {
             Self::Aes(aes_key) => {
                 let mut block = [0_u8; 16];
 
+                // SAFETY: The sample and output contain a full AES block;
+                // aes_key is initialized by AES_set_encrypt_key on success.
                 unsafe {
                     AES_ecb_encrypt(
                         sample.as_ptr(),
@@ -223,14 +256,8 @@ impl HeaderProtectionKey {
                     )
                 };
 
-                // Downsize the encrypted block to the size of the header
-                // protection mask.
-                //
-                // The length of the slice will always match the size of
-                // `HeaderProtectionMask` so the `unwrap()` is safe.
-                let new_mask =
-                    HeaderProtectionMask::try_from(&block[..HP_MASK_LEN])
-                        .unwrap();
+                let mut new_mask = HeaderProtectionMask::default();
+                new_mask.copy_from_slice(&block[..HP_MASK_LEN]);
                 Ok(new_mask)
             },
 
@@ -243,6 +270,8 @@ impl HeaderProtectionKey {
                     sample[0], sample[1], sample[2], sample[3],
                 ]);
 
+                // SAFETY: The key is exactly 32 bytes, the remaining sample
+                // is a 12-byte nonce, and both data buffers are HP_MASK_LEN.
                 unsafe {
                     CRYPTO_chacha_20(
                         new_mask.as_mut_ptr(),
@@ -261,10 +290,18 @@ impl HeaderProtectionKey {
 }
 
 fn make_aead_ctx(alg: Algorithm, key: &[u8]) -> Result<NonNull<EVP_AEAD_CTX>> {
+    if key.len() != alg.key_len() {
+        return Err(Error::CryptoFail);
+    }
+    // SAFETY: The descriptor is static and key has the exact required
+    // length. BoringSSL copies the key into its newly allocated context.
     let ctx = unsafe {
-        let aead = alg.get_evp_aead();
-
-        EVP_AEAD_CTX_new(aead, key.as_ptr(), alg.key_len(), alg.tag_len())
+        EVP_AEAD_CTX_new(
+            alg.get_evp_aead(),
+            key.as_ptr(),
+            key.len(),
+            alg.tag_len(),
+        )
     };
 
     NonNull::new(ctx).ok_or(Error::CryptoFail)
@@ -273,8 +310,19 @@ fn make_aead_ctx(alg: Algorithm, key: &[u8]) -> Result<NonNull<EVP_AEAD_CTX>> {
 pub(crate) fn hkdf_extract(
     alg: Algorithm, out: &mut [u8], secret: &[u8], salt: &[u8],
 ) -> Result<()> {
-    let mut out_len = out.len();
+    // HKDF_extract treats out_len as an output, not a capacity. It writes
+    // the entire digest, so validate the buffer before calling it.
+    let digest_len = match alg {
+        Algorithm::AES256_GCM => 48,
+        Algorithm::AES128_GCM | Algorithm::ChaCha20_Poly1305 => 32,
+    };
+    if out.len() < digest_len {
+        return Err(Error::CryptoFail);
+    }
+    let mut out_len = 0;
 
+    // SAFETY: The output has space for the selected digest. All input slices
+    // and the digest descriptor remain valid throughout this call.
     let rc = unsafe {
         HKDF_extract(
             out.as_mut_ptr(),
@@ -297,6 +345,8 @@ pub(crate) fn hkdf_extract(
 pub(crate) fn hkdf_expand(
     alg: Algorithm, out: &mut [u8], secret: &[u8], info: &[u8],
 ) -> Result<()> {
+    // SAFETY: All slice pointers are valid for their associated lengths,
+    // the output is writable and disjoint, and the digest is static.
     let rc = unsafe {
         HKDF_expand(
             out.as_mut_ptr(),

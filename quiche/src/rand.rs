@@ -25,6 +25,8 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub fn rand_bytes(buf: &mut [u8]) {
+    // SAFETY: The buffer is writable for its full length. BoringSSL's
+    // RAND_bytes fills it or aborts if entropy is unavailable.
     unsafe {
         RAND_bytes(buf.as_mut_ptr(), buf.len());
     }

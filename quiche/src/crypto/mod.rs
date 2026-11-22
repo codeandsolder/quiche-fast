@@ -84,10 +84,13 @@ pub enum Algorithm {
 // submodule.
 impl Algorithm {
     fn get_evp_digest(self) -> *const EVP_MD {
-        match self {
-            Self::AES128_GCM => unsafe { EVP_sha256() },
-            Self::AES256_GCM => unsafe { EVP_sha384() },
-            Self::ChaCha20_Poly1305 => unsafe { EVP_sha256() },
+        // SAFETY: These parameterless BoringSSL functions return static
+        // digest descriptors owned by the library.
+        unsafe {
+            match self {
+                Self::AES128_GCM | Self::ChaCha20_Poly1305 => EVP_sha256(),
+                Self::AES256_GCM => EVP_sha384(),
+            }
         }
     }
 
@@ -310,17 +313,17 @@ impl Seal {
         if cfg!(feature = "fuzzing") {
             let tag_len = self.alg.tag_len();
 
+            let remaining =
+                buf.len().checked_sub(in_len).ok_or(Error::CryptoFail)?;
+            let available =
+                remaining.checked_sub(tag_len).ok_or(Error::CryptoFail)?;
             if let Some(extra) = extra_in {
-                if in_len + tag_len + extra.len() > buf.len() {
+                if extra.len() > available {
                     return Err(Error::CryptoFail);
                 }
                 buf[in_len..in_len + extra.len()].copy_from_slice(extra);
                 return Ok(in_len + extra.len());
             }
-            if in_len + tag_len > buf.len() {
-                return Err(Error::CryptoFail);
-            }
-
             return Ok(in_len + tag_len);
         }
 
@@ -496,8 +499,11 @@ fn hkdf_expand_label(
 ) -> Result<()> {
     const LABEL_PREFIX: &[u8] = b"tls13 ";
 
-    let out_len = (out.len() as u16).to_be_bytes();
-    let label_len = (LABEL_PREFIX.len() + label.len()) as u8;
+    let out_len = u16::try_from(out.len())
+        .map_err(|_| Error::CryptoFail)?
+        .to_be_bytes();
+    let label_len = u8::try_from(LABEL_PREFIX.len() + label.len())
+        .map_err(|_| Error::CryptoFail)?;
 
     let info = [&out_len, &[label_len][..], LABEL_PREFIX, label, &[0][..]];
     let info = info.concat();
@@ -507,9 +513,8 @@ fn hkdf_expand_label(
     Ok(())
 }
 
-fn make_nonce(iv: &[u8], counter: u64) -> [u8; MAX_NONCE_LEN] {
-    let mut nonce = [0; MAX_NONCE_LEN];
-    nonce.copy_from_slice(iv);
+fn make_nonce(iv: &[u8; MAX_NONCE_LEN], counter: u64) -> [u8; MAX_NONCE_LEN] {
+    let mut nonce = *iv;
 
     // XOR the last bytes of the IV with the counter. This is equivalent to
     // left-padding the counter with zero bytes.
@@ -525,6 +530,7 @@ pub fn verify_slices_are_equal(a: &[u8], b: &[u8]) -> Result<()> {
         return Err(Error::CryptoFail);
     }
 
+    // SAFETY: Both slices are readable for the same checked length.
     let rc = unsafe { CRYPTO_memcmp(a.as_ptr(), b.as_ptr(), a.len()) };
 
     if rc == 0 {
@@ -546,6 +552,91 @@ extern "C" {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn crypto_ffi_checks_lengths_before_access() {
+        for alg in [
+            Algorithm::AES128_GCM,
+            Algorithm::AES256_GCM,
+            Algorithm::ChaCha20_Poly1305,
+        ] {
+            let key = vec![0; alg.key_len()];
+            let nonce = vec![0; alg.nonce_len()];
+            assert!(PacketKey::new(
+                alg,
+                vec![0; key.len() - 1],
+                nonce.clone(),
+                Seal::ENCRYPT
+            )
+            .is_err());
+            assert!(PacketKey::new(
+                alg,
+                key.clone(),
+                vec![0; nonce.len() - 1],
+                Seal::ENCRYPT
+            )
+            .is_err());
+            assert!(
+                HeaderProtectionKey::new(alg, vec![0; key.len() - 1]).is_err()
+            );
+            let hp = HeaderProtectionKey::new(alg, key.clone()).unwrap();
+            assert_eq!(hp.new_mask(&[0; 15]), Err(Error::CryptoFail));
+            assert!(hp.new_mask(&[0; 16]).is_ok());
+
+            let mut pkt =
+                PacketKey::new(alg, key.clone(), nonce.clone(), Seal::ENCRYPT)
+                    .unwrap();
+            let mut buf = [0; 32];
+            assert_eq!(
+                pkt.seal_with_u64_counter(0, b"", &mut buf, usize::MAX, None),
+                Err(Error::CryptoFail)
+            );
+            assert_eq!(
+                pkt.seal_with_u64_counter(0, b"", &mut buf, 17, None),
+                Err(Error::CryptoFail)
+            );
+            assert_eq!(
+                pkt.seal_with_u64_counter(0, b"", &mut buf, 16, Some(&[0])),
+                Err(Error::CryptoFail)
+            );
+
+            let mut seal =
+                Seal::new(alg, key.clone(), nonce, key, vec![0; 32]).unwrap();
+            assert_eq!(
+                seal.seal_with_u64_counter(0, b"", &mut buf, usize::MAX, None),
+                Err(Error::CryptoFail)
+            );
+            assert_eq!(
+                seal.seal_with_u64_counter(
+                    0,
+                    b"",
+                    &mut buf,
+                    usize::MAX,
+                    Some(&[0])
+                ),
+                Err(Error::CryptoFail)
+            );
+
+            let required = if alg == Algorithm::AES256_GCM { 48 } else { 32 };
+            let mut out = vec![0xA5; required];
+            assert_eq!(
+                hkdf_extract(alg, &mut out[..required - 1], b"secret", b"salt"),
+                Err(Error::CryptoFail)
+            );
+            assert!(out.iter().all(|&b| b == 0xA5));
+            assert!(hkdf_extract(alg, &mut out, b"secret", b"salt").is_ok());
+        }
+        let mut out = [0; 32];
+        assert_eq!(
+            hkdf_expand_label(
+                Algorithm::AES128_GCM,
+                b"secret",
+                &[0; 250],
+                &mut out
+            ),
+            Err(Error::CryptoFail)
+        );
+    }
 
     #[test]
     fn derive_initial_secrets_v1() {
