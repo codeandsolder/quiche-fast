@@ -27,7 +27,8 @@
 use std::cmp;
 
 use std::collections::BTreeMap;
-use std::collections::VecDeque;
+use std::ops::Bound::Excluded;
+use std::ops::Bound::Unbounded;
 
 use std::time::Duration;
 use std::time::Instant;
@@ -160,55 +161,44 @@ impl RecvBuf {
             return Ok(());
         }
 
-        let mut tmp_bufs = VecDeque::with_capacity(2);
-        tmp_bufs.push_back(buf);
+        let previous_end = self.len;
+        let mut buf = buf;
+        // Trim already-consumed data without cloning the backing allocation.
+        buf.discard_prefix(self.off);
+        self.len = self.len.max(buf.max_off());
 
-        'tmp: while let Some(mut buf) = tmp_bufs.pop_front() {
-            // Discard incoming data below current stream offset. Bytes up to
-            // `self.off` have already been received so we should not buffer
-            // them again. This is also important to make sure `ready()` doesn't
-            // get stuck when a buffer with lower offset than the stream's is
-            // buffered.
-            if self.off_front() > buf.off() {
-                buf =
-                    buf.split_off(self.off_front()).ok_or(Error::InvalidState)?;
-            }
-
-            // Handle overlapping data only if the incoming offset precedes
-            // the largest received offset.
-            if buf.off() < self.max_off() {
-                for (_, b) in self.data.range(buf.off()..) {
-                    let off = buf.off();
-
-                    // We are past the current buffer.
-                    if b.off() > buf.max_off() {
-                        break;
-                    }
-
-                    // New buffer is fully contained in existing buffer.
-                    if off >= b.off() && buf.max_off() <= b.max_off() {
-                        continue 'tmp;
-                    }
-
-                    // New buffer's start overlaps existing buffer.
-                    if off >= b.off() && off < b.max_off() {
-                        buf = buf
-                            .split_off(b.max_off())
-                            .ok_or(Error::InvalidState)?;
-                    }
-
-                    // New buffer's end overlaps existing buffer.
-                    if off < b.off() && buf.max_off() > b.off() {
-                        tmp_bufs.push_back(
-                            buf.split_off(b.off()).ok_or(Error::InvalidState)?,
-                        );
-                    }
-                }
-            }
-
-            self.len = cmp::max(self.len, buf.max_off());
-
+        // In-order data cannot overlap anything already buffered.
+        if buf.off() >= previous_end {
             self.data.insert(buf.max_off(), buf);
+            return Ok(());
+        }
+
+        // The map is keyed by end offset. Find the first interval ending
+        // strictly after the remaining input starts (adjacency is not an
+        // overlap). Keep only uncovered prefixes and advance through each
+        // overlapping interval once, without a temporary queue of fragments.
+        while !buf.is_empty() {
+            let overlap = self
+                .data
+                .range((Excluded(buf.off()), Unbounded))
+                .next()
+                .map(|(&end, entry)| (entry.off(), end))
+                .filter(|&(start, _)| start < buf.max_off());
+
+            let Some((start, end)) = overlap else {
+                self.data.insert(buf.max_off(), buf);
+                break;
+            };
+
+            if start > buf.off() {
+                let remainder =
+                    buf.split_off(start).ok_or(Error::InvalidState)?;
+                self.data.insert(start, buf);
+                buf = remainder;
+            }
+
+            // Existing data wins even when retransmissions disagree.
+            buf.discard_prefix(end);
         }
 
         Ok(())
@@ -1346,6 +1336,73 @@ mod tests {
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+    }
+
+    #[test]
+    fn interval_insertion_matches_first_arrival_byte_model() {
+        const SIZE: usize = 8;
+
+        let intervals: Vec<_> = (0..=SIZE)
+            .flat_map(|start| (start..=SIZE).map(move |end| (start, end)))
+            .collect();
+        for &(first_start, first_end) in &intervals {
+            for &(second_start, second_end) in &intervals {
+                for consumed in 0..=SIZE {
+                    let mut recv = RecvBuf::new(
+                        SIZE as u64,
+                        DEFAULT_STREAM_WINDOW,
+                        DEFAULT_STREAM_WINDOW,
+                    );
+                    let mut expected = [None; SIZE];
+                    let first = [1; SIZE];
+                    let second = [2; SIZE];
+                    recv.write(RangeBuf::from(
+                        &first[first_start..first_end],
+                        first_start as u64,
+                        false,
+                    ))
+                    .unwrap();
+                    expected[first_start..first_end].fill(Some(1));
+
+                    let mut output = [0; SIZE];
+                    let prefix =
+                        expected.iter().take_while(|b| b.is_some()).count();
+                    let read = prefix.min(consumed);
+                    if prefix > 0 {
+                        assert_eq!(
+                            recv.emit(&mut output[..consumed]),
+                            Ok((read, false))
+                        );
+                        assert_eq!(&output[..read], &first[..read]);
+                    } else {
+                        assert_eq!(
+                            recv.emit(&mut output[..consumed]),
+                            Err(Error::Done)
+                        );
+                    }
+
+                    recv.write(RangeBuf::from(
+                        &second[second_start..second_end],
+                        second_start as u64,
+                        false,
+                    ))
+                    .unwrap();
+                    for byte in &mut expected[second_start..second_end] {
+                        byte.get_or_insert(2);
+                    }
+
+                    // Fill every remaining gap with a different byte
+                    // and check that the first arrival was preserved.
+                    recv.write(RangeBuf::from(&[3; SIZE], 0, true)).unwrap();
+                    let expected: Vec<_> =
+                        expected[read..].iter().map(|b| b.unwrap_or(3)).collect();
+                    assert_eq!(recv.emit(&mut output), Ok((SIZE - read, true)));
+                    assert_eq!(&output[..SIZE - read], expected);
+                    assert!(recv.data.is_empty());
+                    assert_eq!(recv.emit(&mut output), Err(Error::Done));
+                }
+            }
+        }
     }
 
     #[test]

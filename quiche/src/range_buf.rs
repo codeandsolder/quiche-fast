@@ -170,9 +170,9 @@ where
         restored as u64
     }
 
-    /// Drop a contiguous acknowledged prefix without cloning the backing
+    /// Drop a contiguous prefix without cloning the backing
     /// allocation. Return the number of pending bytes removed.
-    pub fn acknowledge_prefix(&mut self, offset: u64) -> u64 {
+    pub fn discard_prefix(&mut self, offset: u64) -> u64 {
         let bytes = usize::try_from(offset.saturating_sub(self.off))
             .unwrap_or(self.len)
             .min(self.len);
