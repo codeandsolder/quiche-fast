@@ -57,7 +57,7 @@ const DEFAULT_MAX_ACK_DELAY: u64 = 25;
 ///
 /// A QUIC transport parameter that is not specifically recognized
 /// by this implementation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UnknownTransportParameter<T> {
     /// The ID of the unknown transport parameter.
     pub id: u64,
@@ -77,14 +77,13 @@ impl<T> UnknownTransportParameter<T> {
 }
 
 #[cfg(feature = "qlog")]
-impl From<UnknownTransportParameter<Vec<u8>>>
+impl<T: AsRef<[u8]>> From<&UnknownTransportParameter<T>>
     for qlog::events::quic::UnknownTransportParameter
 {
-    fn from(value: UnknownTransportParameter<Vec<u8>>) -> Self {
+    fn from(value: &UnknownTransportParameter<T>) -> Self {
         Self {
             id: value.id,
-            value: qlog::HexSlice::maybe_string(Some(value.value.as_slice()))
-                .unwrap_or_default(),
+            value: qlog::HexSlice::new(&value.value).to_string(),
         }
     }
 }
@@ -93,12 +92,32 @@ impl From<UnknownTransportParameter<Vec<u8>>>
 #[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct UnknownTransportParameters {
     /// The space remaining for storing unknown transport parameters.
-    pub capacity: usize,
+    remaining_capacity: usize,
     /// The unknown transport parameters.
-    pub parameters: Vec<UnknownTransportParameter<Vec<u8>>>,
+    parameters: Vec<UnknownTransportParameter<Vec<u8>>>,
 }
 
 impl UnknownTransportParameters {
+    /// Create an empty tracker with the given byte budget.
+    pub const fn new(capacity: usize) -> Self {
+        Self {
+            remaining_capacity: capacity,
+            parameters: Vec::new(),
+        }
+    }
+
+    /// Number of bytes still available for parameter IDs and values.
+    pub const fn remaining_capacity(&self) -> usize {
+        self.remaining_capacity
+    }
+
+    /// Iterate over the recorded parameters in wire order.
+    pub fn iter(
+        &self,
+    ) -> std::slice::Iter<'_, UnknownTransportParameter<Vec<u8>>> {
+        self.parameters.iter()
+    }
+
     /// Pushes an unknown transport parameter into storage if there is space
     /// remaining.
     ///
@@ -113,7 +132,7 @@ impl UnknownTransportParameters {
             .checked_add(size_of::<u64>())
             .ok_or(Error::BufferTooShort)?;
         let remaining = self
-            .capacity
+            .remaining_capacity
             .checked_sub(cost)
             .ok_or(Error::BufferTooShort)?;
         let mut value = Vec::new();
@@ -126,7 +145,7 @@ impl UnknownTransportParameters {
         value.extend_from_slice(new.value);
         self.parameters
             .push(UnknownTransportParameter { id: new.id, value });
-        self.capacity = remaining;
+        self.remaining_capacity = remaining;
         Ok(())
     }
 }
@@ -136,12 +155,12 @@ impl<'a> IntoIterator for &'a UnknownTransportParameters {
     type Item = &'a UnknownTransportParameter<Vec<u8>>;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.parameters.iter()
+        self.iter()
     }
 }
 
 /// QUIC Transport Parameters
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TransportParams {
     /// Value of Destination CID field from first Initial packet sent by client
     pub original_destination_connection_id: Option<ConnectionId<'static>>,
@@ -212,7 +231,8 @@ impl Default for TransportParams {
 // The length of the parameter is separate from the varint width. A known
 // integer parameter must contain exactly one varint, even when represented
 // using a non-minimal varint width.
-fn decode_integer(mut value: octets::Octets<'_>) -> Result<u64> {
+fn decode_integer(bytes: &[u8]) -> Result<u64> {
+    let mut value = octets::Octets::with_slice(bytes);
     let v = value
         .get_varint()
         .map_err(|_| Error::InvalidTransportParam)?;
@@ -223,19 +243,18 @@ fn decode_integer(mut value: octets::Octets<'_>) -> Result<u64> {
 }
 
 /// Decode a connection ID only after checking its wire length.
-fn decode_cid(value: octets::Octets<'_>) -> Result<ConnectionId<'static>> {
-    if value.cap() > MAX_CONN_ID_LEN {
+fn decode_cid(value: &[u8]) -> Result<ConnectionId<'static>> {
+    if value.len() > MAX_CONN_ID_LEN {
         return Err(Error::InvalidTransportParam);
     }
-    Ok(ConnectionId::copy_from_slice(value.as_ref()))
+    Ok(ConnectionId::copy_from_slice(value))
 }
 
 /// Validate the preferred-address layout even though migration to a
 /// preferred address is not implemented.
-fn validate_preferred_address(value: octets::Octets<'_>) -> Result<()> {
+fn validate_preferred_address(bytes: &[u8]) -> Result<()> {
     const ADDRESS_BYTES: usize = 4 + 2 + 16 + 2;
     const FIXED_BYTES: usize = ADDRESS_BYTES + 1 + 16;
-    let bytes = value.buf();
     let cid_len = usize::from(
         *bytes
             .get(ADDRESS_BYTES)
@@ -308,12 +327,7 @@ impl TransportParams {
         let mut seen_small = 0_u64;
         let mut seen_large = HashSet::new();
         let mut tp = Self {
-            unknown_params: unknown_size.map(|capacity| {
-                UnknownTransportParameters {
-                    capacity,
-                    parameters: Vec::new(),
-                }
-            }),
+            unknown_params: unknown_size.map(UnknownTransportParameters::new),
             ..Self::default()
         };
 
@@ -342,7 +356,7 @@ impl TransportParams {
             let value = params
                 .get_bytes_with_varint_length()
                 .map_err(|_| Error::InvalidTransportParam)?;
-            tp.decode_parameter(id, value, is_server)?;
+            tp.decode_parameter(id, value.buf(), is_server)?;
         }
 
         tp.validate()?;
@@ -352,7 +366,7 @@ impl TransportParams {
     /// Decode one parameter value, applying the sender role and its wire
     /// schema.
     fn decode_parameter(
-        &mut self, id: u64, value: octets::Octets<'_>, is_server: bool,
+        &mut self, id: u64, value: &[u8], is_server: bool,
     ) -> Result<()> {
         // Parameters that can only be received from a server.
         if is_server && matches!(id, 0x0000 | 0x0002 | 0x000d | 0x0010) {
@@ -364,10 +378,7 @@ impl TransportParams {
             0x0001 => self.max_idle_timeout = decode_integer(value)?,
             0x0002 =>
                 self.stateless_reset_token = Some(u128::from_be_bytes(
-                    value
-                        .buf()
-                        .try_into()
-                        .map_err(|_| Error::InvalidTransportParam)?,
+                    value.try_into().map_err(|_| Error::InvalidTransportParam)?,
                 )),
             0x0003 => self.max_udp_payload_size = decode_integer(value)?,
             0x0004 => self.initial_max_data = decode_integer(value)?,
@@ -381,7 +392,7 @@ impl TransportParams {
             0x000a => self.ack_delay_exponent = decode_integer(value)?,
             0x000b => self.max_ack_delay = decode_integer(value)?,
             0x000c => {
-                if value.cap() != 0 {
+                if !value.is_empty() {
                     return Err(Error::InvalidTransportParam);
                 }
                 self.disable_active_migration = true;
@@ -396,10 +407,7 @@ impl TransportParams {
                 if let Some(unknown) = &mut self.unknown_params {
                     // Tracking is optional and can be exhausted without
                     // invalidating an otherwise valid peer parameter.
-                    let _ = unknown.push(UnknownTransportParameter {
-                        id,
-                        value: value.buf(),
-                    });
+                    let _ = unknown.push(UnknownTransportParameter { id, value });
                 }
             },
         }
@@ -536,19 +544,10 @@ impl TransportParams {
 
                 unknown_parameters: self
                     .unknown_params
-                    .as_ref()
-                    .map(|unknown_params| {
-                        unknown_params
-                            .into_iter()
-                            .cloned()
-                            .map(
-                                Into::<
-                                    qlog::events::quic::UnknownTransportParameter,
-                                >::into,
-                            )
-                            .collect()
-                    })
-                    .unwrap_or_default(),
+                    .iter()
+                    .flat_map(UnknownTransportParameters::iter)
+                    .map(Into::into)
+                    .collect(),
 
                 ..Default::default()
             },
@@ -569,18 +568,15 @@ mod tests {
             };
             assert_eq!(param.is_reserved(), matches!(id, 27 | 58 | 89));
         }
-        let mut tracked = UnknownTransportParameters {
-            capacity: 11,
-            parameters: Vec::new(),
-        };
+        let mut tracked = UnknownTransportParameters::new(11);
         let param = UnknownTransportParameter {
             id: 17,
             value: &b"abc"[..],
         };
-        assert_eq!(tracked.push(param.clone()), Ok(()));
-        assert_eq!(tracked.capacity, 0);
+        assert_eq!(tracked.push(param), Ok(()));
+        assert_eq!(tracked.remaining_capacity(), 0);
         assert_eq!(tracked.push(param), Err(Error::BufferTooShort));
-        assert_eq!(tracked.parameters.len(), 1);
+        assert_eq!(tracked.iter().len(), 1);
         assert_eq!(tracked.into_iter().len(), 1);
     }
 
