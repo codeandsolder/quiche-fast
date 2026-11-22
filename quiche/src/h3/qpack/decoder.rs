@@ -148,10 +148,17 @@ impl Decoder {
 
         let mut size_tracker = FieldListSizeTracker::new(max_size);
 
+        // RFC 9204 sections 4.5.1.1 and 4.5.1.2. The static-only
+        // decoder cannot resolve any dynamic table insert count. With zero
+        // required inserts a negative Delta Base is necessarily invalid;
+        // a nonnegative Base is allowed even when no dynamic entries are used.
         let req_insert_count = decode_int(&mut b, 8)?;
-        let base = decode_int(&mut b, 7)?;
-
-        trace!("Header count={req_insert_count} base={base}");
+        let negative_base = b.peek_u8()? & 0x80 != 0;
+        let delta_base = decode_int(&mut b, 7)?;
+        if req_insert_count != 0 || negative_base {
+            return Err(Error::InvalidFieldSectionPrefix);
+        }
+        trace!("Header count={req_insert_count} base={delta_base}");
 
         while b.cap() > 0 {
             let first = b.peek_u8()?;
@@ -320,7 +327,14 @@ fn decode_str(
 
     let val = if huff {
         val.get_huffman_decoded_with_max_length(max_len)
-            .map_err(|_| Error::HeaderListTooLarge)?
+            .map_err(|e| match e {
+                octets::HuffmanDecodeError::InvalidEncoding =>
+                    Error::InvalidHuffmanEncoding,
+                octets::HuffmanDecodeError::OutputLimitExceeded =>
+                    Error::HeaderListTooLarge,
+                octets::HuffmanDecodeError::AllocationFailed =>
+                    Error::AllocationFailed,
+            })?
     } else {
         if len > max_len {
             return Err(Error::HeaderListTooLarge);
@@ -469,6 +483,39 @@ mod tests {
                 Err(Error::BufferTooShort)
             );
         }
+    }
+
+    #[test]
+    fn static_field_section_prefix_checks_insert_count_and_signed_base() {
+        let mut dec = Decoder::new();
+        let header = Header::new(b":method", b"GET");
+        assert_eq!(dec.decode(&[0, 1, 0xd1], u64::MAX), Ok(vec![header]));
+        for wire in [[1, 0, 0xd1], [0, 0x80, 0xd1], [0, 0x81, 0xd1]] {
+            assert_eq!(
+                dec.decode(&wire, u64::MAX),
+                Err(Error::InvalidFieldSectionPrefix)
+            );
+        }
+    }
+
+    #[test]
+    fn huffman_invalid_encoding_is_not_header_size_exhaustion() {
+        // Literal name "x"; value is one Huffman byte with invalid padding.
+        let malformed = [0, 0, 0x21, b'x', 0x81, 0xff];
+        assert_eq!(
+            Decoder::new().decode(&malformed, u64::MAX),
+            Err(Error::InvalidHuffmanEncoding)
+        );
+        // Same representation with valid HPACK encoding of "no-cache".
+        let valid = b"\x00\x00\x21x\x86\xa8\xeb\x10\x64\x9c\xbf";
+        assert_eq!(
+            Decoder::new().decode(valid, 40),
+            Err(Error::HeaderListTooLarge)
+        );
+        assert_eq!(
+            Decoder::new().decode(valid, 41),
+            Ok(vec![Header::new(b"x", b"no-cache")])
+        );
     }
 
     #[test]

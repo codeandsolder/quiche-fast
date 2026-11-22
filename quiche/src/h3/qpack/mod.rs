@@ -62,6 +62,12 @@ pub enum Error {
 
     /// The decoded header list exceeded the size limit.
     HeaderListTooLarge,
+
+    /// The field-section prefix requires unsupported dynamic table state.
+    InvalidFieldSectionPrefix,
+
+    /// Storage for a decoded string could not be reserved.
+    AllocationFailed,
 }
 
 /// QPACK integers have a prefix of one through eight bits. Keeping the

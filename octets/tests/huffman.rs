@@ -28,6 +28,7 @@
 
 use octets::huffman_encoding_len;
 use octets::BufferTooShortError;
+use octets::HuffmanDecodeError;
 use octets::Octets;
 use octets::OctetsMut;
 use octets::OctetsWriter;
@@ -38,24 +39,42 @@ fn invalid_huffman() {
     // Extra non-zero padding byte at the end.
     let mut b =
         Octets::with_slice(b"\x00\x85\xf2\xb2\x4a\x84\xff\x84\x49\x50\x9f\xff");
-    assert!(b.get_huffman_decoded().is_err());
+    assert_eq!(
+        b.get_huffman_decoded(),
+        Err(HuffmanDecodeError::InvalidEncoding)
+    );
 
     // Zero padded.
     let mut b =
         Octets::with_slice(b"\x00\x85\xf2\xb2\x4a\x84\xff\x83\x49\x50\x90");
-    assert!(b.get_huffman_decoded().is_err());
+    assert_eq!(
+        b.get_huffman_decoded(),
+        Err(HuffmanDecodeError::InvalidEncoding)
+    );
 
     // Non-final EOS symbol.
     let mut b = Octets::with_slice(
         b"\x00\x85\xf2\xb2\x4a\x84\xff\x87\x49\x51\xff\xff\xff\xfa\x7f",
     );
-    assert!(b.get_huffman_decoded().is_err());
-
-    // Huffman too long.
-    let mut b = Octets::with_slice(
-        b"\x00\x85\xf2\xb2\x4a\x84\xff\x87\x49\x51\xff\xff\xff\xfa\x7f",
+    assert_eq!(
+        b.get_huffman_decoded(),
+        Err(HuffmanDecodeError::InvalidEncoding)
     );
-    assert!(b.get_huffman_decoded_with_max_length(4).is_err());
+
+    // Valid HPACK encoding of "no-cache" but too small an output limit.
+    let wire = b"\xa8\xeb\x10\x64\x9c\xbf";
+    let mut b = Octets::with_slice(wire);
+    assert_eq!(
+        b.get_huffman_decoded_with_max_length(4),
+        Err(HuffmanDecodeError::OutputLimitExceeded)
+    );
+    let mut b = Octets::with_slice(wire);
+    assert_eq!(
+        b.get_huffman_decoded_with_max_length(8),
+        Ok(b"no-cache".to_vec())
+    );
+    let mut b = Octets::with_slice(b"");
+    assert_eq!(b.get_huffman_decoded_with_max_length(0), Ok(Vec::new()));
 }
 
 #[test]

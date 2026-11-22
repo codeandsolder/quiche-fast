@@ -3199,7 +3199,8 @@ impl Connection {
 
                     Err(e) => {
                         let e = match e {
-                            qpack::Error::HeaderListTooLarge =>
+                            qpack::Error::HeaderListTooLarge |
+                            qpack::Error::AllocationFailed =>
                                 Error::ExcessiveLoad,
 
                             _ => Error::QpackDecompressionFailed,
