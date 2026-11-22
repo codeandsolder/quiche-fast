@@ -45,9 +45,7 @@ pub(crate) struct PacketKey {
 }
 
 impl PacketKey {
-    pub fn new(
-        alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, _enc: u32,
-    ) -> Result<Self> {
+    pub fn new(alg: Algorithm, key: Vec<u8>, iv: Vec<u8>) -> Result<Self> {
         let nonce = iv.try_into().map_err(|_| Error::CryptoFail)?;
         Ok(Self {
             alg,
@@ -56,7 +54,7 @@ impl PacketKey {
         })
     }
 
-    pub fn from_secret(aead: Algorithm, secret: &[u8], enc: u32) -> Result<Self> {
+    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
         let key_len = aead.key_len();
         let nonce_len = aead.nonce_len();
 
@@ -66,7 +64,7 @@ impl PacketKey {
         derive_pkt_key(aead, secret, &mut key)?;
         derive_pkt_iv(aead, secret, &mut iv)?;
 
-        let mut pkt_key = Self::new(aead, key, iv, enc)?;
+        let mut pkt_key = Self::new(aead, key, iv)?;
 
         // Dummy seal operation to prime the AEAD context with the nonce mask.
         //

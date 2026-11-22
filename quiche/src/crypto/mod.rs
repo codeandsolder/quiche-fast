@@ -143,7 +143,9 @@ struct EVP_MD {
 
 type HeaderProtectionMask = [u8; HP_MASK_LEN];
 
-pub struct Open {
+/// Shared packet-protection state. The direction is part of the type so only
+/// the appropriate open or seal operation is exposed to callers.
+pub struct PacketProtection<const SEALING: bool> {
     alg: Algorithm,
 
     secret: Vec<u8>,
@@ -153,12 +155,10 @@ pub struct Open {
     packet: PacketKey,
 }
 
-impl Open {
-    // Note: some vendor-specific methods are implemented in the boringssl
-    // submodule.
+pub type Open = PacketProtection<false>;
+pub type Seal = PacketProtection<true>;
 
-    pub const DECRYPT: u32 = 0;
-
+impl<const SEALING: bool> PacketProtection<SEALING> {
     pub fn new(
         alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
         secret: Vec<u8>,
@@ -170,7 +170,7 @@ impl Open {
 
             header: HeaderProtectionKey::new(alg, hp_key)?,
 
-            packet: PacketKey::new(alg, key, iv, Self::DECRYPT)?,
+            packet: PacketKey::new(alg, key, iv)?,
         })
     }
 
@@ -182,7 +182,7 @@ impl Open {
 
             header: HeaderProtectionKey::from_secret(aead, secret)?,
 
-            packet: PacketKey::from_secret(aead, secret, Self::DECRYPT)?,
+            packet: PacketKey::from_secret(aead, secret)?,
         })
     }
 
@@ -194,15 +194,14 @@ impl Open {
         self.header.new_mask(sample)
     }
 
-    pub fn alg(&self) -> Algorithm {
+    pub const fn alg(&self) -> Algorithm {
         self.alg
     }
 
     pub fn derive_next_packet_key(&self) -> Result<Self> {
         let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
-        let next_packet_key =
-            PacketKey::from_secret(self.alg, &next_secret, Self::DECRYPT)?;
+        let next_packet_key = PacketKey::from_secret(self.alg, &next_secret)?;
 
         Ok(Self {
             alg: self.alg,
@@ -214,7 +213,9 @@ impl Open {
             packet: next_packet_key,
         })
     }
+}
 
+impl PacketProtection<false> {
     pub fn open_with_u64_counter(
         &self, counter: u64, ad: &[u8], buf: &mut [u8],
     ) -> Result<usize> {
@@ -234,78 +235,7 @@ impl Open {
     }
 }
 
-pub struct Seal {
-    alg: Algorithm,
-
-    secret: Vec<u8>,
-
-    header: HeaderProtectionKey,
-
-    packet: PacketKey,
-}
-
-impl Seal {
-    // Note: some vendor-specific methods are implemented in the boringssl
-    // submodule.
-
-    pub const ENCRYPT: u32 = 1;
-
-    pub fn new(
-        alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
-        secret: Vec<u8>,
-    ) -> Result<Self> {
-        Ok(Self {
-            alg,
-
-            secret,
-
-            header: HeaderProtectionKey::new(alg, hp_key)?,
-
-            packet: PacketKey::new(alg, key, iv, Self::ENCRYPT)?,
-        })
-    }
-
-    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
-        Ok(Self {
-            alg: aead,
-
-            secret: secret.to_vec(),
-
-            header: HeaderProtectionKey::from_secret(aead, secret)?,
-
-            packet: PacketKey::from_secret(aead, secret, Self::ENCRYPT)?,
-        })
-    }
-
-    pub fn new_mask(&self, sample: &[u8]) -> Result<[u8; 5]> {
-        if cfg!(feature = "fuzzing") {
-            return Ok(<[u8; 5]>::default());
-        }
-
-        self.header.new_mask(sample)
-    }
-
-    pub fn alg(&self) -> Algorithm {
-        self.alg
-    }
-
-    pub fn derive_next_packet_key(&self) -> Result<Self> {
-        let next_secret = derive_next_secret(self.alg, &self.secret)?;
-
-        let next_packet_key =
-            PacketKey::from_secret(self.alg, &next_secret, Self::ENCRYPT)?;
-
-        Ok(Self {
-            alg: self.alg,
-
-            secret: next_secret,
-
-            header: self.header.clone(),
-
-            packet: next_packet_key,
-        })
-    }
-
+impl PacketProtection<true> {
     pub fn seal_with_u64_counter(
         &mut self, counter: u64, ad: &[u8], buf: &mut [u8], in_len: usize,
         extra_in: Option<&[u8]>,
@@ -562,20 +492,10 @@ mod tests {
         ] {
             let key = vec![0; alg.key_len()];
             let nonce = vec![0; alg.nonce_len()];
-            assert!(PacketKey::new(
-                alg,
-                vec![0; key.len() - 1],
-                nonce.clone(),
-                Seal::ENCRYPT
-            )
-            .is_err());
-            assert!(PacketKey::new(
-                alg,
-                key.clone(),
-                vec![0; nonce.len() - 1],
-                Seal::ENCRYPT
-            )
-            .is_err());
+            assert!(PacketKey::new(alg, vec![0; key.len() - 1], nonce.clone(),)
+                .is_err());
+            assert!(PacketKey::new(alg, key.clone(), vec![0; nonce.len() - 1],)
+                .is_err());
             assert!(
                 HeaderProtectionKey::new(alg, vec![0; key.len() - 1]).is_err()
             );
@@ -584,8 +504,7 @@ mod tests {
             assert!(hp.new_mask(&[0; 16]).is_ok());
 
             let mut pkt =
-                PacketKey::new(alg, key.clone(), nonce.clone(), Seal::ENCRYPT)
-                    .unwrap();
+                PacketKey::new(alg, key.clone(), nonce.clone()).unwrap();
             let mut buf = [0; 32];
             assert_eq!(
                 pkt.seal_with_u64_counter(0, b"", &mut buf, usize::MAX, None),
