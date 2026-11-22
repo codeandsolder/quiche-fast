@@ -78,7 +78,7 @@ pub struct Http3Settings {
 
 impl From<&Http3Settings> for quiche::h3::Config {
     fn from(value: &Http3Settings) -> Self {
-        let mut config = Self::new().unwrap();
+        let mut config = Self::new();
 
         if let Some(v) = value.max_header_list_size {
             config.set_max_field_section_size(v);

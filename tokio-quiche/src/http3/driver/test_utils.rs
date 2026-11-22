@@ -135,7 +135,7 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         let (driver, controller) = H3Driver::<H>::new(h3_settings);
         let peer = h3::Connection::with_transport(
             H::peer_qconn(&mut pipe),
-            &h3::Config::new().unwrap(),
+            &h3::Config::new(),
         )
         .context("create H3 peer connection")?;
         Ok(Self {

@@ -106,7 +106,7 @@ fn main() {
     config.set_disable_active_migration(true);
     config.enable_early_data();
 
-    let h3_config = quiche::h3::Config::new().unwrap();
+    let h3_config = quiche::h3::Config::new();
 
     let rng = SystemRandom::new();
     let conn_id_seed =

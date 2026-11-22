@@ -236,7 +236,7 @@ pub fn run(
         if (conn.is_established() || conn.is_in_early_data()) &&
             http3_conn.is_none()
         {
-            let h3_config = quiche::h3::Config::new().unwrap();
+            let h3_config = quiche::h3::Config::new();
 
             let mut h3_conn =
                 quiche::h3::Connection::with_transport(&mut conn, &h3_config)

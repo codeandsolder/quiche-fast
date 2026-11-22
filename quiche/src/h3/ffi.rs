@@ -170,11 +170,7 @@ fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
 
 #[no_mangle]
 pub extern "C" fn quiche_h3_config_new() -> *mut h3::Config {
-    match h3::Config::new() {
-        Ok(c) => Box::into_raw(Box::new(c)),
-
-        Err(_) => ptr::null_mut(),
-    }
+    Box::into_raw(Box::new(h3::Config::new()))
 }
 
 #[no_mangle]
