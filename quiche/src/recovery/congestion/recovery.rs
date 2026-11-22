@@ -69,7 +69,6 @@ use crate::recovery::INITIAL_TIME_THRESHOLD;
 use crate::recovery::MAX_OUTSTANDING_NON_ACK_ELICITING;
 use crate::recovery::MAX_PACKET_THRESHOLD;
 use crate::recovery::MAX_PTO_PROBES_COUNT;
-use crate::recovery::MINIMUM_WINDOW_PACKETS;
 use crate::recovery::PACKET_REORDER_TIME_THRESHOLD;
 use crate::recovery::PERSISTENT_CONGESTION_THRESHOLD;
 
@@ -411,8 +410,6 @@ pub struct LegacyRecovery {
 
     bytes_lost: u64,
 
-    pub max_datagram_size: usize,
-
     #[cfg(feature = "qlog")]
     qlog_metrics: QlogMetrics,
 
@@ -455,8 +452,6 @@ impl LegacyRecovery {
             bytes_in_flight: BytesInFlight::default(),
 
             bytes_lost: 0,
-
-            max_datagram_size: recovery_config.max_send_udp_payload_size,
 
             #[cfg(feature = "qlog")]
             qlog_metrics: QlogMetrics::default(),
@@ -551,14 +546,6 @@ impl LegacyRecovery {
         }
     }
 
-    const fn on_persistent_congestion(&mut self) {
-        self.congestion.congestion_window =
-            self.max_datagram_size * MINIMUM_WINDOW_PACKETS;
-        self.congestion.congestion_recovery_start_time = None;
-        self.congestion.bytes_acked_sl = 0;
-        self.congestion.bytes_acked_ca = 0;
-    }
-
     fn detect_lost_packets(
         &mut self, epoch: Epoch, now: Instant, trace_id: &str,
     ) -> (usize, usize) {
@@ -598,7 +585,7 @@ impl LegacyRecovery {
                 (loss.first_lost_ack_eliciting, loss.last_lost_ack_eliciting)
             {
                 if self.in_persistent_congestion(first, last) {
-                    self.on_persistent_congestion();
+                    self.congestion.on_persistent_congestion();
                 }
             }
         }
@@ -937,8 +924,9 @@ impl RecoveryOps for LegacyRecovery {
 
     fn cwnd_available(&self) -> usize {
         // Open more space (snd_cnt) for PRR when allowed.
-        self.cwnd().saturating_sub(self.bytes_in_flight.get()) +
-            self.congestion.prr.snd_cnt
+        self.cwnd()
+            .saturating_sub(self.bytes_in_flight.get())
+            .saturating_add(self.congestion.prr.snd_cnt)
     }
 
     fn rtt(&self) -> Duration {
@@ -987,16 +975,15 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn max_datagram_size(&self) -> usize {
-        self.max_datagram_size
+        self.congestion.max_datagram_size
     }
 
     fn pmtud_update_max_datagram_size(&mut self, new_max_datagram_size: usize) {
-        // Congestion Window is updated only when it's not updated already.
-        // Update cwnd if it hasn't been updated yet.
-        if self.cwnd() ==
-            self.max_datagram_size.saturating_mul(
-                self.congestion.initial_congestion_window_packets,
-            )
+        // Rescale the initial window only until congestion control has
+        // made its own decision. A later return to the same byte count
+        // is not the initial window.
+        if self.congestion.ssthresh.startup_exit().is_none() &&
+            self.cwnd() == self.congestion.send_quantum()
         {
             self.congestion.congestion_window = new_max_datagram_size
                 .saturating_mul(
@@ -1004,12 +991,12 @@ impl RecoveryOps for LegacyRecovery {
                 );
         }
 
-        self.max_datagram_size = new_max_datagram_size;
+        self.congestion.max_datagram_size = new_max_datagram_size;
     }
 
     fn update_max_datagram_size(&mut self, new_max_datagram_size: usize) {
         self.pmtud_update_max_datagram_size(
-            self.max_datagram_size.min(new_max_datagram_size),
+            self.congestion.max_datagram_size.min(new_max_datagram_size),
         );
     }
 
@@ -1212,6 +1199,33 @@ mod tests {
     use crate::recovery::HandshakeStatus;
     use crate::recovery::RecoveryConfig;
     use std::time::Instant;
+
+    #[rstest::rstest]
+    fn legacy_pmtu_uses_live_mss(#[values("cubic", "reno")] algorithm: &str) {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+        config.set_cc_algorithm_name(algorithm).unwrap();
+        let mut r = LegacyRecovery::new(&config);
+        let initial_packets = r.congestion.initial_congestion_window_packets;
+
+        r.pmtud_update_max_datagram_size(1450);
+        assert_eq!(r.max_datagram_size(), 1450);
+        assert_eq!(r.cwnd(), 1450 * initial_packets);
+        assert_eq!(r.send_quantum(), r.cwnd());
+
+        // A loss can occur even if the window subsequently equals the
+        // original initial byte count. Do not rescale that learned window.
+        r.congestion.ssthresh.update(r.cwnd(), false);
+        let learned = r.cwnd();
+        r.pmtud_update_max_datagram_size(1600);
+        assert_eq!(r.max_datagram_size(), 1600);
+        assert_eq!(r.cwnd(), learned);
+        assert_eq!(r.send_quantum(), 1600 * initial_packets);
+
+        r.update_max_datagram_size(1300);
+        assert_eq!(r.max_datagram_size(), 1300);
+        r.congestion.on_persistent_congestion();
+        assert_eq!(r.cwnd(), 1300 * crate::recovery::MINIMUM_WINDOW_PACKETS);
+    }
 
     #[test]
     fn test_high_pto_count_no_panic() {

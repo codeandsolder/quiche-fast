@@ -732,15 +732,6 @@ pub extern "C" fn quiche_config_enable_pacing(config: *mut Config, v: bool) {
 }
 
 #[no_mangle]
-pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
-    config: *mut Config, v: bool,
-) {
-    let config = ffi_mut!(config);
-
-    config.set_enable_cubic_idle_restart_fix(v);
-}
-
-#[no_mangle]
 pub extern "C" fn quiche_config_set_max_pacing_rate(config: *mut Config, v: u64) {
     let config = ffi_mut!(config);
 

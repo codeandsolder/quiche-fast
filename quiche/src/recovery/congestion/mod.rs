@@ -92,10 +92,6 @@ pub struct Congestion {
     // RFC6937 PRR.
     pub(crate) prr: prr::PRR,
 
-    // The maximum size of a data aggregate scheduled and
-    // transmitted together.
-    send_quantum: usize,
-
     pub(crate) congestion_window: usize,
 
     pub(crate) ssthresh: SsThresh,
@@ -116,8 +112,6 @@ pub struct Congestion {
     max_datagram_size: usize,
 
     pub(crate) lost_count: usize,
-
-    pub(crate) enable_cubic_idle_restart_fix: bool,
 }
 
 impl Congestion {
@@ -150,21 +144,30 @@ impl Congestion {
 
             max_datagram_size: recovery_config.max_send_udp_payload_size,
 
-            send_quantum: initial_congestion_window,
-
             delivery_rate: delivery_rate::Rate::default(),
 
             hystart: hystart::Hystart::new(recovery_config.hystart),
 
             prr: prr::PRR::default(),
-
-            enable_cubic_idle_restart_fix: recovery_config
-                .enable_cubic_idle_restart_fix,
         };
 
         (cc.cc_ops.on_init)(&mut cc);
 
         cc
+    }
+
+    /// Persistent congestion is not a reversible single loss event: discard
+    /// every curve checkpoint, pending growth credit and recovery allowance.
+    fn on_persistent_congestion(&mut self) {
+        self.congestion_window = self
+            .max_datagram_size
+            .saturating_mul(super::MINIMUM_WINDOW_PACKETS);
+        self.congestion_recovery_start_time = None;
+        self.bytes_acked_sl = 0;
+        self.bytes_acked_ca = 0;
+        self.cubic_state = cubic::State::default();
+        self.prr = prr::PRR::default();
+        self.hystart = hystart::Hystart::new(self.hystart.enabled());
     }
 
     pub(crate) fn in_congestion_recovery(&self, sent_time: Instant) -> bool {
@@ -182,7 +185,8 @@ impl Congestion {
     }
 
     pub(crate) const fn send_quantum(&self) -> usize {
-        self.send_quantum
+        self.max_datagram_size
+            .saturating_mul(self.initial_congestion_window_packets)
     }
 
     pub(crate) const fn congestion_window(&self) -> usize {
