@@ -916,6 +916,32 @@ fn handshake_0rtt_truncated(
     assert!(pipe.server.is_closed());
 }
 
+fn assert_rejected_packet(
+    pipe: &mut test_utils::Pipe, buf: &mut [u8], written: usize,
+    expected_error: Error, error_code: u64,
+) {
+    let active_path = pipe.server.paths.get_active().unwrap();
+    let info = RecvInfo {
+        to: active_path.local_addr(),
+        from: active_path.peer_addr(),
+    };
+    assert_eq!(
+        pipe.server.recv(&mut buf[..written], info),
+        Err(expected_error)
+    );
+    let (written, _) = pipe.server.send(buf).unwrap();
+    let frames =
+        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
+    assert_eq!(
+        frames.first(),
+        Some(&frame::Frame::ConnectionClose {
+            error_code,
+            frame_type: 0,
+            reason: Vec::new(),
+        })
+    );
+}
+
 #[rstest]
 fn crypto_limit(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     let mut buf = [0; 65535];
@@ -954,34 +980,12 @@ fn crypto_limit(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) 
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
 
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::CryptoBufferExceeded)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x0d,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
+    assert_rejected_packet(
+        &mut pipe,
+        &mut buf,
+        written,
+        Error::CryptoBufferExceeded,
+        0x0d,
     );
 }
 
@@ -5510,7 +5514,11 @@ fn invalid_initial_payload(
     let frames = [frame::Frame::Padding {
         len: MIN_CLIENT_INITIAL_LEN,
     }];
-    let payload_len = frames.iter().map(frame::Frame::wire_len).sum::<usize>();
+    let payload_len = frames
+        .iter()
+        .map(frame::Frame::wire_len)
+        .sum::<Result<usize>>()
+        .unwrap();
     let crypto_ctx = &mut pipe.client.crypto_ctx[epoch];
     let aead = crypto_ctx.crypto_seal.as_mut().unwrap();
 
@@ -11111,9 +11119,10 @@ fn send_connection_ids(
 }
 
 #[rstest]
-/// Tests that NEW_CONNECTION_ID with zero-length CID are rejected.
-fn connection_id_zero(
+/// Tests that NEW_CONNECTION_ID with invalid CID lengths is rejected.
+fn connection_id_invalid_length(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(0, MAX_CONN_ID_LEN + 1)] cid_len: usize,
 ) {
     let mut buf = [0; 65535];
 
@@ -11134,126 +11143,30 @@ fn connection_id_zero(
     let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    let mut frames = Vec::new();
+    let (scid, reset_token) = test_utils::create_cid_and_reset_token(cid_len);
+    let mut payload = [0; 64];
+    let mut writer = octets::OctetsMut::with_slice(&mut payload);
+    writer.put_varint(0x18).unwrap(); // NEW_CONNECTION_ID
+    writer.put_varint(1).unwrap();
+    writer.put_varint(0).unwrap();
+    writer.put_u8(u8::try_from(cid_len).unwrap()).unwrap();
+    writer.put_bytes(&scid).unwrap();
+    writer.put_bytes(&reset_token.to_be_bytes()).unwrap();
+    let len = writer.off();
+    let written = test_utils::encode_raw_pkt(
+        &mut pipe.client,
+        Type::Short,
+        &payload[..len],
+        &mut buf,
+    )
+    .unwrap();
 
-    // Client adds a CID that is too short.
-    let (scid, reset_token) = test_utils::create_cid_and_reset_token(0);
-
-    frames.push(frame::Frame::NewConnectionId {
-        seq_num: 1,
-        retire_prior_to: 0,
-        conn_id: scid.to_vec(),
-        reset_token: reset_token.to_be_bytes(),
-    });
-
-    let pkt_type = Type::Short;
-
-    let written =
-        test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
-            .unwrap();
-
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::InvalidFrame)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x7,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
-    );
-}
-
-#[rstest]
-/// Tests that NEW_CONNECTION_ID with too long CID are rejected.
-fn connection_id_invalid_max_len(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-    config.verify_peer(false);
-    config.set_active_connection_id_limit(2);
-
-    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let mut frames = Vec::new();
-
-    // Client adds a CID that is too long.
-    let (scid, reset_token) =
-        test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN + 1);
-
-    frames.push(frame::Frame::NewConnectionId {
-        seq_num: 1,
-        retire_prior_to: 0,
-        conn_id: scid.to_vec(),
-        reset_token: reset_token.to_be_bytes(),
-    });
-
-    let pkt_type = Type::Short;
-
-    let written =
-        test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
-            .unwrap();
-
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::InvalidFrame)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x7,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
+    assert_rejected_packet(
+        &mut pipe,
+        &mut buf,
+        written,
+        Error::InvalidFrame,
+        0x7,
     );
 }
 
@@ -11515,35 +11428,7 @@ fn connection_id_retire_limit(
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
 
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::IdLimit)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x9,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
-    );
+    assert_rejected_packet(&mut pipe, &mut buf, written, Error::IdLimit, 0x9);
 }
 
 #[rstest]
@@ -13546,7 +13431,11 @@ fn challenge_no_cids(
         key_phase: pipe.client.key_phase,
     };
     hdr.to_bytes(&mut b).expect("encode header");
-    let payload_len = frames.iter().fold(0, |acc, x| acc + x.wire_len());
+    let payload_len: usize = frames
+        .iter()
+        .map(frame::Frame::wire_len)
+        .sum::<Result<usize>>()
+        .unwrap();
     b.put_u32(pn as u32).expect("put pn");
 
     let payload_offset = b.off();

@@ -46,6 +46,69 @@ pub const MAX_CRYPTO_OVERHEAD: usize = 8;
 pub const MAX_DGRAM_OVERHEAD: usize = 2;
 pub const MAX_STREAM_SIZE: u64 = 1 << 62;
 
+/// Output of the shared frame encoding schema. A size-only sink validates
+/// the same field widths without allocating or writing a packet.
+pub trait FrameSink {
+    fn put_varint(&mut self, value: u64) -> Result<()> {
+        self.put_varint_with_len(value, octets::varint_len(value))
+    }
+
+    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()>;
+    fn put_bytes(&mut self, value: &[u8]) -> Result<()>;
+    fn put_padding(&mut self, len: usize) -> Result<()>;
+}
+
+impl FrameSink for octets::OctetsMut<'_> {
+    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
+        octets::OctetsMut::put_varint_with_len(self, value, len)?;
+        Ok(())
+    }
+
+    fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
+        octets::OctetsMut::put_bytes(self, value)?;
+        Ok(())
+    }
+
+    fn put_padding(&mut self, len: usize) -> Result<()> {
+        self.get_bytes_mut(len)?.as_mut().fill(0);
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+struct FrameSizer {
+    len: usize,
+}
+
+impl FrameSizer {
+    fn add(&mut self, len: usize) -> Result<()> {
+        self.len = self.len.checked_add(len).ok_or(Error::BufferTooShort)?;
+        Ok(())
+    }
+}
+
+impl FrameSink for FrameSizer {
+    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
+        if !matches!(len, 1 | 2 | 4 | 8) ||
+            value > octets::MAX_VAR_INT ||
+            octets::varint_len(value) > len
+        {
+            return Err(Error::BufferTooShort);
+        }
+        // All callers supply the natural varint width or the fixed two-byte
+        // payload length specified by the stream/crypto/datagram schema.
+        self.add(len)
+    }
+
+    fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
+        self.add(value.len())
+    }
+
+    fn put_padding(&mut self, len: usize) -> Result<()> {
+        self.add(len)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EcnCounts {
     ect0_count: u64,
@@ -378,17 +441,19 @@ impl Frame {
 
     pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
         let before = b.cap();
+        self.encode(b)?;
+        Ok(before - b.cap())
+    }
 
+    pub fn wire_len(&self) -> Result<usize> {
+        let mut sizer = FrameSizer::default();
+        self.encode(&mut sizer)?;
+        Ok(sizer.len)
+    }
+
+    fn encode(&self, b: &mut impl FrameSink) -> Result<()> {
         match self {
-            Self::Padding { len } => {
-                let mut left = *len;
-
-                while left > 0 {
-                    b.put_varint(0x00)?;
-
-                    left -= 1;
-                }
-            },
+            Self::Padding { len } => b.put_padding(*len)?,
 
             Self::Ping { .. } => {
                 b.put_varint(0x01)?;
@@ -399,15 +464,10 @@ impl Frame {
                 ranges,
                 ecn_counts,
             } => {
-                if ecn_counts.is_none() {
-                    b.put_varint(0x02)?;
-                } else {
-                    b.put_varint(0x03)?;
-                }
-
                 let mut it = ranges.iter().rev();
+                let first = it.next().ok_or(Error::InvalidFrame)?;
 
-                let first = it.next().unwrap();
+                b.put_varint(if ecn_counts.is_some() { 0x03 } else { 0x02 })?;
                 let ack_block = (first.end - 1) - first.start;
 
                 b.put_varint(first.end - 1)?;
@@ -418,7 +478,10 @@ impl Frame {
                 let mut smallest_ack = first.start;
 
                 for block in it {
-                    let gap = smallest_ack - block.end - 1;
+                    let gap = smallest_ack
+                        .checked_sub(block.end)
+                        .and_then(|gap| gap.checked_sub(1))
+                        .ok_or(Error::InvalidFrame)?;
                     let ack_block = (block.end - 1) - block.start;
 
                     b.put_varint(gap)?;
@@ -462,8 +525,6 @@ impl Frame {
                 b.put_bytes(data)?;
             },
 
-            Self::CryptoHeader { .. } => (),
-
             Self::NewToken { token } => {
                 b.put_varint(0x07)?;
 
@@ -482,8 +543,6 @@ impl Frame {
 
                 b.put_bytes(data)?;
             },
-
-            Self::StreamHeader { .. } => (),
 
             Self::MaxData { max } => {
                 b.put_varint(0x10)?;
@@ -541,11 +600,16 @@ impl Frame {
                 conn_id,
                 reset_token,
             } => {
+                let len = u8::try_from(conn_id.len())
+                    .map_err(|_| Error::InvalidFrame)?;
+                if !(1..=packet::MAX_CID_LEN).contains(&len) {
+                    return Err(Error::InvalidFrame);
+                }
                 b.put_varint(0x18)?;
 
                 b.put_varint(*seq_num)?;
                 b.put_varint(*retire_prior_to)?;
-                b.put_u8(conn_id.len() as u8)?;
+                b.put_bytes(&[len])?;
                 b.put_bytes(conn_id.as_ref())?;
                 b.put_bytes(reset_token.as_ref())?;
             },
@@ -599,223 +663,13 @@ impl Frame {
                 b.put_bytes(data.as_ref())?;
             },
 
-            Self::DatagramHeader { .. } => (),
+            // These variants only describe frames already encoded directly
+            // into the packet. They do not own a serializable payload.
+            Self::CryptoHeader { .. } |
+            Self::StreamHeader { .. } |
+            Self::DatagramHeader { .. } => return Err(Error::InvalidState),
         }
-
-        Ok(before - b.cap())
-    }
-
-    pub fn wire_len(&self) -> usize {
-        match self {
-            Self::Padding { len } => *len,
-
-            Self::Ping { .. } => 1,
-
-            Self::ACK {
-                ack_delay,
-                ranges,
-                ecn_counts,
-            } => {
-                let mut it = ranges.iter().rev();
-
-                let first = it.next().unwrap();
-                let ack_block = (first.end - 1) - first.start;
-
-                let mut len = 1 + // frame type
-                    octets::varint_len(first.end - 1) + // largest_ack
-                    octets::varint_len(*ack_delay) + // ack_delay
-                    octets::varint_len(it.len() as u64) + // block_count
-                    octets::varint_len(ack_block); // first_block
-
-                let mut smallest_ack = first.start;
-
-                for block in it {
-                    let gap = smallest_ack - block.end - 1;
-                    let ack_block = (block.end - 1) - block.start;
-
-                    len += octets::varint_len(gap) + // gap
-                           octets::varint_len(ack_block); // ack_block
-
-                    smallest_ack = block.start;
-                }
-
-                if let Some(ecn) = ecn_counts {
-                    len += octets::varint_len(ecn.ect0_count) +
-                        octets::varint_len(ecn.ect1_count) +
-                        octets::varint_len(ecn.ecn_ce_count);
-                }
-
-                len
-            },
-
-            Self::ResetStream {
-                stream_id,
-                error_code,
-                final_size,
-            } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(*error_code) + // error_code
-                octets::varint_len(*final_size) // final_size
-            },
-
-            Self::StopSending {
-                stream_id,
-                error_code,
-            } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(*error_code) // error_code
-            },
-
-            Self::Crypto { data } => {
-                1 + // frame type
-                octets::varint_len(data.off()) + // offset
-                2 + // length, always encode as 2-byte varint
-                data.len() // data
-            },
-
-            Self::CryptoHeader { offset, length, .. } => {
-                1 + // frame type
-                octets::varint_len(*offset) + // offset
-                2 + // length, always encode as 2-byte varint
-                length // data
-            },
-
-            Self::NewToken { token } => {
-                1 + // frame type
-                octets::varint_len(token.len() as u64) + // token length
-                token.len() // token
-            },
-
-            Self::Stream { stream_id, data } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(data.off()) + // offset
-                2 + // length, always encode as 2-byte varint
-                data.len() // data
-            },
-
-            Self::StreamHeader {
-                stream_id,
-                offset,
-                length,
-                ..
-            } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(*offset) + // offset
-                2 + // length, always encode as 2-byte varint
-                length // data
-            },
-
-            Self::MaxData { max } => {
-                1 + // frame type
-                octets::varint_len(*max) // max
-            },
-
-            Self::MaxStreamData { stream_id, max } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(*max) // max
-            },
-
-            Self::MaxStreamsBidi { max } => {
-                1 + // frame type
-                octets::varint_len(*max) // max
-            },
-
-            Self::MaxStreamsUni { max } => {
-                1 + // frame type
-                octets::varint_len(*max) // max
-            },
-
-            Self::DataBlocked { limit } => {
-                1 + // frame type
-                octets::varint_len(*limit) // limit
-            },
-
-            Self::StreamDataBlocked { stream_id, limit } => {
-                1 + // frame type
-                octets::varint_len(*stream_id) + // stream_id
-                octets::varint_len(*limit) // limit
-            },
-
-            Self::StreamsBlockedBidi { limit } => {
-                1 + // frame type
-                octets::varint_len(*limit) // limit
-            },
-
-            Self::StreamsBlockedUni { limit } => {
-                1 + // frame type
-                octets::varint_len(*limit) // limit
-            },
-
-            Self::NewConnectionId {
-                seq_num,
-                retire_prior_to,
-                conn_id,
-                reset_token,
-            } => {
-                1 + // frame type
-                octets::varint_len(*seq_num) + // seq_num
-                octets::varint_len(*retire_prior_to) + // retire_prior_to
-                1 + // conn_id length
-                conn_id.len() + // conn_id
-                reset_token.len() // reset_token
-            },
-
-            Self::RetireConnectionId { seq_num } => {
-                1 + // frame type
-                octets::varint_len(*seq_num) // seq_num
-            },
-
-            Self::PathChallenge { .. } => {
-                1 + // frame type
-                8 // data
-            },
-
-            Self::PathResponse { .. } => {
-                1 + // frame type
-                8 // data
-            },
-
-            Self::ConnectionClose {
-                frame_type,
-                error_code,
-                reason,
-                ..
-            } => {
-                1 + // frame type
-                octets::varint_len(*error_code) + // error_code
-                octets::varint_len(*frame_type) + // frame_type
-                octets::varint_len(reason.len() as u64) + // reason_len
-                reason.len() // reason
-            },
-
-            Self::ApplicationClose { reason, error_code } => {
-                1 + // frame type
-                octets::varint_len(*error_code) + // error_code
-                octets::varint_len(reason.len() as u64) + // reason_len
-                reason.len() // reason
-            },
-
-            Self::HandshakeDone => {
-                1 // frame type
-            },
-
-            Self::Datagram { data } => {
-                1 + // frame type
-                2 + // length, always encode as 2-byte varint
-                data.len() // data
-            },
-
-            Self::DatagramHeader { length } => {
-                1 + // frame type
-                2 + // length, always encode as 2-byte varint
-                *length // data
-            },
-        }
+        Ok(())
     }
 
     pub const fn ack_eliciting(&self) -> bool {
@@ -1264,8 +1118,6 @@ impl std::fmt::Debug for Frame {
 }
 
 fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
-    let first = ty as u8;
-
     let largest_ack = b.get_varint()?;
     let ack_delay = b.get_varint()?;
     let block_count = b.get_varint()?;
@@ -1300,7 +1152,7 @@ fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
         ranges.insert(smallest_ack..largest_ack + 1);
     }
 
-    let ecn_counts = if first & 0x01 != 0 {
+    let ecn_counts = if ty & 0x01 != 0 {
         let ecn = EcnCounts {
             ect0_count: b.get_varint()?,
             ect1_count: b.get_varint()?,
@@ -1320,7 +1172,7 @@ fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
 }
 
 pub fn encode_crypto_header(
-    offset: u64, length: u64, b: &mut octets::OctetsMut,
+    offset: u64, length: u64, b: &mut impl FrameSink,
 ) -> Result<()> {
     b.put_varint(0x06)?;
 
@@ -1333,8 +1185,7 @@ pub fn encode_crypto_header(
 }
 
 pub fn encode_stream_header(
-    stream_id: u64, offset: u64, length: u64, fin: bool,
-    b: &mut octets::OctetsMut,
+    stream_id: u64, offset: u64, length: u64, fin: bool, b: &mut impl FrameSink,
 ) -> Result<()> {
     let mut ty: u8 = 0x08;
 
@@ -1359,7 +1210,7 @@ pub fn encode_stream_header(
     Ok(())
 }
 
-pub fn encode_dgram_header(length: u64, b: &mut octets::OctetsMut) -> Result<()> {
+pub fn encode_dgram_header(length: u64, b: &mut impl FrameSink) -> Result<()> {
     let mut ty: u8 = 0x30;
 
     // Always encode length
@@ -1374,17 +1225,11 @@ pub fn encode_dgram_header(length: u64, b: &mut octets::OctetsMut) -> Result<()>
 }
 
 fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
-    let first = ty as u8;
-
     let stream_id = b.get_varint()?;
 
-    let offset = if first & 0x04 != 0 {
-        b.get_varint()?
-    } else {
-        0
-    };
+    let offset = if ty & 0x04 != 0 { b.get_varint()? } else { 0 };
 
-    let declared_len = if first & 0x02 != 0 {
+    let declared_len = if ty & 0x02 != 0 {
         b.get_varint()?
     } else {
         b.cap() as u64
@@ -1398,7 +1243,7 @@ fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
     }
     let len = usize::try_from(declared_len).map_err(|_| Error::BufferTooShort)?;
 
-    let fin = first & 0x01 != 0;
+    let fin = ty & 0x01 != 0;
 
     let data = b.get_bytes(len)?;
     let data = <RangeBuf>::from(data.as_ref(), offset, fin);
@@ -1409,9 +1254,7 @@ fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
 pub(crate) fn parse_datagram_payload<'a>(
     ty: u64, b: &mut octets::Octets<'a>,
 ) -> Result<octets::Octets<'a>> {
-    let first = ty as u8;
-
-    if first & 0x01 != 0 {
+    if ty & 0x01 != 0 {
         // Octets validates the full QUIC varint before converting to usize.
         Ok(b.get_bytes_with_varint_length()?)
     } else {
@@ -1431,30 +1274,118 @@ fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
 mod tests {
     use super::*;
 
+    fn encode_checked(frame: &Frame, out: &mut [u8]) -> usize {
+        let expected = frame.wire_len().unwrap();
+        let mut b = octets::OctetsMut::with_slice(out);
+        let written = frame.to_bytes(&mut b).unwrap();
+        assert_eq!(written, expected);
+        assert_eq!(written, b.off());
+        written
+    }
+
+    fn assert_roundtrip(
+        frame: &Frame, out: &mut [u8], expected_len: usize,
+        other_allowed: &[packet::Type],
+    ) {
+        assert_eq!(encode_checked(frame, out), expected_len);
+        for ty in [
+            packet::Type::Short,
+            packet::Type::Initial,
+            packet::Type::ZeroRTT,
+            packet::Type::Handshake,
+        ] {
+            let mut reader = octets::Octets::with_slice(out);
+            let decoded = Frame::from_bytes(&mut reader, ty);
+            if ty == packet::Type::Short || other_allowed.contains(&ty) {
+                assert_eq!(decoded, Ok(frame.clone()), "{ty:?}");
+            } else {
+                assert!(decoded.is_err(), "{ty:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_frame_layouts_consistently() {
+        let mut ranges = ranges::RangeSet::default();
+        ranges.insert(octets::MAX_VAR_INT + 1..octets::MAX_VAR_INT + 2);
+        let cases = [
+            (
+                Frame::ACK {
+                    ack_delay: 0,
+                    ranges: ranges::RangeSet::default(),
+                    ecn_counts: None,
+                },
+                Error::InvalidFrame,
+            ),
+            (
+                Frame::ACK {
+                    ack_delay: 0,
+                    ranges,
+                    ecn_counts: None,
+                },
+                Error::BufferTooShort,
+            ),
+            (
+                Frame::NewConnectionId {
+                    seq_num: 1,
+                    retire_prior_to: 0,
+                    conn_id: vec![],
+                    reset_token: [0; 16],
+                },
+                Error::InvalidFrame,
+            ),
+            (
+                Frame::NewConnectionId {
+                    seq_num: 1,
+                    retire_prior_to: 0,
+                    conn_id: vec![0; 256],
+                    reset_token: [0; 16],
+                },
+                Error::InvalidFrame,
+            ),
+            (
+                Frame::Datagram {
+                    data: vec![0; 16_384],
+                },
+                Error::BufferTooShort,
+            ),
+            (
+                Frame::CryptoHeader {
+                    offset: 0,
+                    length: 4,
+                },
+                Error::InvalidState,
+            ),
+            (
+                Frame::StreamHeader {
+                    stream_id: 0,
+                    offset: 0,
+                    length: 4,
+                    fin: false,
+                },
+                Error::InvalidState,
+            ),
+            (Frame::DatagramHeader { length: 4 }, Error::InvalidState),
+        ];
+        let mut out = [0; 17_000];
+        for (frame, error) in cases {
+            assert_eq!(frame.wire_len(), Err(error));
+            let mut b = octets::OctetsMut::with_slice(&mut out);
+            assert_eq!(frame.to_bytes(&mut b), Err(error));
+        }
+    }
+
     #[test]
     fn padding() {
         let mut d = [42; 128];
 
         let frame = Frame::Padding { len: 128 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 128);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 128, &[
+            packet::Type::Initial,
+            packet::Type::ZeroRTT,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1463,10 +1394,7 @@ mod tests {
 
         let frame = Frame::Ping { mtu_probe: None };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
+        let wire_len = encode_checked(&frame, &mut d);
 
         assert_eq!(wire_len, 1);
         assert_eq!(&d[..wire_len], [0x01_u8]);
@@ -1500,24 +1428,10 @@ mod tests {
             ecn_counts: None,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 17);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 17, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1542,24 +1456,10 @@ mod tests {
             ecn_counts,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 23);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 23, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1572,24 +1472,7 @@ mod tests {
             final_size: 21_123_767,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 13);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 13, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1601,24 +1484,7 @@ mod tests {
             error_code: 15_352,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1631,24 +1497,10 @@ mod tests {
             data: <RangeBuf>::from(&data, 1230976, false),
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 19);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 19, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1659,24 +1511,7 @@ mod tests {
             token: Vec::from("this is a token"),
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 17);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 17, &[]);
     }
 
     #[test]
@@ -1690,24 +1525,7 @@ mod tests {
             data: <RangeBuf>::from(&data, 1230976, true),
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 20);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 20, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1744,10 +1562,7 @@ mod tests {
             data: <RangeBuf>::from(&data, MAX_STREAM_SIZE - 11, true),
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
+        let wire_len = encode_checked(&frame, &mut d);
 
         assert_eq!(wire_len, 24);
 
@@ -1764,24 +1579,7 @@ mod tests {
 
         let frame = Frame::MaxData { max: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1793,24 +1591,7 @@ mod tests {
             max: 128_318_273,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1819,24 +1600,7 @@ mod tests {
 
         let frame = Frame::MaxStreamsBidi { max: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1845,24 +1609,7 @@ mod tests {
 
         let frame = Frame::MaxStreamsUni { max: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1871,24 +1618,7 @@ mod tests {
 
         let frame = Frame::DataBlocked { limit: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1900,24 +1630,7 @@ mod tests {
             limit: 128_318_273,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1926,24 +1639,7 @@ mod tests {
 
         let frame = Frame::StreamsBlockedBidi { limit: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1952,24 +1648,7 @@ mod tests {
 
         let frame = Frame::StreamsBlockedUni { limit: 128_318_273 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1983,24 +1662,7 @@ mod tests {
             reset_token: [0x42; 16],
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 41);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 41, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -2009,24 +1671,7 @@ mod tests {
 
         let frame = Frame::RetireConnectionId { seq_num: 123_213 };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[]);
     }
 
     #[test]
@@ -2037,24 +1682,7 @@ mod tests {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 9);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 9, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -2065,24 +1693,7 @@ mod tests {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 9);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 9, &[]);
     }
 
     #[test]
@@ -2095,24 +1706,10 @@ mod tests {
             reason: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 22);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 22, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -2124,24 +1721,7 @@ mod tests {
             reason: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 18);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 18, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -2150,24 +1730,7 @@ mod tests {
 
         let frame = Frame::HandshakeDone;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, 1);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 1, &[]);
     }
 
     #[test]
@@ -2178,10 +1741,7 @@ mod tests {
 
         let frame = Frame::Datagram { data: data.clone() };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
+        let wire_len = encode_checked(&frame, &mut d);
 
         assert_eq!(wire_len, 15);
 
