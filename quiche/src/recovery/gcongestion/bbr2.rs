@@ -414,7 +414,7 @@ struct Limits<T: Ord> {
 }
 
 impl<T: Ord + Clone + Copy> Limits<T> {
-    fn min(&self) -> T {
+    const fn min(&self) -> T {
         self.lo
     }
 
@@ -556,7 +556,7 @@ impl BBRv2 {
         }
     }
 
-    pub fn time_sent_set_to_now(&self) -> bool {
+    pub const fn time_sent_set_to_now(&self) -> bool {
         self.params.time_sent_set_to_now
     }
 
@@ -652,7 +652,7 @@ impl BBRv2 {
         self.cwnd = self.cwnd_limits.apply_limits(self.cwnd);
     }
 
-    fn on_enter_quiescence(&mut self, time: Instant) {
+    const fn on_enter_quiescence(&mut self, time: Instant) {
         self.last_quiescence_start = Some(time);
     }
 

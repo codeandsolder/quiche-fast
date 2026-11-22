@@ -52,9 +52,9 @@ pub(crate) static RENO: CongestionControlOps = CongestionControlOps {
     debug_fmt,
 };
 
-pub fn on_init(_r: &mut Congestion) {}
+pub const fn on_init(_r: &mut Congestion) {}
 
-pub fn on_packet_sent(
+pub const fn on_packet_sent(
     _r: &mut Congestion, _sent_bytes: usize, _bytes_in_flight: usize,
     _now: Instant,
 ) {
@@ -144,9 +144,9 @@ fn congestion_event(
     }
 }
 
-fn checkpoint(_r: &mut Congestion) {}
+const fn checkpoint(_r: &mut Congestion) {}
 
-fn rollback(_r: &mut Congestion) -> bool {
+const fn rollback(_r: &mut Congestion) -> bool {
     true
 }
 
@@ -163,7 +163,9 @@ pub fn state_str(r: &Congestion, now: Instant) -> &'static str {
     }
 }
 
-fn debug_fmt(_r: &Congestion, _f: &mut std::fmt::Formatter) -> std::fmt::Result {
+const fn debug_fmt(
+    _r: &Congestion, _f: &mut std::fmt::Formatter,
+) -> std::fmt::Result {
     Ok(())
 }
 

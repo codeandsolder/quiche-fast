@@ -387,7 +387,7 @@ impl RecoveryEpoch {
     }
 
     /// Returns true if there are any lost frames (ACK or PTO).
-    fn has_lost_frames(&self) -> bool {
+    const fn has_lost_frames(&self) -> bool {
         !self.lost_frames_ack.is_empty() || !self.lost_frames_pto.is_empty()
     }
 
@@ -634,7 +634,7 @@ impl LegacyRecovery {
         }
     }
 
-    fn on_persistent_congestion(&mut self) {
+    const fn on_persistent_congestion(&mut self) {
         self.congestion.congestion_window =
             self.max_datagram_size * MINIMUM_WINDOW_PACKETS;
         self.congestion.congestion_recovery_start_time = None;

@@ -331,13 +331,13 @@ impl Path {
 
     /// Returns the local address on which this path operates.
     #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
+    pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// Returns the peer address on which this path operates.
     #[inline]
-    pub fn peer_addr(&self) -> SocketAddr {
+    pub const fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
@@ -396,19 +396,19 @@ impl Path {
 
     // Returns whether this path is under path validation process.
     #[inline]
-    pub fn under_validation(&self) -> bool {
+    pub const fn under_validation(&self) -> bool {
         matches!(self.state, PathState::Validating | PathState::ValidatingMTU)
     }
 
     /// Requests path validation.
     #[inline]
-    pub fn request_validation(&mut self) {
+    pub const fn request_validation(&mut self) {
         self.challenge_requested = true;
     }
 
     /// Returns whether a validation is requested.
     #[inline]
-    pub fn validation_requested(&self) -> bool {
+    pub const fn validation_requested(&self) -> bool {
         self.challenge_requested
     }
 
@@ -491,7 +491,7 @@ impl Path {
         false
     }
 
-    fn on_failed_validation(&mut self) {
+    const fn on_failed_validation(&mut self) {
         self.state = PathState::Failed;
         self.active = false;
     }

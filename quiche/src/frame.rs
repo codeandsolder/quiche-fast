@@ -818,7 +818,7 @@ impl Frame {
         }
     }
 
-    pub fn ack_eliciting(&self) -> bool {
+    pub const fn ack_eliciting(&self) -> bool {
         // Any other frame is ack-eliciting (note the `!`).
         !matches!(
             self,
@@ -829,7 +829,7 @@ impl Frame {
         )
     }
 
-    pub fn probing(&self) -> bool {
+    pub const fn probing(&self) -> bool {
         matches!(
             self,
             Self::Padding { .. } |

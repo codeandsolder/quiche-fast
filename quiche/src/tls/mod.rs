@@ -390,7 +390,7 @@ impl Context {
         })
     }
 
-    fn as_mut_ptr(&mut self) -> *mut SSL_CTX {
+    const fn as_mut_ptr(&mut self) -> *mut SSL_CTX {
         self.0.as_ptr()
     }
 }
@@ -426,7 +426,7 @@ impl Handshake {
         Ok(Self::new(ptr))
     }
 
-    fn new(ptr: NonNull<SSL>) -> Self {
+    const fn new(ptr: NonNull<SSL>) -> Self {
         Self {
             ptr,
             provided_data_outstanding: false,
@@ -654,15 +654,15 @@ impl Handshake {
         Ok(())
     }
 
-    pub fn early_data_rejected(&self) -> bool {
+    pub const fn early_data_rejected(&self) -> bool {
         self.early_data_rejected
     }
 
-    fn as_ptr(&self) -> *const SSL {
+    const fn as_ptr(&self) -> *const SSL {
         self.ptr.as_ptr()
     }
 
-    fn as_mut_ptr(&mut self) -> *mut SSL {
+    const fn as_mut_ptr(&mut self) -> *mut SSL {
         self.ptr.as_ptr()
     }
 
@@ -946,7 +946,7 @@ extern "C" fn add_handshake_data(
     1
 }
 
-extern "C" fn flush_flight(_ssl: *mut SSL) -> c_int {
+const extern "C" fn flush_flight(_ssl: *mut SSL) -> c_int {
     // We don't really need to anything here since the output packets are
     // generated separately, when conn.send() is called.
 
@@ -1106,21 +1106,21 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
     0
 }
 
-pub fn map_result(bssl_result: c_int) -> Result<()> {
+pub const fn map_result(bssl_result: c_int) -> Result<()> {
     match bssl_result {
         1 => Ok(()),
         _ => Err(Error::TlsFail),
     }
 }
 
-pub fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
+pub const fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
     match bssl_result {
         0 => Ok(()),
         _ => Err(Error::TlsFail),
     }
 }
 
-pub fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
+pub const fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
     match unsafe { bssl_result.as_ref() } {
         Some(v) => Ok(v),
         None => Err(Error::TlsFail),

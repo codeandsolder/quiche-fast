@@ -48,7 +48,7 @@ pub enum Level {
 }
 
 impl Level {
-    pub fn from_epoch(e: packet::Epoch) -> Self {
+    pub const fn from_epoch(e: packet::Epoch) -> Self {
         match e {
             packet::Epoch::Initial => Self::Initial,
 

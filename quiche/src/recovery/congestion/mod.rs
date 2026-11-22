@@ -56,11 +56,11 @@ impl Default for SsThresh {
 }
 
 impl SsThresh {
-    fn get(&self) -> usize {
+    const fn get(&self) -> usize {
         self.ssthresh
     }
 
-    fn startup_exit(&self) -> Option<StartupExit> {
+    const fn startup_exit(&self) -> Option<StartupExit> {
         self.startup_exit
     }
 
@@ -181,15 +181,15 @@ impl Congestion {
         self.delivery_rate.sample_delivery_rate()
     }
 
-    pub(crate) fn send_quantum(&self) -> usize {
+    pub(crate) const fn send_quantum(&self) -> usize {
         self.send_quantum
     }
 
-    pub(crate) fn congestion_window(&self) -> usize {
+    pub(crate) const fn congestion_window(&self) -> usize {
         self.congestion_window
     }
 
-    fn update_app_limited(&mut self, v: bool) {
+    const fn update_app_limited(&mut self, v: bool) {
         self.app_limited = v;
     }
 

@@ -50,7 +50,7 @@ enum HmmState {
 }
 
 impl HmmState {
-    fn as_index(self) -> usize {
+    const fn as_index(self) -> usize {
         match self {
             Self::Normal => 0,
             Self::Transient => 1,
@@ -67,7 +67,7 @@ impl HmmState {
         }
     }
 
-    fn from_episode(episode: HmmEpisode) -> Self {
+    const fn from_episode(episode: HmmEpisode) -> Self {
         match episode {
             HmmEpisode::Idle => Self::Normal,
             HmmEpisode::Active => Self::Transient,
@@ -75,7 +75,7 @@ impl HmmState {
         }
     }
 
-    fn to_episode(self) -> HmmEpisode {
+    const fn to_episode(self) -> HmmEpisode {
         match self {
             Self::Normal => HmmEpisode::Idle,
             Self::Transient => HmmEpisode::Active,
@@ -355,7 +355,7 @@ impl HmmDetector {
         update
     }
 
-    fn reset_pending(&mut self, state: HmmState) {
+    const fn reset_pending(&mut self, state: HmmState) {
         self.pending_state = state;
         self.pending_start_time = None;
         self.pending_samples = 0;

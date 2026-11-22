@@ -44,7 +44,7 @@ enum Representation {
 }
 
 impl Representation {
-    pub fn from_byte(b: u8) -> Self {
+    pub const fn from_byte(b: u8) -> Self {
         if b & INDEXED == INDEXED {
             return Self::Indexed;
         }
@@ -81,7 +81,7 @@ impl FieldListSizeTracker {
     /// The `max_size` parameter is the maximum size in bytes of the full
     /// decoded field list. See
     /// <https://datatracker.ietf.org/doc/html/rfc9114#section-4.2.2>
-    fn new(max_size: u64) -> Self {
+    const fn new(max_size: u64) -> Self {
         Self {
             remaining: max_size,
         }
@@ -132,7 +132,7 @@ impl Decoder {
     }
 
     /// Processes control instructions from the encoder.
-    pub fn control(&mut self, _buf: &mut [u8]) -> Result<()> {
+    pub const fn control(&mut self, _buf: &mut [u8]) -> Result<()> {
         // TODO: process control instructions
         Ok(())
     }
@@ -262,7 +262,7 @@ impl Decoder {
     }
 }
 
-fn lookup_static(idx: u64) -> Result<(&'static [u8], &'static [u8])> {
+const fn lookup_static(idx: u64) -> Result<(&'static [u8], &'static [u8])> {
     if idx >= super::static_table::STATIC_DECODE_TABLE.len() as u64 {
         return Err(Error::InvalidStaticTableIndex);
     }

@@ -68,12 +68,12 @@ impl FlowControl {
     }
 
     /// Returns the current window size.
-    pub fn window(&self) -> u64 {
+    pub const fn window(&self) -> u64 {
         self.window
     }
 
     /// Returns the current flow limit.
-    pub fn max_data(&self) -> u64 {
+    pub const fn max_data(&self) -> u64 {
         self.max_data
     }
 
@@ -85,7 +85,7 @@ impl FlowControl {
 
     /// Adds consumed bytes, saturating if the cumulative counter reaches
     /// `u64::MAX` rather than wrapping or panicking.
-    pub fn add_consumed(&mut self, consumed: u64) {
+    pub const fn add_consumed(&mut self, consumed: u64) {
         self.consumed = self.consumed.saturating_add(consumed);
     }
 

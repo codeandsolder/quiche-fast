@@ -76,12 +76,12 @@ impl BytesInFlight {
     }
 
     /// Current bytes in flight.
-    pub(crate) fn get(&self) -> usize {
+    pub(crate) const fn get(&self) -> usize {
         self.bytes_in_flight
     }
 
     /// Returns true if there are 0 bytes in flight.
-    pub(crate) fn is_zero(&self) -> bool {
+    pub(crate) const fn is_zero(&self) -> bool {
         self.bytes_in_flight == 0
     }
 

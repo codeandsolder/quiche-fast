@@ -49,7 +49,7 @@ where
     I: Sub<I, Output = D> + Copy,
     D: Ord + Div<usize, Output = D> + Copy,
 {
-    pub fn new(window_length: D) -> Self {
+    pub const fn new(window_length: D) -> Self {
         Self {
             window_length,
             estimates: None,

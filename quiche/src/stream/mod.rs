@@ -72,7 +72,7 @@ pub struct RecvBufResetReturn {
 }
 
 impl RecvBufResetReturn {
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Self {
             max_data_delta: 0,
             consumed_flowcontrol: 0,
@@ -588,56 +588,56 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Commits the new `max_streams_bidi` limit.
-    pub fn update_max_streams_bidi(&mut self) {
+    pub const fn update_max_streams_bidi(&mut self) {
         self.local_max_streams_bidi = self.local_max_streams_bidi_next;
     }
 
     /// Sets the `max_streams_bidi` limit to the given value.
-    pub fn set_max_streams_bidi(&mut self, max: u64) {
+    pub const fn set_max_streams_bidi(&mut self, max: u64) {
         self.local_max_streams_bidi = max;
         self.local_max_streams_bidi_next = max;
         self.initial_max_streams_bidi = max;
     }
 
     /// Returns the current `max_streams_bidi` limit.
-    pub fn max_streams_bidi(&self) -> u64 {
+    pub const fn max_streams_bidi(&self) -> u64 {
         self.local_max_streams_bidi
     }
 
     /// Returns the new `max_streams_bidi` limit.
-    pub fn max_streams_bidi_next(&mut self) -> u64 {
+    pub const fn max_streams_bidi_next(&mut self) -> u64 {
         self.local_max_streams_bidi_next
     }
 
     /// Commits the new `max_streams_uni` limit.
-    pub fn update_max_streams_uni(&mut self) {
+    pub const fn update_max_streams_uni(&mut self) {
         self.local_max_streams_uni = self.local_max_streams_uni_next;
     }
 
     /// Returns the new `max_streams_uni` limit.
-    pub fn max_streams_uni_next(&mut self) -> u64 {
+    pub const fn max_streams_uni_next(&mut self) -> u64 {
         self.local_max_streams_uni_next
     }
 
     /// Returns the peer's current maximum bidirectional stream count limit.
-    pub fn peer_max_streams_bidi(&self) -> u64 {
+    pub const fn peer_max_streams_bidi(&self) -> u64 {
         self.peer_max_streams_bidi
     }
 
     /// Returns the number of bidirectional streams that can be created
     /// before the peer's stream count limit is reached.
-    pub fn peer_streams_left_bidi(&self) -> u64 {
+    pub const fn peer_streams_left_bidi(&self) -> u64 {
         self.peer_max_streams_bidi - self.local_opened_streams_bidi
     }
 
     /// Returns the peer's current maximum unidirectional stream count limit.
-    pub fn peer_max_streams_uni(&self) -> u64 {
+    pub const fn peer_max_streams_uni(&self) -> u64 {
         self.peer_max_streams_uni
     }
 
     /// Returns the number of unidirectional streams that can be created
     /// before the peer's stream count limit is reached.
-    pub fn peer_streams_left_uni(&self) -> u64 {
+    pub const fn peer_streams_left_uni(&self) -> u64 {
         self.peer_max_streams_uni - self.local_opened_streams_uni
     }
 
@@ -810,7 +810,7 @@ impl<F: BufFactory> StreamMap<F> {
     ///
     /// This only sends `MAX_STREAMS` when available capacity is at or below 50%
     /// of the initial maximum streams target.
-    pub fn should_update_max_streams_bidi(&self) -> bool {
+    pub const fn should_update_max_streams_bidi(&self) -> bool {
         let available = self
             .local_max_streams_bidi
             .saturating_sub(self.peer_opened_streams_bidi);
@@ -823,7 +823,7 @@ impl<F: BufFactory> StreamMap<F> {
     ///
     /// This only send `MAX_STREAMS` when available capacity is at or below 50%
     /// of the initial maximum streams target.
-    pub fn should_update_max_streams_uni(&self) -> bool {
+    pub const fn should_update_max_streams_uni(&self) -> bool {
         let available = self
             .local_max_streams_uni
             .saturating_sub(self.peer_opened_streams_uni);
@@ -838,7 +838,7 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Returns the total number of bytes buffered across all streams.
-    pub(crate) fn tx_buffered(&self) -> u64 {
+    pub(crate) const fn tx_buffered(&self) -> u64 {
         self.tx_buffered
     }
 
@@ -1010,12 +1010,12 @@ impl<F: BufFactory> Stream<F> {
 }
 
 /// Returns true if the stream was created locally.
-pub fn is_local(stream_id: u64, is_server: bool) -> bool {
+pub const fn is_local(stream_id: u64, is_server: bool) -> bool {
     (stream_id & 0x1) == (is_server as u64)
 }
 
 /// Returns true if the stream is bidirectional.
-pub fn is_bidi(stream_id: u64) -> bool {
+pub const fn is_bidi(stream_id: u64) -> bool {
     (stream_id & 0x2) == 0
 }
 

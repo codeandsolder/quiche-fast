@@ -331,12 +331,12 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Updates the last offset the stream was blocked at, if any.
-    pub fn update_blocked_at(&mut self, blocked_at: Option<u64>) {
+    pub const fn update_blocked_at(&mut self, blocked_at: Option<u64>) {
         self.blocked_at = blocked_at;
     }
 
     /// The last offset the stream was blocked at, if any.
-    pub fn blocked_at(&self) -> Option<u64> {
+    pub const fn blocked_at(&self) -> Option<u64> {
         self.blocked_at
     }
 
@@ -346,7 +346,7 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Marks the stream's final size as acknowledged by the peer.
-    pub(crate) fn ack_fin(&mut self) {
+    pub(crate) const fn ack_fin(&mut self) {
         self.fin_acked = true;
         self.fin_pending = false;
     }
@@ -466,7 +466,7 @@ impl<F: BufFactory> SendBuf<F> {
     ///
     /// This is needed even when the frame's data was acknowledged in another
     /// packet, as the FIN still has to reach the peer.
-    pub(crate) fn retransmit_fin(&mut self) {
+    pub(crate) const fn retransmit_fin(&mut self) {
         if self.fin_acked || self.shutdown || self.error.is_some() {
             return;
         }
@@ -534,7 +534,7 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Returns the largest offset of data buffered.
-    pub fn off_back(&self) -> u64 {
+    pub const fn off_back(&self) -> u64 {
         self.off
     }
 
@@ -560,7 +560,7 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// The maximum offset we are allowed to send to the peer.
-    pub fn max_off(&self) -> u64 {
+    pub const fn max_off(&self) -> u64 {
         self.max_data
     }
 
@@ -573,7 +573,7 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Returns true if the final size still needs to be sent to the peer.
-    pub fn is_fin_pending(&self) -> bool {
+    pub const fn is_fin_pending(&self) -> bool {
         self.fin_pending
     }
 
@@ -594,22 +594,22 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Returns true if the stream was stopped before completion.
-    pub fn is_stopped(&self) -> bool {
+    pub const fn is_stopped(&self) -> bool {
         self.error.is_some()
     }
 
     /// Returns true if a `STOP_SENDING` error still needs to be delivered.
-    pub fn has_unreported_stop(&self) -> bool {
+    pub const fn has_unreported_stop(&self) -> bool {
         self.error.is_some() && !self.error_reported && !self.shutdown
     }
 
     /// Marks the `STOP_SENDING` error as reported to the application.
-    pub fn mark_stop_reported(&mut self) {
+    pub const fn mark_stop_reported(&mut self) {
         self.error_reported = true;
     }
 
     /// Returns true if the stream was shut down.
-    pub fn is_shutdown(&self) -> bool {
+    pub const fn is_shutdown(&self) -> bool {
         self.shutdown
     }
 
@@ -660,7 +660,7 @@ impl<F: BufFactory> SendBuf<F> {
     /// This includes fresh data that has not yet been sent, as well as data
     /// marked for retransmission. It excludes data that has been emitted but
     /// not yet acknowledged (in-flight data).
-    pub fn buffered_bytes(&self) -> u64 {
+    pub const fn buffered_bytes(&self) -> u64 {
         self.buffered_bytes
     }
 }

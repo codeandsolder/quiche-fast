@@ -189,7 +189,7 @@ impl Bandwidth {
     /// Returns `u64::MAX` for infinite bandwidth and non-zero duration.
     /// Saturates to `u64::MAX` on overflow.
     #[inline]
-    pub fn to_bytes_per_period(self, time_period: Duration) -> u64 {
+    pub const fn to_bytes_per_period(self, time_period: Duration) -> u64 {
         let bps = self.bits_per_second;
         let nanos = time_period.as_nanos();
 

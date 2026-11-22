@@ -490,7 +490,7 @@ pub enum WireErrorCode {
 }
 
 impl Error {
-    fn to_wire(self) -> u64 {
+    const fn to_wire(self) -> u64 {
         match self {
             Self::Done => WireErrorCode::NoError as u64,
             Self::InternalError => WireErrorCode::InternalError as u64,
@@ -621,28 +621,28 @@ impl Config {
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
     /// [`Error::ExcessiveLoad`]: enum.Error.html#variant.ExcessiveLoad
-    pub fn set_max_field_section_size(&mut self, v: u64) {
+    pub const fn set_max_field_section_size(&mut self, v: u64) {
         self.max_field_section_size = Some(v);
     }
 
     /// Sets the `SETTINGS_QPACK_MAX_TABLE_CAPACITY` setting.
     ///
     /// The default value is `0`.
-    pub fn set_qpack_max_table_capacity(&mut self, v: u64) {
+    pub const fn set_qpack_max_table_capacity(&mut self, v: u64) {
         self.qpack_max_table_capacity = Some(v);
     }
 
     /// Sets the `SETTINGS_QPACK_BLOCKED_STREAMS` setting.
     ///
     /// The default value is `0`.
-    pub fn set_qpack_blocked_streams(&mut self, v: u64) {
+    pub const fn set_qpack_blocked_streams(&mut self, v: u64) {
         self.qpack_blocked_streams = Some(v);
     }
 
     /// Sets or omits the `SETTINGS_ENABLE_CONNECT_PROTOCOL` setting.
     ///
     /// The default value is `false`.
-    pub fn enable_extended_connect(&mut self, enabled: bool) {
+    pub const fn enable_extended_connect(&mut self, enabled: bool) {
         if enabled {
             self.connect_protocol_enabled = Some(1);
         } else {
@@ -710,7 +710,7 @@ impl Config {
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
     /// [`Error::ExcessiveLoad`]: enum.Error.html#variant.ExcessiveLoad
-    pub fn set_max_priority_update_size(&mut self, v: u64) {
+    pub const fn set_max_priority_update_size(&mut self, v: u64) {
         self.max_priority_update_size = v;
     }
 }
@@ -3453,7 +3453,7 @@ impl Connection {
 
     /// Collects and returns statistics about the connection.
     #[inline]
-    pub fn stats(&self) -> Stats {
+    pub const fn stats(&self) -> Stats {
         Stats {
             qpack_encoder_stream_recv_bytes: self
                 .peer_qpack_streams

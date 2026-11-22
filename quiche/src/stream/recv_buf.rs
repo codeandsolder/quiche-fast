@@ -391,7 +391,7 @@ impl RecvBuf {
     }
 
     /// Returns the lowest offset of data buffered.
-    pub fn off_front(&self) -> u64 {
+    pub const fn off_front(&self) -> u64 {
         self.off
     }
 
@@ -401,7 +401,7 @@ impl RecvBuf {
     }
 
     /// Returns the largest offset ever received.
-    pub fn max_off(&self) -> u64 {
+    pub const fn max_off(&self) -> u64 {
         self.len
     }
 
@@ -414,7 +414,7 @@ impl RecvBuf {
     }
 
     /// Returns true if the stream is not storing incoming data.
-    pub fn is_draining(&self) -> bool {
+    pub const fn is_draining(&self) -> bool {
         self.drain
     }
 

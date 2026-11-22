@@ -83,7 +83,7 @@ impl Pacer {
     /// Create a new [`Pacer`] with and underlying [`Congestion`]
     /// implementation, and an optional throttling as specified by
     /// `max_pacing_rate`.
-    pub(crate) fn new(
+    pub(crate) const fn new(
         enabled: bool, congestion: BBRv2, max_pacing_rate: Option<Bandwidth>,
     ) -> Self {
         Self {
@@ -98,7 +98,7 @@ impl Pacer {
         }
     }
 
-    pub fn get_next_release_time(&self) -> ReleaseDecision {
+    pub const fn get_next_release_time(&self) -> ReleaseDecision {
         if !self.enabled {
             return ReleaseDecision {
                 time: ReleaseTime::Immediate,

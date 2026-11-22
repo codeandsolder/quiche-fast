@@ -98,7 +98,7 @@ impl RttJumpDetector {
         self.apply_update(update);
     }
 
-    fn apply_update(&mut self, update: RttJumpUpdate) {
+    const fn apply_update(&mut self, update: RttJumpUpdate) {
         match update {
             RttJumpUpdate::None => {},
             RttJumpUpdate::PersistentConfirmed { episode_start_time } => {
@@ -109,7 +109,7 @@ impl RttJumpDetector {
     }
 
     /// Total number of confirmed persistent RTT jump episodes.
-    pub(super) fn rtt_persistent_jump_count(&self) -> u64 {
+    pub(super) const fn rtt_persistent_jump_count(&self) -> u64 {
         self.persistent_jump_count
     }
 

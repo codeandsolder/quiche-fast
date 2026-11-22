@@ -98,7 +98,7 @@ pub enum State {
 }
 
 impl Type {
-    pub fn deserialize(v: u64) -> Result<Self> {
+    pub const fn deserialize(v: u64) -> Result<Self> {
         match v {
             HTTP3_CONTROL_STREAM_TYPE_ID => Ok(Self::Control),
             HTTP3_PUSH_STREAM_TYPE_ID => Ok(Self::Push),
@@ -252,11 +252,11 @@ impl Stream {
         }
     }
 
-    pub fn ty(&self) -> Option<Type> {
+    pub const fn ty(&self) -> Option<Type> {
         self.ty
     }
 
-    pub fn state(&self) -> State {
+    pub const fn state(&self) -> State {
         self.state
     }
 
@@ -383,7 +383,7 @@ impl Stream {
     /// HTTP message phase bookkeeping (`remote_initialized`, `data_received`,
     /// `trailers_received`) only applies to peer-initiated streams, since it
     /// tracks the receive direction.
-    fn validate_request_frame_type(&mut self, ty: u64) -> Result<()> {
+    const fn validate_request_frame_type(&mut self, ty: u64) -> Result<()> {
         // Frames that are never valid on a request stream, regardless of which
         // endpoint opened it.
         if matches!(
@@ -438,7 +438,7 @@ impl Stream {
     }
 
     // Returns the stream's current frame type, if any
-    pub fn frame_type(&self) -> Option<u64> {
+    pub const fn frame_type(&self) -> Option<u64> {
         self.frame_type
     }
 
@@ -708,39 +708,39 @@ impl Stream {
     }
 
     /// Initialize the local part of the stream.
-    pub fn initialize_local(&mut self) {
+    pub const fn initialize_local(&mut self) {
         self.local_initialized = true
     }
 
     /// Whether the stream has been locally initialized.
-    pub fn local_initialized(&self) -> bool {
+    pub const fn local_initialized(&self) -> bool {
         self.local_initialized
     }
 
     /// Finish the local part of the stream.
-    pub fn finish_local(&mut self) {
+    pub const fn finish_local(&mut self) {
         self.local_finished = true
     }
 
     /// Whether the local send-side of the stream has finished.
-    pub fn local_finished(&self) -> bool {
+    pub const fn local_finished(&self) -> bool {
         self.local_finished
     }
 
-    pub fn increment_headers_received(&mut self) {
+    pub const fn increment_headers_received(&mut self) {
         self.headers_received_count =
             self.headers_received_count.saturating_add(1);
     }
 
-    pub fn headers_received_count(&self) -> usize {
+    pub const fn headers_received_count(&self) -> usize {
         self.headers_received_count
     }
 
-    pub fn mark_trailers_sent(&mut self) {
+    pub const fn mark_trailers_sent(&mut self) {
         self.trailers_sent = true;
     }
 
-    pub fn trailers_sent(&self) -> bool {
+    pub const fn trailers_sent(&self) -> bool {
         self.trailers_sent
     }
 
@@ -911,7 +911,7 @@ impl Stream {
     ///
     /// This returns `true` if a Data event was not already triggered before
     /// the last reset, and updates the state. Returns `false` otherwise.
-    pub fn try_trigger_data_event(&mut self) -> bool {
+    pub const fn try_trigger_data_event(&mut self) -> bool {
         if self.data_event_triggered {
             return false;
         }
@@ -922,7 +922,7 @@ impl Stream {
     }
 
     /// Resets the data triggered state.
-    fn reset_data_event(&mut self) {
+    const fn reset_data_event(&mut self) {
         self.data_event_triggered = false;
     }
 
@@ -932,17 +932,17 @@ impl Stream {
     }
 
     /// Take the last priority update and leave `None` in its place.
-    pub fn take_last_priority_update(&mut self) -> Option<Vec<u8>> {
+    pub const fn take_last_priority_update(&mut self) -> Option<Vec<u8>> {
         self.last_priority_update.take()
     }
 
     /// Returns `true` if there is a priority update.
-    pub fn has_last_priority_update(&self) -> bool {
+    pub const fn has_last_priority_update(&self) -> bool {
         self.last_priority_update.is_some()
     }
 
     /// Checks whether one of the critical streams was closed.
-    fn critical_stream_closed(&self, fin: bool) -> bool {
+    const fn critical_stream_closed(&self, fin: bool) -> bool {
         fin && matches!(
             self.ty,
             Some(Type::Control) |
@@ -952,7 +952,7 @@ impl Stream {
     }
 
     /// Returns true if the state buffer has enough data to complete the state.
-    fn state_buffer_complete(&self) -> bool {
+    const fn state_buffer_complete(&self) -> bool {
         self.state_off == self.state_len
     }
 
