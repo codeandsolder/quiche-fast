@@ -351,7 +351,7 @@ impl<F: BufFactory> SendBuf<F> {
         self.fin_pending = false;
     }
 
-    pub fn ack_and_drop(&mut self, off: u64, len: usize) -> usize {
+    pub fn ack_and_drop(&mut self, off: u64, len: usize) -> u64 {
         self.ack(off, len);
 
         let ack_off = self.ack_off();
@@ -398,13 +398,13 @@ impl<F: BufFactory> SendBuf<F> {
             // position too much, so make sure that doesn't happen.
             self.pos = self.pos.saturating_sub(drop + 1);
 
-            dropped_len as usize
+            dropped_len
         } else {
             0
         }
     }
 
-    pub fn retransmit(&mut self, off: u64, len: usize) -> usize {
+    pub fn retransmit(&mut self, off: u64, len: usize) -> u64 {
         let max_off = off + len as u64;
         let ack_off = self.ack_off();
 
@@ -458,7 +458,7 @@ impl<F: BufFactory> SendBuf<F> {
             }
         }
 
-        total_retransmitted as usize
+        total_retransmitted
     }
 
     /// Marks the final size for retransmission after a STREAM frame carrying
@@ -668,6 +668,48 @@ impl<F: BufFactory> SendBuf<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_buffered_accounting_keeps_full_logical_width() {
+        let mut streams = <crate::stream::StreamMap>::new(5, 5, 15);
+        let baseline = u64::from(u32::MAX);
+        let params = crate::TransportParams {
+            initial_max_data: baseline + 64,
+            initial_max_stream_data_bidi_local: baseline + 32,
+            initial_max_stream_data_bidi_remote: baseline + 32,
+            initial_max_streams_bidi: 5,
+            ..Default::default()
+        };
+        streams.update_peer_max_streams_bidi(5);
+
+        // Seed a logical byte count without allocating gigabytes of data.
+        streams
+            .get_or_create(0, &params, &params, true, false)
+            .unwrap()
+            .send
+            .buffered_bytes = baseline;
+        streams.add_tx_buffered(baseline);
+
+        {
+            let stream = streams
+                .get_or_create(4, &params, &params, true, false)
+                .unwrap();
+            assert_eq!(stream.send.write(b"hello", false), Ok(5));
+        }
+        streams.add_tx_buffered(5);
+        assert_eq!(streams.tx_buffered(), baseline + 5);
+        assert!(streams.tx_buffered_is_consistent());
+
+        streams.get_mut(0).unwrap().send.buffered_bytes = 0;
+        streams.sub_tx_buffered(baseline);
+        assert_eq!(streams.tx_buffered(), 5);
+        let mut buf = [0; 5];
+        let (written, _) =
+            streams.get_mut(4).unwrap().send.emit(&mut buf).unwrap();
+        streams.sub_tx_buffered(written as u64);
+        assert_eq!(streams.tx_buffered(), 0);
+        assert!(streams.tx_buffered_is_consistent());
+    }
 
     #[test]
     fn empty_write() {
