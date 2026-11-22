@@ -89,7 +89,7 @@ impl<T: PartialOrd + Copy> Minmax<T> {
     pub fn reset(&mut self, time: Instant, meas: T) -> T {
         let val = MinmaxSample { time, value: meas };
 
-        for i in self.estimate.iter_mut() {
+        for i in &mut self.estimate {
             *i = val;
         }
 

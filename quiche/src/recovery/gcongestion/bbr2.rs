@@ -66,7 +66,7 @@ struct Params {
 
     startup_pacing_gain: f32,
 
-    /// STARTUP or PROBE_UP are exited if the total bandwidth growth is less
+    /// STARTUP or `PROBE_UP` are exited if the total bandwidth growth is less
     /// than `full_bw_threshold` in the last `startup_full_bw_rounds` round
     /// trips.
     full_bw_threshold: f32,
@@ -444,7 +444,7 @@ fn initial_pacing_rate(
 }
 
 #[derive(Debug)]
-pub(crate) struct BBRv2 {
+pub struct BBRv2 {
     mode: Mode,
     cwnd: usize,
     mss: usize,
@@ -566,7 +566,7 @@ impl BBRv2 {
                 now,
                 last_quiescence_start,
                 &self.params,
-            )
+            );
         }
     }
 
@@ -827,11 +827,11 @@ impl CongestionControl for BBRv2 {
         }
 
         let network_model = self.mode.network_model_mut();
-        network_model.on_app_limited()
+        network_model.on_app_limited();
     }
 
     fn limit_cwnd(&mut self, max_cwnd: usize) {
-        self.cwnd_limits.hi = max_cwnd
+        self.cwnd_limits.hi = max_cwnd;
     }
 }
 

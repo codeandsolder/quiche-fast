@@ -100,7 +100,7 @@ impl ModeImpl for ProbeRTT {
                 {
                     self.exit_time = Some(
                         congestion_event.event_time + params.probe_rtt_duration,
-                    )
+                    );
                 }
                 Mode::ProbeRTT(self)
             },

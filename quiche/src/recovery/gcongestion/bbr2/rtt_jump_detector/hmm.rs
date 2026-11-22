@@ -83,7 +83,7 @@ impl HmmState {
         }
     }
 
-    fn is_more_elevated_than(self, other: Self) -> bool {
+    const fn is_more_elevated_than(self, other: Self) -> bool {
         self.as_index() > other.as_index()
     }
 }

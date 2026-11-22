@@ -81,7 +81,7 @@ impl Default for Rate {
 }
 
 impl Rate {
-    pub fn on_packet_sent(
+    pub const fn on_packet_sent(
         &mut self, pkt: &mut Sent, bytes_in_flight: usize, bytes_lost: u64,
     ) {
         // No packets in flight.

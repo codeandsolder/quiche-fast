@@ -184,7 +184,9 @@ impl Mode {
         Self::ProbeBW(ProbeBW { model, cycle })
     }
 
-    pub(super) fn probe_rtt(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
+    pub(super) const fn probe_rtt(
+        model: BBRv2NetworkModel, cycle: Cycle,
+    ) -> Self {
         Self::ProbeRTT(ProbeRTT::new(model, cycle))
     }
 
@@ -225,7 +227,7 @@ impl Mode {
             now,
             quiescence_start_time,
             params,
-        )
+        );
     }
 
     pub fn network_model(&self) -> &BBRv2NetworkModel {

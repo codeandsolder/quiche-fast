@@ -75,7 +75,7 @@ impl<F: BufFactory> SendReserve<'_, F> {
 
 impl<F: BufFactory> Drop for SendReserve<'_, F> {
     fn drop(&mut self) {
-        assert_eq!(self.reserved, 0)
+        assert_eq!(self.reserved, 0);
     }
 }
 

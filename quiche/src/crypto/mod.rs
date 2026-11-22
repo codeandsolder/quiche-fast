@@ -693,4 +693,4 @@ mod tests {
 }
 
 mod boringssl;
-pub(crate) use boringssl::*;
+pub use boringssl::*;

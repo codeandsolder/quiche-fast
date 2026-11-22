@@ -177,7 +177,7 @@ impl Congestion {
     }
 
     /// The most recent data delivery rate estimate.
-    pub(crate) fn delivery_rate(&self) -> Bandwidth {
+    pub(crate) const fn delivery_rate(&self) -> Bandwidth {
         self.delivery_rate.sample_delivery_rate()
     }
 
@@ -245,7 +245,7 @@ impl Congestion {
     }
 }
 
-pub(crate) struct CongestionControlOps {
+pub struct CongestionControlOps {
     pub on_init: fn(r: &mut Congestion),
 
     pub on_packet_sent: fn(
@@ -355,7 +355,7 @@ mod cubic;
 mod delivery_rate;
 mod hystart;
 mod prr;
-pub(crate) mod recovery;
+pub mod recovery;
 mod reno;
 
 #[cfg(test)]

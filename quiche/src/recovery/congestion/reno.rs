@@ -40,7 +40,7 @@ use super::CongestionControlOps;
 use crate::recovery::LOSS_REDUCTION_FACTOR;
 use crate::recovery::MINIMUM_WINDOW_PACKETS;
 
-pub(crate) static RENO: CongestionControlOps = CongestionControlOps {
+pub static RENO: CongestionControlOps = CongestionControlOps {
     on_init,
     on_packet_sent,
     on_packets_acked,

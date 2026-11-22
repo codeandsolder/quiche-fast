@@ -1,4 +1,14 @@
-use super::*;
+use super::derive_pkt_iv;
+use super::derive_pkt_key;
+use super::make_nonce;
+use super::Algorithm;
+use super::Error;
+use super::HeaderProtectionMask;
+use super::Result;
+use super::EVP_AEAD;
+use super::EVP_MD;
+use super::HP_MASK_LEN;
+use super::MAX_NONCE_LEN;
 
 use std::ptr::NonNull;
 
@@ -17,7 +27,7 @@ struct EVP_AEAD_CTX {
 
 #[derive(Clone)]
 #[repr(C)]
-pub(crate) struct AES_KEY {
+pub struct AES_KEY {
     rd_key: [u32; 4 * (14 + 1)],
     rounds: c_uint,
 }
@@ -36,7 +46,7 @@ impl Algorithm {
     }
 }
 
-pub(crate) struct PacketKey {
+pub struct PacketKey {
     alg: Algorithm,
 
     ctx: NonNull<EVP_AEAD_CTX>,
@@ -99,7 +109,7 @@ impl PacketKey {
             EVP_AEAD_CTX_open(
                 self.ctx.as_ptr(),  // ctx
                 ptr,                // out
-                &mut out_len,       // out_len
+                &raw mut out_len,   // out_len
                 max_out_len,        // max_out_len
                 nonce[..].as_ptr(), // nonce
                 nonce.len(),        // nonce_len
@@ -149,19 +159,19 @@ impl PacketKey {
         // Any extra input and associated data are valid shared slices.
         let rc = unsafe {
             EVP_AEAD_CTX_seal_scatter(
-                self.ctx.as_ptr(),  // ctx
-                ptr,                // out
-                tag.as_mut_ptr(),   // out_tag
-                &mut out_tag_len,   // out_tag_len
-                tag_capacity,       // max_out_tag_len
-                nonce[..].as_ptr(), // nonce
-                nonce.len(),        // nonce_len
-                ptr.cast_const(),   // inp
-                in_len,             // in_len
-                extra_in_ptr,       // extra_in
-                extra_in_len,       // extra_in_len
-                ad.as_ptr(),        // ad
-                ad.len(),           // ad_len
+                self.ctx.as_ptr(),    // ctx
+                ptr,                  // out
+                tag.as_mut_ptr(),     // out_tag
+                &raw mut out_tag_len, // out_tag_len
+                tag_capacity,         // max_out_tag_len
+                nonce[..].as_ptr(),   // nonce
+                nonce.len(),          // nonce_len
+                ptr.cast_const(),     // inp
+                in_len,               // in_len
+                extra_in_ptr,         // extra_in
+                extra_in_len,         // extra_in_len
+                ad.as_ptr(),          // ad
+                ad.len(),             // ad_len
             )
         };
 
@@ -193,7 +203,7 @@ impl Drop for PacketKey {
     clippy::large_enum_variant,
     reason = "Boxing the large variant would add unnecessary indirection"
 )]
-pub(crate) enum HeaderProtectionKey {
+pub enum HeaderProtectionKey {
     Aes(AES_KEY),
 
     ChaCha([u8; 32]),
@@ -223,7 +233,7 @@ impl HeaderProtectionKey {
                     AES_set_encrypt_key(
                         hp_key.as_ptr(),
                         key_len_bits,
-                        &mut aes_key,
+                        &raw mut aes_key,
                     )
                 };
                 if rc != 0 {
@@ -251,7 +261,7 @@ impl HeaderProtectionKey {
                         block.as_mut_ptr(),
                         aes_key as _,
                         1,
-                    )
+                    );
                 };
 
                 let mut new_mask = HeaderProtectionMask::default();
@@ -305,7 +315,7 @@ fn make_aead_ctx(alg: Algorithm, key: &[u8]) -> Result<NonNull<EVP_AEAD_CTX>> {
     NonNull::new(ctx).ok_or(Error::CryptoFail)
 }
 
-pub(crate) fn hkdf_extract(
+pub fn hkdf_extract(
     alg: Algorithm, out: &mut [u8], secret: &[u8], salt: &[u8],
 ) -> Result<()> {
     // HKDF_extract treats out_len as an output, not a capacity. It writes
@@ -324,7 +334,7 @@ pub(crate) fn hkdf_extract(
     let rc = unsafe {
         HKDF_extract(
             out.as_mut_ptr(),
-            &mut out_len,
+            &raw mut out_len,
             alg.get_evp_digest(),
             secret.as_ptr(),
             secret.len(),
@@ -340,7 +350,7 @@ pub(crate) fn hkdf_extract(
     Ok(())
 }
 
-pub(crate) fn hkdf_expand(
+pub fn hkdf_expand(
     alg: Algorithm, out: &mut [u8], secret: &[u8], info: &[u8],
 ) -> Result<()> {
     // SAFETY: All slice pointers are valid for their associated lengths,

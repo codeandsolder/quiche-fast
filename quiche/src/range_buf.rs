@@ -107,7 +107,7 @@ where
     }
 
     /// Returns the final offset of `self`.
-    pub fn max_off(&self) -> u64 {
+    pub const fn max_off(&self) -> u64 {
         self.off() + self.len() as u64
     }
 
@@ -117,7 +117,7 @@ where
     }
 
     /// Returns true if `self` has a length of zero bytes.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
@@ -133,8 +133,7 @@ where
     {
         assert!(
             at <= self.len,
-            "`at` split index (is {}) should be <= len (is {})",
-            at,
+            "`at` split index (is {at}) should be <= len (is {})",
             self.len
         );
 
