@@ -649,6 +649,7 @@ impl RecoveryOps for GRecovery {
         self.epochs[epoch].next_lost_frame()
     }
 
+    #[cfg(test)]
     fn get_largest_acked_on_epoch(&self, epoch: packet::Epoch) -> Option<u64> {
         self.epochs[epoch].largest_acked_packet
     }

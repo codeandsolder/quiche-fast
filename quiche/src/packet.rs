@@ -748,13 +748,30 @@ impl std::fmt::Debug for Header<'_> {
     }
 }
 
-pub fn pkt_num_len(pn: u64, largest_acked: u64) -> usize {
-    let num_unacked: u64 = pn.saturating_sub(largest_acked) + 1;
-    // computes ceil of num_unacked.log2() + 1
-    let min_bits = u64::BITS - num_unacked.leading_zeros() + 1;
-    // get the num len in bytes, avoiding one-byte packet numbers, which
-    // become ambiguous after deep reordering
-    (min_bits.div_ceil(8) as usize).max(2)
+/// Selects a packet number width for the acknowledged prefix of this space.
+/// Before the first ACK the entire packet number must fit. Afterwards the
+/// range must exceed twice the distance from the largest acknowledged number
+/// (RFC 9000, Section 17.1). Retain a two-byte minimum for delayed packets.
+pub fn pkt_num_len(pn: u64, largest_acked: Option<u64>) -> Result<usize> {
+    if pn > octets::MAX_VAR_INT {
+        return Err(Error::InvalidPacket);
+    }
+    let bits = if let Some(acked) = largest_acked {
+        let distance = pn
+            .checked_sub(acked)
+            .filter(|&d| d != 0)
+            .ok_or(Error::InvalidState)?;
+        u64::BITS - distance.leading_zeros() + 1
+    } else {
+        u64::BITS - pn.leading_zeros()
+    };
+    let len = usize::try_from(bits.div_ceil(8))
+        .map_err(|_| Error::InvalidPacket)?
+        .max(2);
+    if len > MAX_PKT_NUM_LEN {
+        return Err(Error::InvalidPacket);
+    }
+    Ok(len)
 }
 
 pub fn decrypt_hdr(
@@ -814,26 +831,44 @@ pub fn decrypt_hdr(
     Ok(())
 }
 
-pub const fn decode_pkt_num(
-    largest_pn: u64, truncated_pn: u64, pn_len: usize,
-) -> u64 {
-    let pn_nbits = pn_len * 8;
+/// Recover the closest valid packet number in the 62-bit wire domain.
+/// A missing authenticated receive history means the peer sends the entire
+/// packet number, rather than a truncated suffix.
+pub fn decode_pkt_num(
+    largest_pn: Option<u64>, truncated_pn: u64, pn_len: usize,
+) -> Result<u64> {
+    if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) {
+        return Err(Error::InvalidPacket);
+    }
+    let pn_win = 1_u64 << (pn_len * 8);
+    if truncated_pn >= pn_win {
+        return Err(Error::InvalidPacket);
+    }
+    let Some(largest_pn) = largest_pn else {
+        return Ok(truncated_pn);
+    };
+    if largest_pn > octets::MAX_VAR_INT {
+        return Err(Error::InvalidPacket);
+    }
+
     let expected_pn = largest_pn + 1;
-    let pn_win = 1 << pn_nbits;
     let pn_hwin = pn_win / 2;
     let pn_mask = pn_win - 1;
-    let candidate_pn = (expected_pn & !pn_mask) | truncated_pn;
+    let candidate = (expected_pn & !pn_mask) | truncated_pn;
 
-    if candidate_pn + pn_hwin <= expected_pn && candidate_pn < (1 << 62) - pn_win
+    // At the upper boundary, the next mathematical window may lie beyond
+    // the wire domain. The preceding window is then the only valid one.
+    if candidate > octets::MAX_VAR_INT ||
+        (candidate > expected_pn + pn_hwin && candidate >= pn_win)
     {
-        return candidate_pn + pn_win;
+        return Ok(candidate - pn_win);
     }
-
-    if candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win {
-        return candidate_pn - pn_win;
+    if candidate + pn_hwin <= expected_pn &&
+        candidate <= octets::MAX_VAR_INT - pn_win
+    {
+        return Ok(candidate + pn_win);
     }
-
-    candidate_pn
+    Ok(candidate)
 }
 
 pub fn decrypt_pkt<'a>(
@@ -1053,7 +1088,7 @@ pub struct KeyUpdate {
 
 pub struct PktNumSpace {
     /// The largest packet number received.
-    pub largest_rx_pkt_num: u64,
+    pub largest_rx_pkt_num: Option<u64>,
 
     /// Time the largest packet number received.
     pub largest_rx_pkt_time: Instant,
@@ -1063,6 +1098,9 @@ pub struct PktNumSpace {
 
     /// The largest packet number send in the packet number space so far.
     pub largest_tx_pkt_num: Option<u64>,
+
+    /// Greatest validated ACK number in this space, across all paths.
+    pub largest_acked_pkt_num: Option<u64>,
 
     /// Range of packet numbers that we need to send an ACK for.
     pub recv_pkt_need_ack: ranges::RangeSet,
@@ -1077,10 +1115,11 @@ pub struct PktNumSpace {
 impl PktNumSpace {
     pub fn new() -> Self {
         Self {
-            largest_rx_pkt_num: 0,
+            largest_rx_pkt_num: None,
             largest_rx_pkt_time: Instant::now(),
             largest_rx_non_probing_pkt_num: 0,
             largest_tx_pkt_num: None,
+            largest_acked_pkt_num: None,
             recv_pkt_need_ack: ranges::RangeSet::new(crate::MAX_ACK_RANGES),
             recv_pkt_num: PktNumWindow::default(),
             ack_elicited: false,
@@ -1631,42 +1670,116 @@ mod tests {
 
     #[test]
     fn pkt_num_encode_decode() {
-        let num_len = pkt_num_len(0, 0);
+        let num_len = pkt_num_len(0, None).unwrap();
         assert_eq!(num_len, 2);
-        let pn = decode_pkt_num(0xa82f30ea, 0x9b32, 2);
+        let pn = decode_pkt_num(Some(0xa82f30ea), 0x9b32, 2).unwrap();
         assert_eq!(pn, 0xa82f9b32);
         let mut d = [0; 10];
         let mut b = octets::OctetsMut::with_slice(&mut d);
-        let num_len = pkt_num_len(0xac5c02, 0xabe8b3);
+        let num_len = pkt_num_len(0xac5c02, Some(0xabe8b3)).unwrap();
         assert_eq!(num_len, 2);
         encode_pkt_num(0xac5c02, num_len, &mut b).unwrap();
         // reading
         let mut b = octets::OctetsMut::with_slice(&mut d);
         let hdr_num = u64::from(b.get_u16().unwrap());
-        let pn = decode_pkt_num(0xac5c01, hdr_num, num_len);
+        let pn = decode_pkt_num(Some(0xac5c01), hdr_num, num_len).unwrap();
         assert_eq!(pn, 0xac5c02);
         // sending 0xace8fe while having 0xabe8b3 acked
-        let num_len = pkt_num_len(0xace9fe, 0xabe8b3);
+        let num_len = pkt_num_len(0xace9fe, Some(0xabe8b3)).unwrap();
         assert_eq!(num_len, 3);
         let mut b = octets::OctetsMut::with_slice(&mut d);
         encode_pkt_num(0xace9fe, num_len, &mut b).unwrap();
         // reading
         let mut b = octets::OctetsMut::with_slice(&mut d);
         let hdr_num = u64::from(b.get_u24().unwrap());
-        let pn = decode_pkt_num(0xace9fa, hdr_num, num_len);
+        let pn = decode_pkt_num(Some(0xace9fa), hdr_num, num_len).unwrap();
         assert_eq!(pn, 0xace9fe);
         // one-byte packet numbers are never sent, but peers may send them
-        let pn = decode_pkt_num(0xdeadbeef, 0x6e, 1);
+        let pn = decode_pkt_num(Some(0xdeadbeef), 0x6e, 1).unwrap();
         assert_eq!(pn, 0xdeadbf6e);
         // roundtrip
         let base = 0xdeadbeef;
         for i in 1..255 {
             let pn = base + i;
-            let num_len = pkt_num_len(pn, base);
+            let num_len = pkt_num_len(pn, Some(base)).unwrap();
             assert_eq!(num_len, 2);
-            let decoded = decode_pkt_num(base, pn & 0xffff, num_len);
+            let decoded =
+                decode_pkt_num(Some(base), pn & 0xffff, num_len).unwrap();
             assert_eq!(decoded, pn);
         }
+    }
+
+    #[test]
+    fn packet_number_width_uses_full_no_ack_value_and_half_window_bound() {
+        for (pn, len) in [
+            (0, 2),
+            (u64::from(u16::MAX), 2),
+            (1 << 16, 3),
+            ((1 << 24) - 1, 3),
+            (1 << 24, 4),
+            (u64::from(u32::MAX), 4),
+        ] {
+            assert_eq!(pkt_num_len(pn, None), Ok(len));
+            let mut out = [0; 4];
+            let mut b = octets::OctetsMut::with_slice(&mut out);
+            encode_pkt_num(pn, len, &mut b).unwrap();
+            assert_eq!(decode_pkt_num(None, pn, len), Ok(pn));
+        }
+        let base = 1_u64 << 40;
+        for (distance, len) in [
+            (1, 2),
+            ((1 << 15) - 1, 2),
+            (1 << 15, 3),
+            ((1 << 23) - 1, 3),
+            (1 << 23, 4),
+            ((1 << 31) - 1, 4),
+        ] {
+            let pn = base + distance;
+            assert_eq!(pkt_num_len(pn, Some(base)), Ok(len));
+            assert_eq!(
+                decode_pkt_num(Some(base), pn & ((1_u64 << (len * 8)) - 1), len),
+                Ok(pn)
+            );
+        }
+        assert_eq!(pkt_num_len(1 << 32, None), Err(Error::InvalidPacket));
+        assert_eq!(
+            pkt_num_len(base + (1 << 31), Some(base)),
+            Err(Error::InvalidPacket)
+        );
+        assert_eq!(pkt_num_len(base, Some(base)), Err(Error::InvalidState));
+        assert_eq!(
+            pkt_num_len(octets::MAX_VAR_INT + 1, Some(base)),
+            Err(Error::InvalidPacket)
+        );
+    }
+
+    #[test]
+    fn packet_number_decode_never_leaves_wire_domain() {
+        let max = octets::MAX_VAR_INT;
+        for len in 1..=MAX_PKT_NUM_LEN {
+            let window = 1_u64 << (len * 8);
+            let mask = window - 1;
+            for suffix in [0, window / 2 - 1, window / 2, mask] {
+                assert_eq!(
+                    decode_pkt_num(Some(max), suffix, len),
+                    Ok((max & !mask) | suffix)
+                );
+                assert_eq!(decode_pkt_num(None, suffix, len), Ok(suffix));
+                let pn = decode_pkt_num(Some(max - 1), suffix, len).unwrap();
+                assert!(pn <= max);
+                assert_eq!(pn & mask, suffix);
+            }
+            assert_eq!(
+                decode_pkt_num(Some(0), window, len),
+                Err(Error::InvalidPacket)
+            );
+        }
+        assert_eq!(
+            decode_pkt_num(Some(max + 1), 0, 4),
+            Err(Error::InvalidPacket)
+        );
+        assert_eq!(decode_pkt_num(None, 0, 0), Err(Error::InvalidPacket));
+        assert_eq!(decode_pkt_num(None, 0, 5), Err(Error::InvalidPacket));
     }
 
     #[test]
@@ -1826,7 +1939,7 @@ mod tests {
         decrypt_hdr(&mut b, &mut hdr, &aead).unwrap();
         assert_eq!(hdr.pkt_num_len, expected_pn_len);
 
-        let pn = decode_pkt_num(0, hdr.pkt_num, hdr.pkt_num_len);
+        let pn = decode_pkt_num(None, hdr.pkt_num, hdr.pkt_num_len).unwrap();
         assert_eq!(pn, expected_pn);
 
         let payload =
@@ -2044,7 +2157,8 @@ mod tests {
         decrypt_hdr(&mut b, &mut hdr, &aead).unwrap();
         assert_eq!(hdr.pkt_num_len, 3);
 
-        let pn = decode_pkt_num(654_360_564, hdr.pkt_num, hdr.pkt_num_len);
+        let pn = decode_pkt_num(Some(654_360_564), hdr.pkt_num, hdr.pkt_num_len)
+            .unwrap();
         assert_eq!(pn, 654_360_564);
 
         let payload =

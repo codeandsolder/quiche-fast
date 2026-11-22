@@ -3539,7 +3539,10 @@ impl<F: BufFactory> Connection<F> {
             self.pkt_num_spaces[epoch].largest_rx_pkt_num,
             hdr.pkt_num,
             hdr.pkt_num_len,
-        );
+        )
+        .map_err(|e| {
+            drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)
+        })?;
 
         let pn_len = hdr.pkt_num_len;
 
@@ -4048,7 +4051,7 @@ impl<F: BufFactory> Connection<F> {
             cmp::max(self.pkt_num_spaces[epoch].ack_elicited, ack_elicited);
 
         self.pkt_num_spaces[epoch].largest_rx_pkt_num =
-            cmp::max(self.pkt_num_spaces[epoch].largest_rx_pkt_num, pn);
+            self.pkt_num_spaces[epoch].largest_rx_pkt_num.max(Some(pn));
 
         if !probing {
             self.pkt_num_spaces[epoch].largest_rx_non_probing_pkt_num = cmp::max(
@@ -4278,6 +4281,11 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::Done);
         }
 
+        if self.next_pkt_num >= octets::MAX_VAR_INT {
+            self.mark_closed();
+            return Err(Error::Done);
+        }
+
         let now = Instant::now();
 
         if self.local_error.is_none() {
@@ -4362,6 +4370,12 @@ impl<F: BufFactory> Connection<F> {
 
             done += written;
             left -= written;
+
+            if self.is_closed() {
+                // The final allowed packet has already been serialized.
+                has_initial |= ty == Type::Initial;
+                break;
+            }
 
             match ty {
                 Type::Initial => has_initial = true,
@@ -4496,6 +4510,21 @@ impl<F: BufFactory> Connection<F> {
         };
 
         let epoch = pkt_type.to_epoch()?;
+        if self.next_pkt_num >= octets::MAX_VAR_INT {
+            self.mark_closed();
+            return Err(Error::Done);
+        }
+        // Don't skip the final usable packet number. The next increment
+        // will exhaust the number space and silently close the connection.
+        let should_skip = self.next_pkt_num < octets::MAX_VAR_INT - 1 &&
+            self.pkt_num_manager
+                .should_skip_pn(self.handshake_completed);
+        let pn = self.next_pkt_num + u64::from(should_skip);
+        let pn_len = packet::pkt_num_len(
+            pn,
+            self.pkt_num_spaces[epoch].largest_acked_pkt_num,
+        )?;
+
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
 
@@ -4762,10 +4791,7 @@ impl<F: BufFactory> Connection<F> {
         let is_app_limited = self.delivery_rate_check_if_app_limited();
         let n_paths = self.paths.len();
 
-        if self
-            .pkt_num_manager
-            .should_skip_pn(self.handshake_completed)
-        {
+        if should_skip {
             let skipped_pn = self.next_pkt_num;
             self.pkt_num_manager.set_skip_pn(Some(skipped_pn));
             for (_, path) in self.paths.iter_mut() {
@@ -4785,12 +4811,6 @@ impl<F: BufFactory> Connection<F> {
         } else {
             b.cap()
         };
-
-        let pn = self.next_pkt_num;
-
-        let largest_acked_pkt =
-            path.recovery.get_largest_acked_on_epoch(epoch).unwrap_or(0);
-        let pn_len = packet::pkt_num_len(pn, largest_acked_pkt);
 
         // The AEAD overhead at the current encryption level.
         let crypto_overhead = crypto_ctx.crypto_overhead().ok_or(Error::Done)?;
@@ -5892,6 +5912,12 @@ impl<F: BufFactory> Connection<F> {
 
         if ack_eliciting {
             self.ack_eliciting_sent = true;
+        }
+
+        // RFC 9000 §12.3: when the send number reaches its maximum, close
+        // silently, without attempting a CONNECTION_CLOSE packet.
+        if self.next_pkt_num >= octets::MAX_VAR_INT {
+            self.mark_closed();
         }
 
         Ok((pkt_type, written))
@@ -8954,6 +8980,10 @@ impl<F: BufFactory> Connection<F> {
                     self.acked_bytes += acked_bytes as u64;
                     self.spurious_lost_count += spurious_losses;
                 }
+
+                let space = &mut self.pkt_num_spaces[epoch];
+                space.largest_acked_pkt_num =
+                    space.largest_acked_pkt_num.max(Some(largest_acked));
 
                 // Retire the skipped packet number after the entire ACK was
                 // validated and processed across all paths.

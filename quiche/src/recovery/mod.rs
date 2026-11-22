@@ -295,6 +295,7 @@ pub trait RecoveryOps {
 
     fn next_lost_frame(&mut self, epoch: packet::Epoch) -> Option<frame::Frame>;
 
+    #[cfg(test)]
     fn get_largest_acked_on_epoch(&self, epoch: packet::Epoch) -> Option<u64>;
     fn has_lost_frames(&self, epoch: packet::Epoch) -> bool;
     fn loss_probes(&self, epoch: packet::Epoch) -> usize;
