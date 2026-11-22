@@ -1330,17 +1330,6 @@ impl Config {
     ) {
         self.track_unknown_transport_params = Some(size);
     }
-
-    /// Sets whether the initial max data value should be used as the initial
-    /// flow control window.
-    ///
-    /// This is now always enabled and this method is a no-op. It will be
-    /// removed in a future release.
-    #[deprecated(note = "This is now always enabled. This method is a no-op.")]
-    pub const fn set_use_initial_max_data_as_flow_control_win(
-        &mut self, _v: bool,
-    ) {
-    }
 }
 
 /// Tracks the health of the `tx_buffered` value.
@@ -2989,24 +2978,6 @@ impl<F: BufFactory> Connection<F> {
         });
 
         handshake.set_quic_transport_params(&params, is_server)
-    }
-
-    /// Sets the `use_initial_max_data_as_flow_control_win` flag during SSL
-    /// handshake.
-    ///
-    /// This is now always enabled and this method is a no-op. It will be
-    /// removed in a future release.
-    ///
-    /// # Errors
-    ///
-    /// This deprecated no-op always returns `Ok(())`.
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
-    #[deprecated(note = "This is now always enabled. This method is a no-op.")]
-    pub const fn set_use_initial_max_data_as_flow_control_win_in_handshake(
-        _ssl: &mut boring::ssl::SslRef,
-    ) -> Result<()> {
-        Ok(())
     }
 
     /// Processes QUIC packets received from the peer.
