@@ -2988,9 +2988,13 @@ fn std_time_to_c(_time: &Instant, out: &mut timespec) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recovery::RecoveryOps;
     use crate::test_utils;
     use crate::PROTOCOL_VERSION;
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "windows"
+    )))]
     use std::time::Duration;
 
     use libc::c_void;
@@ -4138,6 +4142,7 @@ mod tests {
 #[cfg(test)]
 mod foreign_ownership_tests {
     use super::*;
+    #[cfg(unix)]
     use crate::test_utils;
     use crate::PROTOCOL_VERSION;
 
