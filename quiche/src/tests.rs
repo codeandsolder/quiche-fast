@@ -120,6 +120,152 @@ fn transport_params() {
 }
 
 #[test]
+fn transport_params_preserve_zero_ack_delays() {
+    let default = TransportParams::decode(&[], false, None).unwrap();
+    assert_eq!(default.ack_delay_exponent, 3);
+    assert_eq!(default.max_ack_delay, 25);
+
+    let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    config.set_ack_delay_exponent(0);
+    config.set_max_ack_delay(0);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    pipe.handshake().unwrap();
+    for conn in [&pipe.client, &pipe.server] {
+        let peer = conn.peer_transport_params().unwrap();
+        assert_eq!(peer.ack_delay_exponent, 0);
+        assert_eq!(peer.max_ack_delay, 0);
+    }
+}
+
+#[test]
+fn transport_integer_payload_requires_exactly_one_varint() {
+    for id in [1, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 32] {
+        for bytes in [[id, 2, 1, 0], [id, 2, 0x40, 0x80]] {
+            // A valid two-byte value (128) is permitted for fields whose
+            // protocol range admits it. A one-byte value plus trailing bytes
+            // is never a valid representation.
+            if bytes[2] == 1 {
+                assert_eq!(
+                    TransportParams::decode(&bytes, false, None),
+                    Err(Error::InvalidTransportParam)
+                );
+            } else if !matches!(id, 3 | 10) {
+                assert!(
+                    TransportParams::decode(&bytes, false, None).is_ok(),
+                    "id={id}"
+                );
+            }
+        }
+        assert_eq!(
+            TransportParams::decode(&[id, 0], false, None),
+            Err(Error::InvalidTransportParam)
+        );
+        assert_eq!(
+            TransportParams::decode(&[id, 1, 0x40], false, None),
+            Err(Error::InvalidTransportParam)
+        );
+    }
+    // A non-minimal but complete integer encoding is valid.
+    assert_eq!(
+        TransportParams::decode(&[10, 2, 0x40, 3], false, None)
+            .unwrap()
+            .ack_delay_exponent,
+        3
+    );
+    assert_eq!(
+        TransportParams::decode(&[12, 1, 0], false, None),
+        Err(Error::InvalidTransportParam)
+    );
+    assert!(
+        TransportParams::decode(&[12, 0], false, None)
+            .unwrap()
+            .disable_active_migration
+    );
+}
+
+#[test]
+fn transport_params_local_encoding_rejects_invalid_ranges() {
+    let baseline = TransportParams::default();
+    let mut buf = [0; 256];
+    for invalid in [
+        TransportParams {
+            max_udp_payload_size: 1199,
+            ..baseline.clone()
+        },
+        TransportParams {
+            initial_max_streams_bidi: MAX_STREAM_COUNT + 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            initial_max_streams_uni: MAX_STREAM_COUNT + 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            ack_delay_exponent: MAX_ACK_DELAY_EXPONENT + 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            max_ack_delay: transport_params::MAX_ACK_DELAY + 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            active_conn_id_limit: 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            initial_max_data: octets::MAX_VAR_INT + 1,
+            ..baseline.clone()
+        },
+        TransportParams {
+            max_datagram_frame_size: Some(octets::MAX_VAR_INT + 1),
+            ..baseline.clone()
+        },
+        TransportParams {
+            initial_source_connection_id: Some(
+                vec![1; MAX_CONN_ID_LEN + 1].into(),
+            ),
+            ..baseline
+        },
+    ] {
+        assert_eq!(
+            TransportParams::encode(&invalid, false, &mut buf),
+            Err(Error::InvalidTransportParam)
+        );
+    }
+}
+
+#[test]
+fn transport_params_validate_connection_id_lengths_and_preferred_address() {
+    for id in [0, 15, 16] {
+        let mut wire = vec![id, 21];
+        wire.extend_from_slice(&[0; 21]);
+        assert_eq!(
+            TransportParams::decode(&wire, false, None),
+            Err(Error::InvalidTransportParam)
+        );
+    }
+
+    let mut wire = vec![13, 42];
+    wire.extend_from_slice(&[0; 42]);
+    wire[2 + 24] = 1;
+    assert!(TransportParams::decode(&wire, false, None).is_ok());
+    assert_eq!(
+        TransportParams::decode(&wire, true, None),
+        Err(Error::InvalidTransportParam)
+    );
+    wire[2 + 24] = 0;
+    assert_eq!(
+        TransportParams::decode(&wire, false, None),
+        Err(Error::InvalidTransportParam)
+    );
+    wire[2 + 24] = 2;
+    assert_eq!(
+        TransportParams::decode(&wire, false, None),
+        Err(Error::InvalidTransportParam)
+    );
+}
+
+#[test]
 fn peer_transport_params_wire_preserves_original_encoding() {
     let mut pipe = test_utils::Pipe::new("cubic").unwrap();
     assert!(pipe.client.peer_transport_params_wire().is_none());
@@ -2293,201 +2439,96 @@ fn stream_flow_control_update(
 }
 
 #[rstest]
-fn stream_left_bidi(
+fn stream_left(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert_eq!(3, pipe.client.peer_streams_left_bidi());
-    assert_eq!(3, pipe.server.peer_streams_left_bidi());
+    let remaining = |c: &Connection| {
+        if uni {
+            c.peer_streams_left_uni()
+        } else {
+            c.peer_streams_left_bidi()
+        }
+    };
+    assert_eq!(remaining(&pipe.client), 3);
+    assert_eq!(remaining(&pipe.server), 3);
 
-    pipe.server.stream_send(1, b"a", false).ok();
-    assert_eq!(2, pipe.server.peer_streams_left_bidi());
-    pipe.server.stream_send(5, b"a", false).ok();
-    assert_eq!(1, pipe.server.peer_streams_left_bidi());
+    for i in 0..3 {
+        let id = 4 * i + if uni { 3 } else { 1 };
+        assert_eq!(pipe.server.stream_send(id, b"a", false), Ok(1));
+        assert_eq!(remaining(&pipe.server), 2 - i);
+    }
 
-    pipe.server.stream_send(9, b"a", false).ok();
-    assert_eq!(0, pipe.server.peer_streams_left_bidi());
-
-    let frames = [frame::Frame::MaxStreamsBidi { max: MAX_STREAM_ID }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    assert_eq!(MAX_STREAM_ID - 3, pipe.server.peer_streams_left_bidi());
+    let frame = if uni {
+        frame::Frame::MaxStreamsUni {
+            max: MAX_STREAM_COUNT,
+        }
+    } else {
+        frame::Frame::MaxStreamsBidi {
+            max: MAX_STREAM_COUNT,
+        }
+    };
+    assert!(pipe
+        .send_pkt_to_server(Type::Short, &[frame], &mut buf)
+        .is_ok());
+    assert_eq!(remaining(&pipe.server), MAX_STREAM_COUNT - 3);
 }
 
 #[rstest]
-fn stream_left_uni(
+fn stream_limit(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert_eq!(3, pipe.client.peer_streams_left_uni());
-    assert_eq!(3, pipe.server.peer_streams_left_uni());
-
-    pipe.server.stream_send(3, b"a", false).ok();
-    assert_eq!(2, pipe.server.peer_streams_left_uni());
-    pipe.server.stream_send(7, b"a", false).ok();
-    assert_eq!(1, pipe.server.peer_streams_left_uni());
-
-    pipe.server.stream_send(11, b"a", false).ok();
-    assert_eq!(0, pipe.server.peer_streams_left_uni());
-
-    let frames = [frame::Frame::MaxStreamsUni { max: MAX_STREAM_ID }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    assert_eq!(MAX_STREAM_ID - 3, pipe.server.peer_streams_left_uni());
-}
-
-#[rstest]
-fn stream_limit_bidi(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [
-        frame::Frame::Stream {
-            stream_id: 4,
-            data: <RangeBuf>::from(b"a", 0, false),
+    let frames = std::array::from_fn::<_, 7, _>(|i| frame::Frame::Stream {
+        stream_id: if uni {
+            2 + 4 * i as u64
+        } else {
+            4 + 4 * i as u64
         },
-        frame::Frame::Stream {
-            stream_id: 8,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 12,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 16,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 20,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 24,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 28,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-    ];
-
-    let pkt_type = Type::Short;
+        data: <RangeBuf>::from(b"a", 0, false),
+    });
     assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+        pipe.send_pkt_to_server(Type::Short, &frames, &mut buf),
         Err(Error::StreamLimit),
     );
 }
 
 #[rstest]
-fn stream_limit_max_bidi(
+fn stream_count_frame_bounds(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool, #[values(false, true)] blocked: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    let frames = [frame::Frame::MaxStreamsBidi { max: MAX_STREAM_ID }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::MaxStreamsBidi {
-        max: MAX_STREAM_ID + 1,
-    }];
-
-    let pkt_type = Type::Short;
+    let make_frame = |count| match (uni, blocked) {
+        (false, false) => frame::Frame::MaxStreamsBidi { max: count },
+        (true, false) => frame::Frame::MaxStreamsUni { max: count },
+        (false, true) => frame::Frame::StreamsBlockedBidi { limit: count },
+        (true, true) => frame::Frame::StreamsBlockedUni { limit: count },
+    };
+    assert!(pipe
+        .send_pkt_to_server(
+            Type::Short,
+            &[make_frame(MAX_STREAM_COUNT)],
+            &mut buf
+        )
+        .is_ok());
     assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
-    );
-}
-
-#[rstest]
-fn stream_limit_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [
-        frame::Frame::Stream {
-            stream_id: 2,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 6,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 10,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 14,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 18,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 22,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 26,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-    ];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::StreamLimit),
-    );
-}
-
-#[rstest]
-fn stream_limit_max_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::MaxStreamsUni { max: MAX_STREAM_ID }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::MaxStreamsUni {
-        max: MAX_STREAM_ID + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+        pipe.send_pkt_to_server(
+            Type::Short,
+            &[make_frame(MAX_STREAM_COUNT + 1)],
+            &mut buf
+        ),
         Err(Error::InvalidFrame),
     );
 }
@@ -2709,60 +2750,6 @@ fn stream_stop_counts(
 }
 
 #[rstest]
-fn streams_blocked_max_bidi(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::StreamsBlockedBidi {
-        limit: MAX_STREAM_ID,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::StreamsBlockedBidi {
-        limit: MAX_STREAM_ID + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
-    );
-}
-
-#[rstest]
-fn streams_blocked_max_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [frame::Frame::StreamsBlockedUni {
-        limit: MAX_STREAM_ID,
-    }];
-
-    let pkt_type = Type::Short;
-    assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
-
-    let frames = [frame::Frame::StreamsBlockedUni {
-        limit: MAX_STREAM_ID + 1,
-    }];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::InvalidFrame),
-    );
-}
-
-#[rstest]
 fn streams_blocked_bidi_stat(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
@@ -2777,7 +2764,7 @@ fn streams_blocked_bidi_stat(
     assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
 
     let frames = [frame::Frame::StreamsBlockedBidi {
-        limit: MAX_STREAM_ID,
+        limit: MAX_STREAM_COUNT,
     }];
 
     let pkt_type = Type::Short;
@@ -2810,7 +2797,7 @@ fn streams_blocked_uni_stat(
     assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
 
     let frames = [frame::Frame::StreamsBlockedUni {
-        limit: MAX_STREAM_ID,
+        limit: MAX_STREAM_COUNT,
     }];
 
     let pkt_type = Type::Short;
@@ -13984,8 +13971,13 @@ fn configuration_values_clamping() {
         .set_application_protos(&[b"proto1", b"proto2"])
         .unwrap();
     let v = octets::MAX_VAR_INT + 1;
-    let uv = v as usize;
+    let uv = usize::MAX;
     config.set_max_idle_timeout(v);
+    config.set_max_recv_udp_payload_size(0);
+    assert_eq!(
+        config.local_transport_params.max_udp_payload_size,
+        transport_params::MIN_UDP_PAYLOAD_SIZE
+    );
     config.set_max_recv_udp_payload_size(uv);
     config.set_initial_max_data(v);
     config.set_initial_max_stream_data_bidi_local(v);
@@ -14031,11 +14023,11 @@ fn configuration_values_clamping() {
     );
     assert_eq!(
         pipe.client.local_transport_params.initial_max_streams_bidi,
-        octets::MAX_VAR_INT
+        MAX_STREAM_COUNT
     );
     assert_eq!(
         pipe.client.local_transport_params.initial_max_streams_uni,
-        octets::MAX_VAR_INT
+        MAX_STREAM_COUNT
     );
     assert_eq!(
         pipe.client.local_transport_params.ack_delay_exponent,
@@ -14046,9 +14038,22 @@ fn configuration_values_clamping() {
         octets::MAX_VAR_INT
     );
 
-    // This may return an error, but values too large for varint encoding must
-    // not cause a panic.
-    assert_eq!(pipe.handshake(), Err(Error::InvalidTransportParam));
+    assert_eq!(
+        pipe.client.local_transport_params.max_ack_delay,
+        transport_params::MAX_ACK_DELAY
+    );
+    pipe.handshake().unwrap();
+    assert_eq!(
+        pipe.server
+            .peer_transport_params()
+            .unwrap()
+            .initial_max_streams_bidi,
+        MAX_STREAM_COUNT
+    );
+    assert_eq!(
+        pipe.server.peer_transport_params().unwrap().max_ack_delay,
+        transport_params::MAX_ACK_DELAY
+    );
 }
 
 #[cfg(feature = "custom-client-dcid")]

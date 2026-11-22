@@ -33,7 +33,8 @@ use std::mem::size_of;
 use crate::ConnectionId;
 use crate::Error;
 use crate::Result;
-use crate::MAX_STREAM_ID;
+use crate::MAX_CONN_ID_LEN;
+use crate::MAX_STREAM_COUNT;
 
 #[cfg(feature = "qlog")]
 use crate::crypto;
@@ -45,6 +46,12 @@ use qlog::events::EventData;
 /// Maximum permitted value of the `ack_delay_exponent` transport parameter,
 /// as mandated by RFC 9000 Section 18.2.
 pub const MAX_ACK_DELAY_EXPONENT: u64 = 20;
+
+pub(crate) const MAX_ACK_DELAY: u64 = (1 << 14) - 1;
+pub(crate) const MIN_UDP_PAYLOAD_SIZE: u64 = 1200;
+const DEFAULT_UDP_PAYLOAD_SIZE: u64 = 65527;
+const DEFAULT_ACK_DELAY_EXPONENT: u64 = 3;
+const DEFAULT_MAX_ACK_DELAY: u64 = 25;
 
 /// QUIC Unknown Transport Parameter.
 ///
@@ -205,15 +212,15 @@ impl Default for TransportParams {
             original_destination_connection_id: None,
             max_idle_timeout: 0,
             stateless_reset_token: None,
-            max_udp_payload_size: 65527,
+            max_udp_payload_size: DEFAULT_UDP_PAYLOAD_SIZE,
             initial_max_data: 0,
             initial_max_stream_data_bidi_local: 0,
             initial_max_stream_data_bidi_remote: 0,
             initial_max_stream_data_uni: 0,
             initial_max_streams_bidi: 0,
             initial_max_streams_uni: 0,
-            ack_delay_exponent: 3,
-            max_ack_delay: 25,
+            ack_delay_exponent: DEFAULT_ACK_DELAY_EXPONENT,
+            max_ack_delay: DEFAULT_MAX_ACK_DELAY,
             disable_active_migration: false,
             active_conn_id_limit: 2,
             initial_source_connection_id: None,
@@ -224,7 +231,71 @@ impl Default for TransportParams {
     }
 }
 
+// The length of the parameter is separate from the varint width. A known
+// integer parameter must contain exactly one varint, even when represented
+// using a non-minimal varint width.
+fn decode_integer(mut value: octets::Octets<'_>) -> Result<u64> {
+    let v = value
+        .get_varint()
+        .map_err(|_| Error::InvalidTransportParam)?;
+    if value.cap() != 0 {
+        return Err(Error::InvalidTransportParam);
+    }
+    Ok(v)
+}
+
 impl TransportParams {
+    fn validate(&self) -> Result<()> {
+        for (value, min, max) in [
+            (self.max_idle_timeout, 0, octets::MAX_VAR_INT),
+            (
+                self.max_udp_payload_size,
+                MIN_UDP_PAYLOAD_SIZE,
+                octets::MAX_VAR_INT,
+            ),
+            (self.initial_max_data, 0, octets::MAX_VAR_INT),
+            (
+                self.initial_max_stream_data_bidi_local,
+                0,
+                octets::MAX_VAR_INT,
+            ),
+            (
+                self.initial_max_stream_data_bidi_remote,
+                0,
+                octets::MAX_VAR_INT,
+            ),
+            (self.initial_max_stream_data_uni, 0, octets::MAX_VAR_INT),
+            (self.initial_max_streams_bidi, 0, MAX_STREAM_COUNT),
+            (self.initial_max_streams_uni, 0, MAX_STREAM_COUNT),
+            (self.ack_delay_exponent, 0, MAX_ACK_DELAY_EXPONENT),
+            (self.max_ack_delay, 0, MAX_ACK_DELAY),
+            (self.active_conn_id_limit, 2, octets::MAX_VAR_INT),
+        ] {
+            if !(min..=max).contains(&value) {
+                return Err(Error::InvalidTransportParam);
+            }
+        }
+        if self
+            .max_datagram_frame_size
+            .is_some_and(|v| v > octets::MAX_VAR_INT)
+        {
+            return Err(Error::InvalidTransportParam);
+        }
+        for cid in [
+            &self.original_destination_connection_id,
+            &self.initial_source_connection_id,
+            &self.retry_source_connection_id,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if cid.len() > MAX_CONN_ID_LEN {
+                return Err(Error::InvalidTransportParam);
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn decode(
         buf: &[u8], is_server: bool, unknown_size: Option<usize>,
     ) -> Result<Self> {
@@ -243,10 +314,9 @@ impl TransportParams {
         while params.cap() > 0 {
             let id = params.get_varint()?;
 
-            if seen_params.contains(&id) {
+            if !seen_params.insert(id) {
                 return Err(Error::InvalidTransportParam);
             }
-            seen_params.insert(id);
 
             let mut val = params.get_bytes_with_varint_length()?;
 
@@ -261,7 +331,7 @@ impl TransportParams {
                 },
 
                 0x0001 => {
-                    tp.max_idle_timeout = val.get_varint()?;
+                    tp.max_idle_timeout = decode_integer(val)?;
                 },
 
                 0x0002 => {
@@ -282,70 +352,45 @@ impl TransportParams {
                 },
 
                 0x0003 => {
-                    tp.max_udp_payload_size = val.get_varint()?;
-
-                    if tp.max_udp_payload_size < 1200 {
-                        return Err(Error::InvalidTransportParam);
-                    }
+                    tp.max_udp_payload_size = decode_integer(val)?;
                 },
 
                 0x0004 => {
-                    tp.initial_max_data = val.get_varint()?;
+                    tp.initial_max_data = decode_integer(val)?;
                 },
 
                 0x0005 => {
-                    tp.initial_max_stream_data_bidi_local = val.get_varint()?;
+                    tp.initial_max_stream_data_bidi_local = decode_integer(val)?;
                 },
 
                 0x0006 => {
-                    tp.initial_max_stream_data_bidi_remote = val.get_varint()?;
+                    tp.initial_max_stream_data_bidi_remote = decode_integer(val)?;
                 },
 
                 0x0007 => {
-                    tp.initial_max_stream_data_uni = val.get_varint()?;
+                    tp.initial_max_stream_data_uni = decode_integer(val)?;
                 },
 
                 0x0008 => {
-                    let max = val.get_varint()?;
-
-                    if max > MAX_STREAM_ID {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.initial_max_streams_bidi = max;
+                    tp.initial_max_streams_bidi = decode_integer(val)?;
                 },
 
                 0x0009 => {
-                    let max = val.get_varint()?;
-
-                    if max > MAX_STREAM_ID {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.initial_max_streams_uni = max;
+                    tp.initial_max_streams_uni = decode_integer(val)?;
                 },
 
                 0x000a => {
-                    let ack_delay_exponent = val.get_varint()?;
-
-                    if ack_delay_exponent > MAX_ACK_DELAY_EXPONENT {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.ack_delay_exponent = ack_delay_exponent;
+                    tp.ack_delay_exponent = decode_integer(val)?;
                 },
 
                 0x000b => {
-                    let max_ack_delay = val.get_varint()?;
-
-                    if max_ack_delay >= 2_u64.pow(14) {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.max_ack_delay = max_ack_delay;
+                    tp.max_ack_delay = decode_integer(val)?;
                 },
 
                 0x000c => {
+                    if val.cap() != 0 {
+                        return Err(Error::InvalidTransportParam);
+                    }
                     tp.disable_active_migration = true;
                 },
 
@@ -354,17 +399,25 @@ impl TransportParams {
                         return Err(Error::InvalidTransportParam);
                     }
 
-                    // TODO: decode preferred_address
+                    // This implementation does not use preferred addresses.
+                    // Still validate their RFC 9000 wire layout (IPv4, IPv6,
+                    // CID length + CID, and a 16-byte stateless reset token).
+                    let bytes = val.buf();
+                    let cid_len = bytes
+                        .get(24)
+                        .copied()
+                        .map(usize::from)
+                        .ok_or(Error::InvalidTransportParam)?;
+                    if cid_len == 0 ||
+                        cid_len > MAX_CONN_ID_LEN ||
+                        bytes.len() != 41 + cid_len
+                    {
+                        return Err(Error::InvalidTransportParam);
+                    }
                 },
 
                 0x000e => {
-                    let limit = val.get_varint()?;
-
-                    if limit < 2 {
-                        return Err(Error::InvalidTransportParam);
-                    }
-
-                    tp.active_conn_id_limit = limit;
+                    tp.active_conn_id_limit = decode_integer(val)?;
                 },
 
                 0x000f => {
@@ -380,7 +433,7 @@ impl TransportParams {
                 },
 
                 0x0020 => {
-                    tp.max_datagram_frame_size = Some(val.get_varint()?);
+                    tp.max_datagram_frame_size = Some(decode_integer(val)?);
                 },
 
                 // Track unknown transport parameters specially.
@@ -396,6 +449,7 @@ impl TransportParams {
             }
         }
 
+        tp.validate()?;
         Ok(tp)
     }
 
@@ -408,126 +462,52 @@ impl TransportParams {
         Ok(())
     }
 
+    fn encode_integer(b: &mut octets::OctetsMut, id: u64, v: u64) -> Result<()> {
+        Self::encode_param(b, id, octets::varint_len(v))?;
+        b.put_varint(v)?;
+        Ok(())
+    }
+
     pub(crate) fn encode<'a>(
         tp: &Self, is_server: bool, out: &'a mut [u8],
     ) -> Result<&'a mut [u8]> {
+        tp.validate()?;
         let mut b = octets::OctetsMut::with_slice(out);
 
         if is_server {
-            if let Some(ref odcid) = tp.original_destination_connection_id {
+            if let Some(odcid) = &tp.original_destination_connection_id {
                 Self::encode_param(&mut b, 0x0000, odcid.len())?;
                 b.put_bytes(odcid)?;
             }
         }
 
         if tp.max_idle_timeout != 0 {
-            assert!(tp.max_idle_timeout <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0001,
-                octets::varint_len(tp.max_idle_timeout),
-            )?;
-            b.put_varint(tp.max_idle_timeout)?;
+            Self::encode_integer(&mut b, 0x0001, tp.max_idle_timeout)?;
         }
 
         if is_server {
-            if let Some(ref token) = tp.stateless_reset_token {
+            if let Some(token) = tp.stateless_reset_token {
                 Self::encode_param(&mut b, 0x0002, 16)?;
                 b.put_bytes(&token.to_be_bytes())?;
             }
         }
 
-        if tp.max_udp_payload_size != 0 {
-            assert!(tp.max_udp_payload_size <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0003,
-                octets::varint_len(tp.max_udp_payload_size),
-            )?;
-            b.put_varint(tp.max_udp_payload_size)?;
+        Self::encode_integer(&mut b, 0x0003, tp.max_udp_payload_size)?;
+        for (id, value) in [
+            (0x0004, tp.initial_max_data),
+            (0x0005, tp.initial_max_stream_data_bidi_local),
+            (0x0006, tp.initial_max_stream_data_bidi_remote),
+            (0x0007, tp.initial_max_stream_data_uni),
+            (0x0008, tp.initial_max_streams_bidi),
+            (0x0009, tp.initial_max_streams_uni),
+        ] {
+            if value != 0 {
+                Self::encode_integer(&mut b, id, value)?;
+            }
         }
-
-        if tp.initial_max_data != 0 {
-            assert!(tp.initial_max_data <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0004,
-                octets::varint_len(tp.initial_max_data),
-            )?;
-            b.put_varint(tp.initial_max_data)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_local != 0 {
-            assert!(tp.initial_max_stream_data_bidi_local <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0005,
-                octets::varint_len(tp.initial_max_stream_data_bidi_local),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_bidi_local)?;
-        }
-
-        if tp.initial_max_stream_data_bidi_remote != 0 {
-            assert!(
-                tp.initial_max_stream_data_bidi_remote <= octets::MAX_VAR_INT
-            );
-            Self::encode_param(
-                &mut b,
-                0x0006,
-                octets::varint_len(tp.initial_max_stream_data_bidi_remote),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_bidi_remote)?;
-        }
-
-        if tp.initial_max_stream_data_uni != 0 {
-            assert!(tp.initial_max_stream_data_uni <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0007,
-                octets::varint_len(tp.initial_max_stream_data_uni),
-            )?;
-            b.put_varint(tp.initial_max_stream_data_uni)?;
-        }
-
-        if tp.initial_max_streams_bidi != 0 {
-            assert!(tp.initial_max_streams_bidi <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0008,
-                octets::varint_len(tp.initial_max_streams_bidi),
-            )?;
-            b.put_varint(tp.initial_max_streams_bidi)?;
-        }
-
-        if tp.initial_max_streams_uni != 0 {
-            assert!(tp.initial_max_streams_uni <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0009,
-                octets::varint_len(tp.initial_max_streams_uni),
-            )?;
-            b.put_varint(tp.initial_max_streams_uni)?;
-        }
-
-        if tp.ack_delay_exponent != 0 {
-            assert!(tp.ack_delay_exponent <= MAX_ACK_DELAY_EXPONENT);
-            Self::encode_param(
-                &mut b,
-                0x000a,
-                octets::varint_len(tp.ack_delay_exponent),
-            )?;
-            b.put_varint(tp.ack_delay_exponent)?;
-        }
-
-        if tp.max_ack_delay != 0 {
-            assert!(tp.max_ack_delay <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x000b,
-                octets::varint_len(tp.max_ack_delay),
-            )?;
-            b.put_varint(tp.max_ack_delay)?;
-        }
+        // Explicit zero differs from the peer's default of 3 or 25.
+        Self::encode_integer(&mut b, 0x000a, tp.ack_delay_exponent)?;
+        Self::encode_integer(&mut b, 0x000b, tp.max_ack_delay)?;
 
         if tp.disable_active_migration {
             Self::encode_param(&mut b, 0x000c, 0)?;
@@ -536,13 +516,7 @@ impl TransportParams {
         // TODO: encode preferred_address
 
         if tp.active_conn_id_limit != 2 {
-            assert!(tp.active_conn_id_limit <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x000e,
-                octets::varint_len(tp.active_conn_id_limit),
-            )?;
-            b.put_varint(tp.active_conn_id_limit)?;
+            Self::encode_integer(&mut b, 0x000e, tp.active_conn_id_limit)?;
         }
 
         if let Some(scid) = &tp.initial_source_connection_id {
@@ -558,13 +532,7 @@ impl TransportParams {
         }
 
         if let Some(max_datagram_frame_size) = tp.max_datagram_frame_size {
-            assert!(max_datagram_frame_size <= octets::MAX_VAR_INT);
-            Self::encode_param(
-                &mut b,
-                0x0020,
-                octets::varint_len(max_datagram_frame_size),
-            )?;
-            b.put_varint(max_datagram_frame_size)?;
+            Self::encode_integer(&mut b, 0x0020, max_datagram_frame_size)?;
         }
 
         let out_len = b.off();

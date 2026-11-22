@@ -453,8 +453,8 @@ const MAX_AMPLIFICATION_FACTOR: usize = 3;
 // This represents more or less how many ack blocks can fit in a typical packet.
 const MAX_ACK_RANGES: usize = 68;
 
-// The highest possible stream ID allowed.
-const MAX_STREAM_ID: u64 = 1 << 60;
+// The maximum stream count per stream type (the ID uses two type bits).
+const MAX_STREAM_COUNT: u64 = 1 << 60;
 
 // The default max_datagram_size used in congestion control.
 const MAX_SEND_UDP_PAYLOAD_SIZE: usize = 1200;
@@ -979,12 +979,13 @@ impl Config {
             cmp::min(v, octets::MAX_VAR_INT);
     }
 
-    /// Sets the `max_udp_payload_size transport` parameter.
+    /// Sets the `max_udp_payload_size` transport parameter.
     ///
+    /// Values below 1200 are raised to the QUIC minimum.
     /// The default value is `65527`.
     pub fn set_max_recv_udp_payload_size(&mut self, v: usize) {
-        self.local_transport_params.max_udp_payload_size =
-            cmp::min(v as u64, octets::MAX_VAR_INT);
+        self.local_transport_params.max_udp_payload_size = (v as u64)
+            .clamp(transport_params::MIN_UDP_PAYLOAD_SIZE, octets::MAX_VAR_INT);
     }
 
     /// Sets the maximum outgoing UDP payload size.
@@ -1085,7 +1086,7 @@ impl Config {
     /// The default value is `0`.
     pub fn set_initial_max_streams_bidi(&mut self, v: u64) {
         self.local_transport_params.initial_max_streams_bidi =
-            cmp::min(v, octets::MAX_VAR_INT);
+            cmp::min(v, MAX_STREAM_COUNT);
     }
 
     /// Sets the `initial_max_streams_uni` transport parameter.
@@ -1105,7 +1106,7 @@ impl Config {
     /// The default value is `0`.
     pub fn set_initial_max_streams_uni(&mut self, v: u64) {
         self.local_transport_params.initial_max_streams_uni =
-            cmp::min(v, octets::MAX_VAR_INT);
+            cmp::min(v, MAX_STREAM_COUNT);
     }
 
     /// Sets the `ack_delay_exponent` transport parameter.
@@ -1122,10 +1123,11 @@ impl Config {
 
     /// Sets the `max_ack_delay` transport parameter.
     ///
+    /// Values above 16383 milliseconds are clamped to that protocol maximum.
     /// The default value is `25`.
     pub fn set_max_ack_delay(&mut self, v: u64) {
         self.local_transport_params.max_ack_delay =
-            cmp::min(v, octets::MAX_VAR_INT);
+            cmp::min(v, transport_params::MAX_ACK_DELAY);
     }
 
     /// Sets the `active_connection_id_limit` transport parameter.
@@ -2924,7 +2926,8 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
-        ex_data.local_transport_params.max_idle_timeout = v;
+        ex_data.local_transport_params.max_idle_timeout =
+            cmp::min(v, octets::MAX_VAR_INT);
 
         Self::set_transport_parameters_in_hanshake(
             ex_data.local_transport_params.clone(),
@@ -2955,7 +2958,8 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
-        ex_data.local_transport_params.initial_max_streams_bidi = v;
+        ex_data.local_transport_params.initial_max_streams_bidi =
+            cmp::min(v, MAX_STREAM_COUNT);
 
         Self::set_transport_parameters_in_hanshake(
             ex_data.local_transport_params.clone(),
@@ -4082,7 +4086,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         if let Some(idle_timeout) = self.idle_timeout() {
-            self.idle_timer = Some(now + idle_timeout);
+            self.idle_timer = now.checked_add(idle_timeout);
         }
 
         // Update send capacity.
@@ -5948,7 +5952,7 @@ impl<F: BufFactory> Connection<F> {
         // packet since last receiving a packet.
         if ack_eliciting && !self.ack_eliciting_sent {
             if let Some(idle_timeout) = self.idle_timeout() {
-                self.idle_timer = Some(now + idle_timeout);
+                self.idle_timer = now.checked_add(idle_timeout);
             }
         }
 
@@ -9334,7 +9338,7 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::MaxStreamsBidi { max } => {
-                if max > MAX_STREAM_ID {
+                if max > MAX_STREAM_COUNT {
                     return Err(Error::InvalidFrame);
                 }
 
@@ -9342,7 +9346,7 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::MaxStreamsUni { max } => {
-                if max > MAX_STREAM_ID {
+                if max > MAX_STREAM_COUNT {
                     return Err(Error::InvalidFrame);
                 }
 
@@ -9360,7 +9364,7 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::StreamsBlockedBidi { limit } => {
-                if limit > MAX_STREAM_ID {
+                if limit > MAX_STREAM_COUNT {
                     return Err(Error::InvalidFrame);
                 }
 
@@ -9369,7 +9373,7 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::StreamsBlockedUni { limit } => {
-                if limit > MAX_STREAM_ID {
+                if limit > MAX_STREAM_COUNT {
                     return Err(Error::InvalidFrame);
                 }
 
@@ -9588,7 +9592,7 @@ impl<F: BufFactory> Connection<F> {
         };
 
         let idle_timeout = Duration::from_millis(idle_timeout);
-        let idle_timeout = cmp::max(idle_timeout, 3 * path_pto);
+        let idle_timeout = cmp::max(idle_timeout, path_pto.saturating_mul(3));
 
         Some(idle_timeout)
     }
