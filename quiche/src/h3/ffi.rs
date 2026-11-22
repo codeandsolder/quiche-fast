@@ -276,26 +276,41 @@ pub struct Header {
     value_len: usize,
 }
 
+// The header-sending C entry points all validate the same two connection
+// pointers and borrowed header array before invoking their Rust operation.
+fn header_operation<T>(
+    conn: *mut h3::Connection, quic_conn: *mut Connection,
+    headers: *const Header, headers_len: size_t,
+    op: impl FnOnce(
+        &mut h3::Connection,
+        &mut Connection,
+        &[h3::HeaderRef<'_>],
+    ) -> h3::Result<T>,
+) -> std::result::Result<T, i16> {
+    let conn = ffi_mut!(conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
+    // SAFETY: the C entry points require the header array and its fields
+    // to remain readable for this call; no borrow escapes the operation.
+    let headers = unsafe { headers_from_ptr(headers, headers_len) }
+        .map_err(|()| H3_FFI_ERR_INVALID_ARGUMENT)?;
+    op(conn, quic_conn, &headers).map_err(|e| e.to_c())
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_h3_send_request(
     conn: *mut h3::Connection, quic_conn: *mut Connection,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> i64 {
-    let conn = ffi_mut!(conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    // SAFETY: the C caller supplies the readable headers for this call.
-    let Ok(req_headers) = (unsafe { headers_from_ptr(headers, headers_len) })
-    else {
-        return i64::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_request(quic_conn, &req_headers, fin) {
-        Ok(v) =>
-            i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT)),
-
-        Err(e) => i64::from(e.to_c()),
-    }
+    header_operation(
+        conn,
+        quic_conn,
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| conn.send_request(quic_conn, headers, fin),
+    )
+    .map_or_else(i64::from, |v| {
+        i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
+    })
 }
 
 #[no_mangle]
@@ -303,20 +318,16 @@ pub extern "C" fn quiche_h3_send_response(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    // SAFETY: the C caller supplies the readable headers for this call.
-    let Ok(resp_headers) = (unsafe { headers_from_ptr(headers, headers_len) })
-    else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_response(quic_conn, stream_id, &resp_headers, fin) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    header_operation(
+        conn,
+        quic_conn,
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_response(quic_conn, stream_id, headers, fin)
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
@@ -325,27 +336,19 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
     headers: *const Header, headers_len: size_t, priority: *const Priority,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
     let priority = ffi_ref!(priority, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    // SAFETY: the C caller supplies the readable headers for this call.
-    let Ok(resp_headers) = (unsafe { headers_from_ptr(headers, headers_len) })
-    else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_response_with_priority(
+    header_operation(
+        conn,
         quic_conn,
-        stream_id,
-        &resp_headers,
-        priority,
-        fin,
-    ) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_response_with_priority(
+                quic_conn, stream_id, headers, priority, fin,
+            )
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
@@ -354,25 +357,22 @@ pub extern "C" fn quiche_h3_send_additional_headers(
     headers: *const Header, headers_len: size_t, is_trailer_section: bool,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
-
-    // SAFETY: the C caller supplies the readable headers for this call.
-    let Ok(headers) = (unsafe { headers_from_ptr(headers, headers_len) }) else {
-        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match conn.send_additional_headers(
+    header_operation(
+        conn,
         quic_conn,
-        stream_id,
-        &headers,
-        is_trailer_section,
-        fin,
-    ) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+        headers,
+        headers_len,
+        |conn, quic_conn, headers| {
+            conn.send_additional_headers(
+                quic_conn,
+                stream_id,
+                headers,
+                is_trailer_section,
+                fin,
+            )
+        },
+    )
+    .map_or_else(c_int::from, |()| 0)
 }
 
 #[no_mangle]
