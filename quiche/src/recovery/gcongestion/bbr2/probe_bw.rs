@@ -547,9 +547,12 @@ impl ProbeBW {
 
         let mut rounds = params.probe_bw_probe_max_rounds;
         if params.probe_bw_probe_reno_gain > 0.0 {
-            let reno_rounds = (params.probe_bw_probe_reno_gain *
-                target_bytes_inflight as f32 /
-                DEFAULT_MSS as f32) as usize;
+            let reno_rounds = usize::try_from(crate::scale::scale_gain_div_u64(
+                u64::try_from(target_bytes_inflight).unwrap_or(u64::MAX),
+                f64::from(params.probe_bw_probe_reno_gain),
+                DEFAULT_MSS as u64,
+            ))
+            .unwrap_or(usize::MAX);
             rounds = reno_rounds.min(rounds);
         }
 

@@ -54,18 +54,7 @@ pub(crate) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
         return u64::MAX;
     }
 
-    const FRACTION_BITS: u32 = 52;
-    const EXPONENT_BIAS: u64 = 1023;
-    const SIGNIFICAND_BIT: u64 = 1 << FRACTION_BITS;
-    let exponent = (bits >> FRACTION_BITS) & 0x7ff;
-    let fraction = bits & (SIGNIFICAND_BIT - 1);
-    let (significand, exponent) = if exponent == 0 {
-        (fraction, 1) // subnormals have no implicit leading bit
-    } else {
-        (fraction | SIGNIFICAND_BIT, exponent)
-    };
-    let product = u128::from(value) * u128::from(significand);
-    let bias = EXPONENT_BIAS + u64::from(FRACTION_BITS);
+    let (product, exponent, bias) = gain_product(value, gain);
 
     if exponent >= bias {
         let shift = exponent - bias;
@@ -91,6 +80,65 @@ pub(crate) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
         Rounding::Nearest => remainder >= (1_u128 << (shift - 1)),
     };
     u64::try_from(quotient + u128::from(increment)).unwrap_or(u64::MAX)
+}
+
+/// Exact significand product and binary exponent for a positive finite gain.
+#[inline]
+fn gain_product(value: u64, gain: f64) -> (u128, u64, u64) {
+    let bits = gain.to_bits();
+    const FRACTION_BITS: u32 = 52;
+    const EXPONENT_BIAS: u64 = 1023;
+    const SIGNIFICAND_BIT: u64 = 1 << FRACTION_BITS;
+    let exponent = (bits >> FRACTION_BITS) & 0x7ff;
+    let fraction = bits & (SIGNIFICAND_BIT - 1);
+    let (significand, exponent) = if exponent == 0 {
+        (fraction, 1) // subnormals have no implicit leading bit
+    } else {
+        (fraction | SIGNIFICAND_BIT, exponent)
+    };
+    let product = u128::from(value) * u128::from(significand);
+    let bias = EXPONENT_BIAS + u64::from(FRACTION_BITS);
+
+    (product, exponent, bias)
+}
+
+/// Floor an integer times a binary64 gain divided by an integer, saturating
+/// only the final quotient. This avoids both a rounded floating-point divisor
+/// and premature saturation of an intermediate product.
+#[inline]
+pub(crate) fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
+    if divisor == 0 || value == 0 || gain.is_nan() || gain <= 0.0 {
+        return 0;
+    }
+    if divisor == 1 {
+        return scale_u64(value, gain, Rounding::Down);
+    }
+    if gain.to_bits() == 1.0_f64.to_bits() {
+        return value / divisor;
+    }
+    if gain.is_infinite() {
+        return u64::MAX;
+    }
+
+    let (product, exponent, bias) = gain_product(value, gain);
+    let numerator = if exponent >= bias {
+        let shift = exponent - bias;
+        // If this positive product exceeds u128, division by any u64
+        // divisor still produces a value greater than u64::MAX.
+        if shift > u64::from(product.leading_zeros()) {
+            return u64::MAX;
+        }
+        product << shift
+    } else {
+        let shift = bias - exponent;
+        if shift >= u64::from(u128::BITS) {
+            return 0;
+        }
+        // floor(floor(x) / d) == floor(x / d) for integer positive d.
+        product >> shift
+    };
+
+    u64::try_from(numerator / u128::from(divisor)).unwrap_or(u64::MAX)
 }
 
 #[inline]
@@ -136,11 +184,40 @@ pub(crate) fn scale_ratio_usize(
 
 #[cfg(test)]
 mod tests {
+    use super::scale_gain_div_u64;
     use super::scale_ratio_u64;
     use super::scale_ratio_usize;
     use super::scale_u64;
     use super::scale_usize;
     use super::Rounding;
+
+    #[test]
+    fn gain_division_rounds_once_and_saturates_only_after_division() {
+        for value in [0, 1, 1299, 1300, 1301, (1 << 53) + 1, u64::MAX] {
+            for divisor in [1, 2, 1300, u64::MAX] {
+                for (gain, num, den) in [
+                    (0.25, 1, 4),
+                    (0.5, 1, 2),
+                    (1.0, 1, 1),
+                    (1.5, 3, 2),
+                    (8.0, 8, 1),
+                ] {
+                    let exact =
+                        u128::from(value) * num / (u128::from(divisor) * den);
+                    assert_eq!(
+                        scale_gain_div_u64(value, gain, divisor),
+                        u64::try_from(exact).unwrap_or(u64::MAX)
+                    );
+                }
+            }
+        }
+        assert_eq!(scale_gain_div_u64(u64::MAX, 2.0, 2), u64::MAX);
+        assert_eq!(scale_gain_div_u64(u64::MAX, 2.0, 4), u64::MAX / 2);
+        assert_eq!(scale_gain_div_u64(1, f64::MAX, u64::MAX), u64::MAX);
+        assert_eq!(scale_gain_div_u64(u64::MAX, f64::from_bits(1), 2), 0);
+        assert_eq!(scale_gain_div_u64(123, 1.0, 0), 0);
+        assert_eq!(scale_gain_div_u64(0, f64::INFINITY, 2), 0);
+    }
 
     #[test]
     fn rational_scaling_preserves_integer_loss_and_rounding() {

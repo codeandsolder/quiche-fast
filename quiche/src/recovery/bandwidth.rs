@@ -98,30 +98,29 @@ impl Bandwidth {
     /// Reduce a measured bandwidth in proportion to the bytes lost from
     /// the corresponding flight or congestion window.
     pub fn reduce_by_loss(self, total_bytes: usize, lost_bytes: usize) -> Self {
-        let total = u64::try_from(total_bytes).unwrap_or(u64::MAX);
-        let remaining = u64::try_from(total_bytes.saturating_sub(lost_bytes))
-            .unwrap_or(u64::MAX);
+        self.scale_ratio(total_bytes.saturating_sub(lost_bytes), total_bytes)
+    }
+
+    /// Scale the rate by a rational ratio, rounded to the nearest bit/s.
+    pub fn scale_ratio(self, numerator: usize, denominator: usize) -> Self {
         Self {
             bits_per_second: crate::scale::scale_ratio_u64(
                 self.bits_per_second,
-                remaining,
-                total,
+                u64::try_from(numerator).unwrap_or(u64::MAX),
+                u64::try_from(denominator).unwrap_or(u64::MAX),
                 crate::scale::Rounding::Nearest,
             ),
         }
     }
 
-    pub const fn from_bytes_and_time_delta(
-        bytes: u64, time_delta: Duration,
-    ) -> Self {
+    pub fn from_bytes_and_time_delta(bytes: u64, time_delta: Duration) -> Self {
         if bytes == 0 {
             return Self { bits_per_second: 0 };
         }
 
         let nanos = time_delta.as_nanos();
         let nanos = if nanos == 0 { 1 } else { nanos };
-        let num_nano_bits =
-            (bytes as u128).saturating_mul((8 * NUM_NANOS_PER_SECOND) as u128);
+        let num_nano_bits = u128::from(bytes) * BITS_NANOS_PER_BYTE_U128;
 
         if num_nano_bits < nanos {
             return Self { bits_per_second: 1 };
@@ -130,11 +129,7 @@ impl Bandwidth {
         let bits_per_second = num_nano_bits / nanos;
 
         Self {
-            bits_per_second: if bits_per_second > u64::MAX as u128 {
-                u64::MAX
-            } else {
-                bits_per_second as u64
-            },
+            bits_per_second: u64::try_from(bits_per_second).unwrap_or(u64::MAX),
         }
     }
 
@@ -202,7 +197,7 @@ impl Bandwidth {
         // Slow path: exact u128 intermediate, then saturate.
         let nanos =
             u128::from(bytes) * BITS_NANOS_PER_BYTE_U128 / u128::from(bps);
-        Duration::from_nanos(nanos.min(U64_MAX_U128) as u64)
+        Duration::from_nanos(u64::try_from(nanos).unwrap_or(u64::MAX))
     }
 
     /// Returns the number of bytes that can be sent in `time_period`.
@@ -210,7 +205,7 @@ impl Bandwidth {
     /// Returns `u64::MAX` for infinite bandwidth and non-zero duration.
     /// Saturates to `u64::MAX` on overflow.
     #[inline]
-    pub const fn to_bytes_per_period(self, time_period: Duration) -> u64 {
+    pub fn to_bytes_per_period(self, time_period: Duration) -> u64 {
         let bps = self.bits_per_second;
         let nanos = time_period.as_nanos();
 
@@ -223,9 +218,7 @@ impl Bandwidth {
         }
 
         // Fast path: exact u64 calculation.
-        if nanos <= u64::MAX as u128 {
-            let nanos_u64 = nanos as u64;
-
+        if let Ok(nanos_u64) = u64::try_from(nanos) {
             if bps <= u64::MAX / nanos_u64 {
                 return bps * nanos_u64 / BITS_NANOS_PER_BYTE;
             }
@@ -236,17 +229,16 @@ impl Bandwidth {
         //
         // floor((bps * nanos) / BITS_NANOS_PER_BYTE) > u64::MAX
         // iff bps * nanos >= (u64::MAX + 1) * BITS_NANOS_PER_BYTE
-        let saturation_threshold =
-            ((u64::MAX as u128) + 1) * BITS_NANOS_PER_BYTE_U128;
+        let saturation_threshold = (U64_MAX_U128 + 1) * BITS_NANOS_PER_BYTE_U128;
 
-        if (bps as u128) > (saturation_threshold - 1) / nanos {
+        if u128::from(bps) > (saturation_threshold - 1) / nanos {
             return u64::MAX;
         }
 
         // Slow path: exact u128 arithmetic once the fast-path bounds no longer
         // hold but the final result still fits in u64.
-        let bytes = (bps as u128) * nanos / BITS_NANOS_PER_BYTE_U128;
-        bytes as u64
+        let bytes = u128::from(bps) * nanos / BITS_NANOS_PER_BYTE_U128;
+        u64::try_from(bytes).unwrap_or(u64::MAX)
     }
 }
 
