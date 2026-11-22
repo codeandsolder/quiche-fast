@@ -227,7 +227,7 @@ fn decode_cid(value: octets::Octets<'_>) -> Result<ConnectionId<'static>> {
     if value.cap() > MAX_CONN_ID_LEN {
         return Err(Error::InvalidTransportParam);
     }
-    Ok(value.to_vec().into())
+    Ok(ConnectionId::copy_from_slice(value.as_ref()))
 }
 
 /// Validate the preferred-address layout even though migration to a

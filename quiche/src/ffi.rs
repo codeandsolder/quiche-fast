@@ -1673,10 +1673,7 @@ pub extern "C" fn quiche_conn_source_ids(
 ) -> *mut ConnectionIdIter {
     let conn = ffi_ref!(conn, ptr::null_mut());
 
-    let cids = conn
-        .source_ids()
-        .map(|cid| cid.clone().into_owned())
-        .collect();
+    let cids = conn.source_ids().cloned().collect();
     Box::into_raw(Box::new(ConnectionIdIter { cids, index: 0 }))
 }
 
@@ -3810,6 +3807,36 @@ mod tests {
     }
 
     #[test]
+    fn connection_id_outputs_borrow_live_storage_and_iterators_own_snapshots() {
+        let pipe = test_utils::Pipe::new("cubic").unwrap();
+        let conn = &pipe.client;
+        let mut ptr = ptr::null();
+        let mut len = 0;
+        for (get_id, expected) in [
+            (
+                quiche_conn_source_id as extern "C" fn(_, _, _),
+                conn.source_id(),
+            ),
+            (quiche_conn_destination_id, conn.destination_id()),
+        ] {
+            get_id(conn, &mut ptr, &mut len);
+            assert_eq!(ptr, expected.as_ptr());
+            assert_eq!(len, expected.len());
+        }
+
+        let expected = conn.source_id().clone();
+        let iter = quiche_conn_source_ids(conn);
+        assert!(!iter.is_null());
+        drop(pipe);
+        assert!(quiche_connection_id_iter_next(iter, &mut ptr, &mut len));
+        // SAFETY: the live iterator owns the returned CID storage.
+        let bytes = unsafe { slice::from_raw_parts(ptr, len) };
+        assert_eq!(bytes, expected.as_ref());
+        assert!(!quiche_connection_id_iter_next(iter, &mut ptr, &mut len));
+        quiche_connection_id_iter_free(iter);
+    }
+
+    #[test]
     fn connection_id_iter_next() {
         let cids = vec![
             ConnectionId::from_vec(vec![1, 2, 3, 4]),
@@ -3867,7 +3894,7 @@ mod tests {
         let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
         assert_eq!(pipe.handshake(), Ok(()));
 
-        let scid = pipe.client.source_id().into_owned();
+        let scid = pipe.client.source_id().clone();
 
         let (scid_1, reset_token_1) = test_utils::create_cid_and_reset_token(16);
         assert_eq!(pipe.client.new_scid(&scid_1, reset_token_1, false), Ok(1));

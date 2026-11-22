@@ -199,7 +199,7 @@ pub enum Frame {
     NewConnectionId {
         seq_num: u64,
         retire_prior_to: u64,
-        conn_id: Vec<u8>,
+        conn_id: packet::ConnectionId<'static>,
         reset_token: [u8; 16],
     },
 
@@ -373,7 +373,9 @@ impl Frame {
                 Self::NewConnectionId {
                     seq_num,
                     retire_prior_to,
-                    conn_id: b.get_bytes(conn_id_len as usize)?.to_vec(),
+                    conn_id: packet::ConnectionId::copy_from_slice(
+                        b.get_bytes(usize::from(conn_id_len))?.as_ref(),
+                    ),
                     reset_token: b
                         .get_bytes(16)?
                         .buf()
@@ -1377,7 +1379,7 @@ mod tests {
                 Frame::NewConnectionId {
                     seq_num: 1,
                     retire_prior_to: 0,
-                    conn_id: vec![],
+                    conn_id: packet::ConnectionId::default(),
                     reset_token: [0; 16],
                 },
                 Error::InvalidFrame,
@@ -1386,7 +1388,7 @@ mod tests {
                 Frame::NewConnectionId {
                     seq_num: 1,
                     retire_prior_to: 0,
-                    conn_id: vec![0; 256],
+                    conn_id: packet::ConnectionId::copy_from_slice(&[0; 256]),
                     reset_token: [0; 16],
                 },
                 Error::InvalidFrame,
@@ -1706,7 +1708,9 @@ mod tests {
         let frame = Frame::NewConnectionId {
             seq_num: 123_213,
             retire_prior_to: 122_211,
-            conn_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+            conn_id: packet::ConnectionId::copy_from_slice(&[
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+            ]),
             reset_token: [0x42; 16],
         };
 

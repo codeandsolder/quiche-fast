@@ -81,7 +81,7 @@ impl ConnectionState {
         &mut self, scid: &ConnectionId<'static>,
     ) -> Option<PendingConnection> {
         match mem::replace(self, Self::Returned) {
-            Self::Pending(pending) if *scid == pending.conn.source_id() =>
+            Self::Pending(pending) if scid == pending.conn.source_id() =>
                 Some(pending),
             state => {
                 *self = state;
@@ -123,7 +123,7 @@ where
 
         let timeout_key = conn.timeout_instant().map(|instant| {
             self.timeout_queue
-                .insert_at(conn.source_id().into_owned(), instant.into())
+                .insert_at(conn.source_id().clone(), instant.into())
         });
 
         self.connection = ConnectionState::Pending(PendingConnection {
@@ -266,7 +266,7 @@ where
 fn simple_conn_send<Tx: DatagramSocketSend + Send + Sync + 'static>(
     socket_tx: &MaybeConnectedSocket<Arc<Tx>>, conn: &mut QuicheConnection,
 ) -> io::Result<()> {
-    let scid = conn.source_id().into_owned();
+    let scid = conn.source_id().clone();
     log::debug!("sending client Initials to peer"; "scid" => ?scid);
 
     loop {

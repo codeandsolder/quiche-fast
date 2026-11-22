@@ -358,7 +358,7 @@ where
             return;
         };
 
-        let current_cid = qconn.source_id().into_owned();
+        let current_cid = qconn.source_id().clone();
         for _ in 0..qconn.scids_left() {
             // We don't emit stateless resets, so any unguessable value is fine
             let reset_token = random_u128();

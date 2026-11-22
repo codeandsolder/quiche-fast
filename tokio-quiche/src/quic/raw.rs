@@ -103,7 +103,7 @@ where
     let (shutdown_tx, worker_shutdown_rx) = mpsc::channel(1);
     let (conn_map_cmd_tx, conn_map_rx) = mpsc::unbounded_channel();
 
-    let scid = quiche_conn.source_id().into_owned();
+    let scid = quiche_conn.source_id().clone();
 
     let writer_cfg = WriterConfig {
         pending_cid: None, // only used for unmapping in IPR

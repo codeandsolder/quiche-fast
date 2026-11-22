@@ -338,7 +338,7 @@ where
             );
         };
 
-        let scid = conn.source_id().into_owned();
+        let scid = conn.source_id().clone();
         let writer_cfg = WriterConfig {
             peer_addr,
             local_addr,

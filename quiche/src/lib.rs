@@ -2151,7 +2151,7 @@ impl<F: BufFactory> Connection<F> {
         if let Some(client_dcid) = client_dcid {
             // The Minimum length is 8.
             // See https://datatracker.ietf.org/doc/html/rfc9000#section-7.2-3
-            if client_dcid.to_vec().len() < 8 {
+            if client_dcid.len() < 8 {
                 return Err(Error::InvalidDcidInitialization);
             }
         }
@@ -2162,8 +2162,7 @@ impl<F: BufFactory> Connection<F> {
 
         let max_rx_data = config.local_transport_params.initial_max_data;
 
-        let scid_as_hex: Vec<String> =
-            scid.iter().map(|b| format!("{b:02x}")).collect();
+        let trace_id = format!("{scid:?}");
 
         let reset_token = if is_server {
             config.local_transport_params.stateless_reset_token
@@ -2209,7 +2208,7 @@ impl<F: BufFactory> Connection<F> {
 
             ids,
 
-            trace_id: scid_as_hex.join(""),
+            trace_id,
 
             pkt_num_spaces: [
                 packet::PktNumSpace::new(),
@@ -2375,16 +2374,20 @@ impl<F: BufFactory> Connection<F> {
         if let Some(retry_cids) = retry_cids {
             conn.local_transport_params
                 .original_destination_connection_id =
-                Some(retry_cids.original_destination_cid.to_vec().into());
+                Some(ConnectionId::copy_from_slice(
+                    retry_cids.original_destination_cid.as_ref(),
+                ));
 
             conn.local_transport_params.retry_source_connection_id =
-                Some(retry_cids.retry_source_cid.to_vec().into());
+                Some(ConnectionId::copy_from_slice(
+                    retry_cids.retry_source_cid.as_ref(),
+                ));
 
             conn.did_retry = true;
         }
 
         conn.local_transport_params.initial_source_connection_id =
-            Some(conn.ids.get_scid(0)?.cid.to_vec().into());
+            Some(conn.ids.get_scid(0)?.cid.clone());
 
         conn.handshake.init(is_server)?;
 
@@ -3309,11 +3312,11 @@ impl<F: BufFactory> Connection<F> {
                 return Err(Error::Done);
             }
 
-            if hdr.dcid != self.source_id() {
+            if &hdr.dcid != self.source_id() {
                 return Err(Error::Done);
             }
 
-            if hdr.scid != self.destination_id() {
+            if &hdr.scid != self.destination_id() {
                 return Err(Error::Done);
             }
 
@@ -3359,7 +3362,7 @@ impl<F: BufFactory> Connection<F> {
 
             // Derive Initial secrets based on the new version.
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
-                &self.destination_id(),
+                self.destination_id(),
                 self.version,
                 self.is_server,
                 true,
@@ -3397,7 +3400,7 @@ impl<F: BufFactory> Connection<F> {
             // Check if Retry packet is valid.
             if packet::verify_retry_integrity(
                 &b,
-                &self.destination_id(),
+                self.destination_id(),
                 self.version,
             )
             .is_err()
@@ -3411,7 +3414,7 @@ impl<F: BufFactory> Connection<F> {
             self.did_retry = true;
 
             // Remember peer's new connection ID.
-            self.odcid = Some(self.destination_id().into_owned());
+            self.odcid = Some(self.destination_id().clone());
 
             self.set_initial_dcid(
                 hdr.scid.clone(),
@@ -3419,7 +3422,7 @@ impl<F: BufFactory> Connection<F> {
                 self.paths.get_active_path_id()?,
             )?;
 
-            self.rscid = Some(self.destination_id().into_owned());
+            self.rscid = Some(self.destination_id().clone());
 
             // Derive Initial secrets using the new connection ID.
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
@@ -3722,7 +3725,7 @@ impl<F: BufFactory> Connection<F> {
 
         if !self.is_server && !self.got_peer_conn_id {
             if self.odcid.is_none() {
-                self.odcid = Some(self.destination_id().into_owned());
+                self.odcid = Some(self.destination_id().clone());
             }
 
             // Replace the randomly generated destination connection ID with
@@ -3742,7 +3745,7 @@ impl<F: BufFactory> Connection<F> {
             if !self.did_retry {
                 self.local_transport_params
                     .original_destination_connection_id =
-                    Some(hdr.dcid.to_vec().into());
+                    Some(ConnectionId::copy_from_slice(hdr.dcid.as_ref()));
 
                 self.encode_transport_params()?;
             }
@@ -7825,7 +7828,7 @@ impl<F: BufFactory> Connection<F> {
         &mut self, scid: &ConnectionId, reset_token: u128, retire_if_needed: bool,
     ) -> Result<u64> {
         self.ids.new_scid(
-            scid.to_vec().into(),
+            ConnectionId::copy_from_slice(scid.as_ref()),
             Some(reset_token),
             true,
             None,
@@ -8164,7 +8167,7 @@ impl<F: BufFactory> Connection<F> {
     /// lifetime.
     #[inline]
     #[must_use = "the returned identifier identifies the local connection"]
-    pub fn source_id(&self) -> ConnectionId<'_> {
+    pub fn source_id(&self) -> &ConnectionId<'static> {
         let sequence = self
             .paths
             .get_active()
@@ -8179,7 +8182,7 @@ impl<F: BufFactory> Connection<F> {
     /// An iterator is returned for all active IDs (i.e. ones that have not
     /// been explicitly retired yet).
     #[inline]
-    pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId<'_>> {
+    pub fn source_ids(&self) -> impl Iterator<Item = &ConnectionId<'static>> {
         self.ids.scids_iter()
     }
 
@@ -8189,7 +8192,7 @@ impl<F: BufFactory> Connection<F> {
     /// lifetime.
     #[inline]
     #[must_use = "the returned identifier identifies the peer connection"]
-    pub fn destination_id(&self) -> ConnectionId<'_> {
+    pub fn destination_id(&self) -> &ConnectionId<'static> {
         let sequence = self
             .paths
             .get_active()
@@ -8489,7 +8492,7 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         // Validate initial_source_connection_id.
         match &peer_params.initial_source_connection_id {
-            Some(v) if v != &self.destination_id() =>
+            Some(v) if v != self.destination_id() =>
                 return Err(Error::InvalidTransportParam),
 
             Some(_) => (),
@@ -9386,7 +9389,7 @@ impl<F: BufFactory> Connection<F> {
                 // Retire pending path IDs before propagating the error code to
                 // make sure retired connection IDs are not in use anymore.
                 let new_dcid_res = self.ids.new_dcid(
-                    conn_id.into(),
+                    conn_id,
                     seq_num,
                     u128::from_be_bytes(reset_token),
                     retire_prior_to,
