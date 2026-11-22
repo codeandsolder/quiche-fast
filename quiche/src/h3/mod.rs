@@ -1028,9 +1028,6 @@ pub struct Connection {
     control_stream_id: Option<u64>,
     peer_control_stream_id: Option<u64>,
 
-    qpack_encoder: qpack::Encoder,
-    qpack_decoder: qpack::Decoder,
-
     local_qpack_streams: QpackStreams,
     peer_qpack_streams: QpackStreams,
 
@@ -1086,9 +1083,6 @@ impl Connection {
 
             control_stream_id: None,
             peer_control_stream_id: None,
-
-            qpack_encoder: qpack::Encoder::new(),
-            qpack_decoder: qpack::Decoder::new(),
 
             local_qpack_streams: Default::default(),
             peer_qpack_streams: Default::default(),
@@ -1513,24 +1507,6 @@ impl Connection {
         Ok(())
     }
 
-    fn encode_header_block<T: NameValue>(
-        &mut self, headers: &[T],
-    ) -> Result<Vec<u8>> {
-        let headers_len = headers
-            .iter()
-            .fold(0, |acc, h| acc + h.value().len() + h.name().len() + 32);
-
-        let mut header_block = vec![0; headers_len];
-        let len = self
-            .qpack_encoder
-            .encode(headers, &mut header_block)
-            .map_err(|_| Error::InternalError)?;
-
-        header_block.truncate(len);
-
-        Ok(header_block)
-    }
-
     fn send_headers<T: NameValue, F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
         headers: &[T], fin: bool,
@@ -1543,7 +1519,8 @@ impl Connection {
             self.frames_greased = true;
         }
 
-        let header_block = self.encode_header_block(headers)?;
+        let header_block =
+            qpack::encode(headers).map_err(|_| Error::InternalError)?;
 
         let overhead = octets::varint_len(frame::HEADERS_FRAME_TYPE_ID) +
             octets::varint_len(header_block.len() as u64);
@@ -3191,10 +3168,7 @@ impl Connection {
                     .max_field_section_size
                     .unwrap_or(u64::MAX);
 
-                let headers = match self
-                    .qpack_decoder
-                    .decode(&header_block[..], max_size)
-                {
+                let headers = match qpack::decode(&header_block, max_size) {
                     Ok(v) => v,
 
                     Err(e) => {
@@ -4933,7 +4907,7 @@ mod tests {
 
         let (stream, req) = s.send_request(false).unwrap();
 
-        let header_block = s.client.encode_header_block(&req).unwrap();
+        let header_block = qpack::encode(&req).unwrap();
 
         s.send_frame_client(
             frame::Frame::PushPromise {

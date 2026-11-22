@@ -6,7 +6,6 @@ use h3i::client::sync_client;
 use h3i::config::Config;
 use quiche::h3::frame::Frame;
 use quiche::h3::Header;
-use quiche::h3::NameValue;
 
 /// The QUIC stream to send the frames on. See
 /// https://datatracker.ietf.org/doc/html/rfc9000#name-streams and
@@ -88,18 +87,5 @@ fn main() {
 fn encode_header_block(
     headers: &[quiche::h3::Header],
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut encoder = quiche::h3::qpack::Encoder::new();
-
-    let headers_len = headers
-        .iter()
-        .fold(0, |acc, h| acc + h.value().len() + h.name().len() + 32);
-
-    let mut header_block = vec![0; headers_len];
-    let len = encoder
-        .encode(headers, &mut header_block)
-        .map_err(|_| "Internal Error")?;
-
-    header_block.truncate(len);
-
-    Ok(header_block)
+    quiche::h3::qpack::encode(headers).map_err(|e| e.to_string())
 }

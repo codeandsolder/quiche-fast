@@ -98,6 +98,12 @@ impl std::error::Error for Error {
     }
 }
 
+impl From<std::collections::TryReserveError> for Error {
+    fn from(_: std::collections::TryReserveError) -> Self {
+        Self::AllocationFailed
+    }
+}
+
 impl From<octets::BufferTooShortError> for Error {
     fn from(_err: octets::BufferTooShortError) -> Self {
         Self::BufferTooShort
@@ -106,10 +112,38 @@ impl From<octets::BufferTooShortError> for Error {
 
 #[cfg(test)]
 mod tests {
+    use crate::h3;
     use crate::h3::qpack::Error::HeaderListTooLarge;
-    use crate::*;
+    use crate::h3::NameValue;
 
     use super::*;
+
+    #[test]
+    fn owned_and_fixed_output_agree() {
+        let fields = [
+            h3::Header::new(b":method", b"GET"),
+            h3::Header::new(b"X-Custom", b"Mixed case value"),
+        ];
+        let owned = encode(&fields).unwrap();
+        let mut fixed = vec![0; owned.len()];
+        assert_eq!(encode_into(&fields, &mut fixed), Ok(owned.len()));
+        assert_eq!(fixed, owned);
+        let short = &mut fixed[..owned.len() - 1];
+        assert_eq!(encode_into(&fields, short), Err(Error::BufferTooShort));
+        assert_eq!(decode(&owned, u64::MAX).unwrap()[1].name(), b"x-custom");
+        assert_eq!(
+            decode(&encode_literal(&fields).unwrap(), u64::MAX).unwrap(),
+            fields
+        );
+    }
+
+    #[test]
+    fn empty_field_section_has_prefix() {
+        let fields: [h3::Header; 0] = [];
+        assert_eq!(encode(&fields), Ok(vec![0, 0]));
+        assert_eq!(encode_literal(&fields), Ok(vec![0, 0]));
+        assert_eq!(decode(&[0, 0], 0), Ok(Vec::new()));
+    }
 
     #[test]
     fn encode_decode() {
@@ -127,11 +161,9 @@ mod tests {
             h3::Header::new(b":method", b"GET"),
         ];
 
-        let mut enc = Encoder::new();
-        assert_eq!(enc.encode(&headers, &mut encoded), Ok(240));
+        assert_eq!(encode_into(&headers, &mut encoded), Ok(240));
 
-        let mut dec = Decoder::new();
-        assert_eq!(dec.decode(&encoded, u64::MAX), Ok(headers));
+        assert_eq!(decode(&encoded, u64::MAX), Ok(headers));
     }
 
     #[test]
@@ -149,20 +181,17 @@ mod tests {
         let qpack_field_section_size =
             (b"hello".len() + b"world".len() + 32) * NUM_HDRS;
 
-        let mut enc = Encoder::new();
-        assert_eq!(enc.encode(&headers, &mut encoded), Ok(102));
-
-        let mut dec = Decoder::new();
+        assert_eq!(encode_into(&headers, &mut encoded), Ok(102));
 
         // Equal max_size param ok
         assert_eq!(
-            dec.decode(&encoded, qpack_field_section_size as u64),
+            decode(&encoded, qpack_field_section_size as u64),
             Ok(headers.clone())
         );
 
         // Oversized max_size param ok
         assert_eq!(
-            dec.decode(&encoded, qpack_field_section_size as u64 + 1),
+            decode(&encoded, qpack_field_section_size as u64 + 1),
             Ok(headers.clone())
         );
 
@@ -170,7 +199,7 @@ mod tests {
         let wrong_qpack_field_section_size =
             (b"hello".len() + b"world".len()) * NUM_HDRS;
         assert_eq!(
-            dec.decode(&encoded, wrong_qpack_field_section_size as u64),
+            decode(&encoded, wrong_qpack_field_section_size as u64),
             Err(HeaderListTooLarge)
         );
     }
@@ -196,11 +225,9 @@ mod tests {
             h3::Header::new(b"fOo", b"BaR"),
         ];
 
-        let mut enc = Encoder::new();
-        assert_eq!(enc.encode(&headers_in, &mut encoded), Ok(35));
+        assert_eq!(encode_into(&headers_in, &mut encoded), Ok(35));
 
-        let mut dec = Decoder::new();
-        let headers_out = dec.decode(&encoded, u64::MAX).unwrap();
+        let headers_out = decode(&encoded, u64::MAX).unwrap();
 
         assert_eq!(headers_expected, headers_out);
 
@@ -213,11 +240,9 @@ mod tests {
             h3::HeaderRef::new(b"fOo", b"BaR"),
         ];
 
-        let mut enc = Encoder::new();
-        assert_eq!(enc.encode(&headers_in, &mut encoded), Ok(35));
+        assert_eq!(encode_into(&headers_in, &mut encoded), Ok(35));
 
-        let mut dec = Decoder::new();
-        let headers_out = dec.decode(&encoded, u64::MAX).unwrap();
+        let headers_out = decode(&encoded, u64::MAX).unwrap();
 
         assert_eq!(headers_expected, headers_out);
     }
@@ -225,44 +250,44 @@ mod tests {
     #[test]
     fn lower_ascii_range() {
         let mut encoded = [0u8; 50];
-        let mut enc = Encoder::new();
 
         // Indexed name with literal value
         let headers1 = vec![h3::Header::new(b"location", b"															")];
-        assert_eq!(enc.encode(&headers1, &mut encoded), Ok(19));
+        assert_eq!(encode_into(&headers1, &mut encoded), Ok(19));
 
         // Literal name and value
         let headers2 = vec![h3::Header::new(b"a", b"")];
-        assert_eq!(enc.encode(&headers2, &mut encoded), Ok(20));
+        assert_eq!(encode_into(&headers2, &mut encoded), Ok(20));
 
         let headers3 = vec![h3::Header::new(b"															", b"hello")];
-        assert_eq!(enc.encode(&headers3, &mut encoded), Ok(24));
+        assert_eq!(encode_into(&headers3, &mut encoded), Ok(24));
     }
 
     #[test]
     fn extended_ascii_range() {
         let mut encoded = [0u8; 50];
-        let mut enc = Encoder::new();
 
         let name = b"location";
         let value = "£££££££££££££££";
 
         // Indexed name with literal value
         let headers1 = vec![h3::Header::new(name, value.as_bytes())];
-        assert_eq!(enc.encode(&headers1, &mut encoded), Ok(34));
+        assert_eq!(encode_into(&headers1, &mut encoded), Ok(34));
 
         // Literal name and value
         let value = "ððððððððððððððð";
         let headers2 = vec![h3::Header::new(b"a", value.as_bytes())];
-        assert_eq!(enc.encode(&headers2, &mut encoded), Ok(35));
+        assert_eq!(encode_into(&headers2, &mut encoded), Ok(35));
 
         let headers3 = vec![h3::Header::new(value.as_bytes(), b"hello")];
-        assert_eq!(enc.encode(&headers3, &mut encoded), Ok(39));
+        assert_eq!(encode_into(&headers3, &mut encoded), Ok(39));
     }
 }
 
-pub use decoder::Decoder;
-pub use encoder::Encoder;
+pub use decoder::decode;
+pub use encoder::encode;
+pub use encoder::encode_into;
+pub use encoder::encode_literal;
 
 mod decoder;
 mod encoder;

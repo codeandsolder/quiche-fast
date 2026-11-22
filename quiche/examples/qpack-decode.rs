@@ -49,8 +49,6 @@ fn main() {
 
     let mut file = File::open(args.next().unwrap()).unwrap();
 
-    let mut dec = qpack::Decoder::new();
-
     loop {
         let mut stream_id: [u8; 8] = [0; 8];
         let mut len: [u8; 4] = [0; 4];
@@ -72,11 +70,12 @@ fn main() {
         debug!("Got stream={stream_id} len={len}");
 
         if stream_id == 0 {
-            dec.control(&mut data[..len]).unwrap();
+            // Dynamic-table instructions are unsupported by this static
+            // decoder.
             continue;
         }
 
-        for hdr in dec.decode(&data[..len], u64::MAX).unwrap() {
+        for hdr in qpack::decode(&data[..len], u64::MAX).unwrap() {
             let name = std::str::from_utf8(hdr.name()).unwrap();
             let value = std::str::from_utf8(hdr.value()).unwrap();
             println!("{name}\t{value}");

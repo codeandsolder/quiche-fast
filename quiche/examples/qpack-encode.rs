@@ -47,8 +47,6 @@ fn main() {
     let file = File::open(args.next().unwrap()).unwrap();
     let file = BufReader::new(&file);
 
-    let mut enc = h3::qpack::Encoder::new();
-
     let mut headers: Vec<h3::Header> = Vec::new();
 
     let mut stream_id = 1u64;
@@ -61,7 +59,7 @@ fn main() {
         if line.is_empty() {
             let mut out = [0u8; 65535];
 
-            let len = enc.encode(&headers, &mut out).unwrap();
+            let len = h3::qpack::encode_into(&headers, &mut out).unwrap();
 
             debug!("Writing header block stream={stream_id} len={len}");
 
