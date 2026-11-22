@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
         with:
           rust-toolchain: ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
 
@@ -51,7 +51,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@7bbede943ffd14ba2a534cf1296a20fd11c177ae # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
 
   docker:
     runs-on: ubuntu-latest
