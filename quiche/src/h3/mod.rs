@@ -517,30 +517,30 @@ impl Error {
     }
 
     #[cfg(feature = "ffi")]
-    fn to_c(self) -> libc::ssize_t {
+    const fn to_c(self) -> i16 {
         match self {
-            Error::Done => -1,
-            Error::BufferTooShort => -2,
-            Error::InternalError => -3,
-            Error::ExcessiveLoad => -4,
-            Error::IdError => -5,
-            Error::StreamCreationError => -6,
-            Error::ClosedCriticalStream => -7,
-            Error::MissingSettings => -8,
-            Error::FrameUnexpected => -9,
-            Error::FrameError => -10,
-            Error::QpackDecompressionFailed => -11,
+            Self::Done => -1,
+            Self::BufferTooShort => -2,
+            Self::InternalError => -3,
+            Self::ExcessiveLoad => -4,
+            Self::IdError => -5,
+            Self::StreamCreationError => -6,
+            Self::ClosedCriticalStream => -7,
+            Self::MissingSettings => -8,
+            Self::FrameUnexpected => -9,
+            Self::FrameError => -10,
+            Self::QpackDecompressionFailed => -11,
             // -12 was previously used for TransportError, skip it
-            Error::StreamBlocked => -13,
-            Error::SettingsError => -14,
-            Error::RequestRejected => -15,
-            Error::RequestCancelled => -16,
-            Error::RequestIncomplete => -17,
-            Error::MessageError => -18,
-            Error::ConnectError => -19,
-            Error::VersionFallback => -20,
+            Self::StreamBlocked => -13,
+            Self::SettingsError => -14,
+            Self::RequestRejected => -15,
+            Self::RequestCancelled => -16,
+            Self::RequestIncomplete => -17,
+            Self::MessageError => -18,
+            Self::ConnectError => -19,
+            Self::VersionFallback => -20,
 
-            Error::TransportError(quic_error) => quic_error.to_c() - 1000,
+            Self::TransportError(quic_error) => quic_error.to_c() - 1000,
         }
     }
 }
