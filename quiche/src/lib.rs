@@ -7209,19 +7209,27 @@ impl<F: BufFactory> Connection<F> {
     /// ```
     #[inline]
     pub fn dgram_recv(&mut self, buf: &mut [u8]) -> Result<usize> {
-        match self.dgram_recv_queue.pop() {
-            Some(d) => {
-                if d.as_ref().len() > buf.len() {
-                    return Err(Error::BufferTooShort);
-                }
-                let len = d.as_ref().len();
+        self.dgram_recv_into(buf)
+    }
 
-                buf[..len].copy_from_slice(d.as_ref());
-                Ok(len)
-            },
-
-            None => Err(Error::Done),
+    /// Reads one DATAGRAM into a caller-provided buffer, which may contain
+    /// uninitialized output storage. Like `dgram_recv`, this removes a
+    /// datagram even when the output is too short.
+    ///
+    /// # Errors
+    /// Returns `Error::Done` for an empty queue or `Error::BufferTooShort`
+    /// when the first datagram does not fit.
+    #[inline]
+    pub fn dgram_recv_into<B: bytes::BufMut>(
+        &mut self, mut buf: B,
+    ) -> Result<usize> {
+        let d = self.dgram_recv_buf()?;
+        let bytes = d.as_ref();
+        if bytes.len() > buf.remaining_mut() {
+            return Err(Error::BufferTooShort);
         }
+        buf.put_slice(bytes);
+        Ok(bytes.len())
     }
 
     /// Reads the first received DATAGRAM.

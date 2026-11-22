@@ -46,7 +46,7 @@ use crate::ffi::ffi_out;
 use crate::ffi::ffi_ref;
 use crate::ffi::ffi_slice;
 use crate::ffi::ffi_slice_from_raw_parts;
-use crate::ffi::ffi_slice_mut;
+use crate::ffi::ffi_slice_out;
 
 fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
@@ -398,9 +398,9 @@ pub extern "C" fn quiche_h3_recv_body(
     }
 
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
-    match conn.recv_body(quic_conn, stream_id, out) {
+    match conn.recv_body_buf(quic_conn, stream_id, out) {
         Ok(v) => ssize_t::try_from(v).unwrap_or(ssize_t::MAX),
 
         Err(e) => ssize_t::from(e.to_c()),
