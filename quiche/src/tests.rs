@@ -7548,6 +7548,49 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited_despite_max_unacknowledgin
 }
 
 #[rstest]
+fn reject_ack_for_unsent_packet_number_space(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    let epoch = packet::Epoch::Handshake;
+    assert_eq!(pipe.client.pkt_num_spaces[epoch].largest_tx_pkt_num, None);
+    assert!(!pipe.client.peer_verified_initial_address);
+    let hdr = Header {
+        ty: Type::Handshake,
+        version: PROTOCOL_VERSION,
+        dcid: ConnectionId::default(),
+        scid: ConnectionId::default(),
+        pkt_num: 0,
+        pkt_num_len: 1,
+        token: None,
+        versions: None,
+        key_phase: false,
+    };
+    let mut ranges = ranges::RangeSet::default();
+    ranges.insert(0..1);
+    let frame = frame::Frame::ACK {
+        ack_delay: 0,
+        ranges,
+        ecn_counts: None,
+    };
+    assert_eq!(
+        pipe.client
+            .process_frame(frame, &hdr, 0, epoch, Instant::now()),
+        Err(Error::InvalidAckRange)
+    );
+    assert!(!pipe.client.peer_verified_initial_address);
+    assert_eq!(
+        pipe.client
+            .paths
+            .get_active()
+            .unwrap()
+            .recovery
+            .get_largest_acked_on_epoch(epoch),
+        None
+    );
+}
+
+#[rstest]
 fn validate_peer_sent_ack_range(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {

@@ -33,6 +33,7 @@ use crate::packet;
 use crate::ranges::RangeSet;
 pub(crate) use crate::recovery::bandwidth::Bandwidth;
 use crate::Config;
+use crate::Error;
 use crate::Result;
 
 #[cfg(feature = "qlog")]
@@ -182,6 +183,17 @@ pub struct OnAckReceivedOutcome {
     pub lost_bytes: usize,
     pub acked_bytes: usize,
     pub spurious_losses: usize,
+}
+
+/// Validates the complete ACK before any recovery state is changed.
+pub(crate) fn validate_ack_ranges(
+    ranges: &RangeSet, skip_pn: Option<u64>,
+) -> Result<u64> {
+    let largest = ranges.last().ok_or(Error::InvalidAckRange)?;
+    if skip_pn.is_some_and(|pn| ranges.contains(pn)) {
+        return Err(Error::OptimisticAckDetected);
+    }
+    Ok(largest)
 }
 
 #[derive(Debug, Default)]
@@ -393,7 +405,7 @@ pub enum CongestionControlAlgorithm {
 }
 
 impl FromStr for CongestionControlAlgorithm {
-    type Err = crate::Error;
+    type Err = Error;
 
     /// Converts a string to `CongestionControlAlgorithm`.
     ///
@@ -405,7 +417,7 @@ impl FromStr for CongestionControlAlgorithm {
             "bbr" => Ok(Self::Bbr2Gcongestion),
             "bbr2" => Ok(Self::Bbr2Gcongestion),
             "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
-            _ => Err(crate::Error::CongestionControl),
+            _ => Err(Error::CongestionControl),
         }
     }
 }
@@ -1054,7 +1066,7 @@ mod tests {
     fn lookup_cc_algo_bad() {
         assert_eq!(
             CongestionControlAlgorithm::from_str("???"),
-            Err(crate::Error::CongestionControl)
+            Err(Error::CongestionControl)
         );
     }
 
@@ -2479,6 +2491,51 @@ mod tests {
             r.pacing_rate(),
             expected_pacing_with_rtt_measurement.to_bytes_per_second()
         );
+    }
+
+    #[rstest]
+    fn invalid_ack_preserves_recovery_state(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        cfg.set_cc_algorithm_name(cc_algorithm_name).unwrap();
+        let epoch = packet::Epoch::Application;
+        let mut recovery = Recovery::new(&cfg);
+        let now = Instant::now();
+        let handshake = HandshakeStatus::default();
+        for pn in [0, 1, 3] {
+            let sent = test_utils::helper_packet_sent(pn, now, 1000);
+            recovery.on_packet_sent(sent, epoch, handshake, now, "");
+        }
+        recovery.on_packet_number_skipped(2);
+        let now = now + Duration::from_millis(10);
+        let mut acked = RangeSet::default();
+        assert_eq!(
+            recovery
+                .on_ack_received(&acked, 0, epoch, handshake, now, Some(2), "")
+                .unwrap_err(),
+            Error::InvalidAckRange,
+        );
+        acked.insert(0..1);
+        acked.insert(2..3);
+        assert_eq!(
+            recovery
+                .on_ack_received(&acked, 0, epoch, handshake, now, Some(2), "")
+                .unwrap_err(),
+            Error::OptimisticAckDetected,
+        );
+        assert_eq!(recovery.bytes_in_flight(), 3000);
+        assert_eq!(recovery.sent_packets_len(epoch), 3);
+        assert_eq!(recovery.get_largest_acked_on_epoch(epoch), None);
+        assert!(recovery.next_acked_frame(epoch).is_none());
+
+        let mut valid = RangeSet::default();
+        valid.insert(0..2);
+        let outcome = recovery
+            .on_ack_received(&valid, 0, epoch, handshake, now, Some(2), "")
+            .unwrap();
+        assert_eq!(outcome.acked_bytes, 2000);
+        assert_eq!(recovery.bytes_in_flight(), 1000);
     }
 
     #[rstest]
