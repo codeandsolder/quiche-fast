@@ -707,6 +707,11 @@ impl Stream {
         matches!(self.send_phase, SendPhase::Open)
     }
 
+    /// Trailers forbid further HTTP/3 frames, but may still need a QUIC FIN.
+    pub const fn awaiting_fin_after_trailers(&self) -> bool {
+        matches!(self.send_phase, SendPhase::Trailers)
+    }
+
     /// Advance only after the entire header section was buffered.
     pub const fn on_sent_headers(&mut self, section: HeaderSection, fin: bool) {
         self.send_phase = if fin {

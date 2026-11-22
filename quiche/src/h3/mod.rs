@@ -1592,6 +1592,8 @@ impl Connection {
     /// When a partial write happens (including when [`Done`] is returned) the
     /// application should retry the operation once the stream is reported as
     /// writable again.
+    /// After trailers, an empty body with `fin` set sends only the QUIC FIN
+    /// without emitting another HTTP/3 DATA frame.
     ///
     /// # Errors
     ///
@@ -1616,9 +1618,7 @@ impl Connection {
              body_len: usize,
              fin: bool| {
                 conn.stream_send(stream_id, header, false)?;
-                Ok(conn
-                    .stream_send(stream_id, &body[..body_len], fin)
-                    .map(|v| (v, v))?)
+                Ok(conn.stream_send(stream_id, &body[..body_len], fin)?)
             },
         )
     }
@@ -1695,15 +1695,15 @@ impl Connection {
                     let _ = std::mem::replace(body, remainder);
                 }
 
-                Ok((n, n))
+                Ok(n)
             },
         )
     }
 
-    fn do_send_body<F, B, R, SND>(
+    fn do_send_body<F, B, SND>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64, body: B,
         fin: bool, write_fn: SND,
-    ) -> Result<R>
+    ) -> Result<usize>
     where
         F: BufFactory,
         B: AsRef<[u8]>,
@@ -1714,7 +1714,7 @@ impl Connection {
             B,
             usize,
             bool,
-        ) -> Result<(usize, R)>,
+        ) -> Result<usize>,
     {
         let mut d = [42; 10];
         let mut b = octets::OctetsMut::with_slice(&mut d);
@@ -1726,11 +1726,17 @@ impl Connection {
             return Err(Error::FrameUnexpected);
         }
 
-        if !self
-            .streams
-            .get(&stream_id)
-            .is_some_and(stream::Stream::can_send_body)
-        {
+        let stream =
+            self.streams.get(&stream_id).ok_or(Error::FrameUnexpected)?;
+        if stream.awaiting_fin_after_trailers() && len == 0 && fin {
+            // A QUIC FIN consumes no stream offset or flow-control credit.
+            // A DATA frame, even an empty one, would be illegal here.
+            let written = conn.stream_send(stream_id, &[], true)?;
+            self.finish_local_stream(conn, stream_id);
+            return Ok(written);
+        }
+
+        if !stream.can_send_body() {
             return Err(Error::FrameUnexpected);
         }
 
@@ -1738,9 +1744,6 @@ impl Connection {
         if len == 0 && !fin {
             return Err(Error::Done);
         }
-
-        let overhead = octets::varint_len(frame::DATA_FRAME_TYPE_ID) +
-            octets::varint_len(len as u64);
 
         let stream_cap = match conn.stream_capacity(stream_id) {
             Ok(v) => v,
@@ -1754,22 +1757,16 @@ impl Connection {
             },
         };
 
-        // Make sure there is enough capacity to send the DATA frame header.
-        if stream_cap < overhead {
-            let _ = conn.stream_writable(stream_id, overhead + 1);
+        // Use the length of the chunk we can actually encode, rather than
+        // charging the original input's (possibly larger) varint width.
+        let Some(body_len) = data_payload_capacity(len, stream_cap) else {
+            let _ = conn.stream_writable(stream_id, if len == 0 { 2 } else { 3 });
             return Err(Error::Done);
-        }
+        };
 
-        // Cap the frame payload length to the stream's capacity.
-        let body_len = std::cmp::min(len, stream_cap - overhead);
-
-        // If we can't send the entire body, set the fin flag to false so the
-        // application can try again later.
-        let fin = if body_len != len { false } else { fin };
-
-        // Again, avoid sending 0-length DATA frames when the fin flag is false.
+        let fin = fin && body_len == len;
         if body_len == 0 && !fin {
-            let _ = conn.stream_writable(stream_id, overhead + 1);
+            let _ = conn.stream_writable(stream_id, 3);
             return Err(Error::Done);
         }
 
@@ -1779,8 +1776,7 @@ impl Connection {
 
         // Return how many bytes were written, excluding the frame header.
         // Sending body separately avoids unnecessary copy.
-        let (written, ret) =
-            write_fn(conn, &d[..off], stream_id, body, body_len, fin)?;
+        let written = write_fn(conn, &d[..off], stream_id, body, body_len, fin)?;
         if written != body_len {
             // This should never happen. If it does, it means we wrote an
             // incorrect frame length and thus we can't really continue.
@@ -1812,14 +1808,14 @@ impl Connection {
             // We only need enough capacity to send a few bytes, to make sure
             // the stream doesn't hang due to congestion window not growing
             // enough.
-            let _ = conn.stream_writable(stream_id, overhead + 1);
+            let _ = conn.stream_writable(stream_id, 3);
         }
 
         if fin && written == len {
             self.finish_local_stream(conn, stream_id);
         }
 
-        Ok(ret)
+        Ok(written)
     }
 
     /// Returns whether the peer enabled HTTP/3 DATAGRAM frame support.
@@ -3321,6 +3317,20 @@ impl Connection {
 pub fn grease_value() -> u64 {
     let n = super::rand::rand_u64_uniform(148_764_065_110_560_899);
     31 * n + 33
+}
+
+/// Largest DATA payload fitting the available stream credit and the QUIC
+/// varint domain. Each width contributes a candidate, including the gap
+/// immediately before a length-field width increases.
+fn data_payload_capacity(requested: usize, credit: usize) -> Option<usize> {
+    [8_usize, 4, 2, 1].into_iter().find_map(|width| {
+        let max = (1_u64 << (width * 8 - 2)) - 1;
+        let payload = credit
+            .checked_sub(1 + width)?
+            .min(requested)
+            .min(usize::try_from(max).unwrap_or(usize::MAX));
+        (octets::varint_len(payload as u64) == width).then_some(payload)
+    })
 }
 
 #[doc(hidden)]
@@ -6583,7 +6593,7 @@ mod tests {
             .server
             .send_body(&mut s.pipe.server, stream, &d, true)
             .unwrap();
-        assert_eq!(sent, 25);
+        assert_eq!(sent, 26);
         off += sent;
 
         // send_body wrote as much as it could (sent < size of buff).
@@ -6720,7 +6730,7 @@ mod tests {
             .unwrap();
 
         // send_body wrote as much as it could (sent < size of buff).
-        assert_eq!(sent, 11995);
+        assert_eq!(sent, 11997);
 
         s.advance().ok();
 
@@ -6728,7 +6738,7 @@ mod tests {
         let mut recv_buf = [42; 80000];
         assert!(s.poll_client().is_ok());
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
-        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11995));
+        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11997));
 
         s.advance().ok();
 
@@ -6784,8 +6794,8 @@ mod tests {
         assert_eq!(s.pipe.server.stream_writable_next(), Some(stream));
         assert_eq!(s.pipe.server.stream_writable_next(), None);
 
-        // The body is large enough to fill the cwnd, except for enough bytes
-        // for another DATA frame header (but no payload).
+        // Leave three bytes of capacity: exactly enough for a one-byte DATA
+        // frame with a one-byte length field.
         let send_buf = [42; 11994];
 
         let sent = s
@@ -6795,9 +6805,15 @@ mod tests {
 
         assert_eq!(sent, 11994);
 
-        // There is only enough capacity left for the DATA frame header, but
-        // no payload.
+        // The input size must not force a two-byte length field for a
+        // one-byte partial write.
         assert_eq!(s.pipe.server.stream_capacity(stream).unwrap(), 3);
+        assert_eq!(
+            s.server
+                .send_body(&mut s.pipe.server, stream, &send_buf, false),
+            Ok(1)
+        );
+        assert_eq!(s.pipe.server.stream_capacity(stream).unwrap(), 0);
         assert_eq!(
             s.server
                 .send_body(&mut s.pipe.server, stream, &send_buf, false),
@@ -6810,12 +6826,104 @@ mod tests {
         let mut recv_buf = [42; 80000];
         assert!(s.poll_client().is_ok());
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
-        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11994));
+        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11995));
 
         s.advance().ok();
 
         // Once the server cwnd opens up, we can send more body.
         assert_eq!(s.pipe.server.stream_writable_next(), Some(0));
+    }
+
+    #[test]
+    fn data_payload_capacity_is_maximal() {
+        let mut credits = (0..256).collect::<Vec<usize>>();
+        for boundary in [64_u64, 16_384, 1 << 30, octets::MAX_VAR_INT] {
+            if let Ok(boundary) = usize::try_from(boundary) {
+                credits.extend(
+                    boundary.saturating_sub(12)..=boundary.saturating_add(12),
+                );
+            }
+        }
+        credits.push(usize::MAX);
+        for credit in credits {
+            for requested in [0, 1, 63, 64, 65, 16_384, usize::MAX] {
+                let Some(payload) = data_payload_capacity(requested, credit)
+                else {
+                    assert!(credit < 2);
+                    continue;
+                };
+                assert!(payload <= requested);
+                assert!(payload as u64 <= octets::MAX_VAR_INT);
+                let overhead = 1 + octets::varint_len(payload as u64);
+                assert!(payload <= credit - overhead);
+                if payload < requested && (payload as u64) < octets::MAX_VAR_INT {
+                    let next = payload + 1;
+                    let next_overhead = 1 + octets::varint_len(next as u64);
+                    assert!(credit
+                        .checked_sub(next_overhead)
+                        .is_none_or(|n| n < next));
+                }
+            }
+        }
+    }
+
+    #[rstest::rstest]
+    fn finish_after_trailers_without_data(#[values(false, true)] response: bool) {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+        let (stream, _) = s.send_request(response).unwrap();
+        assert!(matches!(s.poll_server(), Ok((_, Event::Headers { .. }))));
+        if response {
+            assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+            s.send_response(stream, false).unwrap();
+            assert!(matches!(s.poll_client(), Ok((_, Event::Headers { .. }))));
+        }
+        let trailers = [Header::new(b"foo", b"bar")];
+        let (sender, transport) = if response {
+            (&mut s.server, &mut s.pipe.server)
+        } else {
+            (&mut s.client, &mut s.pipe.client)
+        };
+        sender
+            .send_additional_headers(transport, stream, &trailers, true, false)
+            .unwrap();
+        assert_eq!(
+            sender.send_body(transport, stream, b"x", true),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            sender.send_body(transport, stream, b"", false),
+            Err(Error::FrameUnexpected)
+        );
+        let offset = transport.streams.get(stream).unwrap().send.off_back();
+        assert_eq!(sender.send_body(transport, stream, b"", true), Ok(0));
+        assert_eq!(
+            transport.streams.get(stream).unwrap().send.off_back(),
+            offset
+        );
+        assert_eq!(
+            sender.send_body(transport, stream, b"", true),
+            Err(Error::FrameUnexpected)
+        );
+        s.advance().unwrap();
+        let event = if response {
+            s.poll_client()
+        } else {
+            s.poll_server()
+        };
+        assert_eq!(
+            event,
+            Ok((stream, Event::Headers {
+                list: trailers.to_vec(),
+                more_frames: false
+            }))
+        );
+        let event = if response {
+            s.poll_client()
+        } else {
+            s.poll_server()
+        };
+        assert_eq!(event, Ok((stream, Event::Finished)));
     }
 
     #[test]
