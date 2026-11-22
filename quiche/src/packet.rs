@@ -850,12 +850,8 @@ fn compute_retry_integrity_tag(
     pb.put_bytes(odcid)?;
     pb.put_bytes(&b.buf()[..hdr_len])?;
 
-    let mut key = crypto::PacketKey::new(
-        RETRY_AEAD_ALG,
-        key.to_vec(),
-        nonce.to_vec(),
-        crypto::Seal::ENCRYPT,
-    )?;
+    let mut key =
+        crypto::PacketKey::new(RETRY_AEAD_ALG, key.to_vec(), nonce.to_vec())?;
 
     let mut out_tag = vec![0_u8; TAG_LEN];
 
