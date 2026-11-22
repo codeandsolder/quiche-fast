@@ -1049,6 +1049,7 @@ pub struct RecoveryMetricsUpdated {
     // qlog defined
     pub packets_in_flight: Option<u64>,
 
+    /// Pacing rate in bits per second.
     pub pacing_rate: Option<u64>,
 }
 

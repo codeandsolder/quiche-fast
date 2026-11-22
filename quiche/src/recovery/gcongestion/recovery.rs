@@ -1145,18 +1145,18 @@ impl RecoveryOps for GRecovery {
             pacing_rate: Some(
                 self.pacer
                     .pacing_rate(self.bytes_in_flight.get(), &self.rtt_stats)
-                    .to_bytes_per_second(),
+                    .to_bits_per_second(),
             ),
             delivery_rate: Some(self.delivery_rate().to_bytes_per_second()),
             send_rate: Some(self.send_rate().to_bytes_per_second()),
             ack_rate: Some(self.ack_rate().to_bytes_per_second()),
             lost_packets: Some(self.lost_count as u64),
             lost_bytes: Some(self.bytes_lost),
-            pto_count: Some(self.pto_count),
+            pto_count: Some(crate::recovery::qlog_pto_count(self.pto_count)),
             app_limited: Some(self.app_limited()),
         };
 
-        self.qlog_metrics.maybe_update(qlog_metrics)
+        self.qlog_metrics.maybe_update(&qlog_metrics)
     }
 
     #[cfg(feature = "qlog")]
@@ -1311,6 +1311,34 @@ mod tests {
         let mut r = GRecovery::new(&recovery_config).unwrap();
 
         r.pto_count = 99999;
+
+        #[cfg(feature = "qlog")]
+        {
+            let Some(EventData::QuicMetricsUpdated(initial)) =
+                r.get_updated_qlog_event_data()
+            else {
+                panic!("expected initial recovery metrics");
+            };
+            assert_eq!(initial.pto_count, Some(u16::MAX));
+            assert_eq!(
+                initial.pacing_rate,
+                Some(
+                    r.pacer
+                        .pacing_rate(r.bytes_in_flight.get(), &r.rtt_stats)
+                        .to_bits_per_second()
+                )
+            );
+            r.pto_count = u32::MAX;
+            assert!(r.get_updated_qlog_event_data().is_none());
+            r.pto_count = 0;
+            let Some(EventData::QuicMetricsUpdated(reset)) =
+                r.get_updated_qlog_event_data()
+            else {
+                panic!("expected PTO reset");
+            };
+            assert_eq!(reset.pto_count, Some(0));
+            r.pto_count = 99999;
+        }
 
         let handshake_status = HandshakeStatus {
             completed: true,

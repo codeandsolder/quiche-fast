@@ -1097,12 +1097,12 @@ impl RecoveryOps for LegacyRecovery {
             ssthresh: Some(self.congestion.ssthresh.get() as u64),
             lost_packets: Some(self.congestion.lost_count as u64),
             lost_bytes: Some(self.bytes_lost),
-            pto_count: Some(self.pto_count),
+            pto_count: Some(crate::recovery::qlog_pto_count(self.pto_count)),
             app_limited: Some(self.app_limited()),
             ..Default::default()
         };
 
-        self.qlog_metrics.maybe_update(qlog_metrics)
+        self.qlog_metrics.maybe_update(&qlog_metrics)
     }
 
     #[cfg(feature = "qlog")]
@@ -1234,6 +1234,26 @@ mod tests {
         let mut r = LegacyRecovery::new_with_config(&recovery_config);
 
         r.pto_count = 99999;
+
+        #[cfg(feature = "qlog")]
+        {
+            let Some(EventData::QuicMetricsUpdated(initial)) =
+                r.get_updated_qlog_event_data()
+            else {
+                panic!("expected initial recovery metrics");
+            };
+            assert_eq!(initial.pto_count, Some(u16::MAX));
+            r.pto_count = u32::MAX;
+            assert!(r.get_updated_qlog_event_data().is_none());
+            r.pto_count = 0;
+            let Some(EventData::QuicMetricsUpdated(reset)) =
+                r.get_updated_qlog_event_data()
+            else {
+                panic!("expected PTO reset");
+            };
+            assert_eq!(reset.pto_count, Some(0));
+            r.pto_count = 99999;
+        }
 
         let handshake_status = HandshakeStatus {
             completed: true,
