@@ -24,7 +24,8 @@ env:
   RUSTTOOLCHAIN: "1.100.0"
 
 concurrency:
-  group: stable-${{ github.event.pull_request.number || github.ref }}
+  # Manual cross-target validation must not share the pending slot with pushes.
+  group: stable-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}-${{ inputs.windows_only && 'windows' || 'default' }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
