@@ -577,11 +577,7 @@ impl Path {
     }
 
     pub fn stats(&self) -> PathStats {
-        let pmtu = match self
-            .pmtud
-            .as_ref()
-            .map(pmtud::Pmtud::get_current_mtu)
-        {
+        let pmtu = match self.pmtud.as_ref().map(pmtud::Pmtud::get_current_mtu) {
             Some(v) => v,
 
             None => self.recovery.max_datagram_size(),
