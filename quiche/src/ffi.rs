@@ -342,7 +342,6 @@ pub(super) use ffi_mut;
 pub(super) use ffi_out;
 pub(super) use ffi_ref;
 pub(super) use ffi_slice;
-pub(super) use ffi_slice_mut;
 pub(super) use ffi_slice_out;
 
 fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
