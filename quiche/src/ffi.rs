@@ -132,6 +132,27 @@ pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
     Some(unsafe { &mut *ptr })
 }
 
+macro_rules! ffi_addr {
+    ($ptr:expr, $len:expr, $ret:expr) => {{
+        // SAFETY: the C API requires readable address fields for the
+        // supplied length. The decoder checks null, length and alignment.
+        match unsafe { std_addr_from_c($ptr, $len) } {
+            Ok(addr) => addr,
+            Err(()) => return $ret,
+        }
+    }};
+}
+
+macro_rules! ffi_optional_addr {
+    ($ptr:expr, $len:expr, $ret:expr) => {{
+        // SAFETY: present addresses have the same C input contract.
+        match unsafe { optional_std_addr_from_c($ptr, $len) } {
+            Ok(addr) => addr,
+            Err(()) => return $ret,
+        }
+    }};
+}
+
 macro_rules! ffi_ref {
     ($ptr:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
@@ -799,8 +820,6 @@ pub extern "C" fn quiche_accept(
     local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
     peer_len: socklen_t, config: *mut Config,
 ) -> *mut Connection {
-    let local = ffi_ref!(local, ptr::null_mut());
-    let peer = ffi_ref!(peer, ptr::null_mut());
     let config = ffi_mut!(config, ptr::null_mut());
 
     let scid = ffi_slice!(scid, scid_len, ptr::null_mut());
@@ -816,12 +835,8 @@ pub extern "C" fn quiche_accept(
         )))
     };
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return ptr::null_mut();
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return ptr::null_mut();
-    };
+    let local = ffi_addr!(local, local_len, ptr::null_mut());
+    let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
     match accept(&scid, odcid.as_ref(), local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
@@ -836,8 +851,6 @@ pub extern "C" fn quiche_connect(
     local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
     peer_len: socklen_t, config: *mut Config,
 ) -> *mut Connection {
-    let local = ffi_ref!(local, ptr::null_mut());
-    let peer = ffi_ref!(peer, ptr::null_mut());
     let config = ffi_mut!(config, ptr::null_mut());
 
     let server_name = if server_name.is_null() {
@@ -852,12 +865,8 @@ pub extern "C" fn quiche_connect(
     let scid = ffi_slice!(scid, scid_len, ptr::null_mut());
     let scid = ConnectionId::from_ref(scid);
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return ptr::null_mut();
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return ptr::null_mut();
-    };
+    let local = ffi_addr!(local, local_len, ptr::null_mut());
+    let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
     match connect(server_name, &scid, local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
@@ -934,8 +943,6 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     local: *const sockaddr, local_len: socklen_t, peer: *const sockaddr,
     peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
 ) -> *mut Connection {
-    let local = ffi_ref!(local, ptr::null_mut());
-    let peer = ffi_ref!(peer, ptr::null_mut());
     let config = ffi_ref!(config, ptr::null_mut());
 
     {
@@ -952,12 +959,8 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
             )))
         };
 
-        let Ok(local) = std_addr_from_c(local, local_len) else {
-            return ptr::null_mut();
-        };
-        let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-            return ptr::null_mut();
-        };
+        let local = ffi_addr!(local, local_len, ptr::null_mut());
+        let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
         let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
             Ok(v) => v,
@@ -986,13 +989,9 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 #[cfg(not(feature = "custom-client-dcid"))]
 pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
     _scid: *const u8, _scid_len: size_t, _dcid: *const u8, _dcid_len: size_t,
-    local: *const sockaddr, _local_len: socklen_t, peer: *const sockaddr,
-    _peer_len: socklen_t, config: *const Config, _ssl: *mut c_void,
+    _local: *const sockaddr, _local_len: socklen_t, _peer: *const sockaddr,
+    _peer_len: socklen_t, _config: *const Config, _ssl: *mut c_void,
 ) -> *mut Connection {
-    let _ = ffi_ref!(local, ptr::null_mut());
-    let _ = ffi_ref!(peer, ptr::null_mut());
-    let _ = ffi_ref!(config, ptr::null_mut());
-
     // It's always an error to call this function without the custom-client-dcid
     // feature enabled.
     ptr::null_mut()
@@ -1005,8 +1004,6 @@ pub extern "C" fn quiche_conn_new_with_tls(
     peer_len: socklen_t, config: *const Config, ssl: *mut c_void,
     is_server: bool,
 ) -> *mut Connection {
-    let local = ffi_ref!(local, ptr::null_mut());
-    let peer = ffi_ref!(peer, ptr::null_mut());
     let config = ffi_ref!(config, ptr::null_mut());
 
     let scid = ffi_slice!(scid, scid_len, ptr::null_mut());
@@ -1027,12 +1024,8 @@ pub extern "C" fn quiche_conn_new_with_tls(
         retry_source_cid: &scid,
     });
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return ptr::null_mut();
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return ptr::null_mut();
-    };
+    let local = ffi_addr!(local, local_len, ptr::null_mut());
+    let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
     let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
         Ok(v) => v,
@@ -1170,21 +1163,27 @@ pub extern "C" fn quiche_conn_set_max_idle_timeout(
 }
 
 #[repr(C)]
-pub struct RecvInfo<'a> {
-    from: &'a sockaddr,
+pub struct RecvInfo {
+    from: *const sockaddr,
     from_len: socklen_t,
-    to: &'a sockaddr,
+    to: *const sockaddr,
     to_len: socklen_t,
 }
 
-impl TryFrom<&RecvInfo<'_>> for crate::RecvInfo {
-    type Error = ();
-
-    fn try_from(info: &RecvInfo) -> std::result::Result<Self, Self::Error> {
-        Ok(crate::RecvInfo {
-            from: std_addr_from_c(info.from, info.from_len)?,
-            to: std_addr_from_c(info.to, info.to_len)?,
-        })
+impl RecvInfo {
+    /// Decode both addresses without borrowing a foreign sockaddr.
+    ///
+    /// # Safety
+    /// Each non-null pointer with an accepted length must identify readable
+    /// address fields for the duration of this call.
+    unsafe fn decode(&self) -> std::result::Result<crate::RecvInfo, ()> {
+        // SAFETY: the caller guarantees readability of both address inputs.
+        unsafe {
+            Ok(crate::RecvInfo {
+                from: std_addr_from_c(self.from, self.from_len)?,
+                to: std_addr_from_c(self.to, self.to_len)?,
+            })
+        }
     }
 }
 
@@ -1199,7 +1198,9 @@ pub extern "C" fn quiche_conn_recv(
         return e;
     }
 
-    let Ok(info) = crate::RecvInfo::try_from(info) else {
+    // SAFETY: the C receive API requires readable address inputs during the
+    // call.
+    let Ok(info) = (unsafe { info.decode() }) else {
         return ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
     };
 
@@ -1223,12 +1224,39 @@ pub struct SendInfo {
     at: timespec,
 }
 
+impl From<crate::SendInfo> for SendInfo {
+    fn from(info: crate::SendInfo) -> Self {
+        // SAFETY: sockaddr_storage contains integer/byte fields; zero
+        // initializes all storage before writing the actual address.
+        let mut from = unsafe { std::mem::zeroed() };
+        // SAFETY: same layout as from.
+        let mut to = unsafe { std::mem::zeroed() };
+        let from_len = std_addr_to_c(&info.from, &mut from);
+        let to_len = std_addr_to_c(&info.to, &mut to);
+        let mut at = timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        std_time_to_c(&info.at, &mut at);
+        Self {
+            from,
+            from_len,
+            to,
+            to_len,
+            at,
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_conn_send(
     conn: *mut Connection, out: *mut u8, out_len: size_t, out_info: *mut SendInfo,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let out_info = ffi_mut!(out_info, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+    let out_info = ffi_mut!(
+        out_info.cast::<MaybeUninit<SendInfo>>(),
+        ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
+    );
 
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
@@ -1239,10 +1267,7 @@ pub extern "C" fn quiche_conn_send(
 
     match conn.send(out) {
         Ok((v, info)) => {
-            out_info.from_len = std_addr_to_c(&info.from, &mut out_info.from);
-            out_info.to_len = std_addr_to_c(&info.to, &mut out_info.to);
-
-            std_time_to_c(&info.at, &mut out_info.at);
+            out_info.write(info.into());
 
             ssize_t::try_from(v).unwrap_or(ssize_t::MAX)
         },
@@ -1258,27 +1283,28 @@ pub extern "C" fn quiche_conn_send_on_path(
     out_info: *mut SendInfo,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let out_info = ffi_mut!(out_info, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+    let out_info = ffi_mut!(
+        out_info.cast::<MaybeUninit<SendInfo>>(),
+        ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
+    );
 
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
     }
 
-    let Ok(from) = optional_std_addr_from_c(from, from_len) else {
-        return ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(to) = optional_std_addr_from_c(to, to_len) else {
-        return ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let from = ffi_optional_addr!(
+        from,
+        from_len,
+        ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
+    );
+    let to =
+        ffi_optional_addr!(to, to_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let out =
         ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     match conn.send_on_path(out, from, to) {
         Ok((v, info)) => {
-            out_info.from_len = std_addr_to_c(&info.from, &mut out_info.from);
-            out_info.to_len = std_addr_to_c(&info.to, &mut out_info.to);
-
-            std_time_to_c(&info.at, &mut out_info.at);
+            out_info.write(info.into());
 
             ssize_t::try_from(v).unwrap_or(ssize_t::MAX)
         },
@@ -2172,15 +2198,10 @@ pub extern "C" fn quiche_conn_send_ack_eliciting_on_path(
     peer: *const sockaddr, peer_len: socklen_t,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let local = ffi_ref!(local, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let peer = ffi_ref!(peer, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let local =
+        ffi_addr!(local, local_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+    let peer = ffi_addr!(peer, peer_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     match conn.send_ack_eliciting_on_path(local, peer) {
         Ok(()) => 0,
         Err(e) => ssize_t::from(e.to_c()),
@@ -2306,15 +2327,9 @@ pub extern "C" fn quiche_conn_send_quantum_on_path(
     peer: *const sockaddr, peer_len: socklen_t,
 ) -> size_t {
     let conn = ffi_ref!(conn, 0);
-    let local = ffi_ref!(local, 0);
-    let peer = ffi_ref!(peer, 0);
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return 0;
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return 0;
-    };
+    let local = ffi_addr!(local, local_len, 0);
+    let peer = ffi_addr!(peer, peer_len, 0);
 
     conn.send_quantum_on_path(local, peer) as size_t
 }
@@ -2324,11 +2339,8 @@ pub extern "C" fn quiche_conn_paths_iter(
     conn: *const Connection, from: *const sockaddr, from_len: socklen_t,
 ) -> *mut SocketAddrIter {
     let conn = ffi_ref!(conn, ptr::null_mut());
-    let from = ffi_ref!(from, ptr::null_mut());
 
-    let Ok(addr) = std_addr_from_c(from, from_len) else {
-        return ptr::null_mut();
-    };
+    let addr = ffi_addr!(from, from_len, ptr::null_mut());
 
     Box::into_raw(Box::new(conn.paths_iter(addr)))
 }
@@ -2339,11 +2351,15 @@ pub extern "C" fn quiche_socket_addr_iter_next(
     peer_len: *mut socklen_t,
 ) -> bool {
     let iter = ffi_mut!(iter, false);
-    let peer = ffi_mut!(peer, false);
-    let peer_len = ffi_mut!(peer_len, false);
+    let peer = ffi_mut!(peer.cast::<MaybeUninit<sockaddr_storage>>(), false);
+    let peer_len = ffi_mut!(peer_len.cast::<MaybeUninit<socklen_t>>(), false);
 
     if let Some(v) = iter.next() {
-        *peer_len = std_addr_to_c(&v, peer);
+        // SAFETY: sockaddr_storage is an integer/byte storage type.
+        let mut address = unsafe { std::mem::zeroed() };
+        let len = std_addr_to_c(&v, &mut address);
+        peer.write(address);
+        peer_len.write(len);
         return true;
     }
 
@@ -2363,15 +2379,9 @@ pub extern "C" fn quiche_conn_is_path_validated(
     to: *const sockaddr, to_len: socklen_t,
 ) -> c_int {
     let conn = ffi_ref!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let from = ffi_ref!(from, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let to = ffi_ref!(to, c_int::from(FFI_ERR_INVALID_ARGUMENT));
 
-    let Ok(from) = std_addr_from_c(from, from_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(to) = std_addr_from_c(to, to_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let from = ffi_addr!(from, from_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let to = ffi_addr!(to, to_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     match conn.is_path_validated(from, to) {
         Ok(v) => c_int::from(v),
         Err(e) => c_int::from(e.to_c()),
@@ -2386,18 +2396,13 @@ fn path_operation(
     op: impl FnOnce(&mut Connection, SocketAddr, SocketAddr) -> Result<u64>,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let local_addr = ffi_ref!(local.0, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let peer_addr = ffi_ref!(peer.0, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let seq = ffi_mut!(
         seq.cast::<MaybeUninit<u64>>(),
         c_int::from(FFI_ERR_INVALID_ARGUMENT)
     );
-    let Ok(local) = std_addr_from_c(local_addr, local.1) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(peer) = std_addr_from_c(peer_addr, peer.1) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let local =
+        ffi_addr!(local.0, local.1, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let peer = ffi_addr!(peer.0, peer.1, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     match op(conn, local, peer) {
         Ok(v) => {
             seq.write(v);
@@ -2427,12 +2432,10 @@ pub extern "C" fn quiche_conn_migrate_source(
     seq: *mut u64,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let local = ffi_ref!(local, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let seq = ffi_mut!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
 
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let local =
+        ffi_addr!(local, local_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     match conn.migrate_source(local) {
         Ok(v) => {
             *seq = v;
@@ -2677,36 +2680,63 @@ pub extern "C" fn quiche_get_varint(
     ssize_t::try_from(b.off()).unwrap_or(ssize_t::MAX)
 }
 
-fn optional_std_addr_from_c(
+/// Decode a possibly absent C address.
+///
+/// # Safety
+/// A present pointer with an accepted length must identify readable address
+/// fields for the duration of this call.
+unsafe fn optional_std_addr_from_c(
     addr: *const sockaddr, addr_len: socklen_t,
 ) -> std::result::Result<Option<SocketAddr>, ()> {
     if addr.is_null() || addr_len == 0 {
         return Ok(None);
     }
 
-    let Some(addr) = (unsafe { ffi_ptr_ref(addr) }) else {
-        return Err(());
-    };
-
-    std_addr_from_c(addr, addr_len).map(Some)
+    // SAFETY: the caller supplies the same readable address contract.
+    unsafe { std_addr_from_c(addr, addr_len) }.map(Some)
 }
 
-fn std_addr_from_c(
-    addr: &sockaddr, addr_len: socklen_t,
+/// Decode a C address by reading only its initialized address fields.
+///
+/// # Safety
+/// If non-null and its length matches a supported address structure, the
+/// pointer must refer to readable storage for that structure's address fields.
+/// No Rust reference is formed to caller memory or its unused padding.
+unsafe fn std_addr_from_c(
+    addr: *const sockaddr, addr_len: socklen_t,
 ) -> std::result::Result<SocketAddr, ()> {
-    match addr.sa_family as _ {
+    let len = usize::try_from(addr_len).map_err(|_| ())?;
+    if addr.is_null() ||
+        !addr.is_aligned() ||
+        (len != size_of::<sockaddr_in>() && len != size_of::<sockaddr_in6>())
+    {
+        return Err(());
+    }
+
+    // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
+    // the caller guarantees the corresponding field is readable.
+    let family = unsafe { (&raw const (*addr).sa_family).read() };
+    match family as _ {
         AF_INET => {
-            if addr_len as usize != size_of::<sockaddr_in>() {
+            let in4 = addr.cast::<sockaddr_in>();
+            if len != size_of::<sockaddr_in>() || !in4.is_aligned() {
                 return Err(());
             }
 
-            let in4 = unsafe { *(addr as *const _ as *const sockaddr_in) };
+            // SAFETY: length, family and alignment match sockaddr_in. Read
+            // the port and address, not the unused sin_zero bytes.
+            let (sin_addr, sin_port) = unsafe {
+                (
+                    (&raw const (*in4).sin_addr).read(),
+                    (&raw const (*in4).sin_port).read(),
+                )
+            };
 
             #[cfg(not(windows))]
-            let ip_addr = Ipv4Addr::from(u32::from_be(in4.sin_addr.s_addr));
+            let ip_addr = Ipv4Addr::from(u32::from_be(sin_addr.s_addr));
             #[cfg(windows)]
             let ip_addr = {
-                let ip_bytes = unsafe { in4.sin_addr.S_un.S_un_b };
+                let ip_bytes = unsafe { sin_addr.S_un.S_un_b };
 
                 Ipv4Addr::from([
                     ip_bytes.s_b1,
@@ -2716,7 +2746,7 @@ fn std_addr_from_c(
                 ])
             };
 
-            let port = u16::from_be(in4.sin_port);
+            let port = u16::from_be(sin_port);
 
             let out = SocketAddrV4::new(ip_addr, port);
 
@@ -2724,30 +2754,40 @@ fn std_addr_from_c(
         },
 
         AF_INET6 => {
-            if addr_len as usize != size_of::<sockaddr_in6>() {
+            let in6 = addr.cast::<sockaddr_in6>();
+            if len != size_of::<sockaddr_in6>() || !in6.is_aligned() {
                 return Err(());
             }
 
-            let in6 = unsafe { *(addr as *const _ as *const sockaddr_in6) };
+            // SAFETY: length, family and alignment match sockaddr_in6.
+            let (sin6_addr, sin6_port, flowinfo) = unsafe {
+                (
+                    (&raw const (*in6).sin6_addr).read(),
+                    (&raw const (*in6).sin6_port).read(),
+                    (&raw const (*in6).sin6_flowinfo).read(),
+                )
+            };
 
             let ip_addr = Ipv6Addr::from(
                 #[cfg(not(windows))]
-                in6.sin6_addr.s6_addr,
+                sin6_addr.s6_addr,
                 #[cfg(windows)]
                 unsafe {
-                    in6.sin6_addr.u.Byte
+                    sin6_addr.u.Byte
                 },
             );
 
-            let port = u16::from_be(in6.sin6_port);
+            let port = u16::from_be(sin6_port);
 
             #[cfg(not(windows))]
-            let scope_id = in6.sin6_scope_id;
+            // SAFETY: the validated IPv6 layout contains this initialized field.
+            let scope_id = unsafe { (&raw const (*in6).sin6_scope_id).read() };
             #[cfg(windows)]
-            let scope_id = unsafe { in6.Anonymous.sin6_scope_id };
+            // SAFETY: read the scope ID from the validated IPv6 union layout.
+            let scope_id =
+                unsafe { (&raw const (*in6).Anonymous.sin6_scope_id).read() };
 
-            let out =
-                SocketAddrV6::new(ip_addr, port, in6.sin6_flowinfo, scope_id);
+            let out = SocketAddrV6::new(ip_addr, port, flowinfo, scope_id);
 
             Ok(out.into())
         },
@@ -3099,16 +3139,103 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    fn send_initializes_c_packet_metadata(
+        #[values(false, true)] specified_path: bool,
+    ) {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        let mut info = MaybeUninit::<SendInfo>::uninit();
+        let mut buf = [0; 1500];
+        let written = if specified_path {
+            let mut from = unsafe { std::mem::zeroed() };
+            let mut to = unsafe { std::mem::zeroed() };
+            let from_len =
+                std_addr_to_c(&test_utils::Pipe::client_addr(), &mut from);
+            let to_len = std_addr_to_c(&test_utils::Pipe::server_addr(), &mut to);
+            quiche_conn_send_on_path(
+                &mut pipe.client,
+                buf.as_mut_ptr(),
+                buf.len(),
+                (&raw const from).cast(),
+                from_len,
+                (&raw const to).cast(),
+                to_len,
+                info.as_mut_ptr(),
+            )
+        } else {
+            quiche_conn_send(
+                &mut pipe.client,
+                buf.as_mut_ptr(),
+                buf.len(),
+                info.as_mut_ptr(),
+            )
+        };
+        assert!(written > 0);
+        // SAFETY: positive send return means the complete SendInfo was written.
+        let info = unsafe { info.assume_init() };
+        assert_eq!(
+            unsafe {
+                std_addr_from_c((&raw const info.from).cast(), info.from_len)
+            },
+            Ok(test_utils::Pipe::client_addr())
+        );
+        assert_eq!(
+            unsafe { std_addr_from_c((&raw const info.to).cast(), info.to_len) },
+            Ok(test_utils::Pipe::server_addr())
+        );
+    }
+
+    #[test]
+    fn receive_info_rejects_null_nested_address() {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        let info = RecvInfo {
+            from: ptr::null(),
+            from_len: size_of::<sockaddr_in>() as socklen_t,
+            to: ptr::null(),
+            to_len: 0,
+        };
+        let mut buf = [0; 32];
+        assert_eq!(
+            quiche_conn_recv(
+                &mut pipe.server,
+                buf.as_mut_ptr(),
+                buf.len(),
+                &info
+            ),
+            ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
+    fn address_decoder_checks_length_before_reading_memory() {
+        // SAFETY: invalid lengths and nulls are rejected before reading.
+        let dangling = ptr::NonNull::<sockaddr>::dangling().as_ptr();
+        for len in [0, 1, 2, 3, 7] {
+            assert_eq!(unsafe { std_addr_from_c(dangling, len) }, Err(()));
+        }
+        assert_eq!(
+            unsafe {
+                std_addr_from_c(
+                    ptr::null(),
+                    size_of::<sockaddr_in6>() as socklen_t,
+                )
+            },
+            Err(())
+        );
+    }
+
     #[test]
     fn malformed_sockaddr_is_rejected() {
         let mut addr: sockaddr = unsafe { std::mem::zeroed() };
         addr.sa_family = AF_INET as sa_family_t;
 
-        assert_eq!(std_addr_from_c(&addr, 0), Err(()));
+        assert_eq!(unsafe { std_addr_from_c(&addr, 0) }, Err(()));
 
         addr.sa_family = 0;
         assert_eq!(
-            std_addr_from_c(&addr, size_of::<sockaddr_in>() as socklen_t,),
+            unsafe {
+                std_addr_from_c(&addr, size_of::<sockaddr_in>() as socklen_t)
+            },
             Err(())
         );
     }
@@ -3168,7 +3295,7 @@ mod tests {
         assert_eq!(
             unsafe {
                 std_addr_from_c(
-                    &*(&local_out as *const _ as *const sockaddr),
+                    (&raw const local_out).cast::<sockaddr>(),
                     local_len,
                 )
             },
@@ -3177,7 +3304,7 @@ mod tests {
         assert_eq!(
             unsafe {
                 std_addr_from_c(
-                    &*(&peer_out as *const _ as *const sockaddr),
+                    (&raw const peer_out).cast::<sockaddr>(),
                     peer_len,
                 )
             },
@@ -3185,93 +3312,62 @@ mod tests {
         );
     }
 
-    #[test]
-    fn addr_v4() {
-        let addr = "127.0.0.1:8080".parse().unwrap();
-
+    #[rstest::rstest]
+    #[case("127.0.0.1:8080")]
+    #[case("[2001:db8:85a3::8a2e:370:7334]:8080")]
+    fn address_round_trip(#[case] address: &str) {
+        let addr: SocketAddr = address.parse().unwrap();
+        // SAFETY: sockaddr_storage consists of integer and byte fields.
         let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
+        let len = std_addr_to_c(&addr, &mut out);
 
-        assert_eq!(
-            std_addr_to_c(&addr, &mut out),
-            size_of::<sockaddr_in>() as socklen_t
-        );
-
-        let s = ffi::CString::new("ddd.ddd.ddd.ddd").unwrap();
-
-        let s = unsafe {
-            let in_addr = &out as *const _ as *const sockaddr_in;
-            assert_eq!(u16::from_be((*in_addr).sin_port), addr.port());
-
-            let dst = s.into_raw();
-
-            inet_ntop(
-                AF_INET as _,
-                &((*in_addr).sin_addr) as *const _ as *const c_void,
-                dst as _,
-                16,
-            );
-
-            ffi::CString::from_raw(dst).into_string().unwrap()
+        // Independently verify the C layout using inet_ntop rather than only
+        // round-tripping through our own encoder and decoder.
+        let mut dst = [0u8; 46];
+        // SAFETY: the encoder initialized the matching sockaddr layout.
+        let (family, source, port, expected_len) = unsafe {
+            match addr {
+                SocketAddr::V4(_) => {
+                    let p = (&raw const out).cast::<sockaddr_in>();
+                    (
+                        AF_INET,
+                        (&raw const (*p).sin_addr).cast::<c_void>(),
+                        (*p).sin_port,
+                        size_of::<sockaddr_in>(),
+                    )
+                },
+                SocketAddr::V6(_) => {
+                    let p = (&raw const out).cast::<sockaddr_in6>();
+                    (
+                        AF_INET6,
+                        (&raw const (*p).sin6_addr).cast::<c_void>(),
+                        (*p).sin6_port,
+                        size_of::<sockaddr_in6>(),
+                    )
+                },
+            }
         };
-
-        assert_eq!(s, "127.0.0.1");
-
-        let addr = unsafe {
-            std_addr_from_c(
-                &*(&out as *const _ as *const sockaddr),
-                size_of::<sockaddr_in>() as socklen_t,
+        assert_eq!(usize::try_from(len).unwrap(), expected_len);
+        assert_eq!(u16::from_be(port), addr.port());
+        // SAFETY: both the address and the output buffer have the required
+        // size and remain valid for the call.
+        let result = unsafe {
+            inet_ntop(
+                family as _,
+                source,
+                dst.as_mut_ptr().cast(),
+                dst.len() as _,
             )
         };
+        assert!(!result.is_null());
+        // SAFETY: successful inet_ntop writes a NUL-terminated string.
+        let text = unsafe { ffi::CStr::from_ptr(dst.as_ptr().cast()) };
+        assert_eq!(text.to_str().unwrap(), addr.ip().to_string());
 
-        assert_eq!(addr, Ok("127.0.0.1:8080".parse().unwrap()));
-    }
-
-    #[test]
-    fn addr_v6() {
-        let addr = "[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
-            .parse()
-            .unwrap();
-
-        let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
-
+        // SAFETY: out contains the initialized address of length len.
         assert_eq!(
-            std_addr_to_c(&addr, &mut out),
-            size_of::<sockaddr_in6>() as socklen_t
-        );
-
-        let s =
-            ffi::CString::new("dddd:dddd:dddd:dddd:dddd:dddd:dddd:dddd").unwrap();
-
-        let s = unsafe {
-            let in6_addr = &out as *const _ as *const sockaddr_in6;
-            assert_eq!(u16::from_be((*in6_addr).sin6_port), addr.port());
-
-            let dst = s.into_raw();
-
-            inet_ntop(
-                AF_INET6 as _,
-                &((*in6_addr).sin6_addr) as *const _ as *const c_void,
-                dst as _,
-                45,
-            );
-
-            ffi::CString::from_raw(dst).into_string().unwrap()
-        };
-
-        assert_eq!(s, "2001:db8:85a3::8a2e:370:7334");
-
-        let addr = unsafe {
-            std_addr_from_c(
-                &*(&out as *const _ as *const sockaddr),
-                size_of::<sockaddr_in6>() as socklen_t,
-            )
-        };
-
-        assert_eq!(
-            addr,
-            Ok("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:8080"
-                .parse()
-                .unwrap())
+            unsafe { std_addr_from_c((&raw const out).cast(), len) },
+            Ok(addr)
         );
     }
 
@@ -3410,10 +3506,12 @@ mod tests {
         let addr = ptr::NonNull::<sockaddr>::dangling().as_ptr();
         let misaligned_addr =
             addr.cast::<u8>().wrapping_add(1).cast::<sockaddr>();
-        assert!(optional_std_addr_from_c(
-            misaligned_addr,
-            size_of::<sockaddr>() as socklen_t
-        )
+        assert!(unsafe {
+            optional_std_addr_from_c(
+                misaligned_addr,
+                size_of::<sockaddr>() as socklen_t,
+            )
+        }
         .is_err());
     }
 
