@@ -42,6 +42,7 @@ use super::Acked;
 use super::BBRv2CongestionEvent;
 use super::BwLoMode;
 
+#[cfg(test)]
 pub(super) const DEFAULT_MSS: usize = 1300;
 
 #[derive(Debug)]
@@ -682,18 +683,12 @@ impl BBRv2NetworkModel {
         false
     }
 
-    pub(super) const fn queueing_threshold_extra_bytes(&self) -> usize {
-        // TODO(vlad): 2 * mss
-        2 * DEFAULT_MSS
-    }
-
     pub(super) fn check_persistent_queue(
-        &mut self, target_gain: f32, params: &Params,
+        &mut self, target_gain: f32, mss: usize, params: &Params,
     ) {
-        let target = self.bdp(self.max_bandwidth(), target_gain).max(
-            self.bdp0()
-                .saturating_add(self.queueing_threshold_extra_bytes()),
-        );
+        let target = self
+            .bdp(self.max_bandwidth(), target_gain)
+            .max(self.bdp0().saturating_add(mss.saturating_mul(2)));
 
         if self.min_bytes_in_flight_in_round < target {
             self.rounds_with_queueing = 0;
@@ -792,8 +787,8 @@ impl BBRv2NetworkModel {
         self.inflight_hi = new_inflight_hi;
     }
 
-    pub(super) const fn inflight_hi_default(&self) -> usize {
-        usize::MAX
+    pub(super) const fn has_inflight_hi(&self) -> bool {
+        self.inflight_hi != usize::MAX
     }
 
     pub(super) const fn inflight_lo(&self) -> usize {
