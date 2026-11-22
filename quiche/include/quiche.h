@@ -369,11 +369,11 @@ int quiche_conn_set_max_idle_timeout(quiche_conn *conn, uint64_t v);
 
 typedef struct {
     // The remote address the packet was received from.
-    struct sockaddr *from;
+    const struct sockaddr *from;
     socklen_t from_len;
 
     // The local address the packet was received on.
-    struct sockaddr *to;
+    const struct sockaddr *to;
     socklen_t to_len;
 } quiche_recv_info;
 
@@ -953,18 +953,18 @@ typedef struct quiche_socket_addr_iter quiche_socket_addr_iter;
 
 // Returns an iterator over destination `SockAddr`s whose association
 // with "from" forms a known QUIC path on which packets can be sent to.
-quiche_socket_addr_iter *quiche_conn_paths_iter(quiche_conn *conn, const struct sockaddr *from, size_t from_len);
+quiche_socket_addr_iter *quiche_conn_paths_iter(const quiche_conn *conn, const struct sockaddr *from, socklen_t from_len);
 
 // Fetches the next peer from the given iterator. Returns false if there are
 // no more elements in the iterator.
-bool quiche_socket_addr_iter_next(quiche_socket_addr_iter *iter, struct sockaddr_storage *peer, size_t *peer_len);
+bool quiche_socket_addr_iter_next(quiche_socket_addr_iter *iter, struct sockaddr_storage *peer, socklen_t *peer_len);
 
 // Frees the given path iterator object.
 void quiche_socket_addr_iter_free(quiche_socket_addr_iter *iter);
 
 // Returns whether the network path with local address "from and remote address "to" has been validated.
 // If the 4-tuple does not exist over the connection, returns an InvalidState.
-int quiche_conn_is_path_validated(const quiche_conn *conn, const struct sockaddr *from, size_t from_len, const struct sockaddr *to, size_t to_len);
+int quiche_conn_is_path_validated(const quiche_conn *conn, const struct sockaddr *from, socklen_t from_len, const struct sockaddr *to, socklen_t to_len);
 
 // Frees the connection object.
 void quiche_conn_free(quiche_conn *conn);
