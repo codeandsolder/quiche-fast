@@ -685,7 +685,7 @@ fn handshake_done(
 
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert!(pipe.server.handshake_done_sent);
+    assert_ne!(pipe.server.handshake_done, HandshakeDoneState::Pending);
 }
 
 #[rstest]
@@ -9725,6 +9725,79 @@ fn dgram_lost_stat(
 
     // Verify dgram_lost stat is incremented.
     assert_eq!(pipe.client.path_stats().next().unwrap().dgram_lost, 1);
+}
+
+#[rstest]
+fn terminal_connection_lifecycle(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] drain: bool,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let conn = &mut pipe.client;
+    assert_eq!(conn.lifecycle, ConnectionLifecycle::Active);
+    let past = Instant::now() - Duration::from_millis(1);
+    let cause = if drain {
+        assert_eq!(conn.close(false, 0, b""), Ok(()));
+        assert!(conn.send(&mut [0; 65535]).is_ok());
+        assert!(conn.is_draining());
+        assert!(!conn.is_closed());
+        assert!(matches!(conn.lifecycle, ConnectionLifecycle::Draining {
+            origin: CloseOrigin::Local,
+            ..
+        }));
+        conn.lifecycle = ConnectionLifecycle::Draining {
+            deadline: past,
+            origin: CloseOrigin::Local,
+        };
+        CloseCause::Explicit(CloseOrigin::Local)
+    } else {
+        conn.idle_timer = Some(past);
+        CloseCause::IdleTimeout
+    };
+    assert_eq!(conn.timeout_instant(), Some(past));
+    conn.on_timeout();
+    assert_eq!(conn.lifecycle, ConnectionLifecycle::Closed(cause));
+    assert!(conn.is_closed());
+    assert!(!conn.is_draining());
+    assert_eq!(conn.is_timed_out(), !drain);
+    assert_eq!(conn.timeout(), None);
+    // A stale timer or repeated event must not change the terminal cause.
+    conn.idle_timer = Some(past);
+    conn.on_timeout();
+    conn.mark_closed(CloseCause::NoViablePath);
+    assert_eq!(conn.lifecycle, ConnectionLifecycle::Closed(cause));
+    assert_eq!(conn.send(&mut [0; 100]), Err(Error::Done));
+}
+
+#[cfg(feature = "qlog")]
+#[test]
+fn close_qlog_reports_actual_terminal_cause() {
+    use qlog::events::quic::ConnectionClosedTrigger as Trigger;
+    let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    assert_eq!(
+        pipe.client.close_event(CloseCause::IdleTimeout).trigger,
+        Some(Trigger::HandshakeTimeout)
+    );
+    assert_eq!(pipe.handshake(), Ok(()));
+    for (cause, trigger) in [
+        (CloseCause::IdleTimeout, Trigger::IdleTimeout),
+        (CloseCause::StatelessReset, Trigger::StatelessReset),
+        (CloseCause::NoViablePath, Trigger::Error),
+        (CloseCause::PacketNumbersExhausted, Trigger::Error),
+    ] {
+        assert_eq!(pipe.client.close_event(cause).trigger, Some(trigger));
+    }
+    let now = Instant::now();
+    pipe.client
+        .set_qlog(Box::new(std::io::sink()), String::new(), String::new());
+    pipe.client.idle_timer = Some(now);
+    pipe.client.on_timeout();
+    assert!(pipe.client.is_timed_out());
+    assert_eq!(
+        pipe.client.lifecycle,
+        ConnectionLifecycle::Closed(CloseCause::IdleTimeout)
+    );
 }
 
 #[rstest]
