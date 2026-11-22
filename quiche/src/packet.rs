@@ -1278,88 +1278,42 @@ mod tests {
     }
 
     #[test]
-    fn initial_v1_dcid_too_long() {
-        let hdr = Header {
-            ty: Type::Initial,
-            version: 0xafafafaf,
-            dcid: vec![
-                0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
-                0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba,
-            ]
-            .into(),
-            scid: vec![0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb].into(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: Some(vec![0x05, 0x06, 0x07, 0x08]),
-            versions: None,
-            key_phase: false,
-        };
+    fn initial_connection_id_length_is_version_specific() {
+        for (dcid_len, scid_len) in [(21, 7), (9, 21)] {
+            let hdr = Header {
+                ty: Type::Initial,
+                version: 0xafafafaf,
+                dcid: vec![0xba; dcid_len].into(),
+                scid: vec![0xbb; scid_len].into(),
+                pkt_num: 0,
+                pkt_num_len: 0,
+                token: Some(vec![0x05, 0x06, 0x07, 0x08]),
+                versions: None,
+                key_phase: false,
+            };
 
-        let mut d = [0; 50];
+            let mut d = [0; 64];
+            hdr.to_bytes(&mut octets::OctetsMut::with_slice(&mut d))
+                .unwrap();
+            assert_eq!(
+                Header::from_bytes(
+                    &mut octets::OctetsMut::with_slice(&mut d),
+                    dcid_len
+                ),
+                Ok(hdr),
+            );
 
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert!(hdr.to_bytes(&mut b).is_ok());
-        d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert_eq!(Header::from_bytes(&mut b, 21), Err(Error::InvalidPacket));
-    }
-
-    #[test]
-    fn initial_v1_scid_too_long() {
-        let hdr = Header {
-            ty: Type::Initial,
-            version: 0xafafafaf,
-            dcid: vec![0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba]
-                .into(),
-            scid: vec![
-                0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
-                0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
-            ]
-            .into(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: Some(vec![0x05, 0x06, 0x07, 0x08]),
-            versions: None,
-            key_phase: false,
-        };
-
-        let mut d = [0; 50];
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert!(hdr.to_bytes(&mut b).is_ok());
-        d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert_eq!(Header::from_bytes(&mut b, 9), Err(Error::InvalidPacket));
-    }
-
-    #[test]
-    fn initial_non_v1_scid_long() {
-        let hdr = Header {
-            ty: Type::Initial,
-            version: 0xafafafaf,
-            dcid: vec![0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba, 0xba]
-                .into(),
-            scid: vec![
-                0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
-                0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb, 0xbb,
-            ]
-            .into(),
-            pkt_num: 0,
-            pkt_num_len: 0,
-            token: Some(vec![0x05, 0x06, 0x07, 0x08]),
-            versions: None,
-            key_phase: false,
-        };
-
-        let mut d = [0; 50];
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert!(hdr.to_bytes(&mut b).is_ok());
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
+            // A version-independent header can contain longer CIDs. The
+            // same wire bytes with a supported version must be rejected.
+            d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
+            assert_eq!(
+                Header::from_bytes(
+                    &mut octets::OctetsMut::with_slice(&mut d),
+                    dcid_len
+                ),
+                Err(Error::InvalidPacket),
+            );
+        }
     }
 
     #[test]
@@ -1416,14 +1370,14 @@ mod tests {
         let cid = [0; 256];
         let max_cid = [1; 255];
         assert_eq!(
-            super::negotiate_version(&cid, &[], &mut out),
+            negotiate_version(&cid, &[], &mut out),
             Err(Error::InvalidPacket)
         );
         assert_eq!(
-            super::negotiate_version(&[], &cid, &mut out),
+            negotiate_version(&[], &cid, &mut out),
             Err(Error::InvalidPacket)
         );
-        let len = super::negotiate_version(&max_cid, &max_cid, &mut out).unwrap();
+        let len = negotiate_version(&max_cid, &max_cid, &mut out).unwrap();
         let hdr = Header::from_slice(&mut out[..len], 0).unwrap();
         assert_eq!(hdr.scid.as_ref(), max_cid);
         assert_eq!(hdr.dcid.as_ref(), max_cid);
