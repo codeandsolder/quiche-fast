@@ -323,27 +323,19 @@ fn transport_params_forbid_duplicates() {
 
 #[test]
 fn transport_params_unknown_zero_space() {
-    let mut unknown_params: UnknownTransportParameters =
-        UnknownTransportParameters {
-            capacity: 0,
-            parameters: vec![],
-        };
+    let mut unknown_params = UnknownTransportParameters::new(0);
     let massive_unknown_param = UnknownTransportParameter::<&[u8]> {
         id: 5,
         value: &[0xau8; 280],
     };
     assert!(unknown_params.push(massive_unknown_param).is_err());
-    assert!(unknown_params.capacity == 0);
-    assert!(unknown_params.parameters.is_empty());
+    assert!(unknown_params.remaining_capacity() == 0);
+    assert!(unknown_params.iter().len() == 0);
 }
 
 #[test]
 fn transport_params_unknown_max_space_respected() {
-    let mut unknown_params: UnknownTransportParameters =
-        UnknownTransportParameters {
-            capacity: 256,
-            parameters: vec![],
-        };
+    let mut unknown_params = UnknownTransportParameters::new(256);
 
     let massive_unknown_param = UnknownTransportParameter::<&[u8]> {
         id: 5,
@@ -359,16 +351,16 @@ fn transport_params_unknown_max_space_respected() {
     };
 
     assert!(unknown_params.push(massive_unknown_param).is_err());
-    assert!(unknown_params.capacity == 256);
-    assert!(unknown_params.parameters.is_empty());
+    assert!(unknown_params.remaining_capacity() == 256);
+    assert!(unknown_params.iter().len() == 0);
 
     unknown_params.push(big_unknown_param).unwrap();
-    assert!(unknown_params.capacity == 16);
-    assert!(unknown_params.parameters.len() == 1);
+    assert!(unknown_params.remaining_capacity() == 16);
+    assert!(unknown_params.iter().len() == 1);
 
-    unknown_params.push(little_unknown_param.clone()).unwrap();
-    assert!(unknown_params.capacity == 1);
-    assert!(unknown_params.parameters.len() == 2);
+    unknown_params.push(little_unknown_param).unwrap();
+    assert!(unknown_params.remaining_capacity() == 1);
+    assert!(unknown_params.iter().len() == 2);
 
     assert!(unknown_params.push(little_unknown_param).is_err());
 

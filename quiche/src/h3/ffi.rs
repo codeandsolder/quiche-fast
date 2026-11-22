@@ -34,7 +34,8 @@ use libc::c_void;
 use libc::size_t;
 use libc::ssize_t;
 
-use crate::*;
+use crate::h3;
+use crate::Connection;
 
 use crate::h3::NameValue;
 use crate::h3::Priority;
@@ -49,7 +50,7 @@ use crate::ffi::ffi_slice;
 use crate::ffi::ffi_slice_from_raw_parts;
 use crate::ffi::ffi_slice_out;
 
-fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
+fn validate_h3_ssize_len(len: size_t) -> Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
         Err(ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT))
     } else {
@@ -119,11 +120,9 @@ pub extern "C" fn quiche_h3_conn_new_with_transport(
     let quic_conn = ffi_mut!(quic_conn, ptr::null_mut());
     let config = ffi_mut!(config, ptr::null_mut());
 
-    match h3::Connection::with_transport(quic_conn, config) {
-        Ok(c) => Box::into_raw(Box::new(c)),
-
-        Err(_) => ptr::null_mut(),
-    }
+    crate::ffi::into_raw_or_null(h3::Connection::with_transport(
+        quic_conn, config,
+    ))
 }
 
 #[no_mangle]
@@ -286,14 +285,14 @@ fn header_operation<T>(
         &mut Connection,
         &[h3::HeaderRef<'_>],
     ) -> h3::Result<T>,
-) -> std::result::Result<T, i16> {
+) -> Result<T, i16> {
     let conn = ffi_mut!(conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
     let quic_conn = ffi_mut!(quic_conn, Err(H3_FFI_ERR_INVALID_ARGUMENT));
     // SAFETY: the C entry points require the header array and its fields
     // to remain readable for this call; no borrow escapes the operation.
     let headers = unsafe { headers_from_ptr(headers, headers_len) }
         .map_err(|()| H3_FFI_ERR_INVALID_ARGUMENT)?;
-    op(conn, quic_conn, &headers).map_err(|e| e.to_c())
+    op(conn, quic_conn, &headers).map_err(h3::Error::to_c)
 }
 
 #[no_mangle]
@@ -309,7 +308,8 @@ pub extern "C" fn quiche_h3_send_request(
         |conn, quic_conn, headers| conn.send_request(quic_conn, headers, fin),
     )
     .map_or_else(i64::from, |v| {
-        i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
+        i64::try_from(v)
+            .unwrap_or_else(|_| i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
     })
 }
 
@@ -526,7 +526,7 @@ pub extern "C" fn quiche_h3_conn_free(conn: *mut h3::Connection) {
 /// for the returned borrow; the caller must not mutate them during that time.
 unsafe fn headers_from_ptr<'a>(
     ptr: *const Header, len: size_t,
-) -> std::result::Result<Vec<h3::HeaderRef<'a>>, ()> {
+) -> Result<Vec<h3::HeaderRef<'a>>, ()> {
     // SAFETY: the caller supplies the readable header array.
     let headers = unsafe { ffi_slice_from_raw_parts(ptr, len) }.ok_or(())?;
 
