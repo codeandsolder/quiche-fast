@@ -434,8 +434,6 @@ pub struct LegacyRecovery {
 
     bytes_in_flight: BytesInFlight,
 
-    bytes_sent: usize,
-
     bytes_lost: u64,
 
     pub max_datagram_size: usize,
@@ -480,8 +478,6 @@ impl LegacyRecovery {
             time_thresh: INITIAL_TIME_THRESHOLD,
 
             bytes_in_flight: Default::default(),
-
-            bytes_sent: 0,
 
             bytes_lost: 0,
 
@@ -793,8 +789,6 @@ impl RecoveryOps for LegacyRecovery {
 
             self.set_loss_detection_timer(handshake_status, now);
         }
-
-        self.bytes_sent += sent_bytes;
 
         #[cfg(test)]
         {
@@ -1111,11 +1105,14 @@ impl RecoveryOps for LegacyRecovery {
         // Congestion Window is updated only when it's not updated already.
         // Update cwnd if it hasn't been updated yet.
         if self.cwnd() ==
-            self.max_datagram_size *
-                self.congestion.initial_congestion_window_packets
+            self.max_datagram_size.saturating_mul(
+                self.congestion.initial_congestion_window_packets,
+            )
         {
-            self.congestion.congestion_window = new_max_datagram_size *
-                self.congestion.initial_congestion_window_packets;
+            self.congestion.congestion_window = new_max_datagram_size
+                .saturating_mul(
+                    self.congestion.initial_congestion_window_packets,
+                );
         }
 
         self.max_datagram_size = new_max_datagram_size;

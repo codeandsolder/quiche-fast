@@ -122,8 +122,9 @@ pub struct Congestion {
 
 impl Congestion {
     pub(crate) fn from_config(recovery_config: &RecoveryConfig) -> Self {
-        let initial_congestion_window = recovery_config.max_send_udp_payload_size *
-            recovery_config.initial_congestion_window_packets;
+        let initial_congestion_window = recovery_config
+            .max_send_udp_payload_size
+            .saturating_mul(recovery_config.initial_congestion_window_packets);
 
         let mut cc = Congestion {
             congestion_window: initial_congestion_window,

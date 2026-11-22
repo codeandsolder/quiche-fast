@@ -508,8 +508,6 @@ pub struct GRecovery {
 
     bytes_in_flight: BytesInFlight,
 
-    bytes_sent: usize,
-
     pub bytes_lost: u64,
 
     max_datagram_size: usize,
@@ -572,7 +570,6 @@ impl GRecovery {
 
             loss_thresh: LossThreshold::new(recovery_config),
             bytes_in_flight: Default::default(),
-            bytes_sent: 0,
             bytes_lost: 0,
 
             max_datagram_size: recovery_config.max_send_udp_payload_size,
@@ -831,8 +828,6 @@ impl RecoveryOps for GRecovery {
             epoch.pkts_in_flight += 1;
             self.set_loss_detection_timer(handshake_status, time_sent);
         }
-
-        self.bytes_sent += sent_bytes;
 
         trace!("{trace_id} {self:?}");
     }
@@ -1295,7 +1290,7 @@ impl RecoveryOps for GRecovery {
         let floor = if pacing_rate < Bandwidth::from_kbits_per_second(1200) {
             self.max_datagram_size
         } else {
-            2 * self.max_datagram_size
+            self.max_datagram_size.saturating_mul(2)
         };
 
         pacing_rate

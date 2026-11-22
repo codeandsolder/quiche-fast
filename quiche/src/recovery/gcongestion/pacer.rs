@@ -158,8 +158,9 @@ impl Pacer {
         // The next packet should be sent as soon as the current packet has been
         // transferred. PacingRate is based on bytes in flight including this
         // packet.
+        let bytes_in_flight = bytes_in_flight.saturating_add(bytes);
         let delay = self
-            .pacing_rate(bytes_in_flight + bytes, rtt_stats)
+            .pacing_rate(bytes_in_flight, rtt_stats)
             .transfer_time(bytes as u64);
 
         if !self.pacing_limited || self.lumpy_tokens == 0 {
@@ -178,7 +179,7 @@ impl Pacer {
                 self.lumpy_tokens = 1;
             }
 
-            if bytes_in_flight + bytes >= self.sender.get_congestion_window() {
+            if bytes_in_flight >= self.sender.get_congestion_window() {
                 // Don't add lumpy_tokens if the congestion controller is CWND
                 // limited.
                 self.lumpy_tokens = 1;
@@ -189,7 +190,7 @@ impl Pacer {
         self.ideal_next_packet_send_time.set_max(sent_time);
         self.ideal_next_packet_send_time.inc(delay);
         // Stop making up for lost time if underlying sender prevents sending.
-        self.pacing_limited = self.sender.can_send(bytes_in_flight + bytes);
+        self.pacing_limited = self.sender.can_send(bytes_in_flight);
     }
 
     #[expect(
@@ -229,7 +230,8 @@ impl Pacer {
                 let max_rate = max_pacing_rate * 1.25f32;
                 let max_cwnd =
                     max_rate.to_bytes_per_period(rtt_stats.smoothed_rtt);
-                self.sender.limit_cwnd(max_cwnd as usize);
+                self.sender
+                    .limit_cwnd(usize::try_from(max_cwnd).unwrap_or(usize::MAX));
             }
         }
     }

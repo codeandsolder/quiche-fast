@@ -527,7 +527,7 @@ impl BBRv2 {
         max_segment_size: usize, smoothed_rtt: Duration,
         custom_bbr_params: Option<&BbrParams>,
     ) -> Self {
-        let cwnd = initial_congestion_window * max_segment_size;
+        let cwnd = initial_congestion_window.saturating_mul(max_segment_size);
 
         let params = if let Some(custom_bbr_settings) = custom_bbr_params {
             DEFAULT_PARAMS.with_overrides(custom_bbr_settings)
@@ -535,9 +535,10 @@ impl BBRv2 {
             DEFAULT_PARAMS
         };
 
-        let min_cwnd =
-            params.min_cwnd_packets.unwrap_or(initial_congestion_window) *
-                max_segment_size;
+        let min_cwnd = params
+            .min_cwnd_packets
+            .unwrap_or(initial_congestion_window)
+            .saturating_mul(max_segment_size);
 
         BBRv2 {
             mode: Mode::startup(BBRv2NetworkModel::new(&params, smoothed_rtt)),
@@ -545,9 +546,9 @@ impl BBRv2 {
             pacing_rate: initial_pacing_rate(cwnd, smoothed_rtt, &params),
             cwnd_limits: Limits {
                 lo: min_cwnd,
-                hi: max_congestion_window * max_segment_size,
+                hi: max_congestion_window.saturating_mul(max_segment_size),
             },
-            initial_cwnd: initial_congestion_window * max_segment_size,
+            initial_cwnd: cwnd,
             last_sample_is_app_limited: false,
             has_non_app_limited_sample: false,
             last_quiescence_start: None,
@@ -636,10 +637,13 @@ impl BBRv2 {
 
         let prior_cwnd = self.cwnd;
         if network_model.full_bandwidth_reached() {
-            target_cwnd += network_model.max_ack_height();
-            self.cwnd = target_cwnd.min(prior_cwnd + bytes_acked);
-        } else if prior_cwnd < target_cwnd || prior_cwnd < 2 * self.initial_cwnd {
-            self.cwnd = prior_cwnd + bytes_acked;
+            target_cwnd =
+                target_cwnd.saturating_add(network_model.max_ack_height());
+            self.cwnd = target_cwnd.min(prior_cwnd.saturating_add(bytes_acked));
+        } else if prior_cwnd < target_cwnd ||
+            prior_cwnd < self.initial_cwnd.saturating_mul(2)
+        {
+            self.cwnd = prior_cwnd.saturating_add(bytes_acked);
         }
 
         self.cwnd = self
@@ -802,14 +806,15 @@ impl CongestionControl for BBRv2 {
     }
 
     fn update_mss(&mut self, new_mss: usize) {
-        self.cwnd_limits.hi = (self.cwnd_limits.hi as u64 * new_mss as u64 /
-            self.mss as u64) as usize;
-        self.cwnd_limits.lo = (self.cwnd_limits.lo as u64 * new_mss as u64 /
-            self.mss as u64) as usize;
-        self.cwnd =
-            (self.cwnd as u64 * new_mss as u64 / self.mss as u64) as usize;
-        self.initial_cwnd = (self.initial_cwnd as u64 * new_mss as u64 /
-            self.mss as u64) as usize;
+        let old_mss = self.mss;
+        let scale = |window: usize| {
+            let scaled = window as u128 * new_mss as u128 / old_mss as u128;
+            usize::try_from(scaled).unwrap_or(usize::MAX)
+        };
+        self.cwnd_limits.hi = scale(self.cwnd_limits.hi);
+        self.cwnd_limits.lo = scale(self.cwnd_limits.lo);
+        self.cwnd = scale(self.cwnd);
+        self.initial_cwnd = scale(self.initial_cwnd);
         if self.params.scale_pacing_rate_by_mss {
             self.pacing_rate =
                 self.pacing_rate * (new_mss as f64 / self.mss as f64);
@@ -836,6 +841,33 @@ mod tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn congestion_window_width_boundaries() {
+        let mut bbr = BBRv2::new(
+            usize::MAX,
+            usize::MAX,
+            1200,
+            Duration::from_secs(1),
+            None,
+        );
+        assert_eq!(bbr.cwnd, usize::MAX);
+        assert_eq!(bbr.cwnd_limits.hi, usize::MAX);
+        assert_eq!(bbr.cwnd_limits.lo, usize::MAX);
+        bbr.update_mss(600);
+        assert_eq!(bbr.cwnd, usize::MAX / 2);
+        assert_eq!(bbr.initial_cwnd, usize::MAX / 2);
+        assert_eq!(bbr.cwnd_limits.hi, usize::MAX / 2);
+        assert_eq!(bbr.cwnd_limits.lo, usize::MAX / 2);
+        bbr.update_mss(2400);
+        assert_eq!(bbr.cwnd, usize::MAX);
+        assert_eq!(bbr.initial_cwnd, usize::MAX);
+        assert_eq!(bbr.cwnd_limits.hi, usize::MAX);
+        assert_eq!(bbr.cwnd_limits.lo, usize::MAX);
+        bbr.cwnd = usize::MAX - 1;
+        bbr.update_congestion_window(10);
+        assert_eq!(bbr.cwnd, usize::MAX);
+    }
 
     #[rstest]
     fn update_mss(#[values(false, true)] scale_pacing_rate_by_mss: bool) {
