@@ -1219,7 +1219,13 @@ impl Connection {
             return Err(e.into());
         }
 
-        if let Err(e) = self.send_headers(conn, stream_id, headers, fin) {
+        if let Err(e) = self.send_headers(
+            conn,
+            stream_id,
+            headers,
+            stream::HeaderSection::Final,
+            fin,
+        ) {
             // If the stream was blocked before any header bytes were written,
             // the QUIC stream exists but carries no H3 data yet. Roll back the
             // H3-layer stream entry so the stream ID is not consumed and a
@@ -1358,7 +1364,8 @@ impl Connection {
             return Err(Error::FrameUnexpected);
         }
 
-        self.send_headers(conn, stream_id, headers, fin)?;
+        let section = stream::HeaderSection::response(headers);
+        self.send_headers(conn, stream_id, headers, section, fin)?;
 
         // Clamp and shift urgency into quiche-priority space
         let urgency = priority
@@ -1407,28 +1414,23 @@ impl Connection {
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
         headers: &[T], is_trailer_section: bool, fin: bool,
     ) -> Result<()> {
-        // Clients can only send trailer headers.
-        if !self.is_server && !is_trailer_section {
+        let section = if is_trailer_section {
+            stream::HeaderSection::Trailers
+        } else if self.is_server {
+            stream::HeaderSection::response(headers)
+        } else {
             return Err(Error::FrameUnexpected);
-        }
+        };
 
         if !self
             .streams
             .get(&stream_id)
-            .is_some_and(stream::Stream::can_send_message_frames)
+            .is_some_and(|s| s.can_send_additional_headers(section))
         {
             return Err(Error::FrameUnexpected);
         }
 
-        self.send_headers(conn, stream_id, headers, fin)?;
-
-        if is_trailer_section {
-            // send_headers() might have tidied the stream away, so we need to
-            // check again.
-            if let Some(s) = self.streams.get_mut(&stream_id) {
-                s.mark_trailers_sent();
-            }
-        }
+        self.send_headers(conn, stream_id, headers, section, fin)?;
 
         Ok(())
     }
@@ -1494,8 +1496,12 @@ impl Connection {
 
     fn send_headers<T: NameValue, F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
-        headers: &[T], fin: bool,
+        headers: &[T], section: stream::HeaderSection, fin: bool,
     ) -> Result<()> {
+        if section == stream::HeaderSection::Informational && fin {
+            return Err(Error::FrameUnexpected);
+        }
+
         let mut d = [42; 10];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
@@ -1568,7 +1574,7 @@ impl Connection {
         if fin {
             self.finish_local_stream(conn, stream_id);
         } else if let Some(s) = self.streams.get_mut(&stream_id) {
-            s.initialize_local();
+            s.on_sent_headers(section, false);
         }
 
         Ok(())
@@ -1723,7 +1729,7 @@ impl Connection {
         if !self
             .streams
             .get(&stream_id)
-            .is_some_and(stream::Stream::can_send_message_frames)
+            .is_some_and(stream::Stream::can_send_body)
         {
             return Err(Error::FrameUnexpected);
         }
@@ -4567,9 +4573,41 @@ mod tests {
             Header::new(b"server", b"quiche-test"),
         ];
 
+        assert_eq!(
+            s.server
+                .send_response(&mut s.pipe.server, stream, &info_resp, true),
+            Err(Error::FrameUnexpected)
+        );
+
         s.server
             .send_response(&mut s.pipe.server, stream, &info_resp, false)
             .unwrap();
+
+        assert_eq!(
+            s.server
+                .send_body(&mut s.pipe.server, stream, b"body", false),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            s.server.send_additional_headers(
+                &mut s.pipe.server,
+                stream,
+                &[Header::new(b"x-test", b"trailer")],
+                true,
+                false,
+            ),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            s.server.send_additional_headers(
+                &mut s.pipe.server,
+                stream,
+                &info_resp,
+                false,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
 
         s.server
             .send_additional_headers(
@@ -7902,7 +7940,13 @@ mod tests {
         let trailers = vec![Header::new(b"hello", b"world")];
 
         s.client
-            .send_headers(&mut s.pipe.client, r1_id, &trailers, true)
+            .send_additional_headers(
+                &mut s.pipe.client,
+                r1_id,
+                &trailers,
+                true,
+                true,
+            )
             .unwrap();
 
         let r1_ev_trailers = Event::Headers {
@@ -7923,7 +7967,13 @@ mod tests {
         let r2_body = s.send_body_client(r2_id, false).unwrap();
 
         s.client
-            .send_headers(&mut s.pipe.client, r2_id, &trailers, false)
+            .send_additional_headers(
+                &mut s.pipe.client,
+                r2_id,
+                &trailers,
+                true,
+                false,
+            )
             .unwrap();
 
         let r2_ev_trailers = Event::Headers {

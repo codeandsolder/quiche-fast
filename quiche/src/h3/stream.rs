@@ -133,9 +133,35 @@ enum ReceivePhase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SendPhase {
     Initial,
+    Informational,
     Open,
     Trailers,
     Finished,
+}
+
+/// Semantic kind of a header section written to a message stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderSection {
+    Informational,
+    Final,
+    Trailers,
+}
+
+impl HeaderSection {
+    /// Classify response headers without validating application-level fields.
+    pub fn response(headers: &[impl super::NameValue]) -> Self {
+        if headers
+            .iter()
+            .find(|h| h.name() == b":status")
+            .is_some_and(|h| {
+                matches!(h.value(), [b'1', b'0'..=b'9', b'0'..=b'9'])
+            })
+        {
+            Self::Informational
+        } else {
+            Self::Final
+        }
+    }
 }
 
 /// An HTTP/3 stream.
@@ -406,21 +432,12 @@ impl Stream {
     /// Informational responses do not establish the final message body.
     /// Full pseudo-header/field validation remains the application's concern.
     pub fn on_decoded_headers(&mut self, headers: &[super::Header]) {
-        use super::NameValue as _;
-
         if !self.is_local || !matches!(self.receive_phase, ReceivePhase::Initial)
         {
             return;
         }
 
-        let informational = headers
-            .iter()
-            .find(|h| h.name() == b":status")
-            .is_some_and(|h| {
-                matches!(h.value(), [b'1', b'0'..=b'9', b'0'..=b'9'])
-            });
-
-        if !informational {
+        if HeaderSection::response(headers) == HeaderSection::Final {
             self.receive_phase = ReceivePhase::Open;
         }
     }
@@ -672,16 +689,35 @@ impl Stream {
         matches!(self.send_phase, SendPhase::Initial)
     }
 
-    /// Whether DATA or further HEADERS may be sent.
-    pub const fn can_send_message_frames(&self) -> bool {
+    /// Whether another header section may be sent after the first.
+    pub const fn can_send_additional_headers(
+        &self, section: HeaderSection,
+    ) -> bool {
+        matches!(
+            (self.send_phase, section),
+            (
+                SendPhase::Informational,
+                HeaderSection::Informational | HeaderSection::Final
+            ) | (SendPhase::Open, HeaderSection::Trailers)
+        )
+    }
+
+    /// Whether DATA may be sent after the final header section.
+    pub const fn can_send_body(&self) -> bool {
         matches!(self.send_phase, SendPhase::Open)
     }
 
-    /// Record a successful header write.
-    pub const fn initialize_local(&mut self) {
-        if matches!(self.send_phase, SendPhase::Initial) {
-            self.send_phase = SendPhase::Open;
-        }
+    /// Advance only after the entire header section was buffered.
+    pub const fn on_sent_headers(&mut self, section: HeaderSection, fin: bool) {
+        self.send_phase = if fin {
+            SendPhase::Finished
+        } else {
+            match section {
+                HeaderSection::Informational => SendPhase::Informational,
+                HeaderSection::Final => SendPhase::Open,
+                HeaderSection::Trailers => SendPhase::Trailers,
+            }
+        };
     }
 
     /// Finish the local part of the stream.
@@ -692,12 +728,6 @@ impl Stream {
     /// Whether the local send-side of the stream has finished.
     pub const fn local_finished(&self) -> bool {
         matches!(self.send_phase, SendPhase::Finished)
-    }
-
-    pub const fn mark_trailers_sent(&mut self) {
-        if matches!(self.send_phase, SendPhase::Open) {
-            self.send_phase = SendPhase::Trailers;
-        }
     }
 
     /// Tries to fill the state buffer by reading data from the given cursor.
@@ -1742,13 +1772,22 @@ mod tests {
         );
 
         assert!(response.can_send_initial_headers());
-        response.initialize_local();
-        assert!(response.can_send_message_frames());
-        response.mark_trailers_sent();
-        assert!(!response.can_send_message_frames());
-        response.finish_local();
-        response.mark_trailers_sent();
+        response.on_sent_headers(HeaderSection::Informational, false);
+        assert!(!response.can_send_initial_headers());
+        assert!(!response.can_send_body());
+        assert!(
+            response.can_send_additional_headers(HeaderSection::Informational)
+        );
+        assert!(response.can_send_additional_headers(HeaderSection::Final));
+        assert!(!response.can_send_additional_headers(HeaderSection::Trailers));
+        response.on_sent_headers(HeaderSection::Final, false);
+        assert!(response.can_send_body());
+        assert!(!response.can_send_additional_headers(HeaderSection::Final));
+        assert!(response.can_send_additional_headers(HeaderSection::Trailers));
+        response.on_sent_headers(HeaderSection::Trailers, true);
         assert!(response.local_finished());
+        assert!(!response.can_send_body());
+        assert!(!response.can_send_additional_headers(HeaderSection::Trailers));
     }
 
     /// Returns the frame type ID for a given frame variant.
