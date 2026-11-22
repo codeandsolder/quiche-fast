@@ -122,6 +122,48 @@ impl Type {
     }
 }
 
+/// Message-frame sequencing, independent of the wire parser's current state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReceivePhase {
+    Initial,
+    Open,
+    Trailers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SendPhase {
+    Initial,
+    Informational,
+    Open,
+    Trailers,
+    Finished,
+}
+
+/// Semantic kind of a header section written to a message stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderSection {
+    Informational,
+    Final,
+    Trailers,
+}
+
+impl HeaderSection {
+    /// Classify response headers without validating application-level fields.
+    pub fn response(headers: &[impl super::NameValue]) -> Self {
+        if headers
+            .iter()
+            .find(|h| h.name() == b":status")
+            .is_some_and(|h| {
+                matches!(h.value(), [b'1', b'0'..=b'9', b'0'..=b'9'])
+            })
+        {
+            Self::Informational
+        } else {
+            Self::Final
+        }
+    }
+}
+
 /// An HTTP/3 stream.
 ///
 /// This maintains the HTTP/3 state for streams of any type (control, request,
@@ -164,32 +206,17 @@ pub struct Stream {
     /// Whether the stream was created locally, or by the peer.
     is_local: bool,
 
-    /// Whether the stream has been remotely initialized.
-    remote_initialized: bool,
+    /// Peer control initialization or HTTP message receive phase.
+    receive_phase: ReceivePhase,
 
-    /// Whether the stream has been locally initialized.
-    local_initialized: bool,
-
-    /// Whether the local send-side of the stream has finished.
-    local_finished: bool,
+    /// Local HTTP message send phase.
+    send_phase: SendPhase,
 
     /// Whether a `Data` event has been triggered for this stream.
     data_event_triggered: bool,
 
     /// The last `PRIORITY_UPDATE` frame encoded field value, if any.
     last_priority_update: Option<Vec<u8>>,
-
-    /// The count of HEADERS frames that have been received.
-    headers_received_count: usize,
-
-    /// Whether a DATA frame has been received.
-    data_received: bool,
-
-    /// Whether a trailing HEADER field has been sent.
-    trailers_sent: bool,
-
-    /// Whether a trailing HEADER field has been received.
-    trailers_received: bool,
 
     /// Max size of QPACK encoded headers carried in HEADERS or `PUSH_PROMISE`
     /// frames. Related to `SETTINGS_MAX_FIELD_LIST_SIZE`; see
@@ -243,21 +270,12 @@ impl Stream {
 
             is_local,
 
-            remote_initialized: false,
-
-            local_initialized: false,
-            local_finished: false,
+            receive_phase: ReceivePhase::Initial,
+            send_phase: SendPhase::Initial,
 
             data_event_triggered: false,
 
             last_priority_update: None,
-
-            headers_received_count: 0,
-
-            data_received: false,
-
-            trailers_sent: false,
-            trailers_received: false,
 
             max_encoded_headers_payload_size,
             max_priority_update_size,
@@ -283,11 +301,7 @@ impl Stream {
 
             Type::Push => State::PushId,
 
-            Type::QpackEncoder | Type::QpackDecoder => {
-                self.remote_initialized = true;
-
-                State::QpackInstruction
-            },
+            Type::QpackEncoder | Type::QpackDecoder => State::QpackInstruction,
 
             Type::Unknown => State::Drain,
         };
@@ -318,32 +332,22 @@ impl Stream {
                 // Control stream starts uninitialized and only SETTINGS is
                 // accepted in that state. Other frames cause an error. Once
                 // initialized, no more SETTINGS are permitted.
-                match (ty, self.remote_initialized) {
-                    // Initialize control stream.
-                    (frame::SETTINGS_FRAME_TYPE_ID, false) =>
-                        self.remote_initialized = true,
+                match (ty, self.receive_phase) {
+                    (frame::SETTINGS_FRAME_TYPE_ID, ReceivePhase::Initial) =>
+                        self.receive_phase = ReceivePhase::Open,
 
-                    // Non-SETTINGS frames not allowed on control stream
-                    // before initialization.
-                    (_, false) => return Err(Error::MissingSettings),
+                    (_, ReceivePhase::Initial) =>
+                        return Err(Error::MissingSettings),
 
-                    // Additional SETTINGS frame.
-                    (frame::SETTINGS_FRAME_TYPE_ID, true) =>
-                        return Err(Error::FrameUnexpected),
+                    (
+                        frame::SETTINGS_FRAME_TYPE_ID |
+                        frame::DATA_FRAME_TYPE_ID |
+                        frame::HEADERS_FRAME_TYPE_ID |
+                        frame::PUSH_PROMISE_FRAME_TYPE_ID,
+                        _,
+                    ) => return Err(Error::FrameUnexpected),
 
-                    // Frames that can't be received on control stream
-                    // after initialization.
-                    (frame::DATA_FRAME_TYPE_ID, true) =>
-                        return Err(Error::FrameUnexpected),
-
-                    (frame::HEADERS_FRAME_TYPE_ID, true) =>
-                        return Err(Error::FrameUnexpected),
-
-                    (frame::PUSH_PROMISE_FRAME_TYPE_ID, true) =>
-                        return Err(Error::FrameUnexpected),
-
-                    // All other frames are ignored after initialization.
-                    (_, true) => (),
+                    _ => (),
                 }
             },
 
@@ -383,21 +387,12 @@ impl Stream {
         Ok(())
     }
 
-    /// Validates a frame type received on a request stream and advances the
-    /// request-stream HTTP message phase tracking accordingly.
-    ///
-    /// Request streams start uninitialized and only HEADERS is accepted. After
-    /// initialization, DATA and HEADERS frames may be acceptable, depending on
-    /// the HTTP message phase (informational/final headers, body, trailers).
-    /// Receiving any other known frame type on a request stream is always an
-    /// error per RFC 9114, regardless of which endpoint opened the stream.
-    ///
-    /// HTTP message phase bookkeeping (`remote_initialized`, `data_received`,
-    /// `trailers_received`) only applies to peer-initiated streams, since it
-    /// tracks the receive direction.
+    /// Validate request and response frame ordering (RFC 9114 section 4.1).
+    /// Requests have one initial header section, optional DATA, then optional
+    /// trailers. Responses can have informational sections before the final
+    /// header section, so initial response HEADERS advance the receive phase
+    /// only after QPACK decoding identifies their status.
     const fn validate_request_frame_type(&mut self, ty: u64) -> Result<()> {
-        // Frames that are never valid on a request stream, regardless of which
-        // endpoint opened it.
         if matches!(
             ty,
             frame::CANCEL_PUSH_FRAME_TYPE_ID |
@@ -410,43 +405,41 @@ impl Stream {
             return Err(Error::FrameUnexpected);
         }
 
-        // HTTP message phase bookkeeping only applies to peer-initiated
-        // streams, since it tracks the receive direction.
-        if self.is_local {
-            return Ok(());
-        }
-
-        match (ty, self.remote_initialized) {
-            (frame::HEADERS_FRAME_TYPE_ID, false) => {
-                self.remote_initialized = true;
-            },
-
-            (frame::DATA_FRAME_TYPE_ID, false) =>
-                return Err(Error::FrameUnexpected),
-
-            (frame::HEADERS_FRAME_TYPE_ID, true) => {
-                if self.trailers_received {
-                    return Err(Error::FrameUnexpected);
-                }
-
-                if self.data_received {
-                    self.trailers_received = true;
+        match (ty, self.receive_phase) {
+            (frame::HEADERS_FRAME_TYPE_ID, ReceivePhase::Initial) => {
+                if !self.is_local {
+                    self.receive_phase = ReceivePhase::Open;
                 }
             },
 
-            (frame::DATA_FRAME_TYPE_ID, true) => {
-                if self.trailers_received {
-                    return Err(Error::FrameUnexpected);
-                }
+            (frame::HEADERS_FRAME_TYPE_ID, ReceivePhase::Open) =>
+                self.receive_phase = ReceivePhase::Trailers,
 
-                self.data_received = true;
-            },
+            (frame::DATA_FRAME_TYPE_ID, ReceivePhase::Initial) |
+            (
+                frame::HEADERS_FRAME_TYPE_ID | frame::DATA_FRAME_TYPE_ID,
+                ReceivePhase::Trailers,
+            ) => return Err(Error::FrameUnexpected),
 
-            // All other frames can be ignored regardless of stream state.
+            // Extension and unknown frames are not part of message framing.
             _ => (),
         }
 
         Ok(())
+    }
+
+    /// Advance the received response's header phase after decoding its fields.
+    /// Informational responses do not establish the final message body.
+    /// Full pseudo-header/field validation remains the application's concern.
+    pub fn on_decoded_headers(&mut self, headers: &[super::Header]) {
+        if !self.is_local || !matches!(self.receive_phase, ReceivePhase::Initial)
+        {
+            return;
+        }
+
+        if HeaderSection::response(headers) == HeaderSection::Final {
+            self.receive_phase = ReceivePhase::Open;
+        }
     }
 
     // Returns the stream's current frame type, if any
@@ -691,41 +684,50 @@ impl Stream {
         Ok(())
     }
 
-    /// Initialize the local part of the stream.
-    pub const fn initialize_local(&mut self) {
-        self.local_initialized = true;
+    /// Whether a first local header section may be sent.
+    pub const fn can_send_initial_headers(&self) -> bool {
+        matches!(self.send_phase, SendPhase::Initial)
     }
 
-    /// Whether the stream has been locally initialized.
-    pub const fn local_initialized(&self) -> bool {
-        self.local_initialized
+    /// Whether another header section may be sent after the first.
+    pub const fn can_send_additional_headers(
+        &self, section: HeaderSection,
+    ) -> bool {
+        matches!(
+            (self.send_phase, section),
+            (
+                SendPhase::Informational,
+                HeaderSection::Informational | HeaderSection::Final
+            ) | (SendPhase::Open, HeaderSection::Trailers)
+        )
+    }
+
+    /// Whether DATA may be sent after the final header section.
+    pub const fn can_send_body(&self) -> bool {
+        matches!(self.send_phase, SendPhase::Open)
+    }
+
+    /// Advance only after the entire header section was buffered.
+    pub const fn on_sent_headers(&mut self, section: HeaderSection, fin: bool) {
+        self.send_phase = if fin {
+            SendPhase::Finished
+        } else {
+            match section {
+                HeaderSection::Informational => SendPhase::Informational,
+                HeaderSection::Final => SendPhase::Open,
+                HeaderSection::Trailers => SendPhase::Trailers,
+            }
+        };
     }
 
     /// Finish the local part of the stream.
     pub const fn finish_local(&mut self) {
-        self.local_finished = true;
+        self.send_phase = SendPhase::Finished;
     }
 
     /// Whether the local send-side of the stream has finished.
     pub const fn local_finished(&self) -> bool {
-        self.local_finished
-    }
-
-    pub const fn increment_headers_received(&mut self) {
-        self.headers_received_count =
-            self.headers_received_count.saturating_add(1);
-    }
-
-    pub const fn headers_received_count(&self) -> usize {
-        self.headers_received_count
-    }
-
-    pub const fn mark_trailers_sent(&mut self) {
-        self.trailers_sent = true;
-    }
-
-    pub const fn trailers_sent(&self) -> bool {
-        self.trailers_sent
+        matches!(self.send_phase, SendPhase::Finished)
     }
 
     /// Tries to fill the state buffer by reading data from the given cursor.
@@ -1058,7 +1060,7 @@ mod tests {
         let mut stream = open_remote_request_stream();
         // Simulate an already accepted final HEADERS block. A DATA frame is
         // otherwise invalid before the initial HEADERS on request streams.
-        stream.remote_initialized = true;
+        stream.receive_phase = ReceivePhase::Open;
         stream.set_frame_type(DATA_FRAME_TYPE_ID).unwrap();
 
         let length = u64::from(u32::MAX) + 1;
@@ -1563,7 +1565,12 @@ mod tests {
 
     #[test]
     fn additional_headers() {
-        let mut stream = open_remote_request_stream();
+        let mut stream = Stream::new(
+            0,
+            true,
+            SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT,
+            PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT,
+        );
 
         let mut d = vec![42; 128];
         let mut b = octets::OctetsMut::with_slice(&mut d);
@@ -1610,6 +1617,8 @@ mod tests {
         stream.try_fill_buffer_for_tests(&mut cursor).unwrap();
 
         assert_eq!(stream.try_consume_frame(), Ok((info_hdrs, 12)));
+        stream
+            .on_decoded_headers(&[super::super::Header::new(b":status", b"103")]);
         assert_eq!(stream.state, State::FrameType);
 
         // Parse the non-info HEADERS frame type.
@@ -1634,6 +1643,8 @@ mod tests {
         stream.try_fill_buffer_for_tests(&mut cursor).unwrap();
 
         assert_eq!(stream.try_consume_frame(), Ok((non_info_hdrs, 12)));
+        stream
+            .on_decoded_headers(&[super::super::Header::new(b":status", b"200")]);
         assert_eq!(stream.state, State::FrameType);
 
         // Parse the DATA frame type.
@@ -1687,6 +1698,96 @@ mod tests {
 
         assert_eq!(stream.try_consume_frame(), Ok((trailers, 12)));
         assert_eq!(stream.state, State::FrameType);
+    }
+
+    #[test]
+    fn request_and_response_message_phases() {
+        let mut request = open_remote_request_stream();
+        assert_eq!(
+            request.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            request.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Ok(())
+        );
+        assert_eq!(
+            request.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Ok(())
+        );
+        assert_eq!(
+            request.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            request.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+
+        let mut response = Stream::new(
+            0,
+            true,
+            SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT,
+            PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT,
+        );
+        assert_eq!(
+            response.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+        for code in [b"100", b"103"] {
+            assert_eq!(
+                response.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+                Ok(())
+            );
+            response.on_decoded_headers(&[super::super::Header::new(
+                b":status", code,
+            )]);
+            assert_eq!(
+                response.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+                Err(Error::FrameUnexpected)
+            );
+        }
+        assert_eq!(
+            response.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Ok(())
+        );
+        response
+            .on_decoded_headers(&[super::super::Header::new(b":status", b"200")]);
+        assert_eq!(
+            response.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+            Ok(())
+        );
+        assert_eq!(
+            response.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Ok(())
+        );
+        assert_eq!(response.validate_request_frame_type(33), Ok(()));
+        assert_eq!(
+            response.validate_request_frame_type(DATA_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+        assert_eq!(
+            response.validate_request_frame_type(HEADERS_FRAME_TYPE_ID),
+            Err(Error::FrameUnexpected)
+        );
+
+        assert!(response.can_send_initial_headers());
+        response.on_sent_headers(HeaderSection::Informational, false);
+        assert!(!response.can_send_initial_headers());
+        assert!(!response.can_send_body());
+        assert!(
+            response.can_send_additional_headers(HeaderSection::Informational)
+        );
+        assert!(response.can_send_additional_headers(HeaderSection::Final));
+        assert!(!response.can_send_additional_headers(HeaderSection::Trailers));
+        response.on_sent_headers(HeaderSection::Final, false);
+        assert!(response.can_send_body());
+        assert!(!response.can_send_additional_headers(HeaderSection::Final));
+        assert!(response.can_send_additional_headers(HeaderSection::Trailers));
+        response.on_sent_headers(HeaderSection::Trailers, true);
+        assert!(response.local_finished());
+        assert!(!response.can_send_body());
+        assert!(!response.can_send_additional_headers(HeaderSection::Trailers));
     }
 
     /// Returns the frame type ID for a given frame variant.
