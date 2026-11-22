@@ -44,24 +44,24 @@ enum Representation {
 }
 
 impl Representation {
-    pub fn from_byte(b: u8) -> Representation {
+    pub fn from_byte(b: u8) -> Self {
         if b & INDEXED == INDEXED {
-            return Representation::Indexed;
+            return Self::Indexed;
         }
 
         if b & LITERAL_WITH_NAME_REF == LITERAL_WITH_NAME_REF {
-            return Representation::LiteralWithNameRef;
+            return Self::LiteralWithNameRef;
         }
 
         if b & LITERAL == LITERAL {
-            return Representation::Literal;
+            return Self::Literal;
         }
 
         if b & INDEXED_WITH_POST_BASE == INDEXED_WITH_POST_BASE {
-            return Representation::IndexedWithPostBase;
+            return Self::IndexedWithPostBase;
         }
 
-        Representation::LiteralWithPostBase
+        Self::LiteralWithPostBase
     }
 }
 
@@ -127,8 +127,8 @@ pub struct Decoder {}
 
 impl Decoder {
     /// Creates a new QPACK decoder.
-    pub fn new() -> Decoder {
-        Decoder::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Processes control instructions from the encoder.

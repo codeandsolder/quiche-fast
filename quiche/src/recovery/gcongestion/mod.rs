@@ -270,9 +270,9 @@ impl FromStr for BbrRttJumpDetector {
     /// If `name` is not valid, `Error::CongestionControl` is returned.
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "none" => Ok(BbrRttJumpDetector::Disabled),
-            "global_min" => Ok(BbrRttJumpDetector::GlobalMin),
-            "hmm" => Ok(BbrRttJumpDetector::Hmm),
+            "none" => Ok(Self::Disabled),
+            "global_min" => Ok(Self::GlobalMin),
+            "hmm" => Ok(Self::Hmm),
 
             _ => Err(crate::Error::CongestionControl),
         }
@@ -308,10 +308,10 @@ impl FromStr for BbrBwLoReductionStrategy {
     /// If `name` is not valid, `Error::CongestionControl` is returned.
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         match name {
-            "default" => Ok(BbrBwLoReductionStrategy::Default),
-            "minrtt" => Ok(BbrBwLoReductionStrategy::MinRttReduction),
-            "inflight" => Ok(BbrBwLoReductionStrategy::InflightReduction),
-            "cwnd" => Ok(BbrBwLoReductionStrategy::CwndReduction),
+            "default" => Ok(Self::Default),
+            "minrtt" => Ok(Self::MinRttReduction),
+            "inflight" => Ok(Self::InflightReduction),
+            "cwnd" => Ok(Self::CwndReduction),
 
             _ => Err(crate::Error::CongestionControl),
         }

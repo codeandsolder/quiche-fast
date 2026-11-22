@@ -73,14 +73,14 @@ pub struct RecvBuf {
 
 impl RecvBuf {
     /// Creates a new receive buffer.
-    pub fn new(max_data: u64, initial_window: u64, max_window: u64) -> RecvBuf {
-        RecvBuf {
+    pub fn new(max_data: u64, initial_window: u64, max_window: u64) -> Self {
+        Self {
             flow_control: flowcontrol::FlowControl::new(
                 max_data,
                 initial_window,
                 max_window,
             ),
-            ..RecvBuf::default()
+            ..Self::default()
         }
     }
 

@@ -52,34 +52,34 @@ enum HmmState {
 impl HmmState {
     fn as_index(self) -> usize {
         match self {
-            HmmState::Normal => 0,
-            HmmState::Transient => 1,
-            HmmState::Persistent => 2,
+            Self::Normal => 0,
+            Self::Transient => 1,
+            Self::Persistent => 2,
         }
     }
 
     fn from_index(index: usize) -> Self {
         match index {
-            0 => HmmState::Normal,
-            1 => HmmState::Transient,
-            2 => HmmState::Persistent,
+            0 => Self::Normal,
+            1 => Self::Transient,
+            2 => Self::Persistent,
             _ => unreachable!("invalid HMM state index"),
         }
     }
 
     fn from_episode(episode: HmmEpisode) -> Self {
         match episode {
-            HmmEpisode::Idle => HmmState::Normal,
-            HmmEpisode::Active => HmmState::Transient,
-            HmmEpisode::Persistent => HmmState::Persistent,
+            HmmEpisode::Idle => Self::Normal,
+            HmmEpisode::Active => Self::Transient,
+            HmmEpisode::Persistent => Self::Persistent,
         }
     }
 
     fn to_episode(self) -> HmmEpisode {
         match self {
-            HmmState::Normal => HmmEpisode::Idle,
-            HmmState::Transient => HmmEpisode::Active,
-            HmmState::Persistent => HmmEpisode::Persistent,
+            Self::Normal => HmmEpisode::Idle,
+            Self::Transient => HmmEpisode::Active,
+            Self::Persistent => HmmEpisode::Persistent,
         }
     }
 

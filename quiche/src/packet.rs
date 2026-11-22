@@ -75,7 +75,7 @@ static EPOCHS: [Epoch; 3] =
 impl Epoch {
     /// Returns an ordered slice containing the `Epoch`s that fit in the
     /// provided `range`.
-    pub fn epochs(range: RangeInclusive<Epoch>) -> &'static [Epoch] {
+    pub fn epochs(range: RangeInclusive<Self>) -> &'static [Self] {
         &EPOCHS[*range.start() as usize..=*range.end() as usize]
     }
 
@@ -92,7 +92,7 @@ impl Display for Epoch {
 
 impl From<Epoch> for usize {
     fn from(e: Epoch) -> Self {
-        e as usize
+        e as Self
     }
 }
 
@@ -139,25 +139,25 @@ pub enum Type {
 }
 
 impl Type {
-    pub(crate) fn from_epoch(e: Epoch) -> Type {
+    pub(crate) fn from_epoch(e: Epoch) -> Self {
         match e {
-            Epoch::Initial => Type::Initial,
+            Epoch::Initial => Self::Initial,
 
-            Epoch::Handshake => Type::Handshake,
+            Epoch::Handshake => Self::Handshake,
 
-            Epoch::Application => Type::Short,
+            Epoch::Application => Self::Short,
         }
     }
 
     pub(crate) fn to_epoch(self) -> Result<Epoch> {
         match self {
-            Type::Initial => Ok(Epoch::Initial),
+            Self::Initial => Ok(Epoch::Initial),
 
-            Type::ZeroRTT => Ok(Epoch::Application),
+            Self::ZeroRTT => Ok(Epoch::Application),
 
-            Type::Handshake => Ok(Epoch::Handshake),
+            Self::Handshake => Ok(Epoch::Handshake),
 
-            Type::Short => Ok(Epoch::Application),
+            Self::Short => Ok(Epoch::Application),
 
             _ => Err(Error::InvalidPacket),
         }
@@ -345,16 +345,14 @@ impl<'a> Header<'a> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    pub fn from_slice<'b>(
-        buf: &'b mut [u8], dcid_len: usize,
-    ) -> Result<Header<'a>> {
+    pub fn from_slice<'b>(buf: &'b mut [u8], dcid_len: usize) -> Result<Self> {
         let mut b = octets::OctetsMut::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
     }
 
     pub(crate) fn from_bytes<'b>(
         b: &'b mut octets::OctetsMut, dcid_len: usize,
-    ) -> Result<Header<'a>> {
+    ) -> Result<Self> {
         let first = b.get_u8()?;
 
         if !Header::is_long(first) {
@@ -906,8 +904,8 @@ pub struct PktNumSpace {
 }
 
 impl PktNumSpace {
-    pub fn new() -> PktNumSpace {
-        PktNumSpace {
+    pub fn new() -> Self {
+        Self {
             largest_rx_pkt_num: 0,
             largest_rx_pkt_time: Instant::now(),
             largest_rx_non_probing_pkt_num: 0,
@@ -942,7 +940,7 @@ pub struct CryptoContext {
 }
 
 impl CryptoContext {
-    pub fn new() -> CryptoContext {
+    pub fn new() -> Self {
         let crypto_stream = stream::Stream::new(
             0, // dummy
             u64::MAX,
@@ -951,7 +949,7 @@ impl CryptoContext {
             stream::MAX_STREAM_WINDOW,
             stream::MAX_STREAM_WINDOW,
         );
-        CryptoContext {
+        Self {
             key_update: None,
             crypto_open: None,
             crypto_seal: None,
@@ -1048,7 +1046,7 @@ pub struct PktNumManager {
 
 impl PktNumManager {
     pub fn new() -> Self {
-        PktNumManager {
+        Self {
             skip_pn: None,
             skip_pn_counter: None,
         }

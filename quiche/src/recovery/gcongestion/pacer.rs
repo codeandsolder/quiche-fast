@@ -86,7 +86,7 @@ impl Pacer {
     pub(crate) fn new(
         enabled: bool, congestion: BBRv2, max_pacing_rate: Option<Bandwidth>,
     ) -> Self {
-        Pacer {
+        Self {
             enabled,
             sender: congestion,
             max_pacing_rate,

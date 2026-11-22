@@ -126,7 +126,7 @@ impl Congestion {
             .max_send_udp_payload_size
             .saturating_mul(recovery_config.initial_congestion_window_packets);
 
-        let mut cc = Congestion {
+        let mut cc = Self {
             congestion_window: initial_congestion_window,
 
             ssthresh: Default::default(),

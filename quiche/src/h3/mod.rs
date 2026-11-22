@@ -492,27 +492,27 @@ pub enum WireErrorCode {
 impl Error {
     fn to_wire(self) -> u64 {
         match self {
-            Error::Done => WireErrorCode::NoError as u64,
-            Error::InternalError => WireErrorCode::InternalError as u64,
-            Error::StreamCreationError =>
+            Self::Done => WireErrorCode::NoError as u64,
+            Self::InternalError => WireErrorCode::InternalError as u64,
+            Self::StreamCreationError =>
                 WireErrorCode::StreamCreationError as u64,
-            Error::ClosedCriticalStream =>
+            Self::ClosedCriticalStream =>
                 WireErrorCode::ClosedCriticalStream as u64,
-            Error::FrameUnexpected => WireErrorCode::FrameUnexpected as u64,
-            Error::FrameError => WireErrorCode::FrameError as u64,
-            Error::ExcessiveLoad => WireErrorCode::ExcessiveLoad as u64,
-            Error::IdError => WireErrorCode::IdError as u64,
-            Error::MissingSettings => WireErrorCode::MissingSettings as u64,
-            Error::QpackDecompressionFailed => 0x200,
-            Error::BufferTooShort => 0x999,
-            Error::TransportError { .. } | Error::StreamBlocked => 0xFF,
-            Error::SettingsError => WireErrorCode::SettingsError as u64,
-            Error::RequestRejected => WireErrorCode::RequestRejected as u64,
-            Error::RequestCancelled => WireErrorCode::RequestCancelled as u64,
-            Error::RequestIncomplete => WireErrorCode::RequestIncomplete as u64,
-            Error::MessageError => WireErrorCode::MessageError as u64,
-            Error::ConnectError => WireErrorCode::ConnectError as u64,
-            Error::VersionFallback => WireErrorCode::VersionFallback as u64,
+            Self::FrameUnexpected => WireErrorCode::FrameUnexpected as u64,
+            Self::FrameError => WireErrorCode::FrameError as u64,
+            Self::ExcessiveLoad => WireErrorCode::ExcessiveLoad as u64,
+            Self::IdError => WireErrorCode::IdError as u64,
+            Self::MissingSettings => WireErrorCode::MissingSettings as u64,
+            Self::QpackDecompressionFailed => 0x200,
+            Self::BufferTooShort => 0x999,
+            Self::TransportError { .. } | Self::StreamBlocked => 0xFF,
+            Self::SettingsError => WireErrorCode::SettingsError as u64,
+            Self::RequestRejected => WireErrorCode::RequestRejected as u64,
+            Self::RequestCancelled => WireErrorCode::RequestCancelled as u64,
+            Self::RequestIncomplete => WireErrorCode::RequestIncomplete as u64,
+            Self::MessageError => WireErrorCode::MessageError as u64,
+            Self::ConnectError => WireErrorCode::ConnectError as u64,
+            Self::VersionFallback => WireErrorCode::VersionFallback as u64,
         }
     }
 
@@ -560,16 +560,16 @@ impl std::error::Error for Error {
 impl From<super::Error> for Error {
     fn from(err: super::Error) -> Self {
         match err {
-            super::Error::Done => Error::Done,
+            super::Error::Done => Self::Done,
 
-            _ => Error::TransportError(err),
+            _ => Self::TransportError(err),
         }
     }
 }
 
 impl From<octets::BufferTooShortError> for Error {
     fn from(_err: octets::BufferTooShortError) -> Self {
-        Error::BufferTooShort
+        Self::BufferTooShort
     }
 }
 
@@ -588,8 +588,8 @@ pub struct Config {
 
 impl Config {
     /// Creates a new configuration object with default settings.
-    pub const fn new() -> Result<Config> {
-        Ok(Config {
+    pub const fn new() -> Result<Self> {
+        Ok(Self {
             max_field_section_size: Some(SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT),
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
@@ -856,7 +856,7 @@ pub struct Priority {
 
 impl Default for Priority {
     fn default() -> Self {
-        Priority {
+        Self {
             urgency: PRIORITY_URGENCY_DEFAULT,
             incremental: PRIORITY_INCREMENTAL_DEFAULT,
         }
@@ -866,7 +866,7 @@ impl Default for Priority {
 impl Priority {
     /// Creates a new Priority.
     pub const fn new(urgency: u8, incremental: bool) -> Self {
-        Priority {
+        Self {
             urgency,
             incremental,
         }
@@ -1035,13 +1035,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn new(
-        config: &Config, is_server: bool, enable_dgram: bool,
-    ) -> Result<Connection> {
+    fn new(config: &Config, is_server: bool, enable_dgram: bool) -> Result<Self> {
         let initial_uni_stream_id = if is_server { 0x3 } else { 0x2 };
         let h3_datagram = if enable_dgram { Some(1) } else { None };
 
-        Ok(Connection {
+        Ok(Self {
             is_server,
 
             next_request_stream_id: 0,
@@ -1110,7 +1108,7 @@ impl Connection {
     /// [`InternalError`]: ../enum.Error.html#variant.InternalError
     pub fn with_transport<F: BufFactory>(
         conn: &mut super::Connection<F>, config: &Config,
-    ) -> Result<Connection> {
+    ) -> Result<Self> {
         let is_client = !conn.is_server;
         if is_client && !(conn.is_established() || conn.is_in_early_data()) {
             trace!("{} QUIC connection must be established or in early data before creating an HTTP/3 connection", conn.trace_id());
@@ -1118,7 +1116,7 @@ impl Connection {
         }
 
         let mut http3_conn =
-            Connection::new(config, conn.is_server, conn.dgram_enabled())?;
+            Self::new(config, conn.is_server, conn.dgram_enabled())?;
 
         match http3_conn.send_settings(conn) {
             Ok(_) => (),

@@ -58,15 +58,15 @@ pub(super) enum CyclePhase {
 impl CyclePhase {
     pub(super) fn pacing_gain(&self, params: &Params) -> f32 {
         match self {
-            CyclePhase::Up => params.probe_bw_probe_up_pacing_gain,
-            CyclePhase::Down => params.probe_bw_probe_down_pacing_gain,
+            Self::Up => params.probe_bw_probe_up_pacing_gain,
+            Self::Down => params.probe_bw_probe_down_pacing_gain,
             _ => params.probe_bw_default_pacing_gain,
         }
     }
 
     pub(super) fn cwnd_gain(&self, params: &Params) -> f32 {
         match self {
-            CyclePhase::Up => params.probe_bw_up_cwnd_gain,
+            Self::Up => params.probe_bw_up_cwnd_gain,
             _ => params.probe_bw_cwnd_gain,
         }
     }
@@ -97,7 +97,7 @@ impl Default for Cycle {
     fn default() -> Self {
         let now = Instant::now();
 
-        Cycle {
+        Self {
             start_time: now,
             phase_start_time: now,
 
@@ -164,28 +164,28 @@ pub(super) enum Mode {
 
 impl Default for Mode {
     fn default() -> Self {
-        Mode::Placheolder(Placeholder {})
+        Self::Placheolder(Placeholder {})
     }
 }
 
 impl Mode {
     pub(super) fn startup(model: BBRv2NetworkModel) -> Self {
-        Mode::Startup(Startup { model })
+        Self::Startup(Startup { model })
     }
 
     pub(super) fn drain(model: BBRv2NetworkModel) -> Self {
-        Mode::Drain(Drain {
+        Self::Drain(Drain {
             model,
             cycle: Default::default(),
         })
     }
 
     pub(super) fn probe_bw(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
-        Mode::ProbeBW(ProbeBW { model, cycle })
+        Self::ProbeBW(ProbeBW { model, cycle })
     }
 
     pub(super) fn probe_rtt(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
-        Mode::ProbeRTT(ProbeRTT::new(model, cycle))
+        Self::ProbeRTT(ProbeRTT::new(model, cycle))
     }
 
     #[expect(
@@ -230,21 +230,21 @@ impl Mode {
 
     pub fn network_model(&self) -> &BBRv2NetworkModel {
         match self {
-            Mode::Startup(Startup { model }) => model,
-            Mode::Drain(Drain { model, .. }) => model,
-            Mode::ProbeBW(ProbeBW { model, .. }) => model,
-            Mode::ProbeRTT(ProbeRTT { model, .. }) => model,
-            Mode::Placheolder(_) => unreachable!(),
+            Self::Startup(Startup { model }) => model,
+            Self::Drain(Drain { model, .. }) => model,
+            Self::ProbeBW(ProbeBW { model, .. }) => model,
+            Self::ProbeRTT(ProbeRTT { model, .. }) => model,
+            Self::Placheolder(_) => unreachable!(),
         }
     }
 
     pub fn network_model_mut(&mut self) -> &mut BBRv2NetworkModel {
         match self {
-            Mode::Startup(Startup { model }) => model,
-            Mode::Drain(Drain { model, .. }) => model,
-            Mode::ProbeBW(ProbeBW { model, .. }) => model,
-            Mode::ProbeRTT(ProbeRTT { model, .. }) => model,
-            Mode::Placheolder(_) => unreachable!(),
+            Self::Startup(Startup { model }) => model,
+            Self::Drain(Drain { model, .. }) => model,
+            Self::ProbeBW(ProbeBW { model, .. }) => model,
+            Self::ProbeRTT(ProbeRTT { model, .. }) => model,
+            Self::Placheolder(_) => unreachable!(),
         }
     }
 }

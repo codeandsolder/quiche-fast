@@ -40,7 +40,7 @@ pub struct DatagramQueue<F: BufFactory> {
 
 impl<F: BufFactory> DatagramQueue<F> {
     pub fn new(queue_max_len: usize) -> Self {
-        DatagramQueue {
+        Self {
             queue: VecDeque::new(),
             queue_bytes_size: 0,
             queue_max_len,

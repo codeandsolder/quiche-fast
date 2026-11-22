@@ -184,19 +184,19 @@ pub enum WireErrorCode {
 impl Error {
     pub(crate) fn to_wire(self) -> u64 {
         match self {
-            Error::Done => WireErrorCode::NoError as u64,
-            Error::InvalidFrame => WireErrorCode::FrameEncodingError as u64,
-            Error::InvalidStreamState(..) =>
+            Self::Done => WireErrorCode::NoError as u64,
+            Self::InvalidFrame => WireErrorCode::FrameEncodingError as u64,
+            Self::InvalidStreamState(..) =>
                 WireErrorCode::StreamStateError as u64,
-            Error::InvalidTransportParam =>
+            Self::InvalidTransportParam =>
                 WireErrorCode::TransportParameterError as u64,
-            Error::FlowControl => WireErrorCode::FlowControlError as u64,
-            Error::StreamLimit => WireErrorCode::StreamLimitError as u64,
-            Error::IdLimit => WireErrorCode::ConnectionIdLimitError as u64,
-            Error::FinalSize => WireErrorCode::FinalSizeError as u64,
-            Error::CryptoBufferExceeded =>
+            Self::FlowControl => WireErrorCode::FlowControlError as u64,
+            Self::StreamLimit => WireErrorCode::StreamLimitError as u64,
+            Self::IdLimit => WireErrorCode::ConnectionIdLimitError as u64,
+            Self::FinalSize => WireErrorCode::FinalSizeError as u64,
+            Self::CryptoBufferExceeded =>
                 WireErrorCode::CryptoBufferExceeded as u64,
-            Error::KeyUpdate => WireErrorCode::KeyUpdateError as u64,
+            Self::KeyUpdate => WireErrorCode::KeyUpdateError as u64,
             _ => WireErrorCode::ProtocolViolation as u64,
         }
     }
@@ -245,7 +245,7 @@ impl std::error::Error for Error {
 
 impl From<octets::BufferTooShortError> for Error {
     fn from(_err: octets::BufferTooShortError) -> Self {
-        Error::BufferTooShort
+        Self::BufferTooShort
     }
 }
 

@@ -195,8 +195,8 @@ pub struct TransportParams {
 }
 
 impl Default for TransportParams {
-    fn default() -> TransportParams {
-        TransportParams {
+    fn default() -> Self {
+        Self {
             original_destination_connection_id: None,
             max_idle_timeout: 0,
             stateless_reset_token: None,
@@ -222,11 +222,11 @@ impl Default for TransportParams {
 impl TransportParams {
     pub(crate) fn decode(
         buf: &[u8], is_server: bool, unknown_size: Option<usize>,
-    ) -> Result<TransportParams> {
+    ) -> Result<Self> {
         let mut params = octets::Octets::with_slice(buf);
         let mut seen_params = HashSet::new();
 
-        let mut tp = TransportParams::default();
+        let mut tp = Self::default();
 
         if let Some(unknown_transport_param_tracking_size) = unknown_size {
             tp.unknown_params = Some(UnknownTransportParameters {
@@ -404,20 +404,20 @@ impl TransportParams {
     }
 
     pub(crate) fn encode<'a>(
-        tp: &TransportParams, is_server: bool, out: &'a mut [u8],
+        tp: &Self, is_server: bool, out: &'a mut [u8],
     ) -> Result<&'a mut [u8]> {
         let mut b = octets::OctetsMut::with_slice(out);
 
         if is_server {
             if let Some(ref odcid) = tp.original_destination_connection_id {
-                TransportParams::encode_param(&mut b, 0x0000, odcid.len())?;
+                Self::encode_param(&mut b, 0x0000, odcid.len())?;
                 b.put_bytes(odcid)?;
             }
         };
 
         if tp.max_idle_timeout != 0 {
             assert!(tp.max_idle_timeout <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0001,
                 octets::varint_len(tp.max_idle_timeout),
@@ -427,14 +427,14 @@ impl TransportParams {
 
         if is_server {
             if let Some(ref token) = tp.stateless_reset_token {
-                TransportParams::encode_param(&mut b, 0x0002, 16)?;
+                Self::encode_param(&mut b, 0x0002, 16)?;
                 b.put_bytes(&token.to_be_bytes())?;
             }
         }
 
         if tp.max_udp_payload_size != 0 {
             assert!(tp.max_udp_payload_size <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0003,
                 octets::varint_len(tp.max_udp_payload_size),
@@ -444,7 +444,7 @@ impl TransportParams {
 
         if tp.initial_max_data != 0 {
             assert!(tp.initial_max_data <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0004,
                 octets::varint_len(tp.initial_max_data),
@@ -454,7 +454,7 @@ impl TransportParams {
 
         if tp.initial_max_stream_data_bidi_local != 0 {
             assert!(tp.initial_max_stream_data_bidi_local <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0005,
                 octets::varint_len(tp.initial_max_stream_data_bidi_local),
@@ -466,7 +466,7 @@ impl TransportParams {
             assert!(
                 tp.initial_max_stream_data_bidi_remote <= octets::MAX_VAR_INT
             );
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0006,
                 octets::varint_len(tp.initial_max_stream_data_bidi_remote),
@@ -476,7 +476,7 @@ impl TransportParams {
 
         if tp.initial_max_stream_data_uni != 0 {
             assert!(tp.initial_max_stream_data_uni <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0007,
                 octets::varint_len(tp.initial_max_stream_data_uni),
@@ -486,7 +486,7 @@ impl TransportParams {
 
         if tp.initial_max_streams_bidi != 0 {
             assert!(tp.initial_max_streams_bidi <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0008,
                 octets::varint_len(tp.initial_max_streams_bidi),
@@ -496,7 +496,7 @@ impl TransportParams {
 
         if tp.initial_max_streams_uni != 0 {
             assert!(tp.initial_max_streams_uni <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0009,
                 octets::varint_len(tp.initial_max_streams_uni),
@@ -506,7 +506,7 @@ impl TransportParams {
 
         if tp.ack_delay_exponent != 0 {
             assert!(tp.ack_delay_exponent <= MAX_ACK_DELAY_EXPONENT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x000a,
                 octets::varint_len(tp.ack_delay_exponent),
@@ -516,7 +516,7 @@ impl TransportParams {
 
         if tp.max_ack_delay != 0 {
             assert!(tp.max_ack_delay <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x000b,
                 octets::varint_len(tp.max_ack_delay),
@@ -525,14 +525,14 @@ impl TransportParams {
         }
 
         if tp.disable_active_migration {
-            TransportParams::encode_param(&mut b, 0x000c, 0)?;
+            Self::encode_param(&mut b, 0x000c, 0)?;
         }
 
         // TODO: encode preferred_address
 
         if tp.active_conn_id_limit != 2 {
             assert!(tp.active_conn_id_limit <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x000e,
                 octets::varint_len(tp.active_conn_id_limit),
@@ -541,20 +541,20 @@ impl TransportParams {
         }
 
         if let Some(scid) = &tp.initial_source_connection_id {
-            TransportParams::encode_param(&mut b, 0x000f, scid.len())?;
+            Self::encode_param(&mut b, 0x000f, scid.len())?;
             b.put_bytes(scid)?;
         }
 
         if is_server {
             if let Some(scid) = &tp.retry_source_connection_id {
-                TransportParams::encode_param(&mut b, 0x0010, scid.len())?;
+                Self::encode_param(&mut b, 0x0010, scid.len())?;
                 b.put_bytes(scid)?;
             }
         }
 
         if let Some(max_datagram_frame_size) = tp.max_datagram_frame_size {
             assert!(max_datagram_frame_size <= octets::MAX_VAR_INT);
-            TransportParams::encode_param(
+            Self::encode_param(
                 &mut b,
                 0x0020,
                 octets::varint_len(max_datagram_frame_size),

@@ -241,7 +241,7 @@ impl<F: BufFactory> StreamMap<F> {
     pub fn new(
         max_streams_bidi: u64, max_streams_uni: u64, max_stream_window: u64,
     ) -> Self {
-        StreamMap {
+        Self {
             local_max_streams_bidi: max_streams_bidi,
             local_max_streams_bidi_next: max_streams_bidi,
             initial_max_streams_bidi: max_streams_bidi,
@@ -252,7 +252,7 @@ impl<F: BufFactory> StreamMap<F> {
 
             max_stream_window,
 
-            ..StreamMap::default()
+            ..Self::default()
         }
     }
 
@@ -932,7 +932,7 @@ impl<F: BufFactory> Stream<F> {
             ..Default::default()
         });
 
-        Stream {
+        Self {
             recv: recv_buf::RecvBuf::new(max_rx_data, initial_window, max_window),
             send: send_buf::SendBuf::new(max_tx_data),
             send_lowat: 1,
@@ -1141,7 +1141,7 @@ pub struct StreamIter {
 impl StreamIter {
     #[inline]
     fn from(streams: &StreamIdHashSet) -> Self {
-        StreamIter {
+        Self {
             streams: streams.iter().copied().collect(),
             index: 0,
         }

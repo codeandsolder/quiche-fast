@@ -166,12 +166,12 @@ pub struct Context(NonNull<SSL_CTX>);
 impl Context {
     // Note: some vendor-specific methods are implemented in the boringssl
     // submodule.
-    pub fn new() -> Result<Context> {
+    pub fn new() -> Result<Self> {
         unsafe {
             let ctx_raw =
                 NonNull::new(SSL_CTX_new(TLS_method())).ok_or(Error::TlsFail)?;
 
-            let mut ctx = Context(ctx_raw);
+            let mut ctx = Self(ctx_raw);
 
             ctx.set_session_callback();
 
@@ -184,13 +184,13 @@ impl Context {
     #[cfg(feature = "boringssl-boring-crate")]
     pub fn from_boring(
         ssl_ctx_builder: boring::ssl::SslContextBuilder,
-    ) -> Result<Context> {
+    ) -> Result<Self> {
         use foreign_types_shared::ForeignType;
 
         let ctx_raw = NonNull::new(ssl_ctx_builder.build().into_ptr() as _)
             .ok_or(Error::TlsFail)?;
 
-        let mut ctx = Context(ctx_raw);
+        let mut ctx = Self(ctx_raw);
         ctx.set_session_callback();
 
         Ok(ctx)
@@ -420,14 +420,14 @@ impl Handshake {
     // Note: some vendor-specific methods are implemented in the boringssl
     // submodule.
     #[cfg(any(feature = "ffi", feature = "boringssl-boring-crate"))]
-    pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Handshake> {
+    pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Self> {
         let ptr = NonNull::new(ssl.cast()).ok_or(Error::TlsFail)?;
 
-        Ok(Handshake::new(ptr))
+        Ok(Self::new(ptr))
     }
 
-    fn new(ptr: NonNull<SSL>) -> Handshake {
-        Handshake {
+    fn new(ptr: NonNull<SSL>) -> Self {
+        Self {
             ptr,
             provided_data_outstanding: false,
             early_data_rejected: false,

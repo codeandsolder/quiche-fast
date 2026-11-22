@@ -80,12 +80,12 @@ where
     F::Buf: Clone,
 {
     /// Creates a new `RangeBuf` from the given slice.
-    pub fn from(buf: &[u8], off: u64, fin: bool) -> RangeBuf<F> {
+    pub fn from(buf: &[u8], off: u64, fin: bool) -> Self {
         Self::from_raw(F::buf_from_slice(buf), off, fin)
     }
 
-    pub fn from_raw(data: F::Buf, off: u64, fin: bool) -> RangeBuf<F> {
-        RangeBuf {
+    pub fn from_raw(data: F::Buf, off: u64, fin: bool) -> Self {
+        Self {
             len: data.as_ref().len(),
             data,
             start: 0,
@@ -127,7 +127,7 @@ where
     }
 
     /// Splits the buffer into two at the given index.
-    pub fn split_off(&mut self, at: usize) -> RangeBuf<F>
+    pub fn split_off(&mut self, at: usize) -> Self
     where
         F::Buf: Clone + AsRef<[u8]>,
     {
@@ -138,7 +138,7 @@ where
             self.len
         );
 
-        let buf = RangeBuf {
+        let buf = Self {
             data: self.data.clone(),
             start: self.start + at,
             pos: cmp::max(self.pos, self.start + at),
@@ -165,14 +165,14 @@ impl<F: BufFactory> Deref for RangeBuf<F> {
 }
 
 impl<F: BufFactory> Ord for RangeBuf<F> {
-    fn cmp(&self, other: &RangeBuf<F>) -> cmp::Ordering {
+    fn cmp(&self, other: &Self) -> cmp::Ordering {
         // Invert ordering to implement min-heap.
         self.off.cmp(&other.off).reverse()
     }
 }
 
 impl<F: BufFactory> PartialOrd for RangeBuf<F> {
-    fn partial_cmp(&self, other: &RangeBuf<F>) -> Option<cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -180,7 +180,7 @@ impl<F: BufFactory> PartialOrd for RangeBuf<F> {
 impl<F: BufFactory> Eq for RangeBuf<F> {}
 
 impl<F: BufFactory> PartialEq for RangeBuf<F> {
-    fn eq(&self, other: &RangeBuf<F>) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.off == other.off
     }
 }
