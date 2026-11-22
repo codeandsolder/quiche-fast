@@ -246,8 +246,9 @@ enum quiche_cc_algorithm {
     QUICHE_CC_BBR2_GCONGESTION = 4,
 };
 
-// Sets the congestion control algorithm used.
-void quiche_config_set_cc_algorithm(quiche_config *config, enum quiche_cc_algorithm algo);
+// Sets the congestion control algorithm used. Returns 0 on success or a
+// negative error code for an invalid algorithm or configuration pointer.
+int quiche_config_set_cc_algorithm(quiche_config *config, int algo);
 
 // Configures whether to use HyStart++.
 void quiche_config_enable_hystart(quiche_config *config, bool v);
@@ -258,10 +259,6 @@ void quiche_config_enable_pacing(quiche_config *config, bool v);
 // Configures whether to enable the CUBIC idle restart fix (enabled by default).
 void quiche_config_set_enable_cubic_idle_restart_fix(quiche_config *config,
                                                      bool v);
-
-// Deprecated: this is now always enabled and this function is a no-op.
-void quiche_config_set_use_initial_max_data_as_flow_control_win(
-    quiche_config *config, bool v);
 
 // Configures max pacing rate to be used.
 void quiche_config_set_max_pacing_rate(quiche_config *config, uint64_t v);
@@ -440,7 +437,7 @@ int quiche_conn_stream_priority(quiche_conn *conn, uint64_t stream_id,
 
 // Shuts down reading or writing from/to the specified stream.
 int quiche_conn_stream_shutdown(quiche_conn *conn, uint64_t stream_id,
-                                enum quiche_shutdown direction, uint64_t err);
+                                int direction, uint64_t err);
 
 // Returns the stream's send capacity in bytes.
 ssize_t quiche_conn_stream_capacity(quiche_conn *conn, uint64_t stream_id);
@@ -905,7 +902,7 @@ typedef struct quiche_path_event quiche_path_event;
 quiche_path_event *quiche_conn_path_event_next(quiche_conn *conn);
 
 // Returns the type of the event, or QUICHE_PATH_EVENT_INVALID for NULL.
-enum quiche_path_event_type quiche_path_event_type(const quiche_path_event *ev);
+int quiche_path_event_type(const quiche_path_event *ev);
 
 // Should be called if the quiche_path_event_type(...) returns QUICHE_PATH_EVENT_NEW.
 void quiche_path_event_new(const quiche_path_event *ev,
@@ -1172,8 +1169,8 @@ typedef struct quiche_h3_event quiche_h3_event;
 int64_t quiche_h3_conn_poll(quiche_h3_conn *conn, quiche_conn *quic_conn,
                             quiche_h3_event **ev);
 
-// Returns the type of the event.
-enum quiche_h3_event_type quiche_h3_event_type(quiche_h3_event *ev);
+// Returns the type of the event, or UINT32_MAX for an invalid event pointer.
+uint32_t quiche_h3_event_type(const quiche_h3_event *ev);
 
 // Iterates over the headers in the event.
 //

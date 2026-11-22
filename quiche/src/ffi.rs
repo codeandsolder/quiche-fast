@@ -633,11 +633,21 @@ pub extern "C" fn quiche_config_set_cc_algorithm_name(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_cc_algorithm(
-    config: *mut Config, algo: CongestionControlAlgorithm,
-) {
-    let config = ffi_mut!(config);
-
-    config.set_cc_algorithm(algo);
+    config: *mut Config, algo: c_int,
+) -> c_int {
+    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    // The C caller supplies an integer, not a valid Rust enum discriminant.
+    let algorithm = match algo {
+        v if v == CongestionControlAlgorithm::Reno as c_int =>
+            CongestionControlAlgorithm::Reno,
+        v if v == CongestionControlAlgorithm::CUBIC as c_int =>
+            CongestionControlAlgorithm::CUBIC,
+        v if v == CongestionControlAlgorithm::Bbr2Gcongestion as c_int =>
+            CongestionControlAlgorithm::Bbr2Gcongestion,
+        _ => return c_int::from(FFI_ERR_INVALID_ARGUMENT),
+    };
+    config.set_cc_algorithm(algorithm);
+    0
 }
 
 #[no_mangle]
@@ -670,14 +680,6 @@ pub extern "C" fn quiche_config_set_enable_cubic_idle_restart_fix(
     let config = ffi_mut!(config);
 
     config.set_enable_cubic_idle_restart_fix(v);
-}
-
-/// Deprecated: this is now always enabled and this function is a no-op.
-#[no_mangle]
-pub extern "C" fn quiche_config_set_use_initial_max_data_as_flow_control_win(
-    _config: *mut Config, _v: bool,
-) {
-    let _config = ffi_mut!(_config);
 }
 
 #[no_mangle]
@@ -1424,9 +1426,14 @@ pub extern "C" fn quiche_conn_stream_priority(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_stream_shutdown(
-    conn: *mut Connection, stream_id: u64, direction: Shutdown, err: u64,
+    conn: *mut Connection, stream_id: u64, direction: c_int, err: u64,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let direction = match direction {
+        v if v == Shutdown::Read as c_int => Shutdown::Read,
+        v if v == Shutdown::Write as c_int => Shutdown::Write,
+        _ => return c_int::from(FFI_ERR_INVALID_ARGUMENT),
+    };
 
     match conn.stream_shutdown(stream_id, direction, err) {
         Ok(_) => 0,
@@ -3169,6 +3176,45 @@ mod tests {
         assert!(app);
         assert_eq!(code, 42);
         assert_eq!(unsafe { slice::from_raw_parts(reason, len) }, b"reason");
+    }
+
+    #[test]
+    fn c_algorithm_discriminants_are_checked_before_configuration() {
+        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+        assert_eq!(quiche_config_set_cc_algorithm(&mut config, 0), 0);
+        assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+        for invalid in [-1, 2, 3, 5, c_int::MAX] {
+            assert_eq!(
+                quiche_config_set_cc_algorithm(&mut config, invalid),
+                c_int::from(FFI_ERR_INVALID_ARGUMENT)
+            );
+            assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+        }
+        for (value, algorithm) in [
+            (1, CongestionControlAlgorithm::CUBIC),
+            (4, CongestionControlAlgorithm::Bbr2Gcongestion),
+        ] {
+            assert_eq!(quiche_config_set_cc_algorithm(&mut config, value), 0);
+            assert_eq!(config.cc_algorithm, algorithm);
+        }
+    }
+
+    #[test]
+    fn c_shutdown_discriminant_rejects_invalid_values() {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        pipe.handshake().unwrap();
+        pipe.client.stream_send(4, b"a", false).unwrap();
+        pipe.advance().unwrap();
+        for invalid in [-1, 2, c_int::MAX] {
+            assert_eq!(
+                quiche_conn_stream_shutdown(&mut pipe.server, 4, invalid, 42),
+                c_int::from(FFI_ERR_INVALID_ARGUMENT)
+            );
+        }
+        let mut data = [0; 1];
+        assert_eq!(pipe.server.stream_recv(4, &mut data), Ok((1, false)));
+        assert_eq!(&data, b"a");
+        assert_eq!(quiche_conn_stream_shutdown(&mut pipe.server, 4, 0, 42), 0);
     }
 
     #[test]
