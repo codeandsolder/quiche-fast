@@ -53,7 +53,7 @@ pub struct BytesInFlight {
 
 impl BytesInFlight {
     /// Add to bytes in flight.  Record the start time when
-    /// bytes_in_flight was 0 at the beginning of the function.
+    /// `bytes_in_flight` was 0 at the beginning of the function.
     pub(crate) fn add(&mut self, delta: usize, now: Instant) {
         if delta == 0 {
             return;
@@ -68,8 +68,8 @@ impl BytesInFlight {
         }
     }
 
-    /// Substract from bytes in flight.  If bytes_in_flight drops to 0,
-    /// end the current bytes_in_flight >0 interval.
+    /// Substract from bytes in flight.  If `bytes_in_flight` drops to 0,
+    /// end the current `bytes_in_flight` >0 interval.
     pub(crate) fn saturating_subtract(&mut self, delta: usize, now: Instant) {
         self.bytes_in_flight = self.bytes_in_flight.saturating_sub(delta);
         self.update_in_flight_duration(now);
@@ -85,7 +85,7 @@ impl BytesInFlight {
         self.bytes_in_flight == 0
     }
 
-    /// Total time during which bytes_in_flight was > 0.
+    /// Total time during which `bytes_in_flight` was > 0.
     pub(crate) fn get_duration(&self) -> Duration {
         self.closed_interval_duration + self.open_interval_duration
     }

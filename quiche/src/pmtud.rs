@@ -8,7 +8,7 @@
 //! Optimistic binary search between [`MIN_PLPMTU`] (1200) and max supported
 //! MTU:
 //! 1. Probe at max MTU
-//! 2. On max_probes consecutive failures, record as smallest failed size
+//! 2. On `max_probes` consecutive failures, record as smallest failed size
 //! 3. Binary search between largest success and smallest failure
 //! 4. Complete when difference ≤ 1 byte
 //!
@@ -18,12 +18,12 @@
 //! [RFC 8899]: https://datatracker.ietf.org/doc/html/rfc8899
 
 /// Maximum number of probe attempts before treating a size as failed.
-/// https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2
+/// <https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2>
 pub(crate) const MAX_PROBES_DEFAULT: u8 = 3;
 
 /// Min Packetization Layer Path MTU (PLPMTU).
-/// https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2
-/// For QUIC, this is 1200 bytes per https://datatracker.ietf.org/doc/html/rfc9000#section-14.1
+/// <https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2>
+/// For QUIC, this is 1200 bytes per <https://datatracker.ietf.org/doc/html/rfc9000#section-14.1>
 const MIN_PLPMTU: usize = crate::MIN_CLIENT_INITIAL_LEN;
 
 #[derive(Default)]
@@ -32,7 +32,7 @@ pub struct Pmtud {
     /// Will be [`None`] if the PMTU is less than the minimum supported MTU.
     pmtu: Option<usize>,
 
-    /// The current PMTUD probe size. Set to maximum_supported_mtu at
+    /// The current PMTUD probe size. Set to `maximum_supported_mtu` at
     /// initialization.
     probe_size: usize,
 

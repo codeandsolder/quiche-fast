@@ -673,7 +673,7 @@ fn parse_single_varint(
 }
 
 /// Decode a required leading ID and its remaining, frame-bounded payload.
-/// Both PUSH_PROMISE and PRIORITY_UPDATE have the same wire structure.
+/// Both `PUSH_PROMISE` and `PRIORITY_UPDATE` have the same wire structure.
 fn parse_id_and_payload(
     payload_length: usize, b: &mut octets::Octets,
 ) -> Result<(u64, Vec<u8>)> {

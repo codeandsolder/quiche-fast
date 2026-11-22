@@ -67,7 +67,7 @@ struct Params {
     startup_pacing_gain: f32,
 
     /// STARTUP or PROBE_UP are exited if the total bandwidth growth is less
-    /// than `full_bw_threshold` in the last `startup_full_bw_rounds`` round
+    /// than `full_bw_threshold` in the last `startup_full_bw_rounds` round
     /// trips.
     full_bw_threshold: f32,
 
@@ -76,8 +76,8 @@ struct Params {
     startup_full_bw_rounds: usize,
 
     /// Number of rounds to stay in STARTUP when there's a sufficient queue that
-    /// bytes_in_flight never drops below the target (1.75 * BDP).  0 indicates
-    /// the feature is disabled and we never exit due to queueing.
+    /// `bytes_in_flight` never drops below the target (1.75 * BDP).  0
+    /// indicates the feature is disabled and we never exit due to queueing.
     max_startup_queue_rounds: usize,
 
     /// The minimum number of loss marking events to exit STARTUP.
@@ -101,7 +101,7 @@ struct Params {
     /// Minimum duration for BBR-native probes.
     probe_bw_probe_base_duration: Duration,
 
-    /// The minimum number of loss marking events to exit the PROBE_UP phase.
+    /// The minimum number of loss marking events to exit the `PROBE_UP` phase.
     probe_bw_full_loss_count: usize,
 
     /// Pacing gains.
@@ -109,17 +109,17 @@ struct Params {
     probe_bw_probe_down_pacing_gain: f32,
     probe_bw_default_pacing_gain: f32,
 
-    /// cwnd_gain for probe bw phases other than ProbeBW_UP
+    /// `cwnd_gain` for probe bw phases other than `ProbeBW_UP`
     probe_bw_cwnd_gain: f32,
 
-    /// cwnd_gain for ProbeBW_UP
+    /// `cwnd_gain` for `ProbeBW_UP`
     probe_bw_up_cwnd_gain: f32,
 
     // PROBE_UP parameters.
     probe_up_ignore_inflight_hi: bool,
 
-    /// Number of rounds to stay in PROBE_UP when there's a sufficient queue
-    /// that bytes_in_flight never drops below the target.  0 indicates the
+    /// Number of rounds to stay in `PROBE_UP` when there's a sufficient queue
+    /// that `bytes_in_flight` never drops below the target.  0 indicates the
     /// feature is disabled and we never exit due to queueing.
     // TODO(vlad):
     max_probe_up_queue_rounds: usize,
@@ -127,7 +127,7 @@ struct Params {
     // PROBE_RTT parameters.
     probe_rtt_inflight_target_bdp_fraction: f32,
 
-    /// The default period for entering PROBE_RTT
+    /// The default period for entering `PROBE_RTT`
     probe_rtt_period: Duration,
 
     probe_rtt_duration: Duration,
@@ -147,22 +147,22 @@ struct Params {
     loss_threshold: f32,
 
     /// A common factor for multiplicative decreases. Used for adjusting
-    /// `bandwidth_lo``, `inflight_lo`` and `inflight_hi`` upon losses.
+    /// `bandwidth_lo``, ``inflight_lo``` and `inflight_hi` upon losses.
     beta: f32,
 
     // Experimental flags.
     add_ack_height_to_queueing_threshold: bool,
 
-    /// Don't run PROBE_RTT on the regular schedule
+    /// Don't run `PROBE_RTT` on the regular schedule
     avoid_unnecessary_probe_rtt: bool,
 
-    /// When exiting STARTUP due to loss, set `inflight_hi`` to the max of bdp
+    /// When exiting STARTUP due to loss, set `inflight_hi` to the max of bdp
     /// and max bytes delivered in round.
     limit_inflight_hi_by_max_delivered: bool,
 
     startup_loss_exit_use_max_delivered_for_inflight_hi: bool,
 
-    /// Increase `inflight_hi`` based on delievered, not inflight.
+    /// Increase `inflight_hi` based on delivered, not inflight.
     use_bytes_delivered_for_inflight_hi: bool,
 
     /// Set the pacing gain to 25% larger than the recent BW increase in
@@ -179,7 +179,7 @@ struct Params {
     /// google/quiche implementation.
     choose_a0_point_fix: bool,
 
-    /// Controls the behavior of BBRAdaptLowerBoundsFromCongestion().
+    /// Controls the behavior of `BBRAdaptLowerBoundsFromCongestion()`.
     bw_lo_mode: BwLoMode,
 
     /// Determines whether app limited rounds with no bandwidth growth count
@@ -199,14 +199,14 @@ struct Params {
     /// If true, scale the pacing rate when updating mss when doing pmtud.
     scale_pacing_rate_by_mss: bool,
 
-    /// Disable `has_stayed_long_enough_in_probe_down` which can cause ProbeDown
-    /// to exit early.
+    /// Disable `has_stayed_long_enough_in_probe_down` which can cause
+    /// `ProbeDown` to exit early.
     disable_probe_down_early_exit: bool,
 
     /// Set the expected send time for packets when using BBR to `now`
     /// instead of `get_next_release_time()`.  Setting the time based
     /// on `get_next_release_time()` can result in artificially low
-    /// RTT measurements due to the pacer's use of burst_tokens to
+    /// RTT measurements due to the pacer's use of `burst_tokens` to
     /// make up for lost time.  BBR has significant problems when
     /// minRTT is under estimated, so it is better to have the RTT be
     /// slightly over estimated.  The pacer can only schedule packets
@@ -372,24 +372,24 @@ const DEFAULT_PARAMS: Params = Params {
 
 #[derive(Debug, PartialEq)]
 enum BwLoMode {
-    /// Mode that implements the BBRAdaptLowerBoundsFromCongestion()
+    /// Mode that implements the `BBRAdaptLowerBoundsFromCongestion()`
     /// behavior described in the BBR RFC draft.
     Default,
 
-    /// BBRAdaptLowerBoundsFromCongestion experiment that reduces
-    /// bw_lo by bytes_lost/min_rtt.
+    /// `BBRAdaptLowerBoundsFromCongestion` experiment that reduces
+    /// `bw_lo` by `bytes_lost/min_rtt`.
     ///
     /// Not recommended.
     MinRttReduction,
 
-    /// BBRAdaptLowerBoundsFromCongestion experiment that reduces
-    /// bw_lo by bw_lo * bytes_lost/inflight.
+    /// `BBRAdaptLowerBoundsFromCongestion` experiment that reduces
+    /// `bw_lo` by `bw_lo` * `bytes_lost/inflight`.
     ///
     /// Not recommended.
     InflightReduction,
 
-    /// BBRAdaptLowerBoundsFromCongestion experiment that reduces
-    /// bw_lo by bw_lo * bytes_lost/cwnd
+    /// `BBRAdaptLowerBoundsFromCongestion` experiment that reduces
+    /// `bw_lo` by `bw_lo` * `bytes_lost/cwnd`
     ///
     /// Not recommended.
     CwndReduction,
@@ -478,7 +478,7 @@ struct BBRv2CongestionEvent {
     /// Total bytes lost from losses in this event.
     bytes_lost: usize,
 
-    /// Whether acked_packets indicates the end of a round trip.
+    /// Whether `acked_packets` indicates the end of a round trip.
     end_of_round_trip: bool,
     // When the event happened, whether the sender is probing for bandwidth.
     is_probing_for_bandwidth: bool,
@@ -488,13 +488,13 @@ struct BBRv2CongestionEvent {
     // acknowledged inflight packets.
     sample_max_bandwidth: Option<Bandwidth>,
 
-    /// Minimum rtt of all bandwidth samples from acked_packets.
-    /// None if acked_packets is empty.
+    /// Minimum rtt of all bandwidth samples from `acked_packets`.
+    /// None if `acked_packets` is empty.
     sample_min_rtt: Option<Duration>,
 
-    /// The send state of the largest packet in acked_packets, unless it is
-    /// empty. If acked_packets is empty, it's the send state of the largest
-    /// packet in lost_packets.
+    /// The send state of the largest packet in `acked_packets`, unless it is
+    /// empty. If `acked_packets` is empty, it's the send state of the largest
+    /// packet in `lost_packets`.
     last_packet_send_state: SendTimeState,
 }
 

@@ -122,7 +122,7 @@ pub enum Error {
 /// As defined in [RFC9000](https://www.rfc-editor.org/rfc/rfc9000.html#name-error-codes).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum WireErrorCode {
-    /// An endpoint uses this with CONNECTION_CLOSE to signal that the
+    /// An endpoint uses this with `CONNECTION_CLOSE` to signal that the
     /// connection is being closed abruptly in the absence of any error.
     NoError              = 0x0,
     /// The endpoint encountered an internal error and cannot continue with the
@@ -141,9 +141,9 @@ pub enum WireErrorCode {
     StreamStateError     = 0x5,
     /// (1) An endpoint received a STREAM frame containing data that exceeded
     /// the previously established final size, (2) an endpoint received a
-    /// STREAM frame or a RESET_STREAM frame containing a final size that
+    /// STREAM frame or a `RESET_STREAM` frame containing a final size that
     /// was lower than the size of stream data that was already received, or
-    /// (3) an endpoint received a STREAM frame or a RESET_STREAM frame
+    /// (3) an endpoint received a STREAM frame or a `RESET_STREAM` frame
     /// containing a different final size to the one already established.
     FinalSizeError       = 0x6,
     /// An endpoint received a frame that was badly formatted -- for instance, a
@@ -156,7 +156,7 @@ pub enum WireErrorCode {
     /// error.
     TransportParameterError = 0x8,
     /// The number of connection IDs provided by the peer exceeds the advertised
-    /// active_connection_id_limit.
+    /// `active_connection_id_limit`.
     ConnectionIdLimitError = 0x9,
     /// An endpoint detected an error with protocol compliance that was not
     /// covered by more specific error codes.
@@ -176,7 +176,7 @@ pub enum WireErrorCode {
     AeadLimitReached     = 0xf,
     /// An endpoint has determined that the network path is incapable of
     /// supporting QUIC. An endpoint is unlikely to receive a
-    /// CONNECTION_CLOSE frame carrying this code except when the path does
+    /// `CONNECTION_CLOSE` frame carrying this code except when the path does
     /// not support a large enough MTU.
     NoViablePath         = 0x10,
 }

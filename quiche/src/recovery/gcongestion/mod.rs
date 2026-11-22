@@ -194,14 +194,14 @@ pub struct BbrParams {
     pub probe_rtt_cwnd_gain: Option<f32>,
 
     /// Controls the number of rounds BBR should stay in probe up if
-    /// bytes_in_flight doesn't drop below target.
+    /// `bytes_in_flight` doesn't drop below target.
     pub max_probe_up_queue_rounds: Option<usize>,
 
     /// Controls the BBR loss threshold.
     pub loss_threshold: Option<f32>,
 
     /// Controls if BBR should use bytes delievered as an estimate for
-    /// inflight_hi.
+    /// `inflight_hi`.
     pub use_bytes_delivered_for_inflight_hi: Option<bool>,
 
     /// Controls if BBR should adjust startup pacing at round end.
@@ -227,8 +227,8 @@ pub struct BbrParams {
     /// If true, scale the pacing rate when updating mss when doing pmtud.
     pub scale_pacing_rate_by_mss: Option<bool>,
 
-    /// Disable `has_stayed_long_enough_in_probe_down` which can cause ProbeDown
-    /// to exit early.
+    /// Disable `has_stayed_long_enough_in_probe_down` which can cause
+    /// `ProbeDown` to exit early.
     pub disable_probe_down_early_exit: Option<bool>,
 
     /// Set the expected send time for packets when using BBR to `now`

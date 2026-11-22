@@ -26,7 +26,7 @@
 
 //! Reno Congestion Control
 //!
-//! Note that Slow Start can use HyStart++ when enabled.
+//! Note that Slow Start can use `HyStart`++ when enabled.
 
 use std::cmp;
 use std::time::Instant;

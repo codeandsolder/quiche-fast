@@ -29,7 +29,7 @@
 //! This implementation is based on the following draft:
 //! <https://tools.ietf.org/html/draft-ietf-tcpm-rfc8312bis-02>
 //!
-//! Note that Slow Start can use HyStart++ when enabled.
+//! Note that Slow Start can use `HyStart`++ when enabled.
 
 use std::cmp;
 
@@ -71,13 +71,13 @@ const ROLLBACK_THRESHOLD_PERCENT: usize = 20;
 /// Minimum threshold for rolling back state, as number of packets.
 const MIN_ROLLBACK_THRESHOLD: usize = 2;
 
-/// Default value of alpha_aimd in the beginning of congestion avoidance.
+/// Default value of `alpha_aimd` in the beginning of congestion avoidance.
 const ALPHA_AIMD: f64 = 3.0 * (1.0 - BETA_CUBIC) / (1.0 + BETA_CUBIC);
 
 /// CUBIC State Variables.
 ///
 /// We need to keep those variables across the connection.
-/// k, w_max, w_est are described in the RFC.
+/// k, `w_max`, `w_est` are described in the RFC.
 #[derive(Debug, Default)]
 pub struct State {
     k: f64,

@@ -240,7 +240,7 @@ pub struct Path {
     /// Whether the peer has verified our address.
     pub peer_verified_local_address: bool,
 
-    /// Does it requires sending PATH_CHALLENGE?
+    /// Does it requires sending `PATH_CHALLENGE`?
     challenge_requested: bool,
 
     /// Whether the failure of this path was notified.
@@ -433,7 +433,7 @@ impl Path {
         self.challenge_requested = false;
     }
 
-    /// Handles the sending of PATH_CHALLENGE.
+    /// Handles the sending of `PATH_CHALLENGE`.
     pub fn add_challenge_sent(
         &mut self, data: [u8; 8], pkt_size: usize, sent_time: Instant,
     ) {
@@ -622,7 +622,7 @@ impl Path {
     }
 }
 
-/// An iterator over SocketAddr.
+/// An iterator over `SocketAddr`.
 #[derive(Default)]
 pub struct SocketAddrIter {
     pub(crate) sockaddrs: SmallVec<[SocketAddr; 8]>,
@@ -895,7 +895,7 @@ impl PathMap {
             .map(|(pid, _)| pid)
     }
 
-    /// Handles incoming PATH_RESPONSE data.
+    /// Handles incoming `PATH_RESPONSE` data.
     pub fn on_response_received(&mut self, data: [u8; 8]) -> Result<()> {
         let active_pid = self.get_active_path_id()?;
 
@@ -925,7 +925,7 @@ impl PathMap {
         Ok(())
     }
 
-    /// Sets the path with identifier 'path_id' to be active.
+    /// Sets the path with identifier '`path_id`' to be active.
     ///
     /// There can be exactly one active path on which non-probing packets can be
     /// sent. If another path is marked as active, it will be superseded by the
@@ -1096,7 +1096,7 @@ pub struct PathStats {
     /// The maximum bandwidth estimate for the connection in bytes/s.
     ///
     /// Note: not all congestion control algorithms provide this metric;
-    /// it is currently only implemented for bbr2_gcongestion.
+    /// it is currently only implemented for `bbr2_gcongestion`.
     pub max_bandwidth: Option<u64>,
 
     /// The total number of confirmed persistent RTT jump episodes.

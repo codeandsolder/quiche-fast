@@ -387,7 +387,7 @@ pub enum CongestionControlAlgorithm {
     Reno            = 0,
     /// CUBIC congestion control algorithm (default). `cubic` in a string form.
     CUBIC           = 1,
-    /// BBRv2 congestion control algorithm implementation from gcongestion
+    /// `BBRv2` congestion control algorithm implementation from gcongestion
     /// branch. `bbr2_gcongestion` in a string form.
     Bbr2Gcongestion = 4,
 }
@@ -808,7 +808,7 @@ impl RecoveryStats {
 /// Statistics from when a CCA first exited the startup phase.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StartupExit {
-    /// The congestion_window recorded at Startup exit.
+    /// The `congestion_window` recorded at Startup exit.
     pub cwnd: usize,
 
     /// The bandwidth estimate recorded at Startup exit.
@@ -843,7 +843,7 @@ pub enum StartupExitReason {
     /// Exit BBR startup due to persistent queue.
     PersistentQueue,
 
-    /// Exit HyStart++ conservative slow start after the max rounds allowed.
+    /// Exit `HyStart`++ conservative slow start after the max rounds allowed.
     ConservativeSlowStartRounds,
 }
 

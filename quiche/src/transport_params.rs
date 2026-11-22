@@ -110,6 +110,11 @@ pub struct UnknownTransportParameters {
 impl UnknownTransportParameters {
     /// Pushes an unknown transport parameter into storage if there is space
     /// remaining.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Error::BufferTooShort` if the parameter plus its identifier
+    /// would consume all or more of the remaining tracking capacity.
     pub fn push(&mut self, new: UnknownTransportParameter<&[u8]>) -> Result<()> {
         let new_unknown_tp_size = new.value.len() + size_of::<u64>();
         if new_unknown_tp_size < self.capacity {

@@ -127,7 +127,7 @@ const HMM_PERSIST_CONFIRM_SAMPLES: u32 = 3;
 // probabilities online would make detections non-deterministic and risks
 // learning persistent RTT jumps as normal behavior.
 
-/// HMM transition matrix `A[i][j]` = P(state_t = j | state_{t-1} = i).
+/// HMM transition matrix `A[i][j]` = `P(state_t` = j | state_{t-1} = i).
 const HMM_TRANSITION: [[f32; HMM_STATE_COUNT]; HMM_STATE_COUNT] = [
     // from Normal: strongly self-sticky; the small leak prefers Transient over
     // Persistent so onset is routed through the middle state.
