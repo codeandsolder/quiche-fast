@@ -4,6 +4,11 @@ on:
     tags: ["*"]
   pull_request:
   workflow_dispatch:
+    inputs:
+      windows_only:
+        description: Validate all four Windows targets without repeating Linux jobs
+        type: boolean
+        default: false
 
 name: Stable
 
@@ -24,6 +29,7 @@ concurrency:
 
 jobs:
   quiche:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_only
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -113,6 +119,7 @@ jobs:
         uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@d168449633a47de6c0166f0c0cff903e96983820 # main
 
   qlog-dancer-wasm:
+    if: github.event_name != 'workflow_dispatch' || !inputs.windows_only
     name: qlog-dancer WASM library (shared sccache)
     runs-on: ubuntu-latest
     # The workflow-wide x86-64-v2 RUSTFLAGS are invalid for wasm32.
@@ -153,7 +160,7 @@ jobs:
 
   shared-sccache:
     name: Linux workspace (shared sccache)
-    if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/master'
+    if: (github.event_name == 'workflow_dispatch' && !inputs.windows_only) || (github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/master')
     permissions:
       contents: read
     uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@d168449633a47de6c0166f0c0cff903e96983820 # main
@@ -243,7 +250,7 @@ jobs:
         uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@d168449633a47de6c0166f0c0cff903e96983820 # main
 
   quiche_windows:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.windows_only)
     runs-on: windows-2025
     strategy:
       matrix:
@@ -262,6 +269,8 @@ jobs:
             cflags: "-mlong-double-64 -msse2"
             cxxflags: "-mlong-double-64 -msse2"
     env:
+      # Release and manual Windows validation both cover 32-bit targets.
+      RUSTFLAGS: '-D warnings'
       CFLAGS: ${{ matrix.cflags }}
       CXXFLAGS: ${{ matrix.cxxflags }}
       BINDGEN_EXTRA_CLANG_ARGS: ${{ matrix.cflags }}
