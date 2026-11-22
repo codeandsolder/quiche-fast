@@ -6489,6 +6489,37 @@ mod tests {
         s.advance().ok();
     }
 
+    /// Inject client frames and verify the server acknowledges their packet.
+    /// ACK delay is a wall-clock-dependent varint, so the encrypted response
+    /// length is not a stable way to verify an ACK-only packet.
+    fn assert_client_packet_acknowledged(
+        pipe: &mut crate::test_utils::Pipe, frames: &[crate::frame::Frame],
+        buf: &mut [u8],
+    ) {
+        let packet_number = pipe.client.next_pkt_num;
+        let len = pipe
+            .send_pkt_to_server(crate::packet::Type::Short, frames, buf)
+            .unwrap();
+        assert!(len > 0, "server did not emit an ACK response");
+        let response =
+            crate::test_utils::decode_pkt(&mut pipe.client, &mut buf[..len])
+                .unwrap();
+        assert!(
+            response.iter().any(|frame| matches!(frame,
+                crate::frame::Frame::ACK { ranges, .. } if ranges.contains(packet_number)
+            )),
+            "server did not acknowledge packet {packet_number}: {response:?}",
+        );
+        assert!(
+            response.iter().all(|frame| matches!(
+                frame,
+                crate::frame::Frame::ACK { .. } |
+                    crate::frame::Frame::Padding { .. }
+            )),
+            "unexpected non-ACK response: {response:?}"
+        );
+    }
+
     #[test]
     /// Ensure STREAM_DATA_BLOCKED is not emitted multiple times with the same
     /// offset when trying to send large bodies.
@@ -6591,11 +6622,7 @@ mod tests {
             max: 100,
         }];
 
-        let pkt_type = crate::packet::Type::Short;
-        assert_eq!(
-            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(40),
-        );
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
 
         let sent = s
             .server
@@ -8100,21 +8127,14 @@ mod tests {
             final_size: 68,
         }];
 
-        let pkt_type = crate::packet::Type::Short;
-        assert_eq!(
-            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(40)
-        );
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
 
         // Server issues Reset event for the stream.
         assert_eq!(s.poll_server(), Ok((stream, Event::Reset(42))));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Sending RESET_STREAM again shouldn't trigger another Reset event.
-        assert_eq!(
-            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(40)
-        );
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
 
         assert_eq!(s.poll_server(), Err(Error::Done));
     }
@@ -8518,11 +8538,7 @@ mod tests {
             final_size: 68,
         }];
 
-        let pkt_type = crate::packet::Type::Short;
-        assert_eq!(
-            s.pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-            Ok(40)
-        );
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
