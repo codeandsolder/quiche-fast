@@ -9944,7 +9944,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     // Marks the connection as closed and does any related tidyup.
-    const fn mark_closed(&mut self) {
+    fn mark_closed(&mut self) {
         #[cfg(feature = "qlog")]
         {
             let cc = match (self.is_established(), self.timed_out, &self.peer_error, &self.local_error) {
