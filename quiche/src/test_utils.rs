@@ -24,10 +24,30 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use super::*;
+use crate::accept_with_buf_factory;
+use crate::connect_with_buffer_factory;
+use crate::frame;
+use crate::packet;
+use crate::rand;
+use crate::BufFactory;
+use crate::Config;
+use crate::Connection;
+use crate::ConnectionId;
+use crate::DefaultBufFactory;
+use crate::Error;
+use crate::Header;
+use crate::RecvInfo;
+use crate::Result;
+use crate::SendInfo;
+use crate::Type;
+use crate::PROTOCOL_VERSION;
+use std::net::SocketAddr;
+use std::time::Instant;
 
 use smallvec::smallvec;
 
+#[cfg(test)]
+use crate::recovery::RecoveryOps as _;
 use crate::recovery::Sent;
 
 /// Curve preference list that excludes post-quantum groups.
@@ -60,12 +80,39 @@ where
     pub server: Connection<F>,
 }
 
+/// Construct the fixture configuration with its packaged server identity.
+pub fn config_with_test_identity() -> Result<Config> {
+    #[cfg(feature = "boringssl-boring-crate")]
+    {
+        let mut config = Config::with_boring_ssl_ctx_builder(
+            PROTOCOL_VERSION,
+            Pipe::default_tls_ctx_builder()?,
+        )?;
+        config.tls_ctx.load_ca_certs()?;
+        Ok(config)
+    }
+
+    #[cfg(not(feature = "boringssl-boring-crate"))]
+    {
+        // The externally linked TLS backend does not expose the Rust
+        // certificate object API. Use the packaged fixture files directly.
+        let mut config = Config::new(PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/cert.crt",
+        ))?;
+        config.load_priv_key_from_pem_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/examples/cert.key",
+        ))?;
+        Ok(config)
+    }
+}
+
 impl Pipe {
     pub fn default_config(cc_algorithm_name: &str) -> Result<Config> {
-        let mut config = Config::new(PROTOCOL_VERSION)?;
-        assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        let mut config = config_with_test_identity()?;
+        config.set_cc_algorithm_name(cc_algorithm_name)?;
         config.set_application_protos(&[b"proto1", b"proto2"])?;
         config.set_initial_max_data(30);
         config.set_initial_max_stream_data_bidi_local(15);
@@ -88,29 +135,30 @@ impl Pipe {
     }
 
     #[cfg(feature = "boringssl-boring-crate")]
-    pub fn default_tls_ctx_builder() -> boring::ssl::SslContextBuilder {
-        let mut ctx_builder =
+    pub fn default_tls_ctx_builder() -> Result<boring::ssl::SslContextBuilder> {
+        let mut ctx =
             boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
-                .unwrap();
-        ctx_builder
-            .set_certificate_chain_file("examples/cert.crt")
-            .unwrap();
-        ctx_builder
-            .set_private_key_file(
-                "examples/cert.key",
-                boring::ssl::SslFiletype::PEM,
-            )
-            .unwrap();
+                .map_err(|_| Error::TlsFail)?;
+        let cert =
+            boring::x509::X509::from_pem(include_bytes!("../examples/cert.crt"))
+                .map_err(|_| Error::TlsFail)?;
+        let key = boring::pkey::PKey::private_key_from_pem(include_bytes!(
+            "../examples/cert.key"
+        ))
+        .map_err(|_| Error::TlsFail)?;
 
-        ctx_builder
+        ctx.set_certificate(&cert).map_err(|_| Error::TlsFail)?;
+        ctx.set_private_key(&key).map_err(|_| Error::TlsFail)?;
+        ctx.check_private_key().map_err(|_| Error::TlsFail)?;
+        Ok(ctx)
     }
 
     pub fn client_addr() -> SocketAddr {
-        "127.0.0.1:1234".parse().unwrap()
+        SocketAddr::from(([127, 0, 0, 1], 1234))
     }
 
     pub fn server_addr() -> SocketAddr {
-        "127.0.0.1:4321".parse().unwrap()
+        SocketAddr::from(([127, 0, 0, 1], 4321))
     }
 
     pub fn new(cc_algorithm_name: &str) -> Result<Self> {
@@ -171,9 +219,8 @@ impl<F: BufFactory> Pipe<F> {
     pub fn with_client_config_and_buf(
         client_config: &mut Config,
     ) -> Result<Self> {
-        let mut server_config = Self::default_counterpart_config()?;
-        server_config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        server_config.load_priv_key_from_pem_file("examples/cert.key")?;
+        let mut server_config =
+            Self::default_counterpart_config(config_with_test_identity()?)?;
         Self::with_client_and_server_config_and_buf(
             client_config,
             &mut server_config,
@@ -183,7 +230,8 @@ impl<F: BufFactory> Pipe<F> {
     pub fn with_server_config_and_buf(
         server_config: &mut Config,
     ) -> Result<Self> {
-        let mut client_config = Self::default_counterpart_config()?;
+        let mut client_config =
+            Self::default_counterpart_config(Config::new(PROTOCOL_VERSION)?)?;
         Self::with_client_and_server_config_and_buf(
             &mut client_config,
             server_config,
@@ -199,8 +247,7 @@ impl<F: BufFactory> Pipe<F> {
     // Default for the counterpart when only the client or server config was
     // supplied. This deliberately differs from Pipe::default_config: it
     // retains the regular verification, idle timeout, and uni-stream limits.
-    fn default_counterpart_config() -> Result<Config> {
-        let mut config = Config::new(PROTOCOL_VERSION)?;
+    fn default_counterpart_config(mut config: Config) -> Result<Config> {
         config.set_application_protos(&[b"proto1", b"proto2"])?;
         config.set_initial_max_data(30);
         config.set_initial_max_stream_data_bidi_local(15);
@@ -282,7 +329,7 @@ impl<F: BufFactory> Pipe<F> {
     }
 
     pub fn client_recv(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let server_path = &self.server.paths.get_active().unwrap();
+        let server_path = self.server.paths.get_active()?;
         let info = RecvInfo {
             to: server_path.peer_addr(),
             from: server_path.local_addr(),
@@ -292,7 +339,7 @@ impl<F: BufFactory> Pipe<F> {
     }
 
     pub fn server_recv(&mut self, buf: &mut [u8]) -> Result<usize> {
-        let client_path = &self.client.paths.get_active().unwrap();
+        let client_path = self.client.paths.get_active()?;
         let info = RecvInfo {
             to: client_path.peer_addr(),
             from: client_path.local_addr(),
@@ -314,21 +361,23 @@ impl<F: BufFactory> Pipe<F> {
         let open_next = crypto_ctx
             .crypto_open
             .as_ref()
-            .unwrap()
-            .derive_next_packet_key()
-            .unwrap();
+            .ok_or(Error::InvalidState)?
+            .derive_next_packet_key()?;
 
         let seal_next = crypto_ctx
             .crypto_seal
             .as_ref()
-            .unwrap()
+            .ok_or(Error::InvalidState)?
             .derive_next_packet_key()?;
 
-        let open_prev = crypto_ctx.crypto_open.replace(open_next);
+        let open_prev = crypto_ctx
+            .crypto_open
+            .replace(open_next)
+            .ok_or(Error::InvalidState)?;
         crypto_ctx.crypto_seal.replace(seal_next);
 
         crypto_ctx.key_update = Some(packet::KeyUpdate {
-            crypto_open: open_prev.unwrap(),
+            crypto_open: open_prev,
             pn_on_update: self.client.next_pkt_num,
             update_acked: true,
             timer: Instant::now(),
@@ -349,7 +398,7 @@ pub fn recv_send<F: BufFactory>(
         from: active_path.peer_addr(),
     };
 
-    conn.recv(&mut buf[..len], info)?;
+    conn.recv(buf.get_mut(..len).ok_or(Error::BufferTooShort)?, info)?;
 
     let mut off = 0;
 
@@ -479,7 +528,9 @@ pub fn encode_raw_pkt<F: BufFactory>(
     let payload_len = payload.len();
 
     if pkt_type != Type::Short {
-        let len = pn_len + payload_len + crypto_ctx.crypto_overhead().unwrap();
+        let len = pn_len +
+            payload_len +
+            crypto_ctx.crypto_overhead().ok_or(Error::InvalidState)?;
         b.put_varint(len as u64)?;
     }
 
@@ -515,15 +566,18 @@ pub fn decode_pkt<F: BufFactory>(
 ) -> Result<Vec<frame::Frame>> {
     let mut b = octets::OctetsMut::with_slice(buf);
 
-    let mut hdr = Header::from_bytes(&mut b, conn.source_id().len()).unwrap();
+    let mut hdr = Header::from_bytes(&mut b, conn.source_id().len())?;
 
     let epoch = hdr.ty.to_epoch()?;
 
-    let aead = conn.crypto_ctx[epoch].crypto_open.as_ref().unwrap();
+    let aead = conn.crypto_ctx[epoch]
+        .crypto_open
+        .as_ref()
+        .ok_or(Error::InvalidState)?;
 
     let payload_len = b.cap();
 
-    packet::decrypt_hdr(&mut b, &mut hdr, aead).unwrap();
+    packet::decrypt_hdr(&mut b, &mut hdr, aead)?;
 
     let pn = packet::decode_pkt_num(
         conn.pkt_num_spaces[epoch].largest_rx_pkt_num,
@@ -532,8 +586,7 @@ pub fn decode_pkt<F: BufFactory>(
     )?;
 
     let mut payload =
-        packet::decrypt_pkt(&mut b, pn, hdr.pkt_num_len, payload_len, aead)
-            .unwrap();
+        packet::decrypt_pkt(&mut b, pn, hdr.pkt_num_len, payload_len, aead)?;
 
     let mut frames = Vec::new();
 
@@ -584,11 +637,11 @@ pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
 pub fn stream_recv_discard<F: BufFactory>(
     conn: &mut Connection<F>, discard: bool, stream_id: u64,
 ) -> Result<(usize, bool)> {
-    let mut buf = [0; 65535];
+    const LIMIT: usize = 65535;
     if discard {
-        conn.stream_discard(stream_id, 65535)
+        conn.stream_discard(stream_id, LIMIT)
     } else {
-        conn.stream_recv(stream_id, &mut buf)
+        conn.stream_recv(stream_id, &mut vec![0; LIMIT])
     }
 }
 
@@ -634,4 +687,27 @@ pub fn trigger_ack_based_loss<F: BufFactory>(
         from: sender.paths.get_active().unwrap().peer_addr(),
     };
     sender.recv(&mut buf[..ack_len], info).unwrap();
+}
+
+#[cfg(test)]
+mod fixture_tests {
+    use super::decode_pkt;
+    use super::recv_send;
+    use super::Pipe;
+    use crate::Error;
+
+    #[test]
+    fn fixture_errors_are_returned() {
+        assert!(matches!(
+            Pipe::default_config("no-such-algorithm"),
+            Err(Error::CongestionControl)
+        ));
+        let mut pipe = Pipe::new("cubic").unwrap();
+        assert_eq!(pipe.client_update_key(), Err(Error::InvalidState));
+        assert!(decode_pkt(&mut pipe.client, &mut []).is_err());
+        assert_eq!(
+            recv_send(&mut pipe.client, &mut [], 1),
+            Err(Error::BufferTooShort)
+        );
+    }
 }

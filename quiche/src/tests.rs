@@ -10622,7 +10622,8 @@ fn max_streams_threshold_after_handshake_callback_update(
     const CALLBACK_INITIAL_MAX_STREAMS_BIDI: u64 = 100;
 
     // Configure a server callback that changes `initial_max_streams_bidi`.
-    let mut server_tls_ctx_builder = test_utils::Pipe::default_tls_ctx_builder();
+    let mut server_tls_ctx_builder =
+        test_utils::Pipe::default_tls_ctx_builder().unwrap();
     server_tls_ctx_builder.set_select_certificate_callback(|mut hello| {
         // Change `initial_max_streams_bidi` from 4 to 100 during the handshake.
         <Connection>::set_initial_max_streams_bidi_in_handshake(
