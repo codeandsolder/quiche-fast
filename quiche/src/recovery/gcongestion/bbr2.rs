@@ -398,12 +398,11 @@ enum BwLoMode {
 impl From<BbrBwLoReductionStrategy> for BwLoMode {
     fn from(value: BbrBwLoReductionStrategy) -> Self {
         match value {
-            BbrBwLoReductionStrategy::Default => BwLoMode::Default,
-            BbrBwLoReductionStrategy::MinRttReduction =>
-                BwLoMode::MinRttReduction,
+            BbrBwLoReductionStrategy::Default => Self::Default,
+            BbrBwLoReductionStrategy::MinRttReduction => Self::MinRttReduction,
             BbrBwLoReductionStrategy::InflightReduction =>
-                BwLoMode::InflightReduction,
-            BbrBwLoReductionStrategy::CwndReduction => BwLoMode::CwndReduction,
+                Self::InflightReduction,
+            BbrBwLoReductionStrategy::CwndReduction => Self::CwndReduction,
         }
     }
 }
@@ -504,7 +503,7 @@ impl BBRv2CongestionEvent {
         event_time: Instant, prior_cwnd: usize, prior_bytes_in_flight: usize,
         is_probing_for_bandwidth: bool, max_datagram_size: usize,
     ) -> Self {
-        BBRv2CongestionEvent {
+        Self {
             max_datagram_size,
             event_time,
             prior_cwnd,
@@ -540,7 +539,7 @@ impl BBRv2 {
             .unwrap_or(initial_congestion_window)
             .saturating_mul(max_segment_size);
 
-        BBRv2 {
+        Self {
             mode: Mode::startup(BBRv2NetworkModel::new(&params, smoothed_rtt)),
             cwnd,
             pacing_rate: initial_pacing_rate(cwnd, smoothed_rtt, &params),

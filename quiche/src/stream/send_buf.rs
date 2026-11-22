@@ -145,10 +145,10 @@ where
 
 impl<F: BufFactory> SendBuf<F> {
     /// Creates a new send buffer.
-    pub fn new(max_data: u64) -> SendBuf<F> {
-        SendBuf {
+    pub fn new(max_data: u64) -> Self {
+        Self {
             max_data,
-            ..SendBuf::default()
+            ..Self::default()
         }
     }
 

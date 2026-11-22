@@ -38,8 +38,8 @@ pub struct Encoder {}
 
 impl Encoder {
     /// Creates a new QPACK encoder.
-    pub fn new() -> Encoder {
-        Encoder::default()
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Encodes a list of headers into a QPACK header block.

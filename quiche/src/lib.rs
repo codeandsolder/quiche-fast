@@ -623,7 +623,7 @@ impl Config {
     /// let config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
-    pub fn new(version: u32) -> Result<Config> {
+    pub fn new(version: u32) -> Result<Self> {
         Self::with_tls_ctx(version, tls::Context::new()?)
     }
 
@@ -638,16 +638,16 @@ impl Config {
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
     pub fn with_boring_ssl_ctx_builder(
         version: u32, tls_ctx_builder: boring::ssl::SslContextBuilder,
-    ) -> Result<Config> {
+    ) -> Result<Self> {
         Self::with_tls_ctx(version, tls::Context::from_boring(tls_ctx_builder)?)
     }
 
-    fn with_tls_ctx(version: u32, tls_ctx: tls::Context) -> Result<Config> {
+    fn with_tls_ctx(version: u32, tls_ctx: tls::Context) -> Result<Self> {
         if !is_reserved_version(version) && !version_is_supported(version) {
             return Err(Error::UnknownVersion);
         }
 
-        Ok(Config {
+        Ok(Self {
             local_transport_params: TransportParams::default(),
             version,
             tls_ctx,
@@ -1982,9 +1982,9 @@ impl<F: BufFactory> Connection<F> {
         scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
         client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
         config: &mut Config, is_server: bool,
-    ) -> Result<Connection<F>> {
+    ) -> Result<Self> {
         let tls = config.tls_ctx.new_handshake()?;
-        Connection::with_tls(
+        Self::with_tls(
             scid,
             retry_cids,
             client_dcid,
@@ -2004,7 +2004,7 @@ impl<F: BufFactory> Connection<F> {
         scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
         client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
         config: &Config, tls: tls::Handshake, is_server: bool,
-    ) -> Result<Connection<F>> {
+    ) -> Result<Self> {
         if retry_cids.is_some() && client_dcid.is_some() {
             // These are exclusive, the caller should only specify one or the
             // other.
@@ -2067,7 +2067,7 @@ impl<F: BufFactory> Connection<F> {
         );
 
         let initial_flow_control_window = max_rx_data;
-        let mut conn = Connection {
+        let mut conn = Self {
             version: config.version,
 
             ids,
@@ -9797,7 +9797,7 @@ struct AddrTupleFmt(SocketAddr, SocketAddr);
 
 impl std::fmt::Display for AddrTupleFmt {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let AddrTupleFmt(src, dst) = &self;
+        let Self(src, dst) = &self;
 
         if src.ip().is_unspecified() || dst.ip().is_unspecified() {
             return Ok(());

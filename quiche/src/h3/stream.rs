@@ -98,14 +98,14 @@ pub enum State {
 }
 
 impl Type {
-    pub fn deserialize(v: u64) -> Result<Type> {
+    pub fn deserialize(v: u64) -> Result<Self> {
         match v {
-            HTTP3_CONTROL_STREAM_TYPE_ID => Ok(Type::Control),
-            HTTP3_PUSH_STREAM_TYPE_ID => Ok(Type::Push),
-            QPACK_ENCODER_STREAM_TYPE_ID => Ok(Type::QpackEncoder),
-            QPACK_DECODER_STREAM_TYPE_ID => Ok(Type::QpackDecoder),
+            HTTP3_CONTROL_STREAM_TYPE_ID => Ok(Self::Control),
+            HTTP3_PUSH_STREAM_TYPE_ID => Ok(Self::Push),
+            QPACK_ENCODER_STREAM_TYPE_ID => Ok(Self::QpackEncoder),
+            QPACK_DECODER_STREAM_TYPE_ID => Ok(Self::QpackDecoder),
 
-            _ => Ok(Type::Unknown),
+            _ => Ok(Self::Unknown),
         }
     }
 }
@@ -197,7 +197,7 @@ impl Stream {
     pub fn new(
         id: u64, is_local: bool, max_field_section_size: u64,
         max_priority_update_size: u64,
-    ) -> Stream {
+    ) -> Self {
         let (ty, state) = if crate::stream::is_bidi(id) {
             // All bidirectional streams are "request" streams, so we don't
             // need to read the stream type.
@@ -213,7 +213,7 @@ impl Stream {
         let max_encoded_headers_payload_size =
             max_field_section_size.saturating_add(max_field_section_size / 2);
 
-        Stream {
+        Self {
             id,
             ty,
 

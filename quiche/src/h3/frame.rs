@@ -106,7 +106,7 @@ pub enum Frame {
 impl Frame {
     pub fn from_bytes(
         frame_type: u64, payload_length: u64, bytes: &[u8],
-    ) -> Result<Frame> {
+    ) -> Result<Self> {
         // Validate the entire wire length before narrowing to usize. On a
         // 32-bit target a large varint must never wrap into a short payload.
         // SETTINGS is rejected for excessive size independently of the data
@@ -125,15 +125,15 @@ impl Frame {
         let mut b = octets::Octets::with_slice(bytes);
 
         let frame = match frame_type {
-            DATA_FRAME_TYPE_ID => Frame::Data {
+            DATA_FRAME_TYPE_ID => Self::Data {
                 payload: b.get_bytes(payload_length)?.to_vec(),
             },
 
-            HEADERS_FRAME_TYPE_ID => Frame::Headers {
+            HEADERS_FRAME_TYPE_ID => Self::Headers {
                 header_block: b.get_bytes(payload_length)?.to_vec(),
             },
 
-            CANCEL_PUSH_FRAME_TYPE_ID => Frame::CancelPush {
+            CANCEL_PUSH_FRAME_TYPE_ID => Self::CancelPush {
                 push_id: parse_single_varint(payload_length, &mut b)?,
             },
 
@@ -143,11 +143,11 @@ impl Frame {
             PUSH_PROMISE_FRAME_TYPE_ID =>
                 parse_push_promise(payload_length, &mut b)?,
 
-            GOAWAY_FRAME_TYPE_ID => Frame::GoAway {
+            GOAWAY_FRAME_TYPE_ID => Self::GoAway {
                 id: parse_single_varint(payload_length, &mut b)?,
             },
 
-            MAX_PUSH_FRAME_TYPE_ID => Frame::MaxPushId {
+            MAX_PUSH_FRAME_TYPE_ID => Self::MaxPushId {
                 push_id: parse_single_varint(payload_length, &mut b)?,
             },
 
@@ -155,7 +155,7 @@ impl Frame {
             PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID =>
                 parse_priority_update(frame_type, payload_length, &mut b)?,
 
-            _ => Frame::Unknown {
+            _ => Self::Unknown {
                 raw_type: frame_type,
                 payload: b.get_bytes(payload_length)?.to_vec(),
             },
@@ -168,28 +168,28 @@ impl Frame {
         let before = b.cap();
 
         match self {
-            Frame::Data { payload } => {
+            Self::Data { payload } => {
                 b.put_varint(DATA_FRAME_TYPE_ID)?;
                 b.put_varint(payload.len() as u64)?;
 
                 b.put_bytes(payload.as_ref())?;
             },
 
-            Frame::Headers { header_block } => {
+            Self::Headers { header_block } => {
                 b.put_varint(HEADERS_FRAME_TYPE_ID)?;
                 b.put_varint(header_block.len() as u64)?;
 
                 b.put_bytes(header_block.as_ref())?;
             },
 
-            Frame::CancelPush { push_id } => {
+            Self::CancelPush { push_id } => {
                 b.put_varint(CANCEL_PUSH_FRAME_TYPE_ID)?;
                 b.put_varint(octets::varint_len(*push_id) as u64)?;
 
                 b.put_varint(*push_id)?;
             },
 
-            Frame::Settings {
+            Self::Settings {
                 max_field_section_size,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
@@ -283,7 +283,7 @@ impl Frame {
                 }
             },
 
-            Frame::PushPromise {
+            Self::PushPromise {
                 push_id,
                 header_block,
             } => {
@@ -295,21 +295,21 @@ impl Frame {
                 b.put_bytes(header_block.as_ref())?;
             },
 
-            Frame::GoAway { id } => {
+            Self::GoAway { id } => {
                 b.put_varint(GOAWAY_FRAME_TYPE_ID)?;
                 b.put_varint(octets::varint_len(*id) as u64)?;
 
                 b.put_varint(*id)?;
             },
 
-            Frame::MaxPushId { push_id } => {
+            Self::MaxPushId { push_id } => {
                 b.put_varint(MAX_PUSH_FRAME_TYPE_ID)?;
                 b.put_varint(octets::varint_len(*push_id) as u64)?;
 
                 b.put_varint(*push_id)?;
             },
 
-            Frame::PriorityUpdateRequest {
+            Self::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
             } => {
@@ -323,7 +323,7 @@ impl Frame {
                 b.put_bytes(priority_field_value)?;
             },
 
-            Frame::PriorityUpdatePush {
+            Self::PriorityUpdatePush {
                 prioritized_element_id,
                 priority_field_value,
             } => {
@@ -337,7 +337,7 @@ impl Frame {
                 b.put_bytes(priority_field_value)?;
             },
 
-            Frame::Unknown { raw_type, payload } => {
+            Self::Unknown { raw_type, payload } => {
                 b.put_varint(*raw_type)?;
                 b.put_varint(payload.len() as u64)?;
 
@@ -503,19 +503,19 @@ impl Frame {
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Frame::Data { .. } => {
+            Self::Data { .. } => {
                 write!(f, "DATA")?;
             },
 
-            Frame::Headers { .. } => {
+            Self::Headers { .. } => {
                 write!(f, "HEADERS")?;
             },
 
-            Frame::CancelPush { push_id } => {
+            Self::CancelPush { push_id } => {
                 write!(f, "CANCEL_PUSH push_id={push_id}")?;
             },
 
-            Frame::Settings {
+            Self::Settings {
                 max_field_section_size,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
@@ -526,7 +526,7 @@ impl std::fmt::Debug for Frame {
                 write!(f, "SETTINGS max_field_section={max_field_section_size:?}, qpack_max_table={qpack_max_table_capacity:?}, qpack_blocked={qpack_blocked_streams:?} raw={raw:?}, additional_settings={additional_settings:?}")?;
             },
 
-            Frame::PushPromise {
+            Self::PushPromise {
                 push_id,
                 header_block,
             } => {
@@ -538,15 +538,15 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::GoAway { id } => {
+            Self::GoAway { id } => {
                 write!(f, "GOAWAY id={id}")?;
             },
 
-            Frame::MaxPushId { push_id } => {
+            Self::MaxPushId { push_id } => {
                 write!(f, "MAX_PUSH_ID push_id={push_id}")?;
             },
 
-            Frame::PriorityUpdateRequest {
+            Self::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
             } => {
@@ -558,7 +558,7 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::PriorityUpdatePush {
+            Self::PriorityUpdatePush {
                 prioritized_element_id,
                 priority_field_value,
             } => {
@@ -570,7 +570,7 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::Unknown { raw_type, .. } => {
+            Self::Unknown { raw_type, .. } => {
                 write!(f, "UNKNOWN raw_type={raw_type}",)?;
             },
         }

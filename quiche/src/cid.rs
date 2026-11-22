@@ -266,7 +266,7 @@ impl ConnectionIdentifiers {
     pub fn new(
         mut destination_conn_id_limit: usize, initial_scid: &ConnectionId,
         initial_path_id: usize, reset_token: Option<u128>,
-    ) -> ConnectionIdentifiers {
+    ) -> Self {
         // It must be at least 2.
         if destination_conn_id_limit < 2 {
             destination_conn_id_limit = 2;
@@ -307,7 +307,7 @@ impl ConnectionIdentifiers {
             .saturating_mul(RETIRED_CONN_ID_LIMIT_MULTIPLIER);
         // Because we already inserted the initial SCID.
         let next_scid_seq = 1;
-        ConnectionIdentifiers {
+        Self {
             scids,
             dcids,
             retire_dcid_seqs: BoundedConnectionIdSeqSet::new(size),

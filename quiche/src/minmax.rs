@@ -77,7 +77,7 @@ impl<T> Deref for Minmax<T> {
 
 impl<T: PartialOrd + Copy> Minmax<T> {
     pub fn new(val: T) -> Self {
-        Minmax {
+        Self {
             estimate: [MinmaxSample {
                 time: Instant::now(),
                 value: val,

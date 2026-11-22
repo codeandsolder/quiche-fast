@@ -45,7 +45,7 @@ struct ConnectionStateMap<T> {
 
 impl<T> Default for ConnectionStateMap<T> {
     fn default() -> Self {
-        ConnectionStateMap {
+        Self {
             packet_map: VecDeque::new(),
         }
     }
@@ -289,7 +289,7 @@ pub(crate) struct CongestionEventSample {
 
 impl MaxAckHeightTracker {
     pub(crate) fn new(window: usize, overestimate_avoidance: bool) -> Self {
-        MaxAckHeightTracker {
+        Self {
             max_ack_height_filter: WindowedFilter::new(window),
             aggregation_epoch_start_time: None,
             aggregation_epoch_bytes: 0,
@@ -396,7 +396,7 @@ impl From<(Instant, usize, usize, &BandwidthSampler)>
             &BandwidthSampler,
         ),
     ) -> Self {
-        ConnectionStateOnSentPacket {
+        Self {
             sent_time,
             size,
             total_bytes_sent_at_last_acked_packet: sampler
@@ -453,7 +453,7 @@ impl BandwidthSampler {
         max_height_tracker_window_length: usize, overestimate_avoidance: bool,
         choose_a0_point_fix: bool,
     ) -> Self {
-        BandwidthSampler {
+        Self {
             total_bytes_sent: 0,
             total_bytes_acked: 0,
             total_bytes_lost: 0,

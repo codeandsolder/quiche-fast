@@ -343,9 +343,9 @@ impl Recovery {
     pub fn new_with_config(recovery_config: &RecoveryConfig) -> Self {
         let grecovery = GRecovery::new(recovery_config);
         if let Some(grecovery) = grecovery {
-            Recovery::from(grecovery)
+            Self::from(grecovery)
         } else {
-            Recovery::from(LegacyRecovery::new_with_config(recovery_config))
+            Self::from(LegacyRecovery::new_with_config(recovery_config))
         }
     }
 
@@ -400,11 +400,11 @@ impl FromStr for CongestionControlAlgorithm {
     /// If `name` is not valid, `Error::CongestionControl` is returned.
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
-            "reno" => Ok(CongestionControlAlgorithm::Reno),
-            "cubic" => Ok(CongestionControlAlgorithm::CUBIC),
-            "bbr" => Ok(CongestionControlAlgorithm::Bbr2Gcongestion),
-            "bbr2" => Ok(CongestionControlAlgorithm::Bbr2Gcongestion),
-            "bbr2_gcongestion" => Ok(CongestionControlAlgorithm::Bbr2Gcongestion),
+            "reno" => Ok(Self::Reno),
+            "cubic" => Ok(Self::CUBIC),
+            "bbr" => Ok(Self::Bbr2Gcongestion),
+            "bbr2" => Ok(Self::Bbr2Gcongestion),
+            "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
             _ => Err(crate::Error::CongestionControl),
         }
     }
@@ -743,16 +743,16 @@ impl ReleaseTime {
     /// Add the specific delay to the current time
     fn inc(&mut self, delay: Duration) {
         match self {
-            ReleaseTime::Immediate => {},
-            ReleaseTime::At(time) => *time += delay,
+            Self::Immediate => {},
+            Self::At(time) => *time += delay,
         }
     }
 
     /// Set the time to the later of two times
     fn set_max(&mut self, other: Instant) {
         match self {
-            ReleaseTime::Immediate => *self = ReleaseTime::At(other),
-            ReleaseTime::At(time) => *self = ReleaseTime::At(other.max(*time)),
+            Self::Immediate => *self = Self::At(other),
+            Self::At(time) => *self = Self::At(other.max(*time)),
         }
     }
 }

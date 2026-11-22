@@ -72,14 +72,14 @@ enum SentStatus {
 
 impl SentStatus {
     fn ack(&mut self) -> Self {
-        std::mem::replace(self, SentStatus::Acked)
+        std::mem::replace(self, Self::Acked)
     }
 
     fn lose(&mut self) -> Self {
-        if !matches!(self, SentStatus::Acked) {
-            std::mem::replace(self, SentStatus::Lost)
+        if !matches!(self, Self::Acked) {
+            std::mem::replace(self, Self::Lost)
         } else {
-            SentStatus::Acked
+            Self::Acked
         }
     }
 }
@@ -446,7 +446,7 @@ impl LossThreshold {
             } else {
                 None
             };
-        LossThreshold {
+        Self {
             pkt_thresh: Some(INITIAL_PACKET_THRESHOLD),
             time_thresh: INITIAL_TIME_THRESHOLD,
             time_thresh_overhead,

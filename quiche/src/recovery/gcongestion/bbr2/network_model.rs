@@ -199,7 +199,7 @@ pub(super) struct BBRv2NetworkModel {
 
 impl BBRv2NetworkModel {
     pub(super) fn new(params: &Params, initial_rtt: Duration) -> Self {
-        BBRv2NetworkModel {
+        Self {
             min_bytes_in_flight_in_round: usize::MAX,
             inflight_hi_limited_in_round: false,
             bandwidth_sampler: BandwidthSampler::new(

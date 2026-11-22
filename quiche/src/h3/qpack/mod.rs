@@ -75,7 +75,7 @@ impl std::error::Error for Error {
 
 impl From<octets::BufferTooShortError> for Error {
     fn from(_err: octets::BufferTooShortError) -> Self {
-        Error::BufferTooShort
+        Self::BufferTooShort
     }
 }
 

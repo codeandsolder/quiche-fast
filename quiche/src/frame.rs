@@ -190,16 +190,14 @@ pub enum Frame {
 }
 
 impl Frame {
-    pub fn from_bytes(
-        b: &mut octets::Octets, pkt: packet::Type,
-    ) -> Result<Frame> {
+    pub fn from_bytes(b: &mut octets::Octets, pkt: packet::Type) -> Result<Self> {
         let frame_type = b.get_varint()?;
         Self::from_bytes_with_type(frame_type, b, pkt)
     }
 
     pub(crate) fn from_bytes_with_type(
         frame_type: u64, b: &mut octets::Octets, pkt: packet::Type,
-    ) -> Result<Frame> {
+    ) -> Result<Self> {
         let frame = match frame_type {
             0x00 => {
                 let mut len = 1;
@@ -210,20 +208,20 @@ impl Frame {
                     len += 1;
                 }
 
-                Frame::Padding { len }
+                Self::Padding { len }
             },
 
-            0x01 => Frame::Ping { mtu_probe: None },
+            0x01 => Self::Ping { mtu_probe: None },
 
             0x02..=0x03 => parse_ack_frame(frame_type, b)?,
 
-            0x04 => Frame::ResetStream {
+            0x04 => Self::ResetStream {
                 stream_id: b.get_varint()?,
                 error_code: b.get_varint()?,
                 final_size: b.get_varint()?,
             },
 
-            0x05 => Frame::StopSending {
+            0x05 => Self::StopSending {
                 stream_id: b.get_varint()?,
                 error_code: b.get_varint()?,
             },
@@ -233,7 +231,7 @@ impl Frame {
                 let data = b.get_bytes_with_varint_length()?;
                 let data = <RangeBuf>::from(data.as_ref(), offset, false);
 
-                Frame::Crypto { data }
+                Self::Crypto { data }
             },
 
             0x07 => {
@@ -243,44 +241,44 @@ impl Frame {
                     return Err(Error::InvalidFrame);
                 }
 
-                Frame::NewToken {
+                Self::NewToken {
                     token: b.get_bytes(len)?.to_vec(),
                 }
             },
 
             0x08..=0x0f => parse_stream_frame(frame_type, b)?,
 
-            0x10 => Frame::MaxData {
+            0x10 => Self::MaxData {
                 max: b.get_varint()?,
             },
 
-            0x11 => Frame::MaxStreamData {
+            0x11 => Self::MaxStreamData {
                 stream_id: b.get_varint()?,
                 max: b.get_varint()?,
             },
 
-            0x12 => Frame::MaxStreamsBidi {
+            0x12 => Self::MaxStreamsBidi {
                 max: b.get_varint()?,
             },
 
-            0x13 => Frame::MaxStreamsUni {
+            0x13 => Self::MaxStreamsUni {
                 max: b.get_varint()?,
             },
 
-            0x14 => Frame::DataBlocked {
+            0x14 => Self::DataBlocked {
                 limit: b.get_varint()?,
             },
 
-            0x15 => Frame::StreamDataBlocked {
+            0x15 => Self::StreamDataBlocked {
                 stream_id: b.get_varint()?,
                 limit: b.get_varint()?,
             },
 
-            0x16 => Frame::StreamsBlockedBidi {
+            0x16 => Self::StreamsBlockedBidi {
                 limit: b.get_varint()?,
             },
 
-            0x17 => Frame::StreamsBlockedUni {
+            0x17 => Self::StreamsBlockedUni {
                 limit: b.get_varint()?,
             },
 
@@ -293,7 +291,7 @@ impl Frame {
                     return Err(Error::InvalidFrame);
                 }
 
-                Frame::NewConnectionId {
+                Self::NewConnectionId {
                     seq_num,
                     retire_prior_to,
                     conn_id: b.get_bytes(conn_id_len as usize)?.to_vec(),
@@ -305,11 +303,11 @@ impl Frame {
                 }
             },
 
-            0x19 => Frame::RetireConnectionId {
+            0x19 => Self::RetireConnectionId {
                 seq_num: b.get_varint()?,
             },
 
-            0x1a => Frame::PathChallenge {
+            0x1a => Self::PathChallenge {
                 data: b
                     .get_bytes(8)?
                     .buf()
@@ -317,7 +315,7 @@ impl Frame {
                     .map_err(|_| Error::BufferTooShort)?,
             },
 
-            0x1b => Frame::PathResponse {
+            0x1b => Self::PathResponse {
                 data: b
                     .get_bytes(8)?
                     .buf()
@@ -325,18 +323,18 @@ impl Frame {
                     .map_err(|_| Error::BufferTooShort)?,
             },
 
-            0x1c => Frame::ConnectionClose {
+            0x1c => Self::ConnectionClose {
                 error_code: b.get_varint()?,
                 frame_type: b.get_varint()?,
                 reason: b.get_bytes_with_varint_length()?.to_vec(),
             },
 
-            0x1d => Frame::ApplicationClose {
+            0x1d => Self::ApplicationClose {
                 error_code: b.get_varint()?,
                 reason: b.get_bytes_with_varint_length()?.to_vec(),
             },
 
-            0x1e => Frame::HandshakeDone,
+            0x1e => Self::HandshakeDone,
 
             0x30 | 0x31 => parse_datagram_frame(frame_type, b)?,
 
@@ -345,23 +343,23 @@ impl Frame {
 
         let allowed = match (pkt, &frame) {
             // PADDING and PING are allowed on all packet types.
-            (_, Frame::Padding { .. }) | (_, Frame::Ping { .. }) => true,
+            (_, Self::Padding { .. }) | (_, Self::Ping { .. }) => true,
 
             // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, and
             // RETIRE_CONNECTION_ID can't be sent on 0-RTT packets.
-            (packet::Type::ZeroRTT, Frame::ACK { .. }) => false,
-            (packet::Type::ZeroRTT, Frame::Crypto { .. }) => false,
-            (packet::Type::ZeroRTT, Frame::HandshakeDone) => false,
-            (packet::Type::ZeroRTT, Frame::NewToken { .. }) => false,
-            (packet::Type::ZeroRTT, Frame::PathResponse { .. }) => false,
-            (packet::Type::ZeroRTT, Frame::RetireConnectionId { .. }) => false,
-            (packet::Type::ZeroRTT, Frame::ConnectionClose { .. }) => false,
+            (packet::Type::ZeroRTT, Self::ACK { .. }) => false,
+            (packet::Type::ZeroRTT, Self::Crypto { .. }) => false,
+            (packet::Type::ZeroRTT, Self::HandshakeDone) => false,
+            (packet::Type::ZeroRTT, Self::NewToken { .. }) => false,
+            (packet::Type::ZeroRTT, Self::PathResponse { .. }) => false,
+            (packet::Type::ZeroRTT, Self::RetireConnectionId { .. }) => false,
+            (packet::Type::ZeroRTT, Self::ConnectionClose { .. }) => false,
 
             // ACK, CRYPTO and CONNECTION_CLOSE can be sent on all other packet
             // types.
-            (_, Frame::ACK { .. }) => true,
-            (_, Frame::Crypto { .. }) => true,
-            (_, Frame::ConnectionClose { .. }) => true,
+            (_, Self::ACK { .. }) => true,
+            (_, Self::Crypto { .. }) => true,
+            (_, Self::ConnectionClose { .. }) => true,
 
             // All frames are allowed on 0-RTT and 1-RTT packets.
             (packet::Type::Short, _) => true,
@@ -382,7 +380,7 @@ impl Frame {
         let before = b.cap();
 
         match self {
-            Frame::Padding { len } => {
+            Self::Padding { len } => {
                 let mut left = *len;
 
                 while left > 0 {
@@ -392,11 +390,11 @@ impl Frame {
                 }
             },
 
-            Frame::Ping { .. } => {
+            Self::Ping { .. } => {
                 b.put_varint(0x01)?;
             },
 
-            Frame::ACK {
+            Self::ACK {
                 ack_delay,
                 ranges,
                 ecn_counts,
@@ -436,7 +434,7 @@ impl Frame {
                 }
             },
 
-            Frame::ResetStream {
+            Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
@@ -448,7 +446,7 @@ impl Frame {
                 b.put_varint(*final_size)?;
             },
 
-            Frame::StopSending {
+            Self::StopSending {
                 stream_id,
                 error_code,
             } => {
@@ -458,22 +456,22 @@ impl Frame {
                 b.put_varint(*error_code)?;
             },
 
-            Frame::Crypto { data } => {
+            Self::Crypto { data } => {
                 encode_crypto_header(data.off(), data.len() as u64, b)?;
 
                 b.put_bytes(data)?;
             },
 
-            Frame::CryptoHeader { .. } => (),
+            Self::CryptoHeader { .. } => (),
 
-            Frame::NewToken { token } => {
+            Self::NewToken { token } => {
                 b.put_varint(0x07)?;
 
                 b.put_varint(token.len() as u64)?;
                 b.put_bytes(token)?;
             },
 
-            Frame::Stream { stream_id, data } => {
+            Self::Stream { stream_id, data } => {
                 encode_stream_header(
                     *stream_id,
                     data.off(),
@@ -485,59 +483,59 @@ impl Frame {
                 b.put_bytes(data)?;
             },
 
-            Frame::StreamHeader { .. } => (),
+            Self::StreamHeader { .. } => (),
 
-            Frame::MaxData { max } => {
+            Self::MaxData { max } => {
                 b.put_varint(0x10)?;
 
                 b.put_varint(*max)?;
             },
 
-            Frame::MaxStreamData { stream_id, max } => {
+            Self::MaxStreamData { stream_id, max } => {
                 b.put_varint(0x11)?;
 
                 b.put_varint(*stream_id)?;
                 b.put_varint(*max)?;
             },
 
-            Frame::MaxStreamsBidi { max } => {
+            Self::MaxStreamsBidi { max } => {
                 b.put_varint(0x12)?;
 
                 b.put_varint(*max)?;
             },
 
-            Frame::MaxStreamsUni { max } => {
+            Self::MaxStreamsUni { max } => {
                 b.put_varint(0x13)?;
 
                 b.put_varint(*max)?;
             },
 
-            Frame::DataBlocked { limit } => {
+            Self::DataBlocked { limit } => {
                 b.put_varint(0x14)?;
 
                 b.put_varint(*limit)?;
             },
 
-            Frame::StreamDataBlocked { stream_id, limit } => {
+            Self::StreamDataBlocked { stream_id, limit } => {
                 b.put_varint(0x15)?;
 
                 b.put_varint(*stream_id)?;
                 b.put_varint(*limit)?;
             },
 
-            Frame::StreamsBlockedBidi { limit } => {
+            Self::StreamsBlockedBidi { limit } => {
                 b.put_varint(0x16)?;
 
                 b.put_varint(*limit)?;
             },
 
-            Frame::StreamsBlockedUni { limit } => {
+            Self::StreamsBlockedUni { limit } => {
                 b.put_varint(0x17)?;
 
                 b.put_varint(*limit)?;
             },
 
-            Frame::NewConnectionId {
+            Self::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
@@ -552,25 +550,25 @@ impl Frame {
                 b.put_bytes(reset_token.as_ref())?;
             },
 
-            Frame::RetireConnectionId { seq_num } => {
+            Self::RetireConnectionId { seq_num } => {
                 b.put_varint(0x19)?;
 
                 b.put_varint(*seq_num)?;
             },
 
-            Frame::PathChallenge { data } => {
+            Self::PathChallenge { data } => {
                 b.put_varint(0x1a)?;
 
                 b.put_bytes(data.as_ref())?;
             },
 
-            Frame::PathResponse { data } => {
+            Self::PathResponse { data } => {
                 b.put_varint(0x1b)?;
 
                 b.put_bytes(data.as_ref())?;
             },
 
-            Frame::ConnectionClose {
+            Self::ConnectionClose {
                 error_code,
                 frame_type,
                 reason,
@@ -583,7 +581,7 @@ impl Frame {
                 b.put_bytes(reason.as_ref())?;
             },
 
-            Frame::ApplicationClose { error_code, reason } => {
+            Self::ApplicationClose { error_code, reason } => {
                 b.put_varint(0x1d)?;
 
                 b.put_varint(*error_code)?;
@@ -591,17 +589,17 @@ impl Frame {
                 b.put_bytes(reason.as_ref())?;
             },
 
-            Frame::HandshakeDone => {
+            Self::HandshakeDone => {
                 b.put_varint(0x1e)?;
             },
 
-            Frame::Datagram { data } => {
+            Self::Datagram { data } => {
                 encode_dgram_header(data.len() as u64, b)?;
 
                 b.put_bytes(data.as_ref())?;
             },
 
-            Frame::DatagramHeader { .. } => (),
+            Self::DatagramHeader { .. } => (),
         }
 
         Ok(before - b.cap())
@@ -609,11 +607,11 @@ impl Frame {
 
     pub fn wire_len(&self) -> usize {
         match self {
-            Frame::Padding { len } => *len,
+            Self::Padding { len } => *len,
 
-            Frame::Ping { .. } => 1,
+            Self::Ping { .. } => 1,
 
-            Frame::ACK {
+            Self::ACK {
                 ack_delay,
                 ranges,
                 ecn_counts,
@@ -650,7 +648,7 @@ impl Frame {
                 len
             },
 
-            Frame::ResetStream {
+            Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
@@ -661,7 +659,7 @@ impl Frame {
                 octets::varint_len(*final_size) // final_size
             },
 
-            Frame::StopSending {
+            Self::StopSending {
                 stream_id,
                 error_code,
             } => {
@@ -670,27 +668,27 @@ impl Frame {
                 octets::varint_len(*error_code) // error_code
             },
 
-            Frame::Crypto { data } => {
+            Self::Crypto { data } => {
                 1 + // frame type
                 octets::varint_len(data.off()) + // offset
                 2 + // length, always encode as 2-byte varint
                 data.len() // data
             },
 
-            Frame::CryptoHeader { offset, length, .. } => {
+            Self::CryptoHeader { offset, length, .. } => {
                 1 + // frame type
                 octets::varint_len(*offset) + // offset
                 2 + // length, always encode as 2-byte varint
                 length // data
             },
 
-            Frame::NewToken { token } => {
+            Self::NewToken { token } => {
                 1 + // frame type
                 octets::varint_len(token.len() as u64) + // token length
                 token.len() // token
             },
 
-            Frame::Stream { stream_id, data } => {
+            Self::Stream { stream_id, data } => {
                 1 + // frame type
                 octets::varint_len(*stream_id) + // stream_id
                 octets::varint_len(data.off()) + // offset
@@ -698,7 +696,7 @@ impl Frame {
                 data.len() // data
             },
 
-            Frame::StreamHeader {
+            Self::StreamHeader {
                 stream_id,
                 offset,
                 length,
@@ -711,49 +709,49 @@ impl Frame {
                 length // data
             },
 
-            Frame::MaxData { max } => {
+            Self::MaxData { max } => {
                 1 + // frame type
                 octets::varint_len(*max) // max
             },
 
-            Frame::MaxStreamData { stream_id, max } => {
+            Self::MaxStreamData { stream_id, max } => {
                 1 + // frame type
                 octets::varint_len(*stream_id) + // stream_id
                 octets::varint_len(*max) // max
             },
 
-            Frame::MaxStreamsBidi { max } => {
+            Self::MaxStreamsBidi { max } => {
                 1 + // frame type
                 octets::varint_len(*max) // max
             },
 
-            Frame::MaxStreamsUni { max } => {
+            Self::MaxStreamsUni { max } => {
                 1 + // frame type
                 octets::varint_len(*max) // max
             },
 
-            Frame::DataBlocked { limit } => {
+            Self::DataBlocked { limit } => {
                 1 + // frame type
                 octets::varint_len(*limit) // limit
             },
 
-            Frame::StreamDataBlocked { stream_id, limit } => {
+            Self::StreamDataBlocked { stream_id, limit } => {
                 1 + // frame type
                 octets::varint_len(*stream_id) + // stream_id
                 octets::varint_len(*limit) // limit
             },
 
-            Frame::StreamsBlockedBidi { limit } => {
+            Self::StreamsBlockedBidi { limit } => {
                 1 + // frame type
                 octets::varint_len(*limit) // limit
             },
 
-            Frame::StreamsBlockedUni { limit } => {
+            Self::StreamsBlockedUni { limit } => {
                 1 + // frame type
                 octets::varint_len(*limit) // limit
             },
 
-            Frame::NewConnectionId {
+            Self::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
@@ -767,22 +765,22 @@ impl Frame {
                 reset_token.len() // reset_token
             },
 
-            Frame::RetireConnectionId { seq_num } => {
+            Self::RetireConnectionId { seq_num } => {
                 1 + // frame type
                 octets::varint_len(*seq_num) // seq_num
             },
 
-            Frame::PathChallenge { .. } => {
+            Self::PathChallenge { .. } => {
                 1 + // frame type
                 8 // data
             },
 
-            Frame::PathResponse { .. } => {
+            Self::PathResponse { .. } => {
                 1 + // frame type
                 8 // data
             },
 
-            Frame::ConnectionClose {
+            Self::ConnectionClose {
                 frame_type,
                 error_code,
                 reason,
@@ -795,24 +793,24 @@ impl Frame {
                 reason.len() // reason
             },
 
-            Frame::ApplicationClose { reason, error_code } => {
+            Self::ApplicationClose { reason, error_code } => {
                 1 + // frame type
                 octets::varint_len(*error_code) + // error_code
                 octets::varint_len(reason.len() as u64) + // reason_len
                 reason.len() // reason
             },
 
-            Frame::HandshakeDone => {
+            Self::HandshakeDone => {
                 1 // frame type
             },
 
-            Frame::Datagram { data } => {
+            Self::Datagram { data } => {
                 1 + // frame type
                 2 + // length, always encode as 2-byte varint
                 data.len() // data
             },
 
-            Frame::DatagramHeader { length } => {
+            Self::DatagramHeader { length } => {
                 1 + // frame type
                 2 + // length, always encode as 2-byte varint
                 *length // data
@@ -824,20 +822,20 @@ impl Frame {
         // Any other frame is ack-eliciting (note the `!`).
         !matches!(
             self,
-            Frame::Padding { .. } |
-                Frame::ACK { .. } |
-                Frame::ApplicationClose { .. } |
-                Frame::ConnectionClose { .. }
+            Self::Padding { .. } |
+                Self::ACK { .. } |
+                Self::ApplicationClose { .. } |
+                Self::ConnectionClose { .. }
         )
     }
 
     pub fn probing(&self) -> bool {
         matches!(
             self,
-            Frame::Padding { .. } |
-                Frame::NewConnectionId { .. } |
-                Frame::PathChallenge { .. } |
-                Frame::PathResponse { .. }
+            Self::Padding { .. } |
+                Self::NewConnectionId { .. } |
+                Self::PathChallenge { .. } |
+                Self::PathResponse { .. }
         )
     }
 
@@ -1099,15 +1097,15 @@ impl Frame {
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Frame::Padding { len } => {
+            Self::Padding { len } => {
                 write!(f, "PADDING len={len}")?;
             },
 
-            Frame::Ping { mtu_probe } => {
+            Self::Ping { mtu_probe } => {
                 write!(f, "PING mtu_probe={mtu_probe:?}")?;
             },
 
-            Frame::ACK {
+            Self::ACK {
                 ack_delay,
                 ranges,
                 ecn_counts,
@@ -1118,7 +1116,7 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::ResetStream {
+            Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
@@ -1129,26 +1127,26 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::StopSending {
+            Self::StopSending {
                 stream_id,
                 error_code,
             } => {
                 write!(f, "STOP_SENDING stream={stream_id} err={error_code:x}")?;
             },
 
-            Frame::Crypto { data } => {
+            Self::Crypto { data } => {
                 write!(f, "CRYPTO off={} len={}", data.off(), data.len())?;
             },
 
-            Frame::CryptoHeader { offset, length } => {
+            Self::CryptoHeader { offset, length } => {
                 write!(f, "CRYPTO off={offset} len={length}")?;
             },
 
-            Frame::NewToken { token } => {
+            Self::NewToken { token } => {
                 write!(f, "NEW_TOKEN len={}", token.len())?;
             },
 
-            Frame::Stream { stream_id, data } => {
+            Self::Stream { stream_id, data } => {
                 write!(
                     f,
                     "STREAM id={} off={} len={} fin={}",
@@ -1159,7 +1157,7 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::StreamHeader {
+            Self::StreamHeader {
                 stream_id,
                 offset,
                 length,
@@ -1171,42 +1169,42 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::MaxData { max } => {
+            Self::MaxData { max } => {
                 write!(f, "MAX_DATA max={max}")?;
             },
 
-            Frame::MaxStreamData { stream_id, max } => {
+            Self::MaxStreamData { stream_id, max } => {
                 write!(f, "MAX_STREAM_DATA stream={stream_id} max={max}")?;
             },
 
-            Frame::MaxStreamsBidi { max } => {
+            Self::MaxStreamsBidi { max } => {
                 write!(f, "MAX_STREAMS type=bidi max={max}")?;
             },
 
-            Frame::MaxStreamsUni { max } => {
+            Self::MaxStreamsUni { max } => {
                 write!(f, "MAX_STREAMS type=uni max={max}")?;
             },
 
-            Frame::DataBlocked { limit } => {
+            Self::DataBlocked { limit } => {
                 write!(f, "DATA_BLOCKED limit={limit}")?;
             },
 
-            Frame::StreamDataBlocked { stream_id, limit } => {
+            Self::StreamDataBlocked { stream_id, limit } => {
                 write!(
                     f,
                     "STREAM_DATA_BLOCKED stream={stream_id} limit={limit}"
                 )?;
             },
 
-            Frame::StreamsBlockedBidi { limit } => {
+            Self::StreamsBlockedBidi { limit } => {
                 write!(f, "STREAMS_BLOCKED type=bidi limit={limit}")?;
             },
 
-            Frame::StreamsBlockedUni { limit } => {
+            Self::StreamsBlockedUni { limit } => {
                 write!(f, "STREAMS_BLOCKED type=uni limit={limit}")?;
             },
 
-            Frame::NewConnectionId {
+            Self::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
@@ -1218,19 +1216,19 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::RetireConnectionId { seq_num } => {
+            Self::RetireConnectionId { seq_num } => {
                 write!(f, "RETIRE_CONNECTION_ID seq_num={seq_num}")?;
             },
 
-            Frame::PathChallenge { data } => {
+            Self::PathChallenge { data } => {
                 write!(f, "PATH_CHALLENGE data={data:02x?}")?;
             },
 
-            Frame::PathResponse { data } => {
+            Self::PathResponse { data } => {
                 write!(f, "PATH_RESPONSE data={data:02x?}")?;
             },
 
-            Frame::ConnectionClose {
+            Self::ConnectionClose {
                 error_code,
                 frame_type,
                 reason,
@@ -1241,22 +1239,22 @@ impl std::fmt::Debug for Frame {
                 )?;
             },
 
-            Frame::ApplicationClose { error_code, reason } => {
+            Self::ApplicationClose { error_code, reason } => {
                 write!(
                     f,
                     "APPLICATION_CLOSE err={error_code:x} reason={reason:x?}"
                 )?;
             },
 
-            Frame::HandshakeDone => {
+            Self::HandshakeDone => {
                 write!(f, "HANDSHAKE_DONE")?;
             },
 
-            Frame::Datagram { data } => {
+            Self::Datagram { data } => {
                 write!(f, "DATAGRAM len={}", data.len())?;
             },
 
-            Frame::DatagramHeader { length } => {
+            Self::DatagramHeader { length } => {
                 write!(f, "DATAGRAM len={length}")?;
             },
         }

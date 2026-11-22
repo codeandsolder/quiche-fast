@@ -48,13 +48,13 @@ pub enum Level {
 }
 
 impl Level {
-    pub fn from_epoch(e: packet::Epoch) -> Level {
+    pub fn from_epoch(e: packet::Epoch) -> Self {
         match e {
-            packet::Epoch::Initial => Level::Initial,
+            packet::Epoch::Initial => Self::Initial,
 
-            packet::Epoch::Handshake => Level::Handshake,
+            packet::Epoch::Handshake => Self::Handshake,
 
-            packet::Epoch::Application => Level::OneRTT,
+            packet::Epoch::Application => Self::OneRTT,
         }
     }
 }
@@ -85,17 +85,17 @@ pub enum Algorithm {
 impl Algorithm {
     fn get_evp_digest(self) -> *const EVP_MD {
         match self {
-            Algorithm::AES128_GCM => unsafe { EVP_sha256() },
-            Algorithm::AES256_GCM => unsafe { EVP_sha384() },
-            Algorithm::ChaCha20_Poly1305 => unsafe { EVP_sha256() },
+            Self::AES128_GCM => unsafe { EVP_sha256() },
+            Self::AES256_GCM => unsafe { EVP_sha384() },
+            Self::ChaCha20_Poly1305 => unsafe { EVP_sha256() },
         }
     }
 
     pub const fn key_len(self) -> usize {
         match self {
-            Algorithm::AES128_GCM => 16,
-            Algorithm::AES256_GCM => 32,
-            Algorithm::ChaCha20_Poly1305 => 32,
+            Self::AES128_GCM => 16,
+            Self::AES256_GCM => 32,
+            Self::ChaCha20_Poly1305 => 32,
         }
     }
 
@@ -105,17 +105,17 @@ impl Algorithm {
         }
 
         match self {
-            Algorithm::AES128_GCM => 16,
-            Algorithm::AES256_GCM => 16,
-            Algorithm::ChaCha20_Poly1305 => 16,
+            Self::AES128_GCM => 16,
+            Self::AES256_GCM => 16,
+            Self::ChaCha20_Poly1305 => 16,
         }
     }
 
     pub const fn nonce_len(self) -> usize {
         match self {
-            Algorithm::AES128_GCM => 12,
-            Algorithm::AES256_GCM => 12,
-            Algorithm::ChaCha20_Poly1305 => 12,
+            Self::AES128_GCM => 12,
+            Self::AES256_GCM => 12,
+            Self::ChaCha20_Poly1305 => 12,
         }
     }
 }
@@ -159,8 +159,8 @@ impl Open {
     pub fn new(
         alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
         secret: Vec<u8>,
-    ) -> Result<Open> {
-        Ok(Open {
+    ) -> Result<Self> {
+        Ok(Self {
             alg,
 
             secret,
@@ -171,8 +171,8 @@ impl Open {
         })
     }
 
-    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Open> {
-        Ok(Open {
+    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
+        Ok(Self {
             alg: aead,
 
             secret: secret.to_vec(),
@@ -195,13 +195,13 @@ impl Open {
         self.alg
     }
 
-    pub fn derive_next_packet_key(&self) -> Result<Open> {
+    pub fn derive_next_packet_key(&self) -> Result<Self> {
         let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
         let next_packet_key =
             PacketKey::from_secret(self.alg, &next_secret, Self::DECRYPT)?;
 
-        Ok(Open {
+        Ok(Self {
             alg: self.alg,
 
             secret: next_secret,
@@ -250,8 +250,8 @@ impl Seal {
     pub fn new(
         alg: Algorithm, key: Vec<u8>, iv: Vec<u8>, hp_key: Vec<u8>,
         secret: Vec<u8>,
-    ) -> Result<Seal> {
-        Ok(Seal {
+    ) -> Result<Self> {
+        Ok(Self {
             alg,
 
             secret,
@@ -262,8 +262,8 @@ impl Seal {
         })
     }
 
-    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Seal> {
-        Ok(Seal {
+    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
+        Ok(Self {
             alg: aead,
 
             secret: secret.to_vec(),
@@ -286,13 +286,13 @@ impl Seal {
         self.alg
     }
 
-    pub fn derive_next_packet_key(&self) -> Result<Seal> {
+    pub fn derive_next_packet_key(&self) -> Result<Self> {
         let next_secret = derive_next_secret(self.alg, &self.secret)?;
 
         let next_packet_key =
             PacketKey::from_secret(self.alg, &next_secret, Self::ENCRYPT)?;
 
-        Ok(Seal {
+        Ok(Self {
             alg: self.alg,
 
             secret: next_secret,

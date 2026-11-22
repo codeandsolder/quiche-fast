@@ -62,7 +62,7 @@ impl Default for Rate {
     fn default() -> Self {
         let now = Instant::now();
 
-        Rate {
+        Self {
             delivered: 0,
 
             delivered_time: now,
@@ -226,7 +226,7 @@ struct RateSample {
 
 impl RateSample {
     const fn new() -> Self {
-        RateSample {
+        Self {
             bandwidth: Bandwidth::zero(),
             is_app_limited: false,
             interval: Duration::ZERO,

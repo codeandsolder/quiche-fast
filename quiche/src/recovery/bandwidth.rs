@@ -37,40 +37,40 @@ pub struct Bandwidth {
 }
 
 impl std::ops::Mul<f64> for Bandwidth {
-    type Output = Bandwidth;
+    type Output = Self;
 
     fn mul(self, rhs: f64) -> Self::Output {
-        Bandwidth {
+        Self {
             bits_per_second: (self.bits_per_second as f64 * rhs).round() as u64,
         }
     }
 }
 
 impl std::ops::Mul<f32> for Bandwidth {
-    type Output = Bandwidth;
+    type Output = Self;
 
     fn mul(self, rhs: f32) -> Self::Output {
         self * rhs as f64
     }
 }
 
-impl std::ops::Sub<Bandwidth> for Bandwidth {
-    type Output = Option<Bandwidth>;
+impl std::ops::Sub<Self> for Bandwidth {
+    type Output = Option<Self>;
 
-    fn sub(self, rhs: Bandwidth) -> Self::Output {
+    fn sub(self, rhs: Self) -> Self::Output {
         self.bits_per_second
             .checked_sub(rhs.bits_per_second)
-            .map(|bps| Bandwidth {
+            .map(|bps| Self {
                 bits_per_second: bps,
             })
     }
 }
 
-impl std::ops::Add<Bandwidth> for Bandwidth {
-    type Output = Bandwidth;
+impl std::ops::Add<Self> for Bandwidth {
+    type Output = Self;
 
-    fn add(self, rhs: Bandwidth) -> Self::Output {
-        Bandwidth {
+    fn add(self, rhs: Self) -> Self::Output {
+        Self {
             bits_per_second: self
                 .bits_per_second
                 .saturating_add(rhs.bits_per_second),
@@ -95,7 +95,7 @@ impl Bandwidth {
         bytes: u64, time_delta: Duration,
     ) -> Self {
         if bytes == 0 {
-            return Bandwidth { bits_per_second: 0 };
+            return Self { bits_per_second: 0 };
         }
 
         let nanos = time_delta.as_nanos();
@@ -104,12 +104,12 @@ impl Bandwidth {
             (bytes as u128).saturating_mul((8 * NUM_NANOS_PER_SECOND) as u128);
 
         if num_nano_bits < nanos {
-            return Bandwidth { bits_per_second: 1 };
+            return Self { bits_per_second: 1 };
         }
 
         let bits_per_second = num_nano_bits / nanos;
 
-        Bandwidth {
+        Self {
             bits_per_second: if bits_per_second > u64::MAX as u128 {
                 u64::MAX
             } else {
@@ -119,7 +119,7 @@ impl Bandwidth {
     }
 
     pub const fn from_bytes_per_second(bytes_per_second: u64) -> Self {
-        Bandwidth {
+        Self {
             bits_per_second: bytes_per_second.saturating_mul(8),
         }
     }
@@ -140,24 +140,24 @@ impl Bandwidth {
     }
 
     pub const fn from_kbits_per_second(k_bits_per_second: u64) -> Self {
-        Bandwidth {
+        Self {
             bits_per_second: k_bits_per_second.saturating_mul(1_000),
         }
     }
 
     pub const fn from_mbits_per_second(m_bits_per_second: u64) -> Self {
-        Bandwidth::from_kbits_per_second(m_bits_per_second.saturating_mul(1_000))
+        Self::from_kbits_per_second(m_bits_per_second.saturating_mul(1_000))
     }
 
     /// Returns a sentinel representing infinite bandwidth.
     pub const fn infinite() -> Self {
-        Bandwidth {
+        Self {
             bits_per_second: u64::MAX,
         }
     }
 
     pub const fn zero() -> Self {
-        Bandwidth { bits_per_second: 0 }
+        Self { bits_per_second: 0 }
     }
 
     /// Returns the time to transfer `bytes` at this bandwidth.
