@@ -24,7 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::cmp;
 use std::iter::FromIterator;
 use std::ops::Range;
 
@@ -63,11 +62,11 @@ pub struct BTreeRangeSet {
 impl RangeSet {
     /// Create a new [`RangeSet`].
     ///
-    /// When the length of a [`RangeSet`] overflows `capacity` it will remove
-    /// the smallest range.
+    /// When the number of disjoint ranges exceeds `capacity`, the
+    /// lowest-valued range is discarded. Zero capacity retains no ranges.
     pub fn new(capacity: usize) -> Self {
-        RangeSet::Inline(InlineRangeSet {
-            inner: Default::default(),
+        Self::Inline(InlineRangeSet {
+            inner: SmallVec::new(),
             capacity,
         })
     }
@@ -95,13 +94,13 @@ impl RangeSet {
 
     /// Converts the inner representation from a BTree to Inline and vice versa
     /// when the proper conditions are met. Keeps the stored data intact.
-    #[inline(always)]
+    #[inline]
     fn fixup(&mut self) {
         match self {
             RangeSet::Inline(set) if set.inner.len() == MAX_INLINE_CAPACITY => {
                 let old_inner = std::mem::take(&mut set.inner);
                 *self = RangeSet::BTree(BTreeRangeSet {
-                    inner: old_inner.into_inner().expect("At capacity").into(),
+                    inner: old_inner.into_iter().collect(),
                     capacity: set.capacity,
                 });
             },
@@ -122,9 +121,13 @@ impl RangeSet {
     ///
     /// If the [`Range`] overlaps with any existing range, it may be merged with
     /// one or more other [`Range`]s. If following the insertion the number of
-    /// stored ranges overflows capacity, the smalles range will be removed.
+    /// stored ranges exceeds capacity, the lowest-valued range is discarded.
+    /// Empty or reversed ranges do not change the set.
     #[inline]
     pub fn insert(&mut self, item: Range<u64>) {
+        if item.is_empty() {
+            return;
+        }
         match self {
             RangeSet::Inline(set) => set.insert(item),
             RangeSet::BTree(set) => set.insert(item),
@@ -197,6 +200,10 @@ impl RangeSet {
 
 impl InlineRangeSet {
     fn insert(&mut self, item: Range<u64>) {
+        if self.capacity == 0 {
+            return;
+        }
+
         let start = item.start;
         let mut end = item.end;
         let mut pos = 0;
@@ -214,6 +221,11 @@ impl InlineRangeSet {
                         // Inserted range is entirely before this range. Insert
                         // and return.
                         if self.inner.len() == self.capacity {
+                            // The incoming range itself is lowest, so it is
+                            // the range that must be discarded.
+                            if pos == 0 {
+                                return;
+                            }
                             self.inner.remove(0);
                             pos -= 1;
                         }
@@ -282,62 +294,56 @@ impl InlineRangeSet {
 }
 
 impl BTreeRangeSet {
-    // TODO: use RangeInclusive
     fn insert(&mut self, item: Range<u64>) {
+        if self.capacity == 0 || item.is_empty() {
+            return;
+        }
+
         let mut start = item.start;
         let mut end = item.end;
 
-        // Check if preceding existing range overlaps with the new one.
-        if let Some(r) = self.prev_to(start) {
-            // New range overlaps with existing range in the set, merge them.
-            if range_overlaps(&r, &item) {
-                self.inner.remove(&r.start);
-
-                start = cmp::min(start, r.start);
-                end = cmp::max(end, r.end);
-            }
+        // Merge the predecessor if it overlaps or touches the new range.
+        if let Some(r) = self.prev_to(start).filter(|r| r.end >= start) {
+            self.inner.remove(&r.start);
+            start = r.start;
+            end = end.max(r.end);
         }
 
-        // Check if following existing ranges overlap with the new one.
-        while let Some(r) = self.next_to(start) {
-            // Existing range is fully contained in the new range, remove it.
-            if item.contains(&r.start) && item.contains(&r.end) {
-                self.inner.remove(&r.start);
-                continue;
-            }
-
-            // New range doesn't overlap anymore, we are done.
-            if !range_overlaps(&r, &item) {
-                break;
-            }
-
-            // New range overlaps with existing range in the set, merge them.
+        // Because ranges are sorted and disjoint, the next range can be
+        // merged precisely when its start is no greater than the current end.
+        while let Some(r) = self.next_to(start).filter(|r| r.start <= end) {
             self.inner.remove(&r.start);
-
-            start = cmp::min(start, r.start);
-            end = cmp::max(end, r.end);
+            end = end.max(r.end);
         }
 
         if self.inner.len() >= self.capacity {
+            if self
+                .inner
+                .first_key_value()
+                .is_some_and(|(&first, _)| start < first)
+            {
+                return;
+            }
             self.inner.pop_first();
         }
-
         self.inner.insert(start, end);
     }
 
     fn remove_until(&mut self, largest: u64) {
-        let ranges: Vec<Range<u64>> = self
-            .inner
-            .range((Bound::Unbounded, Bound::Included(&largest)))
-            .map(|(&s, &e)| s..e)
-            .collect();
+        // Every representable half-open range excludes u64::MAX.
+        let Some(first_remaining) = largest.checked_add(1) else {
+            self.inner.clear();
+            return;
+        };
 
-        for r in ranges {
-            self.inner.remove(&r.start);
-
-            if r.end > largest + 1 {
-                let start = largest + 1;
-                self.insert(start..r.end);
+        while let Some((&start, &end)) = self.inner.first_key_value() {
+            if start >= first_remaining {
+                break;
+            }
+            self.inner.pop_first();
+            if end > first_remaining {
+                self.inner.insert(first_remaining, end);
+                break;
             }
         }
     }
@@ -359,10 +365,7 @@ impl BTreeRangeSet {
 
 impl Default for RangeSet {
     fn default() -> Self {
-        RangeSet::Inline(InlineRangeSet {
-            inner: Default::default(),
-            capacity: usize::MAX,
-        })
+        Self::new(usize::MAX)
     }
 }
 
@@ -378,9 +381,7 @@ impl PartialEq<Range<u64>> for RangeSet {
             return false;
         }
 
-        // Get the first and only range in the set.
-        let range = self.iter().next().unwrap();
-        range == *other
+        self.iter().next().is_some_and(|range| range == *other)
     }
 }
 
@@ -396,11 +397,6 @@ impl std::fmt::Debug for RangeSet {
 
         write!(f, "{ranges:?}")
     }
-}
-
-fn range_overlaps(r: &Range<u64>, other: &Range<u64>) -> bool {
-    other.start >= r.start && other.start <= r.end ||
-        other.end >= r.start && other.end <= r.end
 }
 
 #[cfg(test)]
@@ -819,6 +815,94 @@ mod tests {
         r.insert(4..17);
         assert_eq!(r.first(), Some(3));
         assert_eq!(r.last(), Some(19));
+    }
+
+    #[test]
+    fn bounded_insert_discards_lowest_in_both_representations() {
+        for capacity in [0, 1, 3, 4, 8] {
+            let mut ranges = RangeSet::new(capacity);
+            for value in 1..=capacity {
+                ranges.push_item(4 * value as u64);
+            }
+            let before: Vec<_> = ranges.iter().collect();
+            ranges.insert(0..1);
+            assert_eq!(ranges.iter().collect::<Vec<_>>(), before);
+            ranges.insert(2..2);
+            ranges.insert(6..3);
+            assert_eq!(ranges.iter().collect::<Vec<_>>(), before);
+            assert_eq!(ranges.len(), capacity);
+        }
+    }
+
+    #[test]
+    fn remove_through_maximum_clears_both_representations() {
+        for count in [2, 6] {
+            let mut ranges = RangeSet::default();
+            for value in 0..count {
+                ranges.insert(2 * value..2 * value + 1);
+            }
+            ranges.insert(u64::MAX - 1..u64::MAX);
+            ranges.remove_until(u64::MAX);
+            assert_eq!(ranges.len(), 0);
+            assert_eq!(ranges.last(), None);
+        }
+    }
+
+    #[test]
+    fn mixed_operations_match_dense_reference() {
+        const WIDTH: u64 = 32;
+        for capacity in 0..=8 {
+            let mut actual = RangeSet::new(capacity);
+            let mut reference = [false; WIDTH as usize];
+            let mut state = 42_u64;
+            for _ in 0..4000 {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let start = ((state >> 32) % WIDTH) as usize;
+                let size = ((state >> 40) % 7) as usize;
+                if state & 7 == 0 {
+                    actual.remove_until(start as u64);
+                    reference[..=start].fill(false);
+                } else {
+                    let end = (start + size).min(reference.len());
+                    actual.insert(start as u64..end as u64);
+                    reference[start..end].fill(true);
+
+                    let mut runs = 0;
+                    let mut prev = false;
+                    for &present in &reference {
+                        if present && !prev {
+                            runs += 1;
+                        }
+                        prev = present;
+                    }
+                    if runs > capacity {
+                        let mut removed = 0;
+                        for index in 0..reference.len() {
+                            if reference[index] {
+                                reference[index] = false;
+                                if index + 1 == reference.len() ||
+                                    !reference[index + 1]
+                                {
+                                    removed += 1;
+                                    if removed == runs - capacity {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                assert_eq!(
+                    actual.flatten().collect::<Vec<_>>(),
+                    reference
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, &present)| present.then_some(i as u64))
+                        .collect::<Vec<_>>()
+                );
+                assert!(actual.len() <= capacity);
+            }
+        }
     }
 
     #[test]
