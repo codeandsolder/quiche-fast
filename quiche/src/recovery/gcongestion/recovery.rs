@@ -88,16 +88,11 @@ impl SentStatus {
 
 #[derive(Default)]
 struct RecoveryEpoch {
-    /// The time the most recent ack-eliciting packet was sent.
-    time_of_last_ack_eliciting_packet: Option<Instant>,
+    timing: EpochTiming,
 
     /// The largest packet number acknowledged in the packet number space so
     /// far.
     largest_acked_packet: Option<u64>,
-
-    /// The time at which the next packet in that packet number space can be
-    /// considered lost based on exceeding the reordering window in time.
-    loss_time: Option<Instant>,
 
     /// An association of packet numbers in a packet number space to information
     /// about them.
@@ -107,7 +102,6 @@ struct RecoveryEpoch {
     skipped_packet_numbers: Vec<u64>,
 
     loss_probes: usize,
-    pkts_in_flight: usize,
 
     acked_frames: VecDeque<frame::Frame>,
 
@@ -173,10 +167,8 @@ impl RecoveryEpoch {
         std::mem::take(&mut self.sent_packets);
         self.clear_lost_frames();
         std::mem::take(&mut self.acked_frames);
-        self.time_of_last_ack_eliciting_packet = None;
-        self.loss_time = None;
+        self.timing = EpochTiming::default();
         self.loss_probes = 0;
-        self.pkts_in_flight = 0;
 
         unacked_bytes
     }
@@ -229,7 +221,7 @@ impl RecoveryEpoch {
                             ..
                         } => {
                             if in_flight {
-                                self.pkts_in_flight -= 1;
+                                self.timing.in_flight_count -= 1;
                                 acked_bytes += sent_bytes;
                             }
                             newly_acked.push(Acked {
@@ -290,7 +282,7 @@ impl RecoveryEpoch {
     ) -> LossDetectionResult {
         newly_lost.clear();
         let mut lost_bytes = 0;
-        self.loss_time = None;
+        self.timing.loss = None;
 
         let lost_send_time = now.checked_sub(loss_delay);
         let largest_acked = self.largest_acked_packet.unwrap_or(0);
@@ -329,7 +321,7 @@ impl RecoveryEpoch {
                         self.lost_frames_ack.extend(frames);
 
                         if in_flight {
-                            self.pkts_in_flight -= 1;
+                            self.timing.in_flight_count -= 1;
 
                             if is_pmtud_probe {
                                 pmtud_lost_bytes += sent_bytes;
@@ -347,7 +339,7 @@ impl RecoveryEpoch {
                         });
                     }
                 } else {
-                    self.loss_time = time_sent.checked_add(loss_delay);
+                    self.timing.loss = time_sent.checked_add(loss_delay);
                     break;
                 }
             }
@@ -626,14 +618,7 @@ impl GRecovery {
             self.bytes_in_flight.is_zero(),
             &self.rtt_stats,
             self.pto_count,
-            |epoch| {
-                let space = &self.epochs[epoch];
-                EpochTiming {
-                    loss: space.loss_time,
-                    last_ack_eliciting: space.time_of_last_ack_eliciting_packet,
-                    has_in_flight: space.pkts_in_flight != 0,
-                }
-            },
+            |epoch| self.epochs[epoch].timing,
         )
     }
 
@@ -736,7 +721,7 @@ impl RecoveryOps for GRecovery {
         epoch.sent_packets.push_back(SentPacket { pkt_num, status });
 
         if ack_eliciting {
-            epoch.time_of_last_ack_eliciting_packet = Some(time_sent);
+            epoch.timing.last_ack_eliciting = Some(time_sent);
             self.outstanding_non_ack_eliciting = 0;
         } else {
             self.outstanding_non_ack_eliciting += 1;
@@ -753,7 +738,7 @@ impl RecoveryOps for GRecovery {
             );
 
             self.bytes_in_flight.add(sent_bytes, now);
-            epoch.pkts_in_flight += 1;
+            epoch.timing.in_flight_count += 1;
             self.set_loss_detection_timer(handshake_status, time_sent);
         }
 
@@ -904,7 +889,7 @@ impl RecoveryOps for GRecovery {
             packet::Epoch::Handshake,
             packet::Epoch::Application,
         ] {
-            if other == epoch || self.epochs[other].pkts_in_flight == 0 {
+            if other == epoch || self.epochs[other].timing.in_flight_count == 0 {
                 continue;
             }
 
@@ -1071,7 +1056,7 @@ impl RecoveryOps for GRecovery {
 
     #[cfg(test)]
     fn in_flight_count(&self, epoch: packet::Epoch) -> usize {
-        self.epochs[epoch].pkts_in_flight
+        self.epochs[epoch].timing.in_flight_count
     }
 
     fn bytes_in_flight(&self) -> usize {

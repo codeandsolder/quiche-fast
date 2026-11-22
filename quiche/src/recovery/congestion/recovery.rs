@@ -75,16 +75,11 @@ use crate::recovery::PERSISTENT_CONGESTION_THRESHOLD;
 
 #[derive(Default)]
 struct RecoveryEpoch {
-    /// The time the most recent ack-eliciting packet was sent.
-    time_of_last_ack_eliciting_packet: Option<Instant>,
+    timing: EpochTiming,
 
     /// The largest packet number acknowledged in the packet number space so
     /// far.
     largest_acked_packet: Option<u64>,
-
-    /// The time at which the next packet in that packet number space can be
-    /// considered lost based on exceeding the reordering window in time.
-    loss_time: Option<Instant>,
 
     /// An association of packet numbers in a packet number space to information
     /// about them.
@@ -94,7 +89,6 @@ struct RecoveryEpoch {
     skipped_packet_numbers: Vec<u64>,
 
     loss_probes: usize,
-    in_flight_count: usize,
 
     acked_frames: Vec<frame::Frame>,
 
@@ -204,7 +198,7 @@ impl RecoveryEpoch {
                     }
                 } else {
                     if unacked.in_flight {
-                        self.in_flight_count -= 1;
+                        self.timing.in_flight_count -= 1;
                         acked_bytes += unacked.size;
                     }
 
@@ -252,7 +246,7 @@ impl RecoveryEpoch {
         &mut self, loss_delay: Duration, pkt_thresh: u64, now: Instant,
         trace_id: &str, epoch: Epoch, first_rtt_sample_time: Option<Instant>,
     ) -> LossDetectionResult {
-        self.loss_time = None;
+        self.timing.loss = None;
 
         // Minimum time of kGranularity before packets are deemed lost.
         let loss_delay = cmp::max(loss_delay, GRANULARITY);
@@ -297,7 +291,7 @@ impl RecoveryEpoch {
 
                 if unacked.is_pmtud_probe {
                     pmtud_lost_bytes += unacked.size;
-                    self.in_flight_count -= 1;
+                    self.timing.in_flight_count -= 1;
 
                     // Do not track PMTUD probes losses.
                     continue;
@@ -322,7 +316,7 @@ impl RecoveryEpoch {
                     // cloning the whole packet should be relatively cheap.
                     largest_lost_pkt = Some(unacked.clone());
 
-                    self.in_flight_count -= 1;
+                    self.timing.in_flight_count -= 1;
 
                     trace!(
                         "{} packet {} lost on epoch {}",
@@ -334,7 +328,7 @@ impl RecoveryEpoch {
 
                 lost_packets += 1;
             } else {
-                self.loss_time = unacked.time_sent.checked_add(loss_delay);
+                self.timing.loss = unacked.time_sent.checked_add(loss_delay);
                 break;
             }
         }
@@ -495,14 +489,7 @@ impl LegacyRecovery {
             self.bytes_in_flight.is_zero(),
             &self.rtt_stats,
             self.pto_count,
-            |epoch| {
-                let space = &self.epochs[epoch];
-                EpochTiming {
-                    loss: space.loss_time,
-                    last_ack_eliciting: space.time_of_last_ack_eliciting_packet,
-                    has_in_flight: space.in_flight_count != 0,
-                }
-            },
+            |epoch| self.epochs[epoch].timing,
         )
     }
 
@@ -689,7 +676,7 @@ impl RecoveryOps for LegacyRecovery {
         }
 
         if in_flight && ack_eliciting {
-            self.epochs[epoch].time_of_last_ack_eliciting_packet = Some(now);
+            self.epochs[epoch].timing.last_ack_eliciting = Some(now);
         }
 
         self.congestion.on_packet_sent(
@@ -702,7 +689,7 @@ impl RecoveryOps for LegacyRecovery {
         );
 
         if in_flight {
-            self.epochs[epoch].in_flight_count += 1;
+            self.epochs[epoch].timing.in_flight_count += 1;
             self.bytes_in_flight.add(sent_bytes, now);
 
             self.set_loss_detection_timer(handshake_status, now);
@@ -849,7 +836,7 @@ impl RecoveryOps for LegacyRecovery {
         // RFC 9002 Section 6.2.4 recommends probing every other eligible
         // packet-number space that still has data in flight as well.
         for other in [Epoch::Initial, Epoch::Handshake, Epoch::Application] {
-            if other == epoch || self.epochs[other].in_flight_count == 0 {
+            if other == epoch || self.epochs[other].timing.in_flight_count == 0 {
                 continue;
             }
 
@@ -928,10 +915,8 @@ impl RecoveryOps for LegacyRecovery {
         epoch.clear_lost_frames();
         epoch.acked_frames.clear();
 
-        epoch.time_of_last_ack_eliciting_packet = None;
-        epoch.loss_time = None;
+        epoch.timing = EpochTiming::default();
         epoch.loss_probes = 0;
-        epoch.in_flight_count = 0;
 
         self.set_loss_detection_timer(handshake_status, now);
     }
@@ -1036,7 +1021,7 @@ impl RecoveryOps for LegacyRecovery {
 
     #[cfg(test)]
     fn in_flight_count(&self, epoch: Epoch) -> usize {
-        self.epochs[epoch].in_flight_count
+        self.epochs[epoch].timing.in_flight_count
     }
 
     fn bytes_in_flight(&self) -> usize {

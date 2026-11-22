@@ -115,10 +115,13 @@ impl RecoveryDeadline {
     }
 }
 
+#[derive(Clone, Copy, Default)]
 struct EpochTiming {
+    /// Earliest time at which a packet can be declared lost.
     loss: Option<Instant>,
+    /// Most recent ack-eliciting send time.
     last_ack_eliciting: Option<Instant>,
-    has_in_flight: bool,
+    in_flight_count: usize,
 }
 
 /// RFC 9002: loss-time deadlines take priority over PTO, and a missing
@@ -162,7 +165,7 @@ fn recovery_deadline(
         .into_iter()
         .filter_map(|epoch| {
             let space = timing(epoch);
-            if !space.has_in_flight ||
+            if space.in_flight_count == 0 ||
                 (epoch == packet::Epoch::Application && !handshake.completed)
             {
                 return None;
