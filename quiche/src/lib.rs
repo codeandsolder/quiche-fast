@@ -10256,7 +10256,6 @@ pub use crate::stream::StreamIter;
 
 pub use crate::transport_params::TransportParams;
 pub use crate::transport_params::UnknownTransportParameter;
-pub use crate::transport_params::UnknownTransportParameterIterator;
 pub use crate::transport_params::UnknownTransportParameters;
 pub use crate::transport_params::MAX_ACK_DELAY_EXPONENT;
 
