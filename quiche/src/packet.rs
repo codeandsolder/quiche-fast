@@ -948,7 +948,7 @@ pub struct CryptoContext {
 impl CryptoContext {
     pub fn new() -> Self {
         let crypto_stream = stream::Stream::new(
-            0, // dummy
+            stream::StreamPriorityKey::default(),
             u64::MAX,
             u64::MAX,
             true,
@@ -968,7 +968,7 @@ impl CryptoContext {
         self.crypto_open = None;
         self.crypto_seal = None;
         self.crypto_stream = <stream::Stream>::new(
-            0, // dummy
+            stream::StreamPriorityKey::default(),
             u64::MAX,
             u64::MAX,
             true,
