@@ -916,6 +916,32 @@ fn handshake_0rtt_truncated(
     assert!(pipe.server.is_closed());
 }
 
+fn assert_rejected_packet(
+    pipe: &mut test_utils::Pipe, buf: &mut [u8], written: usize,
+    expected_error: Error, error_code: u64,
+) {
+    let active_path = pipe.server.paths.get_active().unwrap();
+    let info = RecvInfo {
+        to: active_path.local_addr(),
+        from: active_path.peer_addr(),
+    };
+    assert_eq!(
+        pipe.server.recv(&mut buf[..written], info),
+        Err(expected_error)
+    );
+    let (written, _) = pipe.server.send(buf).unwrap();
+    let frames =
+        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
+    assert_eq!(
+        frames.first(),
+        Some(&frame::Frame::ConnectionClose {
+            error_code,
+            frame_type: 0,
+            reason: Vec::new(),
+        })
+    );
+}
+
 #[rstest]
 fn crypto_limit(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     let mut buf = [0; 65535];
@@ -954,34 +980,12 @@ fn crypto_limit(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) 
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
 
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::CryptoBufferExceeded)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x0d,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
+    assert_rejected_packet(
+        &mut pipe,
+        &mut buf,
+        written,
+        Error::CryptoBufferExceeded,
+        0x0d,
     );
 }
 
@@ -11157,34 +11161,12 @@ fn connection_id_invalid_length(
     )
     .unwrap();
 
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::InvalidFrame)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x7,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
+    assert_rejected_packet(
+        &mut pipe,
+        &mut buf,
+        written,
+        Error::InvalidFrame,
+        0x7,
     );
 }
 
@@ -11446,35 +11428,7 @@ fn connection_id_retire_limit(
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
 
-    let active_path = pipe.server.paths.get_active().unwrap();
-    let info = RecvInfo {
-        to: active_path.local_addr(),
-        from: active_path.peer_addr(),
-    };
-
-    assert_eq!(
-        pipe.server.recv(&mut buf[..written], info),
-        Err(Error::IdLimit)
-    );
-
-    let written = match pipe.server.send(&mut buf) {
-        Ok((write, _)) => write,
-
-        Err(_) => unreachable!(),
-    };
-
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
-    let mut iter = frames.iter();
-
-    assert_eq!(
-        iter.next(),
-        Some(&frame::Frame::ConnectionClose {
-            error_code: 0x9,
-            frame_type: 0,
-            reason: Vec::new(),
-        })
-    );
+    assert_rejected_packet(&mut pipe, &mut buf, written, Error::IdLimit, 0x9);
 }
 
 #[rstest]
