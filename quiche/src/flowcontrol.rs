@@ -27,6 +27,8 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use octets::MAX_VAR_INT;
+
 // When autotuning the receiver window, decide how much
 // we increase the window.
 const WINDOW_INCREASE_FACTOR: u64 = 2;
@@ -56,14 +58,12 @@ pub struct FlowControl {
 
 impl FlowControl {
     pub fn new(max_data: u64, window: u64, max_window: u64) -> Self {
+        let max_window = max_window.min(MAX_VAR_INT);
         Self {
-            max_data,
-
-            window: std::cmp::min(window, max_window),
-
+            max_data: max_data.min(MAX_VAR_INT),
+            window: window.min(max_window),
             max_window,
-
-            ..Default::default()
+            ..Self::default()
         }
     }
 
@@ -102,10 +102,13 @@ impl FlowControl {
             self.max_data_next() > self.max_data
     }
 
-    /// Returns the next flow-control limit. Credit is monotonic even if this
-    /// is called before enough bytes have been consumed to raise the limit.
+    /// Returns the next flow-control limit. Credit is monotonic and always
+    /// representable by the MAX_DATA and MAX_STREAM_DATA wire fields.
     pub fn max_data_next(&self) -> u64 {
-        self.consumed.saturating_add(self.window).max(self.max_data)
+        self.consumed
+            .saturating_add(self.window)
+            .min(MAX_VAR_INT)
+            .max(self.max_data)
     }
 
     /// Commits the new `max_data` limit.
@@ -134,8 +137,8 @@ impl FlowControl {
         self.window = std::cmp::min(window, self.max_window);
     }
 
-    /// Make sure the lower bound of the window is same to
-    /// the current window.
+    /// Increase the window to at least the requested lower bound, subject to
+    /// the configured maximum.
     pub fn ensure_window_lower_bound(&mut self, min_window: u64) {
         if min_window > self.window {
             // ... we still need to clamp to `max_window`
@@ -153,6 +156,15 @@ mod tests {
         let fc = FlowControl::new(100, 100, 50);
         assert_eq!(fc.max_data(), 100);
         assert_eq!(fc.window, 50);
+    }
+
+    #[test]
+    fn initial_credit_and_window_are_wire_representable() {
+        let fc = FlowControl::new(u64::MAX, u64::MAX, u64::MAX);
+        assert_eq!(fc.max_data(), MAX_VAR_INT);
+        assert_eq!(fc.window(), MAX_VAR_INT);
+        assert_eq!(fc.max_data_next(), MAX_VAR_INT);
+        assert!(!fc.should_update_max_data());
     }
 
     #[test]
@@ -246,20 +258,19 @@ mod tests {
 
     #[test]
     fn flow_control_counters_saturate_and_limits_never_decrease() {
-        let mut fc = FlowControl::new(u64::MAX - 4, 8, u64::MAX);
-        assert_eq!(fc.max_data_next(), u64::MAX - 4);
+        let mut fc = FlowControl::new(MAX_VAR_INT - 4, 8, u64::MAX);
+        assert_eq!(fc.max_data_next(), MAX_VAR_INT - 4);
         fc.update_max_data(Instant::now());
-        assert_eq!(fc.max_data(), u64::MAX - 4);
-        fc.add_consumed(u64::MAX - 2);
+        assert_eq!(fc.max_data(), MAX_VAR_INT - 4);
+        fc.add_consumed(MAX_VAR_INT - 2);
         assert!(fc.should_update_max_data());
-        assert_eq!(fc.max_data_next(), u64::MAX);
+        assert_eq!(fc.max_data_next(), MAX_VAR_INT);
         fc.update_max_data(Instant::now());
-        assert_eq!(fc.max_data(), u64::MAX);
-        fc.add_consumed(12);
+        assert_eq!(fc.max_data(), MAX_VAR_INT);
+        fc.add_consumed(u64::MAX);
         assert_eq!(fc.consumed(), u64::MAX);
-        assert_eq!(fc.max_data_next(), u64::MAX);
-        // No new flow-control credit is possible at the saturated limit.
-        // In particular, do not schedule repeated identical MAX_DATA frames.
+        assert_eq!(fc.max_data_next(), MAX_VAR_INT);
+        // No new flow-control credit is possible at the wire limit.
         assert!(!fc.should_update_max_data());
 
         let mut overconsumed = FlowControl::new(5, 2, 4);
@@ -276,7 +287,8 @@ mod tests {
         let mut large = FlowControl::new(0, u64::MAX - 1, u64::MAX);
         large.update_max_data(base);
         large.autotune_window(base + Duration::from_millis(1), Duration::MAX);
-        assert_eq!(large.window(), u64::MAX);
+        assert_eq!(large.window(), MAX_VAR_INT);
+        assert_eq!(large.max_data_next(), MAX_VAR_INT);
 
         let mut out_of_order = FlowControl::new(100, 10, 100);
         out_of_order.update_max_data(base + Duration::from_secs(10));
