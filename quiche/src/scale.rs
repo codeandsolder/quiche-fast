@@ -25,9 +25,9 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 /// Rounding policy for a nonnegative integer multiplied by a floating-point
-/// gain. Nearest breaks ties upward, matching the prior positive f64::round.
+/// gain. Nearest breaks ties upward, matching the prior positive `f64::round`.
 #[derive(Clone, Copy)]
-pub(crate) enum Rounding {
+pub(super) enum Rounding {
     Down,
     Up,
     Nearest,
@@ -42,34 +42,39 @@ pub(crate) enum Rounding {
 /// its at-most-53-bit significand by a u64 needs at most 117 bits. Shifting
 /// that product gives the integer result, with a single final rounding step.
 #[inline]
-pub(crate) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
+pub(super) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
+    u64::try_from(scale_wide(value, gain, rounding)).unwrap_or(u64::MAX)
+}
+
+/// Scale into a wide accumulator, rounding once from the exact binary64
+/// significand product. In particular the integer input never passes through
+/// a floating-point conversion.
+#[inline]
+pub(super) fn scale_wide(value: u64, gain: f64, rounding: Rounding) -> u128 {
     if value == 0 || gain.is_nan() || gain <= 0.0 {
         return 0;
     }
-    let bits = gain.to_bits();
-    if bits == 1.0_f64.to_bits() {
-        return value;
+    if gain.to_bits() == 1.0_f64.to_bits() {
+        return u128::from(value);
     }
     if gain.is_infinite() {
-        return u64::MAX;
+        return u128::MAX;
     }
 
-    let (product, exponent, bias) = gain_product(value, gain);
+    let (product, exponent) = gain_product(value, gain);
 
-    if exponent >= bias {
-        let shift = exponent - bias;
-        if shift >= u64::from(u64::BITS) {
-            return u64::MAX;
+    if exponent >= 0 {
+        let shift = exponent.unsigned_abs();
+        if shift > product.leading_zeros() {
+            return u128::MAX;
         }
-        return u64::try_from(product)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(1_u64 << shift);
+        return product << shift;
     }
 
-    let shift = bias - exponent;
-    if shift >= u64::from(u128::BITS) {
+    let shift = exponent.unsigned_abs();
+    if shift >= u128::BITS {
         // A positive product of at most 117 bits is below half of 2^128.
-        return u64::from(matches!(rounding, Rounding::Up));
+        return u128::from(matches!(rounding, Rounding::Up));
     }
 
     let quotient = product >> shift;
@@ -79,70 +84,45 @@ pub(crate) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
         Rounding::Up => remainder != 0,
         Rounding::Nearest => remainder >= (1_u128 << (shift - 1)),
     };
-    u64::try_from(quotient + u128::from(increment)).unwrap_or(u64::MAX)
+    quotient + u128::from(increment)
 }
 
 /// Exact significand product and binary exponent for a positive finite gain.
 #[inline]
-fn gain_product(value: u64, gain: f64) -> (u128, u64, u64) {
-    let bits = gain.to_bits();
+fn gain_product(value: u64, gain: f64) -> (u128, i32) {
     const FRACTION_BITS: u32 = 52;
-    const EXPONENT_BIAS: u64 = 1023;
+    const EXPONENT_BIAS: i32 = 1023;
     const SIGNIFICAND_BIT: u64 = 1 << FRACTION_BITS;
-    let exponent = (bits >> FRACTION_BITS) & 0x7ff;
+    let bits = gain.to_bits();
+    let encoded_exponent =
+        i32::try_from((bits >> FRACTION_BITS) & 0x7ff).unwrap_or(0);
     let fraction = bits & (SIGNIFICAND_BIT - 1);
-    let (significand, exponent) = if exponent == 0 {
+    let (significand, encoded_exponent) = if encoded_exponent == 0 {
         (fraction, 1) // subnormals have no implicit leading bit
     } else {
-        (fraction | SIGNIFICAND_BIT, exponent)
+        (fraction | SIGNIFICAND_BIT, encoded_exponent)
     };
     let product = u128::from(value) * u128::from(significand);
-    let bias = EXPONENT_BIAS + u64::from(FRACTION_BITS);
-
-    (product, exponent, bias)
+    (product, encoded_exponent - EXPONENT_BIAS - 52)
 }
 
 /// Floor an integer times a binary64 gain divided by an integer, saturating
 /// only the final quotient. This avoids both a rounded floating-point divisor
 /// and premature saturation of an intermediate product.
 #[inline]
-pub(crate) fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
-    if divisor == 0 || value == 0 || gain.is_nan() || gain <= 0.0 {
+pub(super) fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
+    if divisor == 0 {
         return 0;
     }
-    if divisor == 1 {
-        return scale_u64(value, gain, Rounding::Down);
-    }
-    if gain.to_bits() == 1.0_f64.to_bits() {
-        return value / divisor;
-    }
-    if gain.is_infinite() {
-        return u64::MAX;
-    }
-
-    let (product, exponent, bias) = gain_product(value, gain);
-    let numerator = if exponent >= bias {
-        let shift = exponent - bias;
-        // If this positive product exceeds u128, division by any u64
-        // divisor still produces a value greater than u64::MAX.
-        if shift > u64::from(product.leading_zeros()) {
-            return u64::MAX;
-        }
-        product << shift
-    } else {
-        let shift = bias - exponent;
-        if shift >= u64::from(u128::BITS) {
-            return 0;
-        }
-        // floor(floor(x) / d) == floor(x / d) for integer positive d.
-        product >> shift
-    };
-
-    u64::try_from(numerator / u128::from(divisor)).unwrap_or(u64::MAX)
+    // Even if the wide numerator saturated, its quotient by any nonzero
+    // u64 divisor must still be at least u64::MAX. Flooring before the
+    // integer division does not change the final floor.
+    u64::try_from(scale_wide(value, gain, Rounding::Down) / u128::from(divisor))
+        .unwrap_or(u64::MAX)
 }
 
 #[inline]
-pub(crate) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize {
+pub(super) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize {
     let value = u64::try_from(value).unwrap_or(u64::MAX);
     usize::try_from(scale_u64(value, gain, rounding)).unwrap_or(usize::MAX)
 }
@@ -151,7 +131,7 @@ pub(crate) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize 
 /// full-width multiplication; never round the input or the ratio to a float.
 /// A zero denominator represents an unavailable ratio and yields zero.
 #[inline]
-pub(crate) fn scale_ratio_u64(
+pub(super) fn scale_ratio_u64(
     value: u64, numerator: u64, denominator: u64, rounding: Rounding,
 ) -> u64 {
     if denominator == 0 {
@@ -170,7 +150,7 @@ pub(crate) fn scale_ratio_u64(
 }
 
 #[inline]
-pub(crate) fn scale_ratio_usize(
+pub(super) fn scale_ratio_usize(
     value: usize, numerator: u64, denominator: u64, rounding: Rounding,
 ) -> usize {
     usize::try_from(scale_ratio_u64(
@@ -190,6 +170,29 @@ mod tests {
     use super::scale_u64;
     use super::scale_usize;
     use super::Rounding;
+
+    #[test]
+    fn wide_scaling_preserves_full_significand_product() {
+        use super::scale_wide;
+
+        for value in [0, 1, 1_u64 << 53, u64::MAX] {
+            assert_eq!(
+                scale_wide(value, 4_294_967_296.0, Rounding::Down),
+                u128::from(value) << 32
+            );
+            assert_eq!(
+                scale_wide(value, 1.5, Rounding::Down),
+                u128::from(value) * 3 / 2
+            );
+        }
+        assert_eq!(
+            scale_wide(1, 2.0_f64.powi(127), Rounding::Down),
+            1_u128 << 127
+        );
+        assert_eq!(scale_wide(2, 2.0_f64.powi(127), Rounding::Down), u128::MAX);
+        assert_eq!(scale_wide(u64::MAX, f64::INFINITY, Rounding::Up), u128::MAX);
+        assert_eq!(scale_wide(1, f64::from_bits(1), Rounding::Up), 1);
+    }
 
     #[test]
     fn gain_division_rounds_once_and_saturates_only_after_division() {
