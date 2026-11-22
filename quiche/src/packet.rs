@@ -316,7 +316,11 @@ impl Type {
 pub struct ConnectionId<'a>(ConnectionIdInner<'a>);
 
 enum ConnectionIdInner<'a> {
-    Vec(Vec<u8>),
+    Inline {
+        bytes: [u8; MAX_CID_LEN as usize],
+        len: u8,
+    },
+    Heap(Vec<u8>),
     Ref(&'a [u8]),
 }
 
@@ -324,8 +328,26 @@ impl<'a> ConnectionId<'a> {
     /// Creates a new connection ID from the given vector.
     #[inline]
     #[must_use = "the returned connection ID owns the supplied vector"]
-    pub const fn from_vec(cid: Vec<u8>) -> Self {
-        Self(ConnectionIdInner::Vec(cid))
+    pub fn from_vec(cid: Vec<u8>) -> Self {
+        if cid.len() <= usize::from(MAX_CID_LEN) {
+            Self::copy_from_slice(&cid)
+        } else {
+            Self(ConnectionIdInner::Heap(cid))
+        }
+    }
+
+    /// Copies a connection ID, storing ordinary QUIC identifiers inline.
+    #[inline]
+    #[must_use = "the returned identifier owns its bytes"]
+    pub fn copy_from_slice(cid: &[u8]) -> ConnectionId<'static> {
+        match u8::try_from(cid.len()) {
+            Ok(len) if len <= MAX_CID_LEN => {
+                let mut bytes = [0; MAX_CID_LEN as usize];
+                bytes[..cid.len()].copy_from_slice(cid);
+                ConnectionId(ConnectionIdInner::Inline { bytes, len })
+            },
+            _ => ConnectionId(ConnectionIdInner::Heap(cid.to_vec())),
+        }
     }
 
     /// Creates a new connection ID from the given slice.
@@ -339,14 +361,23 @@ impl<'a> ConnectionId<'a> {
     #[inline]
     #[must_use = "the returned connection ID owns its backing bytes"]
     pub fn into_owned(self) -> ConnectionId<'static> {
-        ConnectionId::from_vec(self.into())
+        match self.0 {
+            ConnectionIdInner::Inline { bytes, len } =>
+                ConnectionId(ConnectionIdInner::Inline { bytes, len }),
+            ConnectionIdInner::Heap(cid) =>
+                ConnectionId(ConnectionIdInner::Heap(cid)),
+            ConnectionIdInner::Ref(cid) => Self::copy_from_slice(cid),
+        }
     }
 }
 
 impl Default for ConnectionId<'_> {
     #[inline]
     fn default() -> Self {
-        Self::from_vec(Vec::new())
+        Self(ConnectionIdInner::Inline {
+            bytes: [0; MAX_CID_LEN as usize],
+            len: 0,
+        })
     }
 }
 
@@ -361,7 +392,9 @@ impl From<ConnectionId<'_>> for Vec<u8> {
     #[inline]
     fn from(id: ConnectionId<'_>) -> Self {
         match id.0 {
-            ConnectionIdInner::Vec(cid) => cid,
+            ConnectionIdInner::Inline { bytes, len } =>
+                bytes[..usize::from(len)].to_vec(),
+            ConnectionIdInner::Heap(cid) => cid,
             ConnectionIdInner::Ref(cid) => cid.to_vec(),
         }
     }
@@ -380,7 +413,9 @@ impl AsRef<[u8]> for ConnectionId<'_> {
     #[inline]
     fn as_ref(&self) -> &[u8] {
         match &self.0 {
-            ConnectionIdInner::Vec(v) => v.as_ref(),
+            ConnectionIdInner::Inline { bytes, len } =>
+                &bytes[..usize::from(*len)],
+            ConnectionIdInner::Heap(v) => v.as_ref(),
             ConnectionIdInner::Ref(v) => v,
         }
     }
@@ -398,17 +433,14 @@ impl std::ops::Deref for ConnectionId<'_> {
 
     #[inline]
     fn deref(&self) -> &[u8] {
-        match &self.0 {
-            ConnectionIdInner::Vec(v) => v.as_ref(),
-            ConnectionIdInner::Ref(v) => v,
-        }
+        self.as_ref()
     }
 }
 
 impl Clone for ConnectionId<'_> {
     #[inline]
     fn clone(&self) -> Self {
-        Self::from_vec(self.as_ref().to_vec())
+        Self::copy_from_slice(self.as_ref())
     }
 }
 
@@ -479,17 +511,26 @@ impl Header<'_> {
     /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
     /// let (len, src) = socket.recv_from(&mut buf).unwrap();
     ///
-    /// let hdr = quiche::Header::from_slice(&mut buf[..len], LOCAL_CONN_ID_LEN)?;
+    /// let hdr = quiche::Header::from_slice(&buf[..len], LOCAL_CONN_ID_LEN)?;
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    pub fn from_slice(buf: &mut [u8], dcid_len: usize) -> Result<Self> {
-        let mut b = octets::OctetsMut::with_slice(buf);
+    pub fn from_slice(buf: &[u8], dcid_len: usize) -> Result<Self> {
+        let mut b = octets::Octets::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
     }
 
-    pub(crate) fn from_bytes(
+    pub(crate) fn from_mutable_cursor(
         b: &mut octets::OctetsMut, dcid_len: usize,
+    ) -> Result<Self> {
+        let mut reader = octets::Octets::with_slice(b.as_ref());
+        let header = Self::from_bytes(&mut reader, dcid_len)?;
+        b.skip(reader.off())?;
+        Ok(header)
+    }
+
+    pub(crate) fn from_bytes(
+        b: &mut octets::Octets, dcid_len: usize,
     ) -> Result<Self> {
         let first = b.get_u8()?;
 
@@ -503,7 +544,7 @@ impl Header<'_> {
             return Ok(Header {
                 ty: Type::Short,
                 version: 0,
-                dcid: dcid.to_vec().into(),
+                dcid: ConnectionId::copy_from_slice(dcid.as_ref()),
                 scid: ConnectionId::default(),
                 pkt_num: 0,
                 pkt_num_len: 0,
@@ -532,13 +573,17 @@ impl Header<'_> {
         if crate::version_is_supported(version) && dcid_len > MAX_CID_LEN {
             return Err(Error::InvalidPacket);
         }
-        let dcid = b.get_bytes(dcid_len as usize)?.to_vec();
+        let dcid = ConnectionId::copy_from_slice(
+            b.get_bytes(usize::from(dcid_len))?.as_ref(),
+        );
 
         let scid_len = b.get_u8()?;
         if crate::version_is_supported(version) && scid_len > MAX_CID_LEN {
             return Err(Error::InvalidPacket);
         }
-        let scid = b.get_bytes(scid_len as usize)?.to_vec();
+        let scid = ConnectionId::copy_from_slice(
+            b.get_bytes(usize::from(scid_len))?.as_ref(),
+        );
 
         // End of invariants.
 
@@ -579,8 +624,8 @@ impl Header<'_> {
         Ok(Header {
             ty,
             version,
-            dcid: dcid.into(),
-            scid: scid.into(),
+            dcid,
+            scid,
             pkt_num: 0,
             pkt_num_len: 0,
             token,
@@ -694,8 +739,8 @@ impl Header<'_> {
 ///
 /// A short header, Retry, or Version Negotiation packet occupies the rest of
 /// the datagram. Malformed lengths must also consume the remaining bytes.
-pub fn long_header_packet_len(buf: &mut [u8], dcid_len: usize) -> Option<usize> {
-    let mut b = octets::OctetsMut::with_slice(buf);
+pub fn long_header_packet_len(buf: &[u8], dcid_len: usize) -> Option<usize> {
+    let mut b = octets::Octets::with_slice(buf);
     let hdr = Header::from_bytes(&mut b, dcid_len).ok()?;
 
     if matches!(hdr.ty, Type::Short | Type::Retry | Type::VersionNegotiation) {
@@ -1454,7 +1499,7 @@ mod tests {
         // Add fake retry integrity token.
         b.put_bytes(&[0xba; 16]).unwrap();
 
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
     }
 
@@ -1478,7 +1523,7 @@ mod tests {
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert!(hdr.to_bytes(&mut b).is_ok());
 
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
     }
 
@@ -1501,10 +1546,7 @@ mod tests {
             hdr.to_bytes(&mut octets::OctetsMut::with_slice(&mut d))
                 .unwrap();
             assert_eq!(
-                Header::from_bytes(
-                    &mut octets::OctetsMut::with_slice(&mut d),
-                    dcid_len
-                ),
+                Header::from_bytes(&mut octets::Octets::with_slice(&d), dcid_len),
                 Ok(hdr),
             );
 
@@ -1512,10 +1554,7 @@ mod tests {
             // same wire bytes with a supported version must be rejected.
             d[1..5].copy_from_slice(&crate::PROTOCOL_VERSION.to_be_bytes());
             assert_eq!(
-                Header::from_bytes(
-                    &mut octets::OctetsMut::with_slice(&mut d),
-                    dcid_len
-                ),
+                Header::from_bytes(&mut octets::Octets::with_slice(&d), dcid_len),
                 Err(Error::InvalidPacket),
             );
         }
@@ -1541,7 +1580,7 @@ mod tests {
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert!(hdr.to_bytes(&mut b).is_ok());
 
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
     }
 
@@ -1565,8 +1604,59 @@ mod tests {
         let mut b = octets::OctetsMut::with_slice(&mut d);
         assert!(hdr.to_bytes(&mut b).is_ok());
 
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        let mut b = octets::Octets::with_slice(&d);
         assert_eq!(Header::from_bytes(&mut b, 9).unwrap(), hdr);
+    }
+
+    #[test]
+    fn connection_id_storage_and_ownership() {
+        let source = [0xba; 255];
+        for len in 0..=source.len() {
+            let bytes = &source[..len];
+            let owned = ConnectionId::copy_from_slice(bytes);
+            let borrowed = ConnectionId::from_ref(bytes);
+            assert_eq!(owned, borrowed);
+            assert_eq!(owned.clone(), borrowed.clone());
+            assert_eq!(owned.clone().into_owned(), borrowed.clone().into_owned());
+            assert_eq!(Vec::from(owned.clone()), bytes);
+            assert_eq!(
+                matches!(owned.0, ConnectionIdInner::Inline { .. }),
+                len <= usize::from(MAX_CID_LEN)
+            );
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&owned, &mut hasher);
+            let mut other = std::collections::hash_map::DefaultHasher::new();
+            std::hash::Hash::hash(&borrowed, &mut other);
+            assert_eq!(
+                std::hash::Hasher::finish(&hasher),
+                std::hash::Hasher::finish(&other)
+            );
+        }
+
+        let bytes = vec![0xab; 255];
+        let ptr = bytes.as_ptr();
+        let owned = ConnectionId::from_vec(bytes).into_owned();
+        assert_eq!(owned.as_ptr(), ptr);
+        assert_eq!(Vec::from(owned).as_ptr(), ptr);
+    }
+
+    #[test]
+    fn immutable_header_and_cursor_consume_same_prefix() {
+        let packet = [0x40, 1, 2, 3, 4, 5, 6];
+        let header = Header::from_slice(&packet, 3).unwrap();
+        assert!(matches!(header.dcid.0, ConnectionIdInner::Inline { .. }));
+        assert_eq!(header.dcid.as_ref(), &[1, 2, 3]);
+        let mut mutable = packet;
+        let mut cursor = octets::OctetsMut::with_slice(&mut mutable);
+        assert_eq!(Header::from_mutable_cursor(&mut cursor, 3), Ok(header));
+        assert_eq!(cursor.off(), 4);
+        assert_eq!(cursor.as_ref(), &[4, 5, 6]);
+        assert_eq!(
+            Header::from_mutable_cursor(&mut cursor, 20),
+            Err(Error::BufferTooShort)
+        );
+        assert_eq!(cursor.off(), 4);
+        assert_eq!(mutable, packet);
     }
 
     #[test]
@@ -1596,7 +1686,7 @@ mod tests {
             &mut PacketWriter::from_initialized(&mut out),
         )
         .unwrap();
-        let hdr = Header::from_slice(&mut out[..len], 0).unwrap();
+        let hdr = Header::from_slice(&out[..len], 0).unwrap();
         assert_eq!(hdr.scid.as_ref(), max_cid);
         assert_eq!(hdr.dcid.as_ref(), max_cid);
 
@@ -1916,7 +2006,7 @@ mod tests {
     ) {
         let mut b = octets::OctetsMut::with_slice(pkt);
 
-        let mut hdr = Header::from_bytes(&mut b, 0).unwrap();
+        let mut hdr = Header::from_mutable_cursor(&mut b, 0).unwrap();
         assert_eq!(hdr.ty, Type::Initial);
 
         let payload_len = b.get_varint().unwrap() as usize;
@@ -2142,7 +2232,7 @@ mod tests {
 
         let aead = crypto::Open::from_secret(alg, &secret).unwrap();
 
-        let mut hdr = Header::from_bytes(&mut b, 0).unwrap();
+        let mut hdr = Header::from_mutable_cursor(&mut b, 0).unwrap();
         assert_eq!(hdr.ty, Type::Short);
 
         let payload_len = b.cap();
@@ -2167,7 +2257,7 @@ mod tests {
     ) {
         let mut b = octets::OctetsMut::with_slice(header);
 
-        let hdr = Header::from_bytes(&mut b, 0).unwrap();
+        let hdr = Header::from_mutable_cursor(&mut b, 0).unwrap();
         assert_eq!(hdr.ty, Type::Initial);
 
         let mut out = vec![0; expected_pkt.len()];
@@ -2503,7 +2593,7 @@ mod tests {
 
         let mut b = octets::OctetsMut::with_slice(&mut header);
 
-        let hdr = Header::from_bytes(&mut b, 0).unwrap();
+        let hdr = Header::from_mutable_cursor(&mut b, 0).unwrap();
         assert_eq!(hdr.ty, Type::Short);
 
         let mut out = vec![0; expected_pkt.len()];

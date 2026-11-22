@@ -830,16 +830,16 @@ pub extern "C" fn quiche_config_free(config: *mut Config) {
 
 #[no_mangle]
 pub extern "C" fn quiche_header_info(
-    buf: *mut u8, buf_len: size_t, dcil: size_t, version: *mut u32, ty: *mut u8,
-    scid: *mut u8, scid_len: *mut size_t, dcid: *mut u8, dcid_len: *mut size_t,
-    token: *mut u8, token_len: *mut size_t,
+    buf: *const u8, buf_len: size_t, dcil: size_t, version: *mut u32,
+    ty: *mut u8, scid: *mut u8, scid_len: *mut size_t, dcid: *mut u8,
+    dcid_len: *mut size_t, token: *mut u8, token_len: *mut size_t,
 ) -> c_int {
     let version = ffi_out!(version, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let ty = ffi_out!(ty, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let scid_len = ffi_mut!(scid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let dcid_len = ffi_mut!(dcid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let token_len = ffi_mut!(token_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let buf = ffi_slice_mut!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let buf = ffi_slice!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let hdr = match Header::from_slice(buf, dcil) {
         Ok(v) => v,
 
@@ -3288,7 +3288,7 @@ mod tests {
     #[test]
     fn c_header_info_writes_uninitialized_connection_ids() {
         // Version negotiation with 2-byte DCID, 3-byte SCID and one version.
-        let mut packet = [0x80, 0, 0, 0, 0, 2, 1, 2, 3, 3, 4, 5, 0, 0, 0, 1];
+        let packet = [0x80, 0, 0, 0, 0, 2, 1, 2, 3, 3, 4, 5, 0, 0, 0, 1];
         let mut scid = [MaybeUninit::<u8>::uninit(); 20];
         let mut dcid = [MaybeUninit::<u8>::uninit(); 20];
         let mut version = MaybeUninit::<u32>::uninit();
@@ -3298,7 +3298,7 @@ mod tests {
         let mut tl = 0;
         assert_eq!(
             quiche_header_info(
-                packet.as_mut_ptr(),
+                packet.as_ptr(),
                 packet.len(),
                 0,
                 version.as_mut_ptr(),
@@ -3510,7 +3510,7 @@ mod tests {
             slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len)
         };
         let mut reader = octets::OctetsMut::with_slice(packet);
-        let hdr = Header::from_bytes(&mut reader, 0).unwrap();
+        let hdr = Header::from_mutable_cursor(&mut reader, 0).unwrap();
         assert_eq!(hdr.ty, Type::Retry);
         assert_eq!(hdr.dcid.as_ref(), scid);
         assert_eq!(hdr.scid.as_ref(), new_scid);
