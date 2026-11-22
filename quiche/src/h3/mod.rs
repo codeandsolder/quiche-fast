@@ -49,7 +49,7 @@
 //! connection is creating its configuration object:
 //!
 //! ```
-//! let h3_config = quiche::h3::Config::new()?;
+//! let h3_config = quiche::h3::Config::new();
 //! # Ok::<(), quiche::h3::Error>(())
 //! ```
 //!
@@ -63,7 +63,7 @@
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
 //! # let local = "127.0.0.1:4321".parse().unwrap();
 //! # let mut conn = quiche::accept(&scid, None, local, peer, &mut config).unwrap();
-//! # let h3_config = quiche::h3::Config::new()?;
+//! # let h3_config = quiche::h3::Config::new();
 //! let h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! # Ok::<(), quiche::h3::Error>(())
 //! ```
@@ -80,7 +80,7 @@
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
 //! # let local = "127.0.0.1:4321".parse().unwrap();
 //! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
-//! # let h3_config = quiche::h3::Config::new()?;
+//! # let h3_config = quiche::h3::Config::new();
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! let req = vec![
 //!     quiche::h3::Header::new(b":method", b"GET"),
@@ -103,7 +103,7 @@
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
 //! # let local = "127.0.0.1:4321".parse().unwrap();
 //! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
-//! # let h3_config = quiche::h3::Config::new()?;
+//! # let h3_config = quiche::h3::Config::new();
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! let req = vec![
 //!     quiche::h3::Header::new(b":method", b"GET"),
@@ -135,7 +135,7 @@
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
 //! # let local = "127.0.0.1:1234".parse().unwrap();
 //! # let mut conn = quiche::accept(&scid, None, local, peer, &mut config).unwrap();
-//! # let h3_config = quiche::h3::Config::new()?;
+//! # let h3_config = quiche::h3::Config::new();
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! loop {
 //!     match h3_conn.poll(&mut conn) {
@@ -202,7 +202,7 @@
 //! # let peer = "127.0.0.1:1234".parse().unwrap();
 //! # let local = "127.0.0.1:1234".parse().unwrap();
 //! # let mut conn = quiche::connect(None, &scid, local, peer, &mut config).unwrap();
-//! # let h3_config = quiche::h3::Config::new()?;
+//! # let h3_config = quiche::h3::Config::new();
 //! # let mut h3_conn = quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 //! loop {
 //!     match h3_conn.poll(&mut conn) {
@@ -586,15 +586,17 @@ pub struct Config {
     max_priority_update_size: u64,
 }
 
+impl Default for Config {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Config {
     /// Creates a new configuration object with default settings.
-    ///
-    /// # Errors
-    ///
-    /// This constructor always succeeds; the result type does not currently
-    /// represent any failure.
-    pub const fn new() -> Result<Self> {
-        Ok(Self {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
             max_field_section_size: Some(SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT),
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
@@ -602,7 +604,7 @@ impl Config {
             additional_settings: None,
             max_priority_update_size:
                 PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT,
-        })
+        }
     }
 
     /// Sets the `SETTINGS_MAX_FIELD_SECTION_SIZE` setting.
@@ -1049,11 +1051,11 @@ pub struct Connection {
 }
 
 impl Connection {
-    fn new(config: &Config, is_server: bool, enable_dgram: bool) -> Result<Self> {
+    fn new(config: &Config, is_server: bool, enable_dgram: bool) -> Self {
         let initial_uni_stream_id = if is_server { 0x3 } else { 0x2 };
         let h3_datagram = if enable_dgram { Some(1) } else { None };
 
-        Ok(Self {
+        Self {
             is_server,
 
             next_request_stream_id: 0,
@@ -1101,7 +1103,7 @@ impl Connection {
             peer_goaway_id: None,
 
             max_priority_update_size: config.max_priority_update_size,
-        })
+        }
     }
 
     /// Creates a new HTTP/3 connection using the provided QUIC connection.
@@ -1137,7 +1139,7 @@ impl Connection {
         }
 
         let mut http3_conn =
-            Self::new(config, conn.is_server, conn.dgram_enabled())?;
+            Self::new(config, conn.is_server, conn.dgram_enabled());
 
         match http3_conn.send_settings(conn) {
             Ok(_) => (),
@@ -3544,7 +3546,7 @@ pub mod testing {
             config.enable_dgram(true, 3, 3);
             config.set_ack_delay_exponent(8);
 
-            let h3_config = Config::new()?;
+            let h3_config = Config::new();
             Ok((config, h3_config))
         }
     }
@@ -3563,8 +3565,8 @@ pub mod testing {
             let server_dgram = pipe.server.dgram_enabled();
             Ok(Session {
                 pipe,
-                client: Connection::new(h3_config, false, client_dgram)?,
-                server: Connection::new(h3_config, true, server_dgram)?,
+                client: Connection::new(h3_config, false, client_dgram),
+                server: Connection::new(h3_config, true, server_dgram),
             })
         }
 
@@ -3913,7 +3915,7 @@ mod tests {
         config.enable_early_data();
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         // Perform initial handshake.
         let mut pipe = crate::test_utils::Pipe::with_config(&mut config).unwrap();
@@ -5269,7 +5271,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -5717,12 +5719,12 @@ mod tests {
     #[test]
     /// Ensure quiche allocates streams for client and server roles as expected.
     fn uni_stream_local_counting() {
-        let config = Config::new().unwrap();
+        let config = Config::new();
 
-        let h3_cln = Connection::new(&config, false, false).unwrap();
+        let h3_cln = Connection::new(&config, false, false);
         assert_eq!(h3_cln.next_uni_stream_id, 2);
 
-        let h3_srv = Connection::new(&config, true, false).unwrap();
+        let h3_srv = Connection::new(&config, true, false);
         assert_eq!(h3_srv.next_uni_stream_id, 3);
     }
 
@@ -6138,7 +6140,7 @@ mod tests {
         config.verify_peer(false);
         config.set_initial_congestion_window_packets(100);
 
-        let mut h3_config = Config::new().unwrap();
+        let mut h3_config = Config::new();
         h3_config.set_max_field_section_size(256 * 1024);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
@@ -6194,7 +6196,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let mut h3_config = Config::new().unwrap();
+        let mut h3_config = Config::new();
         h3_config.set_max_field_section_size(65);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
@@ -6246,7 +6248,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6378,7 +6380,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6441,7 +6443,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6512,7 +6514,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6614,7 +6616,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6745,7 +6747,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6818,7 +6820,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -6951,7 +6953,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
@@ -7008,7 +7010,7 @@ mod tests {
         config.set_ack_delay_exponent(8);
         config.grease(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
         s.handshake().unwrap();
@@ -7037,7 +7039,7 @@ mod tests {
         config.enable_dgram(true, 1000, 1000);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7081,7 +7083,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7133,7 +7135,7 @@ mod tests {
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7188,7 +7190,7 @@ mod tests {
     #[test]
     /// Tests that setting SETTINGS with prohibited values generates an error.
     fn set_prohibited_additional_settings() {
-        let mut h3_config = Config::new().unwrap();
+        let mut h3_config = Config::new();
         assert_eq!(
             h3_config.set_additional_settings(vec![(
                 frame::SETTINGS_QPACK_MAX_TABLE_CAPACITY,
@@ -7365,7 +7367,7 @@ mod tests {
         config.verify_peer(false);
         config.grease(false);
 
-        let mut h3_config = Config::new().unwrap();
+        let mut h3_config = Config::new();
         h3_config
             .set_additional_settings(vec![(42, 43), (44, 45)])
             .unwrap();
@@ -7489,7 +7491,7 @@ mod tests {
         config.verify_peer(false);
         config.enable_dgram(true, 100, 100);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         s.handshake().unwrap();
 
@@ -7533,7 +7535,7 @@ mod tests {
         config.verify_peer(false);
         config.enable_dgram(true, 100, 100);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         s.handshake().unwrap();
 
@@ -7618,7 +7620,7 @@ mod tests {
         config.verify_peer(false);
         config.enable_dgram(true, 100, 100);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         s.handshake().unwrap();
 
@@ -8091,7 +8093,7 @@ mod tests {
         config.verify_peer(false);
         config.enable_dgram(true, 100, 100);
 
-        let h3_config = Config::new().unwrap();
+        let h3_config = Config::new();
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         s.handshake().unwrap();
 

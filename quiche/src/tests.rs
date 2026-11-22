@@ -15145,7 +15145,7 @@ fn rejected_zero_rtt_replays_http3_request(
     let mut initial = buf[..len].to_vec();
     assert!(pipe.client.is_in_early_data());
 
-    let h3_config = h3::Config::new().unwrap();
+    let h3_config = h3::Config::new();
     let request = vec![
         h3::Header::new(b":method", b"GET"),
         h3::Header::new(b":scheme", b"https"),

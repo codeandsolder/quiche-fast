@@ -130,7 +130,7 @@ fn main() {
 
     debug!("written {write}");
 
-    let h3_config = quiche::h3::Config::new().unwrap();
+    let h3_config = quiche::h3::Config::new();
 
     // Prepare request.
     let mut path = String::from(url.path());

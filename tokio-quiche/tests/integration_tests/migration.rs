@@ -154,7 +154,7 @@ pub(crate) async fn run_migration_test(
     }
 
     // Create a new HTTP/3 connection once the QUIC connection is established.
-    let h3_config = quiche::h3::Config::new().unwrap();
+    let h3_config = quiche::h3::Config::new();
     let mut h3_conn =
         quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap();
 

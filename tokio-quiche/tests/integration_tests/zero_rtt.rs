@@ -379,7 +379,7 @@ impl EarlyDataClient {
         socket.send(&out[..len]).unwrap();
         assert!(conn.is_in_early_data());
 
-        let h3_config = quiche::h3::Config::new().unwrap();
+        let h3_config = quiche::h3::Config::new();
         let mut h3_conn =
             quiche::h3::Connection::with_transport(&mut conn, &h3_config)
                 .unwrap();

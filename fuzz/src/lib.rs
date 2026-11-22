@@ -95,7 +95,7 @@ pub fn server_process(
     conn.recv(&mut buf, info).ok();
 
     if (conn.is_in_early_data() || conn.is_established()) && h3_conn.is_none() {
-        let h3_config = quiche::h3::Config::new().unwrap();
+        let h3_config = quiche::h3::Config::new();
 
         if let Ok(c) = quiche::h3::Connection::with_transport(conn, &h3_config) {
             *h3_conn = Some(c);
