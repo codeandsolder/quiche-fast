@@ -40,7 +40,7 @@ struct Sample<T, I> {
 #[derive(Debug)]
 pub struct WindowedFilter<T, I, D> {
     window_length: D,
-    estimates: [Option<Sample<T, I>>; 3],
+    estimates: Option<[Sample<T, I>; 3]>,
 }
 
 impl<T, I, D> WindowedFilter<T, I, D>
@@ -50,106 +50,79 @@ where
     D: Ord + Div<usize, Output = D> + Copy,
 {
     pub fn new(window_length: D) -> Self {
-        WindowedFilter {
+        Self {
             window_length,
-            estimates: [None, None, None],
+            estimates: None,
         }
-    }
-
-    pub fn reset(&mut self, new_sample: T, new_time: I) {
-        let sample = Some(Sample {
-            sample: new_sample,
-            time: new_time,
-        });
-
-        self.estimates = [sample, sample, sample];
     }
 
     pub fn get_best(&self) -> Option<T> {
-        self.estimates[0].as_ref().map(|e| e.sample)
+        self.estimates.map(|[best, _, _]| best.sample)
     }
 
-    pub fn get_second_best(&self) -> Option<T> {
-        self.estimates[1].as_ref().map(|e| e.sample)
-    }
-
-    pub fn get_third_best(&self) -> Option<T> {
-        self.estimates[2].as_ref().map(|e| e.sample)
-    }
-
-    pub fn clear(&mut self) {
-        self.estimates = [None, None, None];
+    /// Recompute stored values in measurement order, retaining their times.
+    /// Returning None discards a sample.
+    pub fn recompute(&mut self, mut update: impl FnMut(T) -> Option<T>) {
+        if let Some(estimates) = self.estimates.take() {
+            for estimate in estimates {
+                if let Some(sample) = update(estimate.sample) {
+                    self.update(sample, estimate.time);
+                }
+            }
+        }
     }
 
     pub fn update(&mut self, new_sample: T, new_time: I) {
-        // Reset all estimates if they have not yet been initialized, if new
-        // sample is a new best, or if the newest recorded estimate is too
-        // old.
-        if match &self.estimates[0] {
-            None => true,
-            Some(best) if new_sample > best.sample => true,
-            _ =>
-                new_time - self.estimates[2].as_ref().unwrap().time >
-                    self.window_length,
-        } {
-            return self.reset(new_sample, new_time);
+        let new = Sample {
+            sample: new_sample,
+            time: new_time,
+        };
+
+        let Some(estimates) = &mut self.estimates else {
+            self.estimates = Some([new; 3]);
+            return;
+        };
+        let [best, second, third] = estimates;
+
+        // Reset for a new best or when even the newest estimate is too old.
+        if new_sample > best.sample || new_time - third.time > self.window_length
+        {
+            *estimates = [new; 3];
+            return;
         }
 
-        if new_sample > self.estimates[1].unwrap().sample {
-            self.estimates[1] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            self.estimates[2] = self.estimates[1];
-        } else if new_sample > self.estimates[2].unwrap().sample {
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
+        if new_sample > second.sample {
+            *second = new;
+            *third = new;
+        } else if new_sample > third.sample {
+            *third = new;
         }
 
-        // Expire and update estimates as necessary.
-        if new_time - self.estimates[0].unwrap().time > self.window_length {
-            // The best estimate hasn't been updated for an entire window, so
-            // promote second and third best estimates.
-            self.estimates[0] = self.estimates[1];
-            self.estimates[1] = self.estimates[2];
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            // The new best estimate may also be stale. Check it once more. The
-            // check at the start of the method handles further stale samples.
-            if new_time - self.estimates[0].unwrap().time > self.window_length {
-                self.estimates[0] = self.estimates[1];
-                self.estimates[1] = self.estimates[2];
+        if new_time - best.time > self.window_length {
+            *best = *second;
+            *second = *third;
+            *third = new;
+            if new_time - best.time > self.window_length {
+                *best = *second;
+                *second = *third;
             }
             return;
         }
 
-        if self.estimates[1].unwrap().sample == self.estimates[0].unwrap().sample &&
-            new_time - self.estimates[1].unwrap().time > self.window_length / 4
+        // Take a new second estimate in the second quarter of the window.
+        if second.sample == best.sample &&
+            new_time - second.time > self.window_length / 4
         {
-            // No better sample arrived for a quarter of the window, so take the
-            // second-best estimate from the second quarter.
-            self.estimates[1] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            self.estimates[2] = self.estimates[1];
+            *second = new;
+            *third = new;
             return;
         }
 
-        if self.estimates[2].unwrap().sample == self.estimates[1].unwrap().sample &&
-            new_time - self.estimates[2].unwrap().time > self.window_length / 2
+        // Take a new third estimate in the second half of the window.
+        if third.sample == second.sample &&
+            new_time - third.time > self.window_length / 2
         {
-            // We've passed a half of the window without a better estimate, so
-            // take a third-best estimate from the second half of the
-            // window.
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
+            *third = new;
         }
     }
 }
