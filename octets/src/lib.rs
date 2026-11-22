@@ -1051,6 +1051,16 @@ impl OctetsWriter for OctetsMut<'_> {
     }
 }
 
+impl OctetsWriter for Vec<u8> {
+    type Error = std::collections::TryReserveError;
+
+    fn put_bytes(&mut self, v: &[u8]) -> std::result::Result<(), Self::Error> {
+        self.try_reserve(v.len())?;
+        self.extend_from_slice(v);
+        Ok(())
+    }
+}
+
 /// Returns the QUIC variable-length integer width class for `v`.
 ///
 /// Values above [`MAX_VAR_INT`] also map to 8 bytes; encoding APIs reject

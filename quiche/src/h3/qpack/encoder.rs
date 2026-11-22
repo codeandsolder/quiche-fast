@@ -35,57 +35,47 @@ use super::INDEXED;
 use super::LITERAL;
 use super::LITERAL_WITH_NAME_REF;
 
-/// A QPACK encoder.
-#[derive(Default)]
-pub struct Encoder {}
+/// Encodes a field section using the static table and lowercase header names.
+pub fn encode<T: NameValue>(headers: &[T]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_fields::<true, T>(headers, &mut out)?;
+    Ok(out)
+}
 
-impl Encoder {
-    /// Creates a new QPACK encoder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
+/// Encodes a field section into caller-provided storage.
+pub fn encode_into<T: NameValue>(headers: &[T], out: &mut [u8]) -> Result<usize> {
+    let mut b = octets::OctetsMut::with_slice(out);
+    encode_fields::<true, T>(headers, &mut b)?;
+    Ok(b.off())
+}
 
-    /// Encodes a list of headers into a QPACK header block.
-    pub fn encode<T: NameValue>(
-        &mut self, headers: &[T], out: &mut [u8],
-    ) -> Result<usize> {
-        let mut b = octets::OctetsMut::with_slice(out);
+/// Encodes literal fields without static lookup or header-name normalization.
+/// Huffman coding is still used when it saves space.
+pub fn encode_literal<T: NameValue>(headers: &[T]) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    encode_fields::<false, T>(headers, &mut out)?;
+    Ok(out)
+}
 
-        // Required Insert Count.
-        encode_int(0, 0, 8, &mut b)?;
-
-        // Base.
-        encode_int(0, 0, 7, &mut b)?;
-
-        for h in headers {
-            match lookup_static(h) {
-                Some((idx, true)) => {
-                    const STATIC: u8 = 0x40;
-
-                    // Encode as statically indexed.
-                    encode_int(idx, INDEXED | STATIC, 6, &mut b)?;
-                },
-
-                Some((idx, false)) => {
-                    const STATIC: u8 = 0x10;
-
-                    // Encode value as literal with static name reference.
-                    encode_int(idx, LITERAL_WITH_NAME_REF | STATIC, 4, &mut b)?;
-                    encode_str::<false>(h.value(), 0, 7, &mut b)?;
-                },
-
-                None => {
-                    // Encode as fully literal.
-
-                    encode_str::<true>(h.name(), LITERAL, 3, &mut b)?;
-                    encode_str::<false>(h.value(), 0, 7, &mut b)?;
-                },
-            }
+fn encode_fields<const USE_STATIC: bool, T: NameValue>(
+    headers: &[T], b: &mut impl octets::OctetsWriter<Error: Into<Error>>,
+) -> Result<()> {
+    // Static-only QPACK: required insert count and delta base are both zero.
+    b.put_bytes(&[0, 0]).map_err(Into::into)?;
+    for h in headers {
+        match if USE_STATIC { lookup_static(h) } else { None } {
+            Some((idx, true)) => encode_int(idx, INDEXED | 0x40, 6, b)?,
+            Some((idx, false)) => {
+                encode_int(idx, LITERAL_WITH_NAME_REF | 0x10, 4, b)?;
+                encode_str::<false>(h.value(), 0, 7, b)?;
+            },
+            None => {
+                encode_str::<USE_STATIC>(h.name(), LITERAL, 3, b)?;
+                encode_str::<false>(h.value(), 0, 7, b)?;
+            },
         }
-
-        Ok(b.off())
     }
+    Ok(())
 }
 
 fn lookup_static<T: NameValue>(h: &T) -> Option<(u64, bool)> {
@@ -124,7 +114,8 @@ fn lookup_static<T: NameValue>(h: &T) -> Option<(u64, bool)> {
 /// Encodes an unsigned integer with a 1-8 bit QPACK prefix.
 /// Representation flags must not overlap the integer prefix.
 pub fn encode_int(
-    mut v: u64, first: u8, prefix: usize, b: &mut octets::OctetsMut,
+    mut v: u64, first: u8, prefix: usize,
+    b: &mut impl octets::OctetsWriter<Error: Into<Error>>,
 ) -> Result<()> {
     let mask = prefix_mask(prefix)?;
     if first & mask != 0 {
@@ -133,25 +124,29 @@ pub fn encode_int(
 
     // I fits in the prefix without a continuation.
     if v < u64::from(mask) {
-        b.put_u8(first | v.to_le_bytes()[0])?;
+        b.put_bytes(&[first | v.to_le_bytes()[0]])
+            .map_err(Into::into)?;
         return Ok(());
     }
 
-    b.put_u8(first | mask)?;
+    b.put_bytes(&[first | mask]).map_err(Into::into)?;
     v -= u64::from(mask);
 
     // Continuations consist of seven low-order bits plus the continuation flag.
     while v >= 128 {
-        b.put_u8((v.to_le_bytes()[0] & 0x7f) | 0x80)?;
+        b.put_bytes(&[(v.to_le_bytes()[0] & 0x7f) | 0x80])
+            .map_err(Into::into)?;
         v >>= 7;
     }
-    b.put_u8(v.to_le_bytes()[0])?;
+    b.put_bytes(&[v.to_le_bytes()[0]]).map_err(Into::into)?;
     Ok(())
 }
 
+/// Encodes a string literal, choosing Huffman coding when it saves space.
 #[inline]
 pub fn encode_str<const LOWER_CASE: bool>(
-    v: &[u8], first: u8, prefix: usize, b: &mut octets::OctetsMut,
+    v: &[u8], first: u8, prefix: usize,
+    b: &mut impl octets::OctetsWriter<Error: Into<Error>>,
 ) -> Result<()> {
     let huffman_bit = string_huffman_bit(prefix)?;
     if first & (huffman_bit | prefix_mask(prefix)?) != 0 {
@@ -162,13 +157,19 @@ pub fn encode_str<const LOWER_CASE: bool>(
     // those just encode the literal string.
     if let Ok(len) = octets::huffman_encoding_len::<LOWER_CASE>(v) {
         encode_int(len as u64, first | huffman_bit, prefix, b)?;
-        b.put_huffman_encoded::<LOWER_CASE>(v)?;
+        b.put_huffman_encoded::<LOWER_CASE>(v).map_err(Into::into)?;
     } else {
         encode_int(v.len() as u64, first, prefix, b)?;
-        if LOWER_CASE {
-            b.put_bytes(&v.to_ascii_lowercase())?;
+        if LOWER_CASE && v.iter().any(u8::is_ascii_uppercase) {
+            let mut chunk = [0; 128];
+            for input in v.chunks(chunk.len()) {
+                let dst = &mut chunk[..input.len()];
+                dst.copy_from_slice(input);
+                dst.make_ascii_lowercase();
+                b.put_bytes(dst).map_err(Into::into)?;
+            }
         } else {
-            b.put_bytes(v)?;
+            b.put_bytes(v).map_err(Into::into)?;
         }
     }
 
@@ -215,9 +216,7 @@ mod tests {
     #[test]
     fn encode_static_header() {
         let mut encoded = [0; 3];
-        Encoder::default()
-            .encode(&[(b":method", b"GET")], &mut encoded)
-            .unwrap();
+        encode_into(&[(b":method", b"GET")], &mut encoded).unwrap();
         assert_eq!(encoded, [0, 0, INDEXED | 0x40 | 17]);
     }
 
@@ -231,9 +230,7 @@ mod tests {
         buf.put_u8(0).unwrap();
         encode_str::<false>(b"FORGET", 0, 7, &mut buf).unwrap();
 
-        Encoder::default()
-            .encode(&[(b":method", b"FORGET")], &mut encoded)
-            .unwrap();
+        encode_into(&[(b":method", b"FORGET")], &mut encoded).unwrap();
         assert_eq!(encoded, expected);
     }
 }

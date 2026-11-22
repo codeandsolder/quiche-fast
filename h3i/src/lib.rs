@@ -54,8 +54,7 @@
 //! use h3i::config::Config;
 //! use quiche::h3::frame::Frame;
 //! use quiche::h3::Header;
-//! use quiche::h3::NameValue;
-//!
+//! //!
 //! fn main() {
 //!    /// The QUIC stream to send the frames on. See
 //!    /// https://datatracker.ietf.org/doc/html/rfc9000#name-streams and
@@ -131,20 +130,7 @@
 //! fn encode_header_block(
 //!     headers: &[quiche::h3::Header],
 //! ) -> std::result::Result<Vec<u8>, String> {
-//!     let mut encoder = quiche::h3::qpack::Encoder::new();
-//!
-//!     let headers_len = headers
-//!         .iter()
-//!         .fold(0, |acc, h| acc + h.value().len() + h.name().len() + 32);
-//!
-//!     let mut header_block = vec![0; headers_len];
-//!     let len = encoder
-//!         .encode(headers, &mut header_block)
-//!         .map_err(|_| "Internal Error")?;
-//!
-//!     header_block.truncate(len);
-//!
-//!     Ok(header_block)
+//!     quiche::h3::qpack::encode(headers).map_err(|e| e.to_string())
 //! }
 //! ```
 
@@ -159,10 +145,6 @@ use qlog::events::quic::PacketSent;
 use qlog::events::quic::PacketType;
 use qlog::events::quic::QuicFrame;
 use qlog::events::EventData;
-use quiche::h3::qpack::encode_int;
-use quiche::h3::qpack::encode_str;
-use quiche::h3::qpack::LITERAL;
-use quiche::h3::NameValue;
 
 #[cfg(not(feature = "async"))]
 pub use quiche;
@@ -207,59 +189,17 @@ impl StreamIdAllocator {
     }
 }
 
-/// Encodes a header block literally. Unlike [`encode_header_block`],
-/// this function encodes all the headers exactly as provided. This
-/// means it does not use the huffman lookup table, nor does it convert
-/// the header names to lowercase before encoding.
+/// Encodes a header block without static lookup or lowercasing names.
 fn encode_header_block_literal(
     headers: &[quiche::h3::Header],
 ) -> std::result::Result<Vec<u8>, String> {
-    // This is a combination of a modified `quiche::h3::qpack::Encoder::encode`
-    // and the [`encode_header_block`] function.
-    let headers_len = headers
-        .iter()
-        .fold(0, |acc, h| acc + h.value().len() + h.name().len() + 32);
-
-    let mut header_block = vec![0; headers_len];
-
-    let mut b = octets::OctetsMut::with_slice(&mut header_block);
-
-    // Required Insert Count.
-    encode_int(0, 0, 8, &mut b).map_err(|e| format!("{e:?}"))?;
-
-    // Base.
-    encode_int(0, 0, 7, &mut b).map_err(|e| format!("{e:?}"))?;
-
-    for h in headers {
-        encode_str::<false>(h.name(), LITERAL, 3, &mut b)
-            .map_err(|e| format!("{e:?}"))?;
-        encode_str::<false>(h.value(), 0, 7, &mut b)
-            .map_err(|e| format!("{e:?}"))?;
-    }
-
-    let len = b.off();
-
-    header_block.truncate(len);
-    Ok(header_block)
+    quiche::h3::qpack::encode_literal(headers).map_err(|e| e.to_string())
 }
 
 fn encode_header_block(
     headers: &[quiche::h3::Header],
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut encoder = quiche::h3::qpack::Encoder::new();
-
-    let headers_len = headers
-        .iter()
-        .fold(0, |acc, h| acc + h.value().len() + h.name().len() + 32);
-
-    let mut header_block = vec![0; headers_len];
-    let len = encoder
-        .encode(headers, &mut header_block)
-        .map_err(|_| "Internal Error")?;
-
-    header_block.truncate(len);
-
-    Ok(header_block)
+    quiche::h3::qpack::encode(headers).map_err(|e| e.to_string())
 }
 
 fn fake_packet_header() -> PacketHeader {
