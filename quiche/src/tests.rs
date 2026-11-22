@@ -120,6 +120,29 @@ fn transport_params() {
 }
 
 #[test]
+fn ack_delay_scaling_preserves_integer_bounds() {
+    for exponent in 0..=MAX_ACK_DELAY_EXPONENT {
+        assert_eq!(
+            encode_ack_delay(Duration::MAX, exponent),
+            octets::MAX_VAR_INT
+        );
+        let factor = 1_u64 << exponent;
+        let encoded = u64::MAX / factor;
+        assert_eq!(decode_ack_delay(encoded, exponent), Ok(encoded * factor));
+        if exponent != 0 {
+            assert_eq!(
+                decode_ack_delay(encoded + 1, exponent),
+                Err(Error::InvalidFrame)
+            );
+        }
+        let delay = Duration::from_micros(3 * factor + factor - 1);
+        assert_eq!(encode_ack_delay(delay, exponent), 3);
+    }
+    assert_eq!(decode_ack_delay(1, 64), Err(Error::InvalidFrame));
+    assert_eq!(decode_ack_delay(1, u64::MAX), Err(Error::InvalidFrame));
+}
+
+#[test]
 fn transport_params_preserve_zero_ack_delays() {
     let default = TransportParams::decode(&[], false, None).unwrap();
     assert_eq!(default.ack_delay_exponent, 3);

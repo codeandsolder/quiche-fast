@@ -480,10 +480,6 @@ const RESERVED_VERSION_MASK: u32 = 0xfafafafa;
 // The maximum size of the receiver connection flow control window.
 const MAX_CONNECTION_WINDOW: u64 = 24 * 1024 * 1024;
 
-// How much larger the connection flow control window need to be larger than
-// the stream flow control window.
-const CONNECTION_WINDOW_FACTOR: f64 = 1.5;
-
 // How many probing packet timeouts do we tolerate before considering the path
 // validation as failed.
 const MAX_PROBING_TIMEOUTS: usize = 3;
@@ -4930,9 +4926,10 @@ impl<F: BufFactory> Connection<F> {
             let ack_delay = pkt_space.largest_rx_pkt_time.elapsed();
 
             #[cfg(not(feature = "fuzzing"))]
-            let ack_delay = ack_delay.as_micros() as u64 /
-                2_u64
-                    .pow(self.local_transport_params.ack_delay_exponent as u32);
+            let ack_delay = encode_ack_delay(
+                ack_delay,
+                self.local_transport_params.ack_delay_exponent,
+            );
 
             // pseudo-random reproducible ack delays when fuzzing
             #[cfg(feature = "fuzzing")]
@@ -5215,8 +5212,10 @@ impl<F: BufFactory> Connection<F> {
 
                     // Make sure the connection window always has some
                     // room compared to the stream window.
+                    // Keep the connection window 50% larger, using exact
+                    // integer arithmetic rather than rounding a wire offset.
                     flow_control.ensure_window_lower_bound(
-                        (recv_win as f64 * CONNECTION_WINDOW_FACTOR) as u64,
+                        recv_win.saturating_add(recv_win / 2),
                     );
                 }
             }
@@ -8934,11 +8933,10 @@ impl<F: BufFactory> Connection<F> {
             frame::Frame::ACK {
                 ranges, ack_delay, ..
             } => {
-                let ack_delay = ack_delay
-                    .checked_mul(2_u64.pow(
-                        self.peer_transport_params.ack_delay_exponent as u32,
-                    ))
-                    .ok_or(Error::InvalidFrame)?;
+                let ack_delay = decode_ack_delay(
+                    ack_delay,
+                    self.peer_transport_params.ack_delay_exponent,
+                )?;
 
                 let skip_pn = self.pkt_num_manager.skip_pn();
                 let largest_acked =
@@ -10055,6 +10053,24 @@ fn drop_pkt_on_err(
     // Ignore other invalid packets that haven't been authenticated to prevent
     // man-in-the-middle and man-on-the-side attacks.
     Error::Done
+}
+
+// Transport parameter validation limits the exponent to 20. Scale before
+// narrowing the elapsed duration, and clamp to the largest wire integer.
+#[cfg(any(not(feature = "fuzzing"), test))]
+fn encode_ack_delay(delay: Duration, exponent: u64) -> u64 {
+    let scaled = delay.as_micros() >> exponent;
+    u64::try_from(scaled)
+        .unwrap_or(u64::MAX)
+        .min(octets::MAX_VAR_INT)
+}
+
+fn decode_ack_delay(encoded: u64, exponent: u64) -> Result<u64> {
+    let exponent = u32::try_from(exponent).map_err(|_| Error::InvalidFrame)?;
+    1_u64
+        .checked_shl(exponent)
+        .and_then(|factor| encoded.checked_mul(factor))
+        .ok_or(Error::InvalidFrame)
 }
 
 /// Returns the reserved bits of a packet's first byte, after header
