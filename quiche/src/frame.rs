@@ -1283,6 +1283,27 @@ mod tests {
         written
     }
 
+    fn assert_roundtrip(
+        frame: &Frame, out: &mut [u8], expected_len: usize,
+        other_allowed: &[packet::Type],
+    ) {
+        assert_eq!(encode_checked(frame, out), expected_len);
+        for ty in [
+            packet::Type::Short,
+            packet::Type::Initial,
+            packet::Type::ZeroRTT,
+            packet::Type::Handshake,
+        ] {
+            let mut reader = octets::Octets::with_slice(out);
+            let decoded = Frame::from_bytes(&mut reader, ty);
+            if ty == packet::Type::Short || other_allowed.contains(&ty) {
+                assert_eq!(decoded, Ok(frame.clone()), "{ty:?}");
+            } else {
+                assert!(decoded.is_err(), "{ty:?}");
+            }
+        }
+    }
+
     #[test]
     fn rejects_invalid_frame_layouts_consistently() {
         let mut ranges = ranges::RangeSet::default();
@@ -1360,21 +1381,11 @@ mod tests {
 
         let frame = Frame::Padding { len: 128 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 128);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 128, &[
+            packet::Type::Initial,
+            packet::Type::ZeroRTT,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1417,21 +1428,10 @@ mod tests {
             ecn_counts: None,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 17);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 17, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1456,21 +1456,10 @@ mod tests {
             ecn_counts,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 23);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 23, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1483,21 +1472,7 @@ mod tests {
             final_size: 21_123_767,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 13);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 13, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1509,21 +1484,7 @@ mod tests {
             error_code: 15_352,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1536,21 +1497,10 @@ mod tests {
             data: <RangeBuf>::from(&data, 1230976, false),
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 19);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 19, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1561,21 +1511,7 @@ mod tests {
             token: Vec::from("this is a token"),
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 17);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 17, &[]);
     }
 
     #[test]
@@ -1589,21 +1525,7 @@ mod tests {
             data: <RangeBuf>::from(&data, 1230976, true),
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 20);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 20, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1657,21 +1579,7 @@ mod tests {
 
         let frame = Frame::MaxData { max: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1683,21 +1591,7 @@ mod tests {
             max: 128_318_273,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1706,21 +1600,7 @@ mod tests {
 
         let frame = Frame::MaxStreamsBidi { max: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1729,21 +1609,7 @@ mod tests {
 
         let frame = Frame::MaxStreamsUni { max: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1752,21 +1618,7 @@ mod tests {
 
         let frame = Frame::DataBlocked { limit: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1778,21 +1630,7 @@ mod tests {
             limit: 128_318_273,
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 7);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1801,21 +1639,7 @@ mod tests {
 
         let frame = Frame::StreamsBlockedBidi { limit: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1824,21 +1648,7 @@ mod tests {
 
         let frame = Frame::StreamsBlockedUni { limit: 128_318_273 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1852,21 +1662,7 @@ mod tests {
             reset_token: [0x42; 16],
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 41);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 41, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1875,21 +1671,7 @@ mod tests {
 
         let frame = Frame::RetireConnectionId { seq_num: 123_213 };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 5);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 5, &[]);
     }
 
     #[test]
@@ -1900,21 +1682,7 @@ mod tests {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 9);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 9, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -1925,21 +1693,7 @@ mod tests {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 9);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 9, &[]);
     }
 
     #[test]
@@ -1952,21 +1706,10 @@ mod tests {
             reason: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 22);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        assert_roundtrip(&frame, &mut d, 22, &[
+            packet::Type::Initial,
+            packet::Type::Handshake,
+        ]);
     }
 
     #[test]
@@ -1978,21 +1721,7 @@ mod tests {
             reason: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 18);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_ok());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 18, &[packet::Type::ZeroRTT]);
     }
 
     #[test]
@@ -2001,21 +1730,7 @@ mod tests {
 
         let frame = Frame::HandshakeDone;
 
-        let wire_len = encode_checked(&frame, &mut d);
-
-        assert_eq!(wire_len, 1);
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert_eq!(Frame::from_bytes(&mut b, packet::Type::Short), Ok(frame));
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Initial).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::ZeroRTT).is_err());
-
-        let mut b = octets::Octets::with_slice(&d);
-        assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_err());
+        assert_roundtrip(&frame, &mut d, 1, &[]);
     }
 
     #[test]

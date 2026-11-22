@@ -510,6 +510,20 @@ pub fn encode_pkt<F: BufFactory>(
     conn: &mut Connection<F>, pkt_type: Type, frames: &[frame::Frame],
     buf: &mut [u8],
 ) -> Result<usize> {
+    let mut payload = vec![0; buf.len()];
+    let mut writer = octets::OctetsMut::with_slice(&mut payload);
+    for frame in frames {
+        frame.to_bytes(&mut writer)?;
+    }
+    let payload_len = writer.off();
+    encode_raw_pkt(conn, pkt_type, &payload[..payload_len], buf)
+}
+
+/// Encrypt deliberately malformed wire payloads without using the frame
+/// encoder.
+pub fn encode_raw_pkt<F: BufFactory>(
+    conn: &mut Connection<F>, pkt_type: Type, payload: &[u8], buf: &mut [u8],
+) -> Result<usize> {
     let mut b = octets::OctetsMut::with_slice(buf);
 
     let epoch = pkt_type.to_epoch()?;
@@ -547,10 +561,7 @@ pub fn encode_pkt<F: BufFactory>(
 
     hdr.to_bytes(&mut b)?;
 
-    let payload_len = frames.iter().try_fold(0_usize, |acc, frame| {
-        acc.checked_add(frame.wire_len()?)
-            .ok_or(Error::BufferTooShort)
-    })?;
+    let payload_len = payload.len();
 
     if pkt_type != Type::Short {
         let len = pn_len + payload_len + crypto_ctx.crypto_overhead().unwrap();
@@ -563,9 +574,7 @@ pub fn encode_pkt<F: BufFactory>(
 
     let payload_offset = b.off();
 
-    for frame in frames {
-        frame.to_bytes(&mut b)?;
-    }
+    b.put_bytes(payload)?;
 
     let aead = match crypto_ctx.crypto_seal {
         Some(ref mut v) => v,
