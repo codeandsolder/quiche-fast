@@ -41,7 +41,11 @@ impl std::ops::Mul<f64> for Bandwidth {
 
     fn mul(self, rhs: f64) -> Self::Output {
         Self {
-            bits_per_second: (self.bits_per_second as f64 * rhs).round() as u64,
+            bits_per_second: crate::scale::scale_u64(
+                self.bits_per_second,
+                rhs,
+                crate::scale::Rounding::Nearest,
+            ),
         }
     }
 }

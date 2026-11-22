@@ -9582,19 +9582,18 @@ impl<F: BufFactory> Connection<F> {
 
     /// Updates send capacity.
     fn update_tx_cap(&mut self) {
-        let cwin_available = match self.paths.get_active() {
-            Ok(p) => p.recovery.cwnd_available() as u64,
-            Err(_) => 0,
-        };
-
+        let cwin_available = self
+            .paths
+            .get_active()
+            .map_or(0, |p| p.recovery.cwnd_available());
         let flow_credit = self.max_tx_data.saturating_sub(self.tx_data);
-        let cap = cmp::min(cwin_available, flow_credit) as usize;
-        let scaled = (cap as f64 * self.tx_cap_factor).ceil() as usize;
-
-        // The capacity factor can relax congestion buffering, but it must
-        // never permit sending beyond the peer's hard flow-control limit.
+        let flow_credit = usize::try_from(flow_credit).unwrap_or(usize::MAX);
+        let cap = cwin_available.min(flow_credit);
+        // The capacity factor can relax congestion buffering, but never the
+        // hard flow-control limit imposed by the peer.
         self.tx_cap =
-            scaled.min(usize::try_from(flow_credit).unwrap_or(usize::MAX));
+            scale::scale_usize(cap, self.tx_cap_factor, scale::Rounding::Up)
+                .min(flow_credit);
     }
 
     fn delivery_rate_check_if_app_limited(&self) -> bool {
@@ -10265,6 +10264,7 @@ mod rand;
 mod range_buf;
 mod ranges;
 mod recovery;
+mod scale;
 mod stream;
 mod tls;
 mod transport_params;

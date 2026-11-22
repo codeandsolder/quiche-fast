@@ -43,7 +43,8 @@ use super::Lost;
 
 /// Congestion window fraction that the pacing sender allows in bursts during
 /// pacing.
-const LUMPY_PACING_CWND_FRACTION: f64 = 0.25;
+// Pace at most one quarter of the current congestion window in a burst.
+const LUMPY_PACING_CWND_DIVISOR: usize = 4;
 
 /// Number of packets that the pacing sender allows in bursts during pacing.
 /// This is ignored if a flow's estimated bandwidth is lower than 1200 kbps.
@@ -167,8 +168,8 @@ impl Pacer {
             // Reset `lumpy_tokens` if the application or congestion window
             // throttles sending, or if the token runs out.
             self.lumpy_tokens = 1.max(LUMPY_PACING_SIZE.min(
-                (self.sender.get_congestion_window_in_packets() as f64 *
-                    LUMPY_PACING_CWND_FRACTION) as usize,
+                self.sender.get_congestion_window_in_packets() /
+                    LUMPY_PACING_CWND_DIVISOR,
             ));
 
             if self.sender.bandwidth_estimate(rtt_stats) <
