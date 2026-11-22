@@ -614,13 +614,14 @@ mod tests {
     #[test]
     fn h3_ffi_rejects_misaligned_references() {
         let mut config = h3::Config::new();
+        let original = config.max_field_section_size;
         assert!(align_of::<h3::Config>() > 1);
         let ptr = (&raw mut config)
             .cast::<u8>()
             .wrapping_add(1)
             .cast::<h3::Config>();
         quiche_h3_config_set_max_field_section_size(ptr, 42);
-        assert_eq!(config.max_field_section_size, None);
+        assert_eq!(config.max_field_section_size, original);
 
         let ev = h3::Event::Data;
         assert!(align_of::<h3::Event>() > 1);
