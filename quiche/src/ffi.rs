@@ -101,8 +101,13 @@ use crate::*;
 
 const FFI_ERR_INVALID_ARGUMENT: ssize_t = -24;
 
-unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
-    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+/// Borrow an initialized C object, rejecting null and misaligned pointers.
+///
+/// # Safety
+/// A non-null, aligned pointer must identify a live initialized T for the
+/// returned lifetime. The C caller must not mutate it during that borrow.
+pub(super) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+    if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
 
@@ -111,8 +116,13 @@ unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
     Some(unsafe { &*ptr })
 }
 
-unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
-    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+/// Exclusively borrow an initialized C object, rejecting null and misalignment.
+///
+/// # Safety
+/// A non-null, aligned pointer must identify a live initialized T, with
+/// exclusive access for the returned lifetime.
+pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+    if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
 
@@ -125,7 +135,7 @@ macro_rules! ffi_ref {
     ($ptr:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { ffi_ptr_ref($ptr) } {
+        match unsafe { $crate::ffi::ffi_ptr_ref($ptr) } {
             Some(value) => value,
             None => return,
         }
@@ -133,7 +143,7 @@ macro_rules! ffi_ref {
     ($ptr:expr, $ret:expr) => {{
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { ffi_ptr_ref($ptr) } {
+        match unsafe { $crate::ffi::ffi_ptr_ref($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -145,7 +155,7 @@ macro_rules! ffi_mut {
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public C
         // API.
-        match unsafe { ffi_ptr_mut($ptr) } {
+        match unsafe { $crate::ffi::ffi_ptr_mut($ptr) } {
             Some(value) => value,
             None => return,
         }
@@ -154,7 +164,7 @@ macro_rules! ffi_mut {
         // SAFETY: C callers may pass null. Non-null pointers retain the same
         // validity/alignment/lifetime/exclusivity requirements as the public
         // C API.
-        match unsafe { ffi_ptr_mut($ptr) } {
+        match unsafe { $crate::ffi::ffi_ptr_mut($ptr) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -166,13 +176,13 @@ fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
         return true;
     }
 
-    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
+    if ptr.is_null() || !ptr.is_aligned() {
         return false;
     }
 
-    size_of::<T>()
-        .checked_mul(len)
-        .is_some_and(|bytes| bytes <= isize::MAX as usize)
+    size_of::<T>().checked_mul(len).is_some_and(|bytes| {
+        bytes <= isize::MAX as usize && ptr.addr().checked_add(bytes).is_some()
+    })
 }
 
 /// Builds a shared slice from a C pointer after checking the parts that can be
@@ -182,15 +192,11 @@ fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
 ///
 /// For non-empty slices, \`ptr\` must still point to \`len\` initialized \`T\`
 /// values in one live allocation for the returned lifetime.
-unsafe fn ffi_slice_from_raw_parts<'a, T>(
+pub(super) unsafe fn ffi_slice_from_raw_parts<'a, T>(
     ptr: *const T, len: usize,
 ) -> Option<&'a [T]> {
     if len == 0 {
-        // SAFETY: NonNull::dangling() is non-null and correctly aligned, and a
-        // zero-length slice does not access the pointee.
-        return Some(unsafe {
-            slice::from_raw_parts(ptr::NonNull::<T>::dangling().as_ptr(), 0)
-        });
+        return Some(&[]);
     }
 
     if !ffi_slice_layout_valid(ptr, len) {
@@ -210,15 +216,11 @@ unsafe fn ffi_slice_from_raw_parts<'a, T>(
 /// For non-empty slices, \`ptr\` must point to \`len\` initialized \`T\` values
 /// in one live allocation and be exclusively borrowed for the returned
 /// lifetime.
-unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
+pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
     ptr: *mut T, len: usize,
 ) -> Option<&'a mut [T]> {
     if len == 0 {
-        // SAFETY: NonNull::dangling() is non-null and correctly aligned, and a
-        // zero-length slice does not access the pointee.
-        return Some(unsafe {
-            slice::from_raw_parts_mut(ptr::NonNull::<T>::dangling().as_ptr(), 0)
-        });
+        return Some(&mut []);
     }
 
     if !ffi_slice_layout_valid(ptr.cast_const(), len) {
@@ -232,13 +234,17 @@ unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
 
 macro_rules! ffi_slice {
     ($ptr:expr, $len:expr) => {{
-        match unsafe { ffi_slice_from_raw_parts($ptr, $len) } {
+        // SAFETY: the C caller supplies one allocation of initialized elements,
+        // valid and shared for this call; the helper verifies layout bounds.
+        match unsafe { $crate::ffi::ffi_slice_from_raw_parts($ptr, $len) } {
             Some(value) => value,
             None => return,
         }
     }};
     ($ptr:expr, $len:expr, $ret:expr) => {{
-        match unsafe { ffi_slice_from_raw_parts($ptr, $len) } {
+        // SAFETY: the C caller supplies one allocation of initialized elements,
+        // valid and shared for this call; the helper verifies layout bounds.
+        match unsafe { $crate::ffi::ffi_slice_from_raw_parts($ptr, $len) } {
             Some(value) => value,
             None => return $ret,
         }
@@ -247,12 +253,19 @@ macro_rules! ffi_slice {
 
 macro_rules! ffi_slice_mut {
     ($ptr:expr, $len:expr, $ret:expr) => {{
-        match unsafe { ffi_slice_from_raw_parts_mut($ptr, $len) } {
+        // SAFETY: the C caller supplies exclusive access to initialized
+        // elements for this call; the helper verifies layout bounds.
+        match unsafe { $crate::ffi::ffi_slice_from_raw_parts_mut($ptr, $len) } {
             Some(value) => value,
             None => return $ret,
         }
     }};
 }
+
+pub(super) use ffi_mut;
+pub(super) use ffi_ref;
+pub(super) use ffi_slice;
+pub(super) use ffi_slice_mut;
 
 fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
