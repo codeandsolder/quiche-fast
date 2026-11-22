@@ -1637,7 +1637,8 @@ mod tests {
         let ptr = bytes.as_ptr();
         let owned = ConnectionId::from_vec(bytes).into_owned();
         assert_eq!(owned.as_ptr(), ptr);
-        assert_eq!(Vec::from(owned).as_ptr(), ptr);
+        let recovered = Vec::from(owned);
+        assert_eq!(recovered.as_ptr(), ptr);
     }
 
     #[test]
