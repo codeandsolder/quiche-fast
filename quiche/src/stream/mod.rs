@@ -1972,236 +1972,112 @@ mod tests {
             stream.send.off_front() < stream.send.off_back()
     }
 
-    #[test]
-    fn send_emit() {
-        let mut buf = [0; 5];
-
-        let mut stream = test_stream(0, 20, 0, DEFAULT_STREAM_WINDOW);
-
-        assert_eq!(stream.send.write(b"hello", false), Ok(5));
-        assert_eq!(stream.send.write(b"world", false), Ok(5));
-        assert_eq!(stream.send.write(b"olleh", false), Ok(5));
-        assert_eq!(stream.send.write(b"dlrow", true), Ok(5));
+    fn four_chunk_stream(window: u64) -> Stream {
+        let mut stream = test_stream(0, 20, window, DEFAULT_STREAM_WINDOW);
+        for (chunk, fin) in [
+            (b"hello", false),
+            (b"world", false),
+            (b"olleh", false),
+            (b"dlrow", true),
+        ] {
+            assert_eq!(stream.send.write(chunk, fin), Ok(chunk.len()));
+        }
         assert_eq!(stream.send.off_front(), 0);
         assert_eq!(stream.send.bufs_count(), 4);
-
         assert!(stream.is_flushable());
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 4);
-        assert_eq!(&buf[..4], b"hell");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 8);
-        assert_eq!(&buf[..4], b"owor");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
-        assert_eq!(stream.send.off_front(), 10);
-        assert_eq!(&buf[..2], b"ld");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
-        assert_eq!(stream.send.off_front(), 11);
-        assert_eq!(&buf[..1], b"o");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 16);
-        assert_eq!(&buf[..5], b"llehd");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
-        assert_eq!(stream.send.off_front(), 20);
-        assert_eq!(&buf[..4], b"lrow");
-
-        assert!(!stream.is_flushable());
-
-        assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
-        assert_eq!(stream.send.off_front(), 20);
+        stream
     }
 
-    #[test]
-    fn send_emit_ack() {
+    #[track_caller]
+    fn assert_stream_emits(
+        stream: &mut Stream, capacity: usize, data: &[u8], fin: bool,
+        next_off: u64,
+    ) {
         let mut buf = [0; 5];
+        assert_eq!(stream_send_ready(stream), !data.is_empty());
+        assert_eq!(stream.send.emit(&mut buf[..capacity]), (data.len(), fin));
+        assert_eq!(stream.send.off_front(), next_off);
+        assert_eq!(&buf[..data.len()], data);
+    }
 
-        let mut stream = test_stream(0, 20, 0, DEFAULT_STREAM_WINDOW);
-
-        assert_eq!(stream.send.write(b"hello", false), Ok(5));
-        assert_eq!(stream.send.write(b"world", false), Ok(5));
-        assert_eq!(stream.send.write(b"olleh", false), Ok(5));
-        assert_eq!(stream.send.write(b"dlrow", true), Ok(5));
-        assert_eq!(stream.send.off_front(), 0);
-        assert_eq!(stream.send.bufs_count(), 4);
-
-        assert!(stream.is_flushable());
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 4);
-        assert_eq!(&buf[..4], b"hell");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 8);
-        assert_eq!(&buf[..4], b"owor");
-
-        stream.send.ack_and_drop(0, 5);
-        assert_eq!(stream.send.bufs_count(), 3);
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
-        assert_eq!(stream.send.off_front(), 10);
-        assert_eq!(&buf[..2], b"ld");
-
-        stream.send.ack_and_drop(7, 5);
-        assert_eq!(stream.send.bufs_count(), 3);
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
-        assert_eq!(stream.send.off_front(), 11);
-        assert_eq!(&buf[..1], b"o");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 16);
-        assert_eq!(&buf[..5], b"llehd");
-
-        stream.send.ack_and_drop(5, 7);
-        assert_eq!(stream.send.bufs_count(), 2);
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
-        assert_eq!(stream.send.off_front(), 20);
-        assert_eq!(&buf[..4], b"lrow");
-
+    #[rstest]
+    fn send_emit(#[values(false, true)] acknowledge: bool) {
+        let mut stream = four_chunk_stream(0);
+        // Schedule ACKs between emissions as well as after exhaustion. Out-of-
+        // order ACKs must not advance the emission cursor; only contiguous
+        // prefixes release buffered ranges.
+        for (capacity, data, fin, next_off, ack) in [
+            (4, b"hell".as_slice(), false, 4, None),
+            (4, b"owor", false, 8, Some((0, 5, 3))),
+            (2, b"ld", false, 10, Some((7, 5, 3))),
+            (1, b"o", false, 11, None),
+            (5, b"llehd", false, 16, Some((5, 7, 2))),
+            (5, b"lrow", true, 20, None),
+        ] {
+            assert_stream_emits(&mut stream, capacity, data, fin, next_off);
+            if acknowledge {
+                if let Some((off, len, remaining)) = ack {
+                    stream.send.ack_and_drop(off, len);
+                    assert_eq!(stream.send.bufs_count(), remaining);
+                }
+            }
+        }
         assert!(!stream.is_flushable());
-
-        assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
-        assert_eq!(stream.send.off_front(), 20);
-
-        stream.send.ack_and_drop(22, 4);
-        assert_eq!(stream.send.bufs_count(), 2);
-
-        stream.send.ack_and_drop(20, 1);
-        assert_eq!(stream.send.bufs_count(), 2);
+        assert_stream_emits(&mut stream, 5, b"", true, 20);
+        if acknowledge {
+            for (off, len) in [(22, 4), (20, 1)] {
+                stream.send.ack_and_drop(off, len);
+                assert_eq!(stream.send.bufs_count(), 2);
+            }
+        }
     }
 
     #[test]
     fn send_emit_retransmit() {
-        let mut buf = [0; 5];
+        let mut stream = four_chunk_stream(DEFAULT_STREAM_WINDOW);
 
-        let mut stream =
-            test_stream(0, 20, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
+        assert_stream_emits(&mut stream, 4, b"hell", false, 4);
 
-        assert_eq!(stream.send.write(b"hello", false), Ok(5));
-        assert_eq!(stream.send.write(b"world", false), Ok(5));
-        assert_eq!(stream.send.write(b"olleh", false), Ok(5));
-        assert_eq!(stream.send.write(b"dlrow", true), Ok(5));
-        assert_eq!(stream.send.off_front(), 0);
-        assert_eq!(stream.send.bufs_count(), 4);
-
-        assert!(stream.is_flushable());
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 4);
-        assert_eq!(&buf[..4], b"hell");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..4]), (4, false));
-        assert_eq!(stream.send.off_front(), 8);
-        assert_eq!(&buf[..4], b"owor");
+        assert_stream_emits(&mut stream, 4, b"owor", false, 8);
 
         stream.send.retransmit(3, 3);
         assert_eq!(stream.send.off_front(), 3);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..3]), (3, false));
-        assert_eq!(stream.send.off_front(), 8);
-        assert_eq!(&buf[..3], b"low");
+        assert_stream_emits(&mut stream, 3, b"low", false, 8);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
-        assert_eq!(stream.send.off_front(), 10);
-        assert_eq!(&buf[..2], b"ld");
+        assert_stream_emits(&mut stream, 2, b"ld", false, 10);
 
         stream.send.ack_and_drop(7, 2);
 
         stream.send.retransmit(8, 2);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
-        assert_eq!(stream.send.off_front(), 10);
-        assert_eq!(&buf[..2], b"ld");
+        assert_stream_emits(&mut stream, 2, b"ld", false, 10);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..1]), (1, false));
-        assert_eq!(stream.send.off_front(), 11);
-        assert_eq!(&buf[..1], b"o");
+        assert_stream_emits(&mut stream, 1, b"o", false, 11);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 16);
-        assert_eq!(&buf[..5], b"llehd");
+        assert_stream_emits(&mut stream, 5, b"llehd", false, 16);
 
         stream.send.retransmit(12, 2);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..2]), (2, false));
-        assert_eq!(stream.send.off_front(), 16);
-        assert_eq!(&buf[..2], b"le");
+        assert_stream_emits(&mut stream, 2, b"le", false, 16);
 
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (4, true));
-        assert_eq!(stream.send.off_front(), 20);
-        assert_eq!(&buf[..4], b"lrow");
+        assert_stream_emits(&mut stream, 5, b"lrow", true, 20);
 
         assert!(!stream.is_flushable());
 
-        assert!(!stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (0, true));
-        assert_eq!(stream.send.off_front(), 20);
+        assert_stream_emits(&mut stream, 5, b"", true, 20);
 
-        stream.send.retransmit(7, 12);
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 12);
-        assert_eq!(&buf[..5], b"rldol");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 17);
-        assert_eq!(&buf[..5], b"lehdl");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (2, false));
-        assert_eq!(stream.send.off_front(), 20);
-        assert_eq!(&buf[..2], b"ro");
-
-        stream.send.ack_and_drop(12, 7);
-
-        stream.send.retransmit(7, 12);
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 12);
-        assert_eq!(&buf[..5], b"rldol");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (5, false));
-        assert_eq!(stream.send.off_front(), 17);
-        assert_eq!(&buf[..5], b"lehdl");
-
-        assert!(stream_send_ready(&stream));
-        assert_eq!(stream.send.emit(&mut buf[..5]), (2, false));
-        assert_eq!(stream.send.off_front(), 20);
-        assert_eq!(&buf[..2], b"ro");
+        for acknowledge in [false, true] {
+            if acknowledge {
+                stream.send.ack_and_drop(12, 7);
+            }
+            stream.send.retransmit(7, 12);
+            for (data, next_off) in
+                [(b"rldol".as_slice(), 12), (b"lehdl", 17), (b"ro", 20)]
+            {
+                assert_stream_emits(&mut stream, 5, data, false, next_off);
+            }
+        }
     }
 
     #[test]

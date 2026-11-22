@@ -770,10 +770,20 @@ mod tests {
         assert_eq!(send.buffered_bytes, 0);
     }
 
+    #[track_caller]
+    fn assert_emission(
+        send: &mut SendBuf, capacity: usize, data: &[u8], fin: bool,
+        buffered: u64, next_off: u64,
+    ) {
+        let mut buf = [0; 15];
+        assert_eq!(send.emit(&mut buf[..capacity]), (data.len(), fin));
+        assert_eq!(&buf[..data.len()], data);
+        assert_eq!(send.buffered_bytes, buffered);
+        assert_eq!(send.off_front(), next_off);
+    }
+
     #[test]
     fn split_write() {
-        let mut buf = [0; 10];
-
         let mut send = <SendBuf>::new(u64::MAX);
         assert_eq!(send.buffered_bytes, 0);
 
@@ -788,35 +798,15 @@ mod tests {
 
         assert_eq!(send.off_front(), 0);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
-        assert_eq!(written, 10);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"somethingh");
-        assert_eq!(send.buffered_bytes, 9);
+        assert_emission(&mut send, 10, b"somethingh", false, 9, 10);
 
-        assert_eq!(send.off_front(), 10);
+        assert_emission(&mut send, 5, b"ellow", false, 4, 15);
 
-        let (written, fin) = send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"ellow");
-        assert_eq!(send.buffered_bytes, 4);
-
-        assert_eq!(send.off_front(), 15);
-
-        let (written, fin) = send.emit(&mut buf[..10]);
-        assert_eq!(written, 4);
-        assert!(fin);
-        assert_eq!(&buf[..written], b"orld");
-        assert_eq!(send.buffered_bytes, 0);
-
-        assert_eq!(send.off_front(), 19);
+        assert_emission(&mut send, 10, b"orld", true, 0, 19);
     }
 
     #[test]
     fn resend() {
-        let mut buf = [0; 15];
-
         let mut send = <SendBuf>::new(u64::MAX);
         assert_eq!(send.buffered_bytes, 0);
         assert_eq!(send.off_front(), 0);
@@ -832,26 +822,11 @@ mod tests {
 
         assert_eq!(send.buffered_bytes, 19);
 
-        let (written, fin) = send.emit(&mut buf[..4]);
-        assert_eq!(written, 4);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"some");
-        assert_eq!(send.buffered_bytes, 15);
-        assert_eq!(send.off_front(), 4);
+        assert_emission(&mut send, 4, b"some", false, 15, 4);
 
-        let (written, fin) = send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"thing");
-        assert_eq!(send.buffered_bytes, 10);
-        assert_eq!(send.off_front(), 9);
+        assert_emission(&mut send, 5, b"thing", false, 10, 9);
 
-        let (written, fin) = send.emit(&mut buf[..5]);
-        assert_eq!(written, 5);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"hello");
-        assert_eq!(send.buffered_bytes, 5);
-        assert_eq!(send.off_front(), 14);
+        assert_emission(&mut send, 5, b"hello", false, 5, 14);
 
         send.retransmit(4, 5);
         assert_eq!(send.buffered_bytes, 10);
@@ -861,19 +836,9 @@ mod tests {
         assert_eq!(send.buffered_bytes, 14);
         assert_eq!(send.off_front(), 0);
 
-        let (written, fin) = send.emit(&mut buf[..11]);
-        assert_eq!(written, 9);
-        assert!(!fin);
-        assert_eq!(&buf[..written], b"something");
-        assert_eq!(send.buffered_bytes, 5);
-        assert_eq!(send.off_front(), 14);
+        assert_emission(&mut send, 11, b"something", false, 5, 14);
 
-        let (written, fin) = send.emit(&mut buf[..11]);
-        assert_eq!(written, 5);
-        assert!(fin);
-        assert_eq!(&buf[..written], b"world");
-        assert_eq!(send.buffered_bytes, 0);
-        assert_eq!(send.off_front(), 19);
+        assert_emission(&mut send, 11, b"world", true, 0, 19);
     }
 
     #[test]
