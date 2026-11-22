@@ -412,20 +412,21 @@ impl Path {
         self.challenge_requested
     }
 
-    pub fn should_send_pmtu_probe(
-        &mut self, hs_confirmed: bool, hs_done: bool, out_len: usize,
-        is_closing: bool, frames_empty: bool,
-    ) -> bool {
-        let Some(pmtud) = self.pmtud.as_mut() else {
-            return false;
-        };
+    /// Returns the eligible probe size for this path, not the active path.
+    pub fn pmtu_probe_size(
+        &self, handshake_ready: bool, out_len: usize, packet_occupied: bool,
+    ) -> Option<usize> {
+        let pmtud = self.pmtud.as_ref()?;
+        let size = pmtud.get_probe_size();
 
-        (hs_confirmed && hs_done) &&
-            self.recovery.cwnd_available() > pmtud.get_probe_size() &&
-            out_len >= pmtud.get_probe_size() &&
+        (handshake_ready &&
+            self.validated() &&
+            !self.probing_required() &&
+            self.recovery.cwnd_available() > size &&
+            out_len >= size &&
             pmtud.should_probe() &&
-            !is_closing &&
-            frames_empty
+            !packet_occupied)
+            .then_some(size)
     }
 
     pub fn on_challenge_sent(&mut self) {
@@ -1154,6 +1155,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pmtud_probe_requires_validated_path_without_pending_validation() {
+        let local = "127.0.0.1:1234".parse().unwrap();
+        let peer = "127.0.0.1:4321".parse().unwrap();
+        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        config.discover_pmtu(true);
+        config.set_max_send_udp_payload_size(1400);
+        let recovery_config = RecoveryConfig::from_config(&config);
+        let mut path = Path::new(
+            local,
+            peer,
+            &recovery_config,
+            config.path_challenge_recv_max_queue_len,
+            false,
+            Some(&config),
+        );
+
+        assert_eq!(path.pmtu_probe_size(true, 1400, false), None);
+        path.state = PathState::Validated;
+        assert_eq!(path.pmtu_probe_size(true, 1400, false), Some(1400));
+        path.request_validation();
+        assert_eq!(path.pmtu_probe_size(true, 1400, false), None);
+    }
+
+    #[test]
     fn pmtud_probe_respects_cwnd_during_pto() {
         let local = "127.0.0.1:1234".parse().unwrap();
         let peer = "127.0.0.1:4321".parse().unwrap();
@@ -1187,7 +1212,7 @@ mod tests {
             .inc_loss_probes(crate::packet::Epoch::Application);
 
         assert!(path.pmtud.as_ref().unwrap().should_probe());
-        assert!(!path.should_send_pmtu_probe(true, true, 1400, false, true));
+        assert_eq!(path.pmtu_probe_size(true, 1400, false), None);
     }
 
     #[test]

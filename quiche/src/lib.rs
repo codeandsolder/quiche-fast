@@ -4312,10 +4312,6 @@ impl<F: BufFactory> Connection<F> {
 
         let mut done = 0;
 
-        // Limit output packet size to respect the sender and receiver's
-        // maximum UDP payload size limit.
-        let mut left = cmp::min(out.len(), self.max_send_udp_payload_size());
-
         let send_pid = match (from, to) {
             (Some(f), Some(t)) => self
                 .paths
@@ -4327,22 +4323,34 @@ impl<F: BufFactory> Connection<F> {
 
         let send_path = self.paths.get_mut(send_pid)?;
 
-        // Increase the maximum datagram size for a PMTUD probe.
+        let peer_limit =
+            usize::try_from(self.peer_transport_params.max_udp_payload_size)
+                .unwrap_or(usize::MAX)
+                .min(16383);
+        let handshake_ready =
+            self.handshake_confirmed && self.handshake_completed;
+        let mut limit = if self.handshake_completed {
+            send_path.recovery.max_datagram_size().min(peer_limit)
+        } else {
+            MIN_CLIENT_INITIAL_LEN
+        };
+
+        // Reserve output space for a probe without raising the congestion
+        // controller's confirmed datagram size before an ACK.
         if let Some(pmtud) = send_path.pmtud.as_mut() {
-            if pmtud.should_probe() {
-                let size = if self.handshake_confirmed || self.handshake_completed
-                {
-                    pmtud.get_probe_size()
-                } else {
-                    pmtud.get_current_mtu()
-                };
-
-                send_path.recovery.pmtud_update_max_datagram_size(size);
-
-                left =
-                    cmp::min(out.len(), send_path.recovery.max_datagram_size());
+            if handshake_ready {
+                pmtud.limit_maximum(peer_limit);
+            }
+            limit = pmtud.get_current_mtu().min(peer_limit);
+            if send_path.recovery.max_datagram_size() != limit {
+                send_path.recovery.pmtud_update_max_datagram_size(limit);
+            }
+            if handshake_ready && pmtud.should_probe() {
+                limit = limit.max(pmtud.get_probe_size().min(peer_limit));
             }
         }
+
+        let mut left = out.len().min(limit);
 
         // Limit data sent by the server based on the amount of data received
         // from the client before its address is validated.
@@ -5005,78 +5013,39 @@ impl<F: BufFactory> Connection<F> {
             //
             // Generate PMTUD probes only after handshake confirmation to avoid
             // interference from anti-amplification limits.
-            if let Ok(active_path) = self.paths.get_active_mut() {
-                let should_probe_pmtu = active_path.should_send_pmtu_probe(
-                    self.handshake_confirmed,
-                    self.handshake_completed,
-                    out_len,
-                    is_closing,
-                    frames.is_empty(),
+            let path = self.paths.get_mut(send_pid)?;
+            if let Some(probe_size) = path.pmtu_probe_size(
+                self.handshake_confirmed && self.handshake_completed,
+                out_len,
+                is_closing || !frames.is_empty(),
+            ) {
+                trace!(
+                    "{} sending PMTUD probe of {} bytes",
+                    self.trace_id,
+                    probe_size,
                 );
 
-                if should_probe_pmtu {
-                    if let Some(pmtud) = active_path.pmtud.as_mut() {
-                        let probe_size = pmtud.get_probe_size();
-                        trace!(
-                        "{} sending pmtud probe pmtu_probe={} estimated_pmtu={}",
-                        self.trace_id,
-                        probe_size,
-                        pmtud.get_current_mtu(),
-                    );
+                left = probe_size
+                    .checked_sub(overhead)
+                    .filter(|&size| size >= PAYLOAD_MIN_LEN)
+                    .ok_or(Error::Done)?;
 
-                        left = probe_size;
+                let padding = frame::Frame::Padding { len: left - 1 };
+                let ping = frame::Frame::Ping {
+                    mtu_probe: Some(probe_size),
+                };
 
-                        match left.checked_sub(overhead) {
-                            Some(v) => left = v,
-
-                            None => {
-                                // We can't send more because there isn't enough
-                                // space available in the output buffer.
-                                //
-                                // The congestion window is nearly full. A new
-                                // packet does not fit.
-                                //
-                                // Clear the app-limited state so ACKs can grow
-                                // the congestion window.
-                                active_path.recovery.update_app_limited(false);
-                                return Err(Error::Done);
-                            },
-                        }
-
-                        let frame = frame::Frame::Padding {
-                            len: probe_size - overhead - 1,
-                        };
-
-                        if push_frame_to_pkt(
-                            &mut b,
-                            &mut frames,
-                            frame,
-                            &mut left,
-                        )? {
-                            let frame = frame::Frame::Ping {
-                                mtu_probe: Some(probe_size),
-                            };
-
-                            if push_frame_to_pkt(
-                                &mut b,
-                                &mut frames,
-                                frame,
-                                &mut left,
-                            )? {
-                                ack_eliciting = true;
-                                in_flight = true;
-                            }
-                        }
-
-                        // Reset probe flag after sending to prevent duplicate
-                        // probes in a single flight.
-                        pmtud.set_in_flight(true);
-                        is_pmtud_probe = true;
-                    }
+                if !push_frame_to_pkt(&mut b, &mut frames, padding, &mut left)? ||
+                    !push_frame_to_pkt(&mut b, &mut frames, ping, &mut left)?
+                {
+                    return Err(Error::Done);
                 }
+
+                ack_eliciting = true;
+                in_flight = true;
+                is_pmtud_probe = true;
             }
 
-            let path = self.paths.get_mut(send_pid)?;
             // Create PATH_RESPONSE frame if needed.
             // We do not try to ensure that these are really sent.
             while let Some(challenge) = path.pop_received_challenge() {
@@ -5950,6 +5919,11 @@ impl<F: BufFactory> Connection<F> {
         self.on_packet_sent(send_pid, sent_pkt, epoch, handshake_status, now)?;
 
         let path = self.paths.get_mut(send_pid)?;
+        if is_pmtud_probe {
+            if let Some(pmtud) = path.pmtud.as_mut() {
+                pmtud.set_in_flight(true);
+            }
+        }
         qlog_with_type!(QLOG_METRICS, self.qlog, q, {
             path.recovery.maybe_qlog(q, now);
         });
@@ -8285,8 +8259,12 @@ impl<F: BufFactory> Connection<F> {
         let old_pmtu = pmtud.get_current_mtu();
         pmtud.revalidate_pmtu();
 
-        let Some(event) =
-            path::pmtu_event(local, peer, old_pmtu, pmtud.get_current_mtu())
+        let current_mtu = pmtud.get_current_mtu();
+        active_path
+            .recovery
+            .pmtud_update_max_datagram_size(current_mtu);
+
+        let Some(event) = path::pmtu_event(local, peer, old_pmtu, current_mtu)
         else {
             return;
         };
@@ -8605,19 +8583,9 @@ impl<F: BufFactory> Connection<F> {
         // locally addressable packet sizes. Oversized limits must not wrap.
         let peer_udp_limit = usize::try_from(peer_params.max_udp_payload_size)
             .unwrap_or(usize::MAX);
-        if active_path
-            .pmtud
-            .as_ref()
-            .map(|pmtud| pmtud.should_probe())
-            .unwrap_or(false)
-        {
+        if let Some(pmtud) = active_path.pmtud.as_ref() {
             active_path.recovery.pmtud_update_max_datagram_size(
-                active_path
-                    .pmtud
-                    .as_mut()
-                    .expect("PMTUD existence verified above")
-                    .get_probe_size()
-                    .min(peer_udp_limit),
+                pmtud.get_current_mtu().min(peer_udp_limit),
             );
         } else {
             active_path

@@ -71,6 +71,7 @@ impl Pmtud {
             max_probes
         };
 
+        let maximum_supported_mtu = maximum_supported_mtu.max(MIN_PLPMTU);
         Self {
             maximum_supported_mtu,
             probe_size: maximum_supported_mtu,
@@ -92,6 +93,27 @@ impl Pmtud {
     /// Sets the PMTUD probe size.
     fn set_probe_size(&mut self, probe_size: usize) {
         self.probe_size = std::cmp::min(probe_size, self.maximum_supported_mtu);
+    }
+
+    /// Apply the final peer-advertised maximum to the path's search space.
+    pub fn limit_maximum(&mut self, limit: usize) {
+        let limit = limit.max(MIN_PLPMTU);
+        if limit >= self.maximum_supported_mtu {
+            return;
+        }
+
+        self.maximum_supported_mtu = limit;
+        self.smallest_failed_probe_size = self
+            .smallest_failed_probe_size
+            .filter(|&size| size <= limit);
+        self.largest_successful_probe_size = self
+            .largest_successful_probe_size
+            .map(|size| size.min(limit));
+        self.pmtu = self.pmtu.map(|size| size.min(limit));
+        if self.probe_size > limit {
+            self.probe_size = limit;
+            self.probe_failure_count = 0;
+        }
     }
 
     /// Returns the PMTUD probe size.
@@ -139,14 +161,14 @@ impl Pmtud {
                     self.set_pmtu(successful_probe_size);
                 } else {
                     self.probe_size =
-                        (successful_probe_size + failed_probe_size) / 2
+                        successful_probe_size.midpoint(failed_probe_size)
                 }
             },
 
             // With only failed probes, binary search between the smallest
             // failed probe and the minimum supported MTU
             (Some(failed_probe_size), None) =>
-                self.probe_size = (MIN_PLPMTU + failed_probe_size) / 2,
+                self.probe_size = MIN_PLPMTU.midpoint(failed_probe_size),
 
             // As the algorithm is optimistic in that the initial probe size
             // is the maximum supported MTU, then having only a successful probe
