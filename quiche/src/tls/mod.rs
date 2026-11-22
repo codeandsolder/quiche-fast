@@ -865,7 +865,9 @@ impl<'a> ExData<'a> {
 
 /// # Safety
 /// A non-null cipher must point to a live BoringSSL cipher descriptor.
-unsafe fn get_cipher_from_ptr(cipher: *const SSL_CIPHER) -> Result<crypto::Algorithm> {
+unsafe fn get_cipher_from_ptr(
+    cipher: *const SSL_CIPHER,
+) -> Result<crypto::Algorithm> {
     if cipher.is_null() {
         return Err(Error::TlsFail);
     }
@@ -882,102 +884,78 @@ unsafe fn get_cipher_from_ptr(cipher: *const SSL_CIPHER) -> Result<crypto::Algor
     Ok(alg)
 }
 
-extern "C" fn set_read_secret(
+unsafe extern "C" fn set_read_secret(
     ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
     secret: *const u8, secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
-    // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
-
-        None => return 0,
-    };
-
-    trace!("{} set read secret lvl={:?}", ex_data.trace_id, level);
-
-    let space = match level {
-        crypto::Level::Initial => &mut ex_data.crypto_ctx[packet::Epoch::Initial],
-        crypto::Level::ZeroRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-        crypto::Level::Handshake =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
-        crypto::Level::OneRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-    };
-
-    // SAFETY: BoringSSL passes the cipher descriptor for this callback.
-    let aead = match unsafe { get_cipher_from_ptr(cipher) } {
-        Ok(v) => v,
-
-        Err(_) => return 0,
-    };
-
-    // 0-RTT read secrets are present only on the server.
-    if level != crypto::Level::ZeroRTT || ex_data.is_server {
-        let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-
-        let open = match crypto::Open::from_secret(aead, secret) {
-            Ok(v) => v,
-
-            Err(_) => return 0,
-        };
-
-        if level == crypto::Level::ZeroRTT {
-            space.crypto_0rtt_open = Some(open);
-            return 1;
-        }
-
-        space.crypto_open = Some(open);
-    }
-
-    1
+    // SAFETY: BoringSSL supplies live callback arguments.
+    unsafe { install_secret::<true>(ssl, level, cipher, secret, secret_len) }
 }
 
-extern "C" fn set_write_secret(
+unsafe extern "C" fn set_write_secret(
     ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
     secret: *const u8, secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
-    // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
+    // SAFETY: BoringSSL supplies live callback arguments.
+    unsafe { install_secret::<false>(ssl, level, cipher, secret, secret_len) }
+}
 
-        None => return 0,
+/// # Safety
+/// Called synchronously by BoringSSL with a live SSL, valid cipher descriptor
+/// and a secret buffer readable for secret_len bytes.
+unsafe fn install_secret<const READ: bool>(
+    ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
+    secret: *const u8, secret_len: usize,
+) -> c_int {
+    // SAFETY: the caller guarantees exclusive synchronous callback access.
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return 0;
     };
 
-    trace!("{} set write secret lvl={:?}", ex_data.trace_id, level);
-
-    let space = match level {
-        crypto::Level::Initial => &mut ex_data.crypto_ctx[packet::Epoch::Initial],
-        crypto::Level::ZeroRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-        crypto::Level::Handshake =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
-        crypto::Level::OneRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
+    trace!(
+        "{} set {} secret lvl={:?}",
+        ex_data.trace_id,
+        if READ { "read" } else { "write" },
+        level
+    );
+    // SAFETY: the cipher descriptor is supplied by BoringSSL.
+    let Ok(aead) = (unsafe { get_cipher_from_ptr(cipher) }) else {
+        return 0;
     };
 
-    // SAFETY: BoringSSL passes the cipher descriptor for this callback.
-    let aead = match unsafe { get_cipher_from_ptr(cipher) } {
-        Ok(v) => v,
-
-        Err(_) => return 0,
-    };
-
-    // 0-RTT write secrets are present only on the client.
-    if level != crypto::Level::ZeroRTT || !ex_data.is_server {
-        let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-
-        let seal = match crypto::Seal::from_secret(aead, secret) {
-            Ok(v) => v,
-
-            Err(_) => return 0,
-        };
-
-        space.crypto_seal = Some(seal);
+    // Early data is read by the server and written by the client.
+    if level == crypto::Level::ZeroRTT && READ != ex_data.is_server {
+        return 1;
     }
 
+    if secret.is_null() || secret_len == 0 || secret_len > isize::MAX as usize {
+        return 0;
+    }
+    // SAFETY: the callback borrows this buffer for its duration.
+    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
+    let epoch = match level {
+        crypto::Level::Initial => packet::Epoch::Initial,
+        crypto::Level::Handshake => packet::Epoch::Handshake,
+        crypto::Level::ZeroRTT | crypto::Level::OneRTT =>
+            packet::Epoch::Application,
+    };
+    let space = &mut ex_data.crypto_ctx[epoch];
+
+    if READ {
+        let Ok(open) = crypto::Open::from_secret(aead, secret) else {
+            return 0;
+        };
+        if level == crypto::Level::ZeroRTT {
+            space.crypto_0rtt_open = Some(open);
+        } else {
+            space.crypto_open = Some(open);
+        }
+    } else {
+        let Ok(seal) = crypto::Seal::from_secret(aead, secret) else {
+            return 0;
+        };
+        space.crypto_seal = Some(seal);
+    }
     1
 }
 
