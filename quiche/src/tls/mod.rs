@@ -257,13 +257,13 @@ impl Context {
     }
 
     #[cfg(not(windows))]
-    fn load_ca_certs(&mut self) -> Result<()> {
+    pub(super) fn load_ca_certs(&mut self) -> Result<()> {
         // SAFETY: The live context is exclusively borrowed.
         unsafe { map_result(SSL_CTX_set_default_verify_paths(self.as_mut_ptr())) }
     }
 
     #[cfg(windows)]
-    fn load_ca_certs(&mut self) -> Result<()> {
+    pub(super) fn load_ca_certs(&mut self) -> Result<()> {
         use windows_sys::Win32::Security::Cryptography::CertCloseStore;
         use windows_sys::Win32::Security::Cryptography::CertEnumCertificatesInStore;
         use windows_sys::Win32::Security::Cryptography::CertOpenSystemStoreA;
