@@ -345,13 +345,13 @@ impl<'a> Header<'a> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    pub fn from_slice<'b>(buf: &'b mut [u8], dcid_len: usize) -> Result<Self> {
+    pub fn from_slice(buf: &mut [u8], dcid_len: usize) -> Result<Self> {
         let mut b = octets::OctetsMut::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
     }
 
-    pub(crate) fn from_bytes<'b>(
-        b: &'b mut octets::OctetsMut, dcid_len: usize,
+    pub(crate) fn from_bytes(
+        b: &mut octets::OctetsMut, dcid_len: usize,
     ) -> Result<Self> {
         let first = b.get_u8()?;
 
