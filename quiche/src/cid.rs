@@ -219,6 +219,13 @@ impl BoundedNonEmptyConnectionIdVecDeque {
     }
 }
 
+/// Direction of a connection identifier relative to this endpoint.
+#[derive(Clone, Copy)]
+pub enum CidDirection {
+    Source,
+    Destination,
+}
+
 #[derive(Default)]
 pub struct ConnectionIdentifiers {
     /// All the Destination Connection IDs provided by our peer.
@@ -725,21 +732,19 @@ impl ConnectionIdentifiers {
         self.dcids.iter().filter(|e| e.path_id.is_none()).count()
     }
 
-    /// Returns the oldest active source Connection ID of this connection.
-    #[inline]
-    pub fn oldest_scid(&self) -> &ConnectionIdEntry {
-        self.scids.get_oldest()
-    }
-
-    /// Returns the oldest known active destination Connection ID of this
-    /// connection.
-    ///
-    /// Note that due to e.g., reordering at reception side, the oldest known
-    /// active destination Connection ID is not necessarily the one having the
-    /// lowest sequence.
-    #[inline]
-    pub fn oldest_dcid(&self) -> &ConnectionIdEntry {
-        self.dcids.get_oldest()
+    /// Selects the active path's connection ID or the oldest remaining ID
+    /// of the same direction when that path has no usable identifier.
+    pub fn active_or_oldest(
+        &self, direction: CidDirection, sequence: Option<u64>,
+    ) -> ConnectionId<'_> {
+        let entries = match direction {
+            CidDirection::Source => &self.scids,
+            CidDirection::Destination => &self.dcids,
+        };
+        let entry = sequence
+            .and_then(|seq| entries.get(seq))
+            .unwrap_or_else(|| entries.get_oldest());
+        ConnectionId::from_ref(entry.cid.as_ref())
     }
 
     /// Adds or remove the source Connection ID sequence number from the

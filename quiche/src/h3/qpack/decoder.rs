@@ -127,6 +127,7 @@ pub struct Decoder {}
 
 impl Decoder {
     /// Creates a new QPACK decoder.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }

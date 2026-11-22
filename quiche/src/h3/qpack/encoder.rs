@@ -38,6 +38,7 @@ pub struct Encoder {}
 
 impl Encoder {
     /// Creates a new QPACK encoder.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
