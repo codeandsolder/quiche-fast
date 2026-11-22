@@ -407,66 +407,59 @@ impl RecoveryEpoch {
     }
 }
 
-struct LossThreshold {
-    pkt_thresh: Option<u64>,
-    time_thresh: f64,
-
-    // # Experiment: enable_relaxed_loss_threshold
-    //
-    // If `Some` this will disable pkt_thresh on the first loss and then double
-    // time_thresh on subsequent loss.
-    //
-    // The actual threshold is calcualted as `1.0 +
-    // INITIAL_TIME_THRESHOLD_OVERHEAD` and equivalent to the initial value
-    // of INITIAL_TIME_THRESHOLD.
-    time_thresh_overhead: Option<f64>,
+enum LossThreshold {
+    StandardInitial,
+    StandardReordering { packets: u64 },
+    RelaxedInitial,
+    RelaxedTimeOnly { overhead: f64 },
 }
 
 impl LossThreshold {
     const fn new(recovery_config: &RecoveryConfig) -> Self {
-        let time_thresh_overhead =
-            if recovery_config.enable_relaxed_loss_threshold {
-                Some(INITIAL_TIME_THRESHOLD_OVERHEAD)
-            } else {
-                None
-            };
-        Self {
-            pkt_thresh: Some(INITIAL_PACKET_THRESHOLD),
-            time_thresh: INITIAL_TIME_THRESHOLD,
-            time_thresh_overhead,
+        if recovery_config.enable_relaxed_loss_threshold {
+            Self::RelaxedInitial
+        } else {
+            Self::StandardInitial
         }
     }
 
     const fn pkt_thresh(&self) -> Option<u64> {
-        self.pkt_thresh
+        match *self {
+            Self::StandardInitial | Self::RelaxedInitial =>
+                Some(INITIAL_PACKET_THRESHOLD),
+            Self::StandardReordering { packets } => Some(packets),
+            Self::RelaxedTimeOnly { .. } => None,
+        }
     }
 
     const fn time_thresh(&self) -> f64 {
-        self.time_thresh
+        match *self {
+            Self::StandardInitial | Self::RelaxedInitial =>
+                INITIAL_TIME_THRESHOLD,
+            Self::StandardReordering { .. } => PACKET_REORDER_TIME_THRESHOLD,
+            Self::RelaxedTimeOnly { overhead } => 1.0 + overhead,
+        }
     }
 
     fn on_spurious_loss(&mut self, new_pkt_thresh: u64) {
-        if let Some(time_thresh_overhead) = &mut self.time_thresh_overhead {
-            if self.pkt_thresh.is_some() {
-                // Disable packet threshold on first spurious loss.
-                self.pkt_thresh = None;
-            } else {
-                // Double time threshold but cap it at `1.0`, which ends up
-                // being 2x the RTT.
-                *time_thresh_overhead *= TIME_THRESHOLD_OVERHEAD_MULTIPLIER;
-                *time_thresh_overhead = time_thresh_overhead.min(1.0);
-
-                self.time_thresh = 1.0 + *time_thresh_overhead;
-            }
-        } else {
-            let new_packet_threshold = self
-                .pkt_thresh
-                .expect("packet threshold should always be Some when `enable_relaxed_loss_threshold` is false")
-                .max(new_pkt_thresh.min(MAX_PACKET_THRESHOLD));
-            self.pkt_thresh = Some(new_packet_threshold);
-
-            self.time_thresh = PACKET_REORDER_TIME_THRESHOLD;
-        }
+        *self = match *self {
+            Self::StandardInitial => Self::StandardReordering {
+                packets: INITIAL_PACKET_THRESHOLD
+                    .max(new_pkt_thresh.min(MAX_PACKET_THRESHOLD)),
+            },
+            Self::StandardReordering { packets } => Self::StandardReordering {
+                packets: packets.max(new_pkt_thresh.min(MAX_PACKET_THRESHOLD)),
+            },
+            // The first spurious loss disables packet-based loss detection.
+            Self::RelaxedInitial => Self::RelaxedTimeOnly {
+                overhead: INITIAL_TIME_THRESHOLD_OVERHEAD,
+            },
+            // Subsequent losses double the time overhead up to one RTT.
+            Self::RelaxedTimeOnly { overhead } => Self::RelaxedTimeOnly {
+                overhead: (overhead * TIME_THRESHOLD_OVERHEAD_MULTIPLIER)
+                    .min(1.0),
+            },
+        };
     }
 }
 
@@ -1219,7 +1212,7 @@ mod tests {
         assert!(!recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
-        assert_eq!(loss_thresh.time_thresh_overhead, None);
+        assert!(matches!(loss_thresh, LossThreshold::StandardInitial));
         assert_eq!(loss_thresh.pkt_thresh().unwrap(), INITIAL_PACKET_THRESHOLD);
         assert_eq!(loss_thresh.time_thresh(), INITIAL_TIME_THRESHOLD);
 
@@ -1279,10 +1272,7 @@ mod tests {
         assert!(recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
-        assert_eq!(
-            loss_thresh.time_thresh_overhead,
-            Some(INITIAL_TIME_THRESHOLD_OVERHEAD)
-        );
+        assert!(matches!(loss_thresh, LossThreshold::RelaxedInitial));
         assert_eq!(loss_thresh.pkt_thresh().unwrap(), INITIAL_PACKET_THRESHOLD);
         assert_eq!(loss_thresh.time_thresh(), INITIAL_TIME_THRESHOLD);
 
