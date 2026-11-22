@@ -37,12 +37,12 @@ use super::Sent;
 
 use crate::packet::Epoch;
 use crate::ranges::RangeSet;
+use crate::recovery::validate_ack_ranges;
 use crate::recovery::Bandwidth;
 use crate::recovery::HandshakeStatus;
 use crate::recovery::OnLossDetectionTimeoutOutcome;
 use crate::recovery::RecoveryOps;
 use crate::recovery::StartupExit;
-use crate::Error;
 use crate::Result;
 
 #[cfg(feature = "qlog")]
@@ -133,12 +133,12 @@ struct LossDetectionResult {
 }
 
 impl RecoveryEpoch {
-    // `peer_sent_ack_ranges` should not be used without validation.
+    // ACK ranges and the largest acknowledged packet have been validated.
     fn detect_and_remove_acked_packets(
         &mut self, now: Instant, peer_sent_ack_ranges: &RangeSet,
-        newly_acked: &mut Vec<Acked>, rtt_stats: &RttStats, skip_pn: Option<u64>,
-        trace_id: &str,
-    ) -> Result<AckedDetectionResult> {
+        newly_acked: &mut Vec<Acked>, rtt_stats: &RttStats,
+        largest_ack_received: u64, trace_id: &str,
+    ) -> AckedDetectionResult {
         newly_acked.clear();
         self.newly_acked_send_times.clear();
 
@@ -148,23 +148,12 @@ impl RecoveryEpoch {
         let mut has_ack_eliciting = false;
         let mut has_in_flight_spurious_loss = false;
 
-        let largest_ack_received = peer_sent_ack_ranges
-            .last()
-            .expect("ACK frames should always have at least one ack range");
         let largest_acked = self
             .largest_acked_packet
             .unwrap_or(0)
             .max(largest_ack_received);
 
         for peer_sent_range in peer_sent_ack_ranges.iter() {
-            if skip_pn.is_some_and(|skip_pn| peer_sent_range.contains(&skip_pn)) {
-                // https://www.rfc-editor.org/rfc/rfc9000#section-13.1
-                // An endpoint SHOULD treat receipt of an acknowledgment
-                // for a packet it did not send as
-                // a connection error of type PROTOCOL_VIOLATION
-                return Err(Error::OptimisticAckDetected);
-            }
-
             // Because packets always have incrementing numbers, they are always
             // in sorted order.
             let start = if self
@@ -241,21 +230,19 @@ impl RecoveryEpoch {
             }
         }
 
-        if let Some(largest_ack_received) = peer_sent_ack_ranges.last() {
-            self.skipped_packet_numbers.retain(|&pn| {
-                largest_ack_received < pn.saturating_add(MAX_PACKET_THRESHOLD)
-            });
-        }
+        self.skipped_packet_numbers.retain(|&pn| {
+            largest_ack_received < pn.saturating_add(MAX_PACKET_THRESHOLD)
+        });
 
         self.drain_acked_and_lost_packets(now - rtt_stats.rtt());
 
-        Ok(AckedDetectionResult {
+        AckedDetectionResult {
             acked_bytes,
             spurious_losses,
             spurious_pkt_thresh,
             has_ack_eliciting,
             has_in_flight_spurious_loss,
-        })
+        }
     }
 
     fn detect_lost_packets(
@@ -819,6 +806,8 @@ impl RecoveryOps for LegacyRecovery {
         handshake_status: HandshakeStatus, now: Instant, skip_pn: Option<u64>,
         trace_id: &str,
     ) -> Result<OnAckReceivedOutcome> {
+        let largest_ack_received =
+            validate_ack_ranges(peer_sent_ack_ranges, skip_pn)?;
         let AckedDetectionResult {
             acked_bytes,
             spurious_losses,
@@ -830,9 +819,9 @@ impl RecoveryOps for LegacyRecovery {
             peer_sent_ack_ranges,
             &mut self.newly_acked,
             &self.rtt_stats,
-            skip_pn,
+            largest_ack_received,
             trace_id,
-        )?;
+        );
 
         self.acked_packet_send_times
             .extend(self.epochs[epoch].newly_acked_send_times.iter().copied());
@@ -848,9 +837,6 @@ impl RecoveryOps for LegacyRecovery {
             (self.congestion.cc_ops.rollback)(&mut self.congestion);
         }
 
-        let largest_ack_received = peer_sent_ack_ranges
-            .last()
-            .expect("ACK frames should always have at least one ack range");
         let largest_acked_pkt_num = self.epochs[epoch]
             .largest_acked_packet
             .unwrap_or(0)
