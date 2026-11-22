@@ -193,18 +193,21 @@ enum ConnectionIdInner<'a> {
 impl<'a> ConnectionId<'a> {
     /// Creates a new connection ID from the given vector.
     #[inline]
+    #[must_use]
     pub const fn from_vec(cid: Vec<u8>) -> Self {
         Self(ConnectionIdInner::Vec(cid))
     }
 
     /// Creates a new connection ID from the given slice.
     #[inline]
+    #[must_use]
     pub const fn from_ref(cid: &'a [u8]) -> Self {
         Self(ConnectionIdInner::Ref(cid))
     }
 
     /// Returns a new owning connection ID from the given existing one.
     #[inline]
+    #[must_use]
     pub fn into_owned(self) -> ConnectionId<'static> {
         ConnectionId::from_vec(self.into())
     }
