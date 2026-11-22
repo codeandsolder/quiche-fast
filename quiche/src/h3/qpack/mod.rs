@@ -112,8 +112,8 @@ impl From<octets::BufferTooShortError> for Error {
 
 #[cfg(test)]
 mod tests {
-    use crate::h3::qpack::Error::HeaderListTooLarge;
     use crate::h3;
+    use crate::h3::qpack::Error::HeaderListTooLarge;
     use crate::h3::NameValue;
 
     use super::*;
