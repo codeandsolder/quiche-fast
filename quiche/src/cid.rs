@@ -40,7 +40,7 @@ use smallvec::SmallVec;
 /// Used to calculate the cap for the queue of retired connection IDs for which
 /// a RETIRED_CONNECTION_ID frame have not been sent, as a multiple of
 /// `active_conn_id_limit` (see RFC 9000, section 5.1.2).
-const RETIRED_CONN_ID_LIMIT_MULTIPLIER: u64 = 3;
+const RETIRED_CONN_ID_LIMIT_MULTIPLIER: usize = 3;
 
 #[derive(Default)]
 struct BoundedConnectionIdSeqSet {
@@ -303,10 +303,8 @@ impl ConnectionIdentifiers {
             },
         );
 
-        // Guard against overflow.
-        let value =
-            (destination_conn_id_limit as u64) * RETIRED_CONN_ID_LIMIT_MULTIPLIER;
-        let size = cmp::min(usize::MAX as u64, value) as usize;
+        let size = destination_conn_id_limit
+            .saturating_mul(RETIRED_CONN_ID_LIMIT_MULTIPLIER);
         // Because we already inserted the initial SCID.
         let next_scid_seq = 1;
         ConnectionIdentifiers {
@@ -332,6 +330,14 @@ impl ConnectionIdentifiers {
             // Connection IDs when the host wants to force their renewal.
             self.scids.resize(2 * v - 1);
         }
+    }
+
+    /// Remaining source-ID slots, respecting the actual rotation capacity
+    /// and the application's local active-ID limit.
+    pub fn scids_left(&self, local_limit: u64) -> usize {
+        self.source_conn_id_limit
+            .min(usize::try_from(local_limit).unwrap_or(usize::MAX))
+            .saturating_sub(self.active_source_cids())
     }
 
     /// Gets the destination Connection ID associated with the provided sequence
@@ -853,6 +859,27 @@ impl ConnectionIdentifiers {
 mod tests {
     use super::*;
     use crate::test_utils::create_cid_and_reset_token;
+
+    #[test]
+    fn large_connection_id_limits_do_not_overflow() {
+        let scid = ConnectionId::from_ref(b"initial");
+        let mut ids = ConnectionIdentifiers::new(usize::MAX, &scid, 0, None);
+        assert_eq!(ids.dcids.capacity, usize::MAX);
+        assert_eq!(ids.retire_dcid_seqs.capacity, usize::MAX);
+        // These are logical bounds, not eager allocation sizes.
+        assert_eq!(ids.dcids.len(), 1);
+        assert_eq!(ids.scids.len(), 1);
+        assert!(ids.retire_dcid_seqs.is_empty());
+
+        ids.set_source_conn_id_limit(u64::MAX);
+        assert_eq!(ids.scids_left(u64::MAX), usize::MAX / 2 - 1);
+        assert_eq!(ids.scids_left(3), 2);
+        assert_eq!(ids.scids_left(1), 0);
+
+        let (next, token) = create_cid_and_reset_token(16);
+        assert_eq!(ids.new_scid(next, Some(token), true, None, false), Ok(1));
+        assert_eq!(ids.scids_left(u64::MAX), usize::MAX / 2 - 2);
+    }
 
     #[test]
     fn ids_new_scids() {

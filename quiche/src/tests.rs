@@ -7191,6 +7191,31 @@ fn tx_cap_factor(#[values(true, false)] discard: bool) {
 }
 
 #[rstest]
+fn capacity_factor_respects_connection_flow_credit(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(0.5, 1.0, 2.0, f64::MAX)] factor: f64,
+) {
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_initial_max_data(30);
+    config.set_initial_max_stream_data_bidi_remote(100);
+    config.set_initial_max_stream_data_bidi_local(100);
+    config.set_send_capacity_factor(factor);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    pipe.handshake().unwrap();
+    let accepted = if factor < 1.0 { 15 } else { 30 };
+    assert_eq!(pipe.client.stream_send(0, &[42; 40], false), Ok(accepted));
+    assert_eq!(pipe.client.tx_data, accepted as u64);
+    assert_eq!(pipe.client.stream_capacity(0), Ok(0));
+    assert_eq!(pipe.client.stream_send(4, b"x", false), Err(Error::Done));
+    assert_eq!(pipe.client.blocked_limit, Some(30));
+    pipe.advance().unwrap();
+    let mut out = [0; 40];
+    assert_eq!(pipe.server.stream_recv(0, &mut out), Ok((accepted, false)));
+    assert_eq!(&out[..accepted], &[42; 30][..accepted]);
+    assert!(pipe.client.tx_data <= pipe.client.max_tx_data);
+}
+
+#[rstest]
 fn client_rst_stream_while_bytes_in_flight(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     #[values(false, true)] use_stop_sending: bool,
@@ -11439,6 +11464,30 @@ fn connection_id_retire_limit(
             reason: Vec::new(),
         })
     );
+}
+
+#[rstest]
+fn large_advertised_connection_id_limit_preserves_slots(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    const LIMIT: u64 = 1_u64 << 32;
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_active_connection_id_limit(LIMIT);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    pipe.handshake().unwrap();
+    let limit = usize::try_from(LIMIT)
+        .unwrap_or(usize::MAX)
+        .min(usize::MAX / 2);
+    assert_eq!(
+        pipe.client.peer_transport_params.active_conn_id_limit,
+        LIMIT
+    );
+    assert_eq!(pipe.client.scids_left(), limit - 1);
+    let (scid, token) = test_utils::create_cid_and_reset_token(16);
+    assert_eq!(pipe.client.new_scid(&scid, token, false), Ok(1));
+    pipe.advance().unwrap();
+    assert_eq!(pipe.client.scids_left(), limit - 2);
+    assert_eq!(pipe.server.available_dcids(), 1);
 }
 
 #[rstest]

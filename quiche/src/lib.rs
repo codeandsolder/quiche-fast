@@ -906,6 +906,8 @@ impl Config {
 
     /// Sets the send capacity factor.
     ///
+    /// Values above one allow buffering beyond the congestion window, but
+    /// cannot increase the peer's connection-level flow-control credit.
     /// The default value is `1`.
     pub fn set_send_capacity_factor(&mut self, v: f64) {
         self.tx_cap_factor = v;
@@ -2048,17 +2050,17 @@ impl<F: BufFactory> Connection<F> {
         // Assume clients validate the server's address implicitly.
         path.peer_verified_local_address = is_server;
 
-        // Do not allocate more than the number of active CIDs.
-        let paths = path::PathMap::new(
-            path,
-            config.local_transport_params.active_conn_id_limit as usize,
-            is_server,
-        );
+        // Do not allocate more than the number of active CIDs. A wire limit
+        // above the addressable collection size cannot constrain it further.
+        let active_conn_id_limit =
+            usize::try_from(config.local_transport_params.active_conn_id_limit)
+                .unwrap_or(usize::MAX);
+        let paths = path::PathMap::new(path, active_conn_id_limit, is_server);
 
         let active_path_id = paths.get_active_path_id()?;
 
         let ids = cid::ConnectionIdentifiers::new(
-            config.local_transport_params.active_conn_id_limit as usize,
+            active_conn_id_limit,
             scid,
             active_path_id,
             reset_token,
@@ -6200,7 +6202,7 @@ impl<F: BufFactory> Connection<F> {
         //
         // Note that this is separate from "send capacity" as that also takes
         // congestion control into consideration.
-        if self.max_tx_data - self.tx_data < len as u64 {
+        if self.max_tx_data.saturating_sub(self.tx_data) < len as u64 {
             self.blocked_limit = Some(self.max_tx_data);
         }
 
@@ -6716,7 +6718,7 @@ impl<F: BufFactory> Connection<F> {
 
         let priority_key = Arc::clone(&stream.priority_key);
 
-        if self.max_tx_data - self.tx_data < len as u64 {
+        if self.max_tx_data.saturating_sub(self.tx_data) < len as u64 {
             self.blocked_limit = Some(self.max_tx_data);
         }
 
@@ -7561,7 +7563,8 @@ impl<F: BufFactory> Connection<F> {
     /// provided to the peer without exceeding the limit it advertised.
     ///
     /// The limit is the minimum of the locally configured active connection
-    /// ID limit and the one sent by the peer.
+    /// ID limit and the peer's limit, subject to the addressable size of the
+    /// internal connection ID collection.
     ///
     /// Returns `0` when the peer's limit is already reached or temporarily
     /// exceeded (e.g. during a SCID rotation where a retirement is in
@@ -7574,12 +7577,8 @@ impl<F: BufFactory> Connection<F> {
     /// [`peer_active_conn_id_limit`]: struct.Stats.html#structfield.peer_active_conn_id_limit
     #[inline]
     pub fn scids_left(&self) -> usize {
-        let max_active_source_cids = cmp::min(
-            self.peer_transport_params.active_conn_id_limit,
-            self.local_transport_params.active_conn_id_limit,
-        ) as usize;
-
-        max_active_source_cids.saturating_sub(self.active_scids())
+        self.ids
+            .scids_left(self.local_transport_params.active_conn_id_limit)
     }
 
     /// Requests the retirement of the destination Connection ID used by the
@@ -9295,9 +9294,14 @@ impl<F: BufFactory> Connection<F> {
             Err(_) => 0,
         };
 
-        let cap =
-            cmp::min(cwin_available, self.max_tx_data - self.tx_data) as usize;
-        self.tx_cap = (cap as f64 * self.tx_cap_factor).ceil() as usize;
+        let flow_credit = self.max_tx_data.saturating_sub(self.tx_data);
+        let cap = cmp::min(cwin_available, flow_credit) as usize;
+        let scaled = (cap as f64 * self.tx_cap_factor).ceil() as usize;
+
+        // The capacity factor can relax congestion buffering, but it must
+        // never permit sending beyond the peer's hard flow-control limit.
+        self.tx_cap =
+            scaled.min(usize::try_from(flow_credit).unwrap_or(usize::MAX));
     }
 
     fn delivery_rate_check_if_app_limited(&self) -> bool {
