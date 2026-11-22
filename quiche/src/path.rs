@@ -580,7 +580,7 @@ impl Path {
         let pmtu = match self
             .pmtud
             .as_ref()
-            .map(super::pmtud::Pmtud::get_current_mtu)
+            .map(pmtud::Pmtud::get_current_mtu)
         {
             Some(v) => v,
 
