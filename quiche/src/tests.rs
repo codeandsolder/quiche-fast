@@ -5510,7 +5510,11 @@ fn invalid_initial_payload(
     let frames = [frame::Frame::Padding {
         len: MIN_CLIENT_INITIAL_LEN,
     }];
-    let payload_len = frames.iter().map(frame::Frame::wire_len).sum::<usize>();
+    let payload_len = frames
+        .iter()
+        .map(frame::Frame::wire_len)
+        .sum::<Result<usize>>()
+        .unwrap();
     let crypto_ctx = &mut pipe.client.crypto_ctx[epoch];
     let aead = crypto_ctx.crypto_seal.as_mut().unwrap();
 
@@ -13546,7 +13550,11 @@ fn challenge_no_cids(
         key_phase: pipe.client.key_phase,
     };
     hdr.to_bytes(&mut b).expect("encode header");
-    let payload_len: usize = frames.iter().map(|f| f.wire_len().unwrap()).sum();
+    let payload_len: usize = frames
+        .iter()
+        .map(frame::Frame::wire_len)
+        .sum::<Result<usize>>()
+        .unwrap();
     b.put_u32(pn as u32).expect("put pn");
 
     let payload_offset = b.off();
