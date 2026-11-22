@@ -95,6 +95,22 @@ const BITS_NANOS_PER_BYTE_U128: u128 = BITS_NANOS_PER_BYTE as u128;
 const U64_MAX_U128: u128 = u64::MAX as u128;
 
 impl Bandwidth {
+    /// Reduce a measured bandwidth in proportion to the bytes lost from
+    /// the corresponding flight or congestion window.
+    pub fn reduce_by_loss(self, total_bytes: usize, lost_bytes: usize) -> Self {
+        let total = u64::try_from(total_bytes).unwrap_or(u64::MAX);
+        let remaining = u64::try_from(total_bytes.saturating_sub(lost_bytes))
+            .unwrap_or(u64::MAX);
+        Self {
+            bits_per_second: crate::scale::scale_ratio_u64(
+                self.bits_per_second,
+                remaining,
+                total,
+                crate::scale::Rounding::Nearest,
+            ),
+        }
+    }
+
     pub const fn from_bytes_and_time_delta(
         bytes: u64, time_delta: Duration,
     ) -> Self {
@@ -170,7 +186,7 @@ impl Bandwidth {
     /// Saturates to `Duration::from_nanos(u64::MAX)` if the
     /// calculation would overflow.
     #[inline]
-    pub fn transfer_time(&self, bytes: u64) -> Duration {
+    pub fn transfer_time(self, bytes: u64) -> Duration {
         let bps = self.bits_per_second;
 
         if bytes == 0 || bps == 0 || bps == u64::MAX {
@@ -236,19 +252,53 @@ impl Bandwidth {
 
 impl std::fmt::Debug for Bandwidth {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self.bits_per_second {
-            x if x < 1_000_000 => write!(f, "{:.2} Kbps", x as f64 / 1_000.),
-            x if x < 1_000_000_000 => {
-                write!(f, "{:.2} Mbps", x as f64 / 1_000_000.)
-            },
-            x => write!(f, "{:.2} Gbps", x as f64 / 1_000_000_000.),
-        }
+        let (divisor, unit) = match self.bits_per_second {
+            x if x < 1_000_000 => (1_000, "Kbps"),
+            x if x < 1_000_000_000 => (1_000_000, "Mbps"),
+            _ => (1_000_000_000, "Gbps"),
+        };
+        // Divide before multiplying the remainder, so even the maximum
+        // encoded bandwidth formats exactly without overflow.
+        let whole = self.bits_per_second / divisor;
+        let fraction = self.bits_per_second % divisor * 100;
+        let cents = fraction / divisor;
+        let remainder = fraction % divisor;
+        let round = remainder * 2 > divisor ||
+            (remainder * 2 == divisor && cents % 2 == 1);
+        let cents = cents + u64::from(round);
+        write!(f, "{}.{:02} {unit}", whole + cents / 100, cents % 100)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loss_ratio_and_display_keep_full_width_rates() {
+        let bw = Bandwidth {
+            bits_per_second: u64::MAX - 1,
+        };
+        assert_eq!(bw.reduce_by_loss(100, 0), bw);
+        assert_eq!(bw.reduce_by_loss(2, 1).bits_per_second, (u64::MAX - 1) / 2);
+        assert_eq!(bw.reduce_by_loss(100, 101), Bandwidth::zero());
+        assert_eq!(bw.reduce_by_loss(0, 0), Bandwidth::zero());
+        assert_eq!(format!("{bw:?}"), "18446744073.71 Gbps");
+        for (bps, display) in [
+            (994, "0.99 Kbps"),
+            (995, "1.00 Kbps"),
+            (985, "0.98 Kbps"),
+            (999_999, "1000.00 Kbps"),
+            (1_000_000, "1.00 Mbps"),
+        ] {
+            assert_eq!(
+                format!("{:?}", Bandwidth {
+                    bits_per_second: bps
+                }),
+                display
+            );
+        }
+    }
 
     #[test]
     fn constructors() {
@@ -600,7 +650,7 @@ mod tests {
             format!("{:?}", Bandwidth {
                 bits_per_second: 12345
             }),
-            "12.35 Kbps"
+            "12.34 Kbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {

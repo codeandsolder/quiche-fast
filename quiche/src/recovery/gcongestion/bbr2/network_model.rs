@@ -522,30 +522,28 @@ impl BBRv2NetworkModel {
                 // saved when entering 'recovery', but this BBRv2
                 // implementation doesn't have recovery defined.
                 self.bandwidth_lo = self.bandwidth_lo.map(|b| {
-                    b * ((effective_inflight as f64 -
-                        congestion_event.bytes_lost as f64) /
-                        effective_inflight as f64)
+                    b.reduce_by_loss(
+                        effective_inflight,
+                        congestion_event.bytes_lost,
+                    )
                 });
             },
             BwLoMode::CwndReduction => {
                 self.bandwidth_lo = self.bandwidth_lo.map(|b| {
-                    b * ((congestion_event.prior_cwnd as f64 -
-                        congestion_event.bytes_lost as f64) /
-                        congestion_event.prior_cwnd as f64)
+                    b.reduce_by_loss(
+                        congestion_event.prior_cwnd,
+                        congestion_event.bytes_lost,
+                    )
                 });
             },
         }
 
-        let mut last_bandwidth = self.bandwidth_latest;
-        // sample_max_bandwidth will be None if the loss is triggered by a timer
-        // expiring. Ideally we'd use the most recent bandwidth sample,
-        // but bandwidth_latest is safer than None.
-        if let Some(sample_max_bandwidth) = congestion_event.sample_max_bandwidth
-        {
-            // bandwidth_latest is the max bandwidth for the round, but to allow
-            // fast, conservation style response to loss, use the last sample.
-            last_bandwidth = sample_max_bandwidth;
-        }
+        // Timer-triggered losses may not contain a sample; fall back to
+        // the round maximum in that case. A real sample permits a fast,
+        // conservation-style response to loss.
+        let last_bandwidth = congestion_event
+            .sample_max_bandwidth
+            .unwrap_or(self.bandwidth_latest);
         if self.pacing_gain > params.full_bw_threshold {
             // STARTUP applies `pacing_gain` to `bandwidth_lo`. Remove that
             // factor so pacing can decrease without falling below
