@@ -100,11 +100,15 @@ impl Hystart {
     }
 
     pub const fn css_start_time(&self) -> Option<Instant> {
-        self.css_start_time
+        if self.enabled {
+            self.css_start_time
+        } else {
+            None
+        }
     }
 
     pub const fn in_css(&self) -> bool {
-        self.enabled && self.css_start_time().is_some()
+        self.css_start_time().is_some()
     }
 
     pub const fn start_round(&mut self, pkt_num: u64) {
