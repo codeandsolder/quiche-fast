@@ -101,21 +101,17 @@ impl RttStats {
             ack_delay = ack_delay.min(self.max_ack_delay);
         }
 
-        // Adjust for acknowledgment delay if plausible.
-        let mut adjusted_rtt = latest_rtt;
-        if latest_rtt >= *self.min_rtt + ack_delay {
-            adjusted_rtt = latest_rtt - ack_delay;
-        }
+        // Adjust for acknowledgment delay only when the result is plausible.
+        let adjusted_rtt = latest_rtt
+            .checked_sub(ack_delay)
+            .filter(|adjusted| *adjusted >= *self.min_rtt)
+            .unwrap_or(latest_rtt);
 
-        self.rttvar = self.rttvar * 3 / 4 +
-            Duration::from_nanos(
-                self.smoothed_rtt
-                    .as_nanos()
-                    .abs_diff(adjusted_rtt.as_nanos()) as u64 /
-                    4,
-            );
+        self.rttvar = weighted_part::<3, 4>(self.rttvar) +
+            self.smoothed_rtt.abs_diff(adjusted_rtt) / 4;
 
-        self.smoothed_rtt = self.smoothed_rtt * 7 / 8 + adjusted_rtt / 8;
+        self.smoothed_rtt =
+            weighted_part::<7, 8>(self.smoothed_rtt) + adjusted_rtt / 8;
     }
 
     pub(crate) const fn rtt(&self) -> Duration {
@@ -153,9 +149,66 @@ impl RttStats {
     }
 
     pub(crate) fn loss_delay(&self, time_thresh: f64) -> Duration {
-        self.latest_rtt
-            .max(self.smoothed_rtt)
-            .mul_f64(time_thresh)
+        let rtt = self.latest_rtt.max(self.smoothed_rtt);
+        Duration::try_from_secs_f64(time_thresh * rtt.as_secs_f64())
+            .unwrap_or(Duration::MAX)
             .max(GRANULARITY)
+    }
+}
+
+/// Computes floor(duration * NUM / DEN) without overflowing an intermediate
+/// Duration. In the ordinary RTT range the checked multiplication is enough;
+/// the quotient/remainder decomposition also handles Duration::MAX exactly.
+fn weighted_part<const NUM: u32, const DEN: u32>(duration: Duration) -> Duration {
+    const { assert!(DEN > 0 && NUM <= DEN) };
+    if let Some(scaled) = duration.checked_mul(NUM) {
+        return scaled / DEN;
+    }
+
+    let quotient = duration / DEN;
+    let remainder = duration - quotient * DEN;
+    quotient * NUM + remainder * NUM / DEN
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn weighted_duration_preserves_full_width_and_rounding() {
+        for duration in [
+            Duration::ZERO,
+            Duration::from_nanos(7),
+            Duration::from_micros(312_345),
+            Duration::from_secs(u64::MAX / 2),
+            Duration::MAX,
+        ] {
+            let nanos = duration.as_nanos();
+            assert_eq!(weighted_part::<3, 4>(duration).as_nanos(), nanos * 3 / 4);
+            assert_eq!(weighted_part::<7, 8>(duration).as_nanos(), nanos * 7 / 8);
+        }
+    }
+
+    #[test]
+    fn rtt_update_handles_extreme_samples_and_ack_delay() {
+        let now = Instant::now();
+        let first = Duration::from_secs(u64::MAX / 2);
+        let second = Duration::MAX;
+        let mut stats = RttStats::new(first, Duration::MAX);
+        stats.update_rtt(first, Duration::ZERO, now, false);
+        stats.update_rtt(second, Duration::MAX, now, true);
+
+        // The ACK delay is implausible: subtracting it would take the sample
+        // below min_rtt. Variance must retain all bits of the full-width delta.
+        assert_eq!(
+            stats.smoothed_rtt.as_nanos(),
+            first.as_nanos() * 7 / 8 + second.as_nanos() / 8
+        );
+        assert_eq!(
+            stats.rttvar.as_nanos(),
+            (first / 2).as_nanos() * 3 / 4 + (second - first).as_nanos() / 4
+        );
+        assert_eq!(stats.loss_delay(1.125), Duration::MAX);
+        assert_eq!(stats.probe_timeout(), Duration::MAX);
     }
 }

@@ -513,10 +513,11 @@ impl LegacyRecovery {
         }
 
         // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.1
-        let duration = (self.rtt_stats.smoothed_rtt +
-            cmp::max(self.rtt_stats.rttvar * 4, GRANULARITY) +
-            self.rtt_stats.max_ack_delay) *
-            PERSISTENT_CONGESTION_THRESHOLD;
+        let duration = self
+            .rtt_stats
+            .probe_timeout()
+            .saturating_add(self.rtt_stats.max_ack_delay)
+            .saturating_mul(PERSISTENT_CONGESTION_THRESHOLD);
 
         if last.saturating_duration_since(first) <= duration {
             return false;
@@ -563,8 +564,7 @@ impl LegacyRecovery {
     fn detect_lost_packets(
         &mut self, epoch: Epoch, now: Instant, trace_id: &str,
     ) -> (usize, usize) {
-        let loss_delay = cmp::max(self.rtt_stats.latest_rtt, self.rtt())
-            .mul_f64(self.time_thresh);
+        let loss_delay = self.rtt_stats.loss_delay(self.time_thresh);
 
         let loss = self.epochs[epoch].detect_lost_packets(
             loss_delay,
