@@ -1969,17 +1969,18 @@ mod tests {
         assert!(stream.recv.write(buf).is_ok());
         assert!(!stream.recv.is_fin());
 
-        stream.send.ack(6, 4);
+        assert_eq!(stream.send.emit(&mut [0; 10][..]), (10, true));
+        stream.send.ack_and_drop(6, 4);
         assert!(!stream.send.is_complete());
 
         let mut buf = [0; 2];
         assert_eq!(stream.recv.emit(&mut buf), Ok((2, false)));
         assert!(!stream.recv.is_fin());
 
-        stream.send.ack(1, 5);
+        stream.send.ack_and_drop(1, 5);
         assert!(!stream.send.is_complete());
 
-        stream.send.ack(0, 1);
+        stream.send.ack_and_drop(0, 1);
         assert!(!stream.send.is_complete());
 
         stream.send.ack_fin();
@@ -2055,13 +2056,12 @@ mod tests {
     #[rstest]
     fn send_emit(#[values(false, true)] acknowledge: bool) {
         let mut stream = four_chunk_stream(0);
-        // Schedule ACKs between emissions as well as after exhaustion. Out-of-
-        // order ACKs must not advance the emission cursor; only contiguous
-        // prefixes release buffered ranges.
+        // Schedule ACKs between emissions as well as after exhaustion.
+        // Sparse ACKs retire data without altering the pending send cursor.
         for (capacity, data, fin, next_off, ack) in [
             (4, b"hell".as_slice(), false, 4, None),
             (4, b"owor", false, 8, Some((0, 5, 3))),
-            (2, b"ld", false, 10, Some((7, 5, 3))),
+            (2, b"ld", false, 10, Some((7, 3, 3))),
             (1, b"o", false, 11, None),
             (5, b"llehd", false, 16, Some((5, 7, 2))),
             (5, b"lrow", true, 20, None),
@@ -2101,9 +2101,9 @@ mod tests {
 
         stream.send.ack_and_drop(7, 2);
 
-        stream.send.retransmit(8, 2);
+        assert_eq!(stream.send.retransmit(8, 2), 1);
 
-        assert_stream_emits(&mut stream, 2, b"ld", false, 10);
+        assert_stream_emits(&mut stream, 2, b"d", false, 10);
 
         assert_stream_emits(&mut stream, 1, b"o", false, 11);
 
@@ -2119,17 +2119,14 @@ mod tests {
 
         assert_stream_emits(&mut stream, 5, b"", false, 20);
 
-        for acknowledge in [false, true] {
-            if acknowledge {
-                stream.send.ack_and_drop(12, 7);
-            }
-            stream.send.retransmit(7, 12);
-            for (data, next_off) in
-                [(b"rldol".as_slice(), 12), (b"lehdl", 17), (b"ro", 20)]
-            {
-                assert_stream_emits(&mut stream, 5, data, false, next_off);
-            }
+        assert_eq!(stream.send.retransmit(7, 12), 10);
+        for (data, next_off) in [(b"dolle".as_slice(), 14), (b"hdlro", 20)] {
+            assert_stream_emits(&mut stream, 5, data, false, next_off);
         }
+
+        stream.send.ack_and_drop(12, 7);
+        assert_eq!(stream.send.retransmit(7, 12), 3);
+        assert_stream_emits(&mut stream, 5, b"dol", false, 20);
     }
 
     #[test]
