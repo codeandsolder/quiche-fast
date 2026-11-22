@@ -1059,7 +1059,7 @@ impl Connection {
 
             next_uni_stream_id: initial_uni_stream_id,
 
-            streams: HashMap::default(),
+            streams: crate::stream::StreamIdHashMap::default(),
 
             local_settings: ConnectionSettings {
                 max_field_section_size: config.max_field_section_size,
