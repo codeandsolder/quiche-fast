@@ -2146,7 +2146,7 @@ mod tests {
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.empty_fin_next());
 
-        let mut empty = [];
+        let mut empty = [0_u8; 0];
         assert_eq!(stream.send.emit(&mut empty[..]), (0, true));
     }
 
