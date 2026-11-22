@@ -42,6 +42,7 @@ use super::mode::CyclePhase;
 use super::mode::Mode;
 use super::mode::ModeImpl;
 use super::network_model::BBRv2NetworkModel;
+#[cfg(test)]
 use super::network_model::DEFAULT_MSS;
 use super::BBRv2CongestionEvent;
 use super::BwLoMode;
@@ -265,14 +266,14 @@ impl ProbeBW {
         self.model.restart_round_early();
     }
 
-    fn enter_probe_up(&mut self, now: Instant, cwnd: usize) {
+    fn enter_probe_up(&mut self, now: Instant, cwnd: usize, mss: usize) {
         let cycle = &mut self.cycle;
 
         cycle.phase = CyclePhase::Up;
         cycle.phase_start_time = now;
         cycle.rounds_in_phase = 0;
         cycle.is_sample_from_probing = true;
-        self.raise_inflight_high_slope(cwnd);
+        self.raise_inflight_high_slope(cwnd, mss);
         self.model.restart_round_early();
     }
 
@@ -375,6 +376,7 @@ impl ProbeBW {
             self.enter_probe_up(
                 congestion_event.event_time,
                 congestion_event.prior_cwnd,
+                congestion_event.max_datagram_size,
             );
         }
     }
@@ -409,8 +411,11 @@ impl ProbeBW {
         } else if self.cycle.rounds_in_phase > 0 {
             if params.max_probe_up_queue_rounds > 0 {
                 if congestion_event.end_of_round_trip {
-                    self.model
-                        .check_persistent_queue(params.full_bw_threshold, params);
+                    self.model.check_persistent_queue(
+                        params.full_bw_threshold,
+                        congestion_event.max_datagram_size,
+                        params,
+                    );
                     if self.model.rounds_with_queueing() >=
                         params.max_probe_up_queue_rounds
                     {
@@ -419,7 +424,7 @@ impl ProbeBW {
                 }
             } else {
                 let mut queuing_threshold_extra_bytes =
-                    self.model.queueing_threshold_extra_bytes();
+                    congestion_event.max_datagram_size.saturating_mul(2);
                 if params.add_ack_height_to_queueing_threshold {
                     queuing_threshold_extra_bytes = queuing_threshold_extra_bytes
                         .saturating_add(self.model.max_ack_height());
@@ -513,7 +518,7 @@ impl ProbeBW {
             return AdaptUpperBoundsResult::AdaptedOk;
         }
 
-        if self.model.inflight_hi() == self.model.inflight_hi_default() {
+        if !self.model.has_inflight_hi() {
             return AdaptUpperBoundsResult::NotAdaptedInflightHighNotSet;
         }
 
@@ -539,7 +544,7 @@ impl ProbeBW {
 
     fn is_time_to_probe_for_reno_coexistence(
         &self, target_bytes_inflight: usize, probe_wait_fraction: f64,
-        _congestion_event: &BBRv2CongestionEvent, params: &Params,
+        congestion_event: &BBRv2CongestionEvent, params: &Params,
     ) -> bool {
         if !params.enable_reno_coexistence {
             return false;
@@ -550,7 +555,7 @@ impl ProbeBW {
             let reno_rounds = usize::try_from(crate::scale::scale_gain_div_u64(
                 u64::try_from(target_bytes_inflight).unwrap_or(u64::MAX),
                 f64::from(params.probe_bw_probe_reno_gain),
-                DEFAULT_MSS as u64,
+                congestion_event.max_datagram_size as u64,
             ))
             .unwrap_or(usize::MAX);
             rounds = reno_rounds.min(rounds);
@@ -583,14 +588,14 @@ impl ProbeBW {
         self.has_phase_lasted(self.model.min_rtt(), congestion_event)
     }
 
-    fn raise_inflight_high_slope(&mut self, cwnd: usize) {
+    fn raise_inflight_high_slope(&mut self, cwnd: usize, mss: usize) {
         let growth_this_round = 1usize << self.cycle.probe_up_rounds;
         // Capping rounds at 30 limits `growth_this_round` to 1G and keeps
         // `probe_up_bytes` near one MSS. This grows `inflight_hi` by about one
         // packet per ACK.
         self.cycle.probe_up_rounds = self.cycle.probe_up_rounds.add(1).min(30);
         let probe_up_bytes = cwnd / growth_this_round;
-        self.cycle.probe_up_bytes = Some(probe_up_bytes.max(DEFAULT_MSS));
+        self.cycle.probe_up_bytes = Some(probe_up_bytes.max(mss.max(1)));
     }
 
     fn probe_inflight_high_upward(
@@ -642,10 +647,9 @@ impl ProbeBW {
                 )
             };
             self.cycle.probe_up_acked = remainder;
-            let new_inflight_hi = self
-                .model
-                .inflight_hi()
-                .saturating_add(delta.saturating_mul(DEFAULT_MSS));
+            let new_inflight_hi = self.model.inflight_hi().saturating_add(
+                delta.saturating_mul(congestion_event.max_datagram_size),
+            );
             if new_inflight_hi > self.model.inflight_hi() {
                 self.model.set_inflight_hi(new_inflight_hi);
             }
@@ -655,7 +659,10 @@ impl ProbeBW {
         }
 
         if congestion_event.end_of_round_trip {
-            self.raise_inflight_high_slope(congestion_event.prior_cwnd);
+            self.raise_inflight_high_slope(
+                congestion_event.prior_cwnd,
+                congestion_event.max_datagram_size,
+            );
         }
     }
 
@@ -721,7 +728,7 @@ mod tests {
         let cycle = Cycle::default();
         let mut probe_bw = ProbeBW { model, cycle };
         probe_bw.model.set_inflight_hi(100_000);
-        probe_bw.raise_inflight_high_slope(100_000);
+        probe_bw.raise_inflight_high_slope(100_000, DEFAULT_MSS);
         assert_eq!(probe_bw.cycle.probe_up_rounds, 1);
         assert_eq!(probe_bw.cycle.probe_up_bytes, Some(100_000));
 
@@ -798,6 +805,37 @@ mod datagram_cwnd_tests {
     }
 
     #[test]
+    fn probe_calculations_use_current_path_mss() {
+        let mut params = DEFAULT_PARAMS;
+        params.probe_bw_probe_reno_gain = 1.0;
+        params.enable_reno_coexistence = true;
+        params.probe_bw_probe_max_rounds = 100;
+        let now = Instant::now();
+        let mut probe = ProbeBW {
+            model: BBRv2NetworkModel::new(&params, Duration::from_millis(60)),
+            cycle: Cycle {
+                rounds_since_probe: 10,
+                probe_up_rounds: 30,
+                ..Cycle::default()
+            },
+        };
+        for mss in [1200, 1400, 9000] {
+            let cwnd = 10 * mss;
+            let event = BBRv2CongestionEvent::new(now, cwnd, cwnd, true, mss);
+            probe.raise_inflight_high_slope(cwnd, mss);
+            assert_eq!(probe.cycle.probe_up_bytes, Some(mss));
+            assert!(probe.is_time_to_probe_for_reno_coexistence(
+                cwnd, 1.0, &event, &params
+            ));
+            probe.cycle.rounds_since_probe = 9;
+            assert!(!probe.is_time_to_probe_for_reno_coexistence(
+                cwnd, 1.0, &event, &params
+            ));
+            probe.cycle.rounds_since_probe = 10;
+        }
+    }
+
+    #[test]
     fn probe_up_preserves_ack_remainder_at_width_limit() {
         let mut probe = ProbeBW {
             model: BBRv2NetworkModel::new(
@@ -836,7 +874,11 @@ mod datagram_cwnd_tests {
                 10 * mss,
                 10 * mss - 50
             );
-            assert!(after > before, "ProbeUp wedged with packet size {mss}");
+            assert_eq!(
+                after,
+                before + mss,
+                "ProbeUp must grow by one current-sized packet"
+            );
         }
     }
 

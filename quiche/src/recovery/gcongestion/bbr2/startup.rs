@@ -83,14 +83,18 @@ impl ModeImpl for Startup {
             ));
         }
 
-        let check_persisten_queue =
+        let check_persistent_queue =
             params.max_startup_queue_rounds > 0 && !has_bandwidth_growth;
-        if check_persisten_queue {
+        if check_persistent_queue {
             // https://github.com/google/quiche/blob/27eca0257490df89d2bd2c2a8bcea15565e7831c/quiche/quic/core/congestion_control/bbr2_startup.cc#L60-L62
             // 1.75 is less than the 2x CWND gain, but substantially more than
             // 1.25x, the minimum bandwidth increase expected during
             // STARTUP.
-            self.model.check_persistent_queue(1.75, params);
+            self.model.check_persistent_queue(
+                1.75,
+                congestion_event.max_datagram_size,
+                params,
+            );
             if self.model.full_bandwidth_reached() {
                 recovery_stats.set_startup_exit(StartupExit::new(
                     cwnd,
