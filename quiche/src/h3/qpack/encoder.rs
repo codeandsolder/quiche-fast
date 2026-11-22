@@ -24,6 +24,9 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use super::prefix_mask;
+use super::string_huffman_bit;
+use super::Error;
 use super::Result;
 
 use crate::h3::NameValue;
@@ -118,32 +121,31 @@ fn lookup_static<T: NameValue>(h: &T) -> Option<(u64, bool)> {
     None
 }
 
+/// Encodes an unsigned integer with a 1-8 bit QPACK prefix.
+/// Representation flags must not overlap the integer prefix.
 pub fn encode_int(
     mut v: u64, first: u8, prefix: usize, b: &mut octets::OctetsMut,
 ) -> Result<()> {
-    let mask = 2u64.pow(prefix as u32) - 1;
+    let mask = prefix_mask(prefix)?;
+    if first & mask != 0 {
+        return Err(Error::InvalidPrefix);
+    }
 
-    // Encode I on N bits.
-    if v < mask {
-        b.put_u8(first | v as u8)?;
+    // I fits in the prefix without a continuation.
+    if v < u64::from(mask) {
+        b.put_u8(first | v.to_le_bytes()[0])?;
         return Ok(());
     }
 
-    // Encode (2^N - 1) on N bits.
-    b.put_u8(first | mask as u8)?;
+    b.put_u8(first | mask)?;
+    v -= u64::from(mask);
 
-    v -= mask;
-
+    // Continuations consist of seven low-order bits plus the continuation flag.
     while v >= 128 {
-        // Encode (I % 128 + 128) on 8 bits.
-        b.put_u8((v % 128 + 128) as u8)?;
-
+        b.put_u8((v.to_le_bytes()[0] & 0x7f) | 0x80)?;
         v >>= 7;
     }
-
-    // Encode I on 8 bits.
-    b.put_u8(v as u8)?;
-
+    b.put_u8(v.to_le_bytes()[0])?;
     Ok(())
 }
 
@@ -151,11 +153,16 @@ pub fn encode_int(
 pub fn encode_str<const LOWER_CASE: bool>(
     v: &[u8], first: u8, prefix: usize, b: &mut octets::OctetsMut,
 ) -> Result<()> {
+    let huffman_bit = string_huffman_bit(prefix)?;
+    if first & (huffman_bit | prefix_mask(prefix)?) != 0 {
+        return Err(Error::InvalidPrefix);
+    }
+
     // Huffman-encoding generally saves space but in some cases it doesn't, for
     // those just encode the literal string.
     match octets::huffman_encoding_len::<LOWER_CASE>(v) {
         Ok(len) => {
-            encode_int(len as u64, first | (1 << prefix), prefix, b)?;
+            encode_int(len as u64, first | huffman_bit, prefix, b)?;
             b.put_huffman_encoded::<LOWER_CASE>(v)?;
         },
 
