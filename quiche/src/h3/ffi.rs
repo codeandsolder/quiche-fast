@@ -28,7 +28,6 @@
 use std::convert::TryFrom;
 
 use std::ptr;
-use std::slice;
 
 use libc::c_int;
 use libc::c_void;
@@ -42,123 +41,11 @@ use crate::h3::Priority;
 
 const H3_FFI_ERR_INVALID_ARGUMENT: ssize_t = -21;
 
-macro_rules! ffi_ref {
-    ($ptr:expr) => {{
-        // SAFETY: C callers may pass null. Non-null pointers retain the same
-        // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { $ptr.as_ref() } {
-            Some(value) => value,
-            None => return,
-        }
-    }};
-    ($ptr:expr, $ret:expr) => {{
-        // SAFETY: C callers may pass null. Non-null pointers retain the same
-        // validity/alignment/lifetime requirements as the public C API.
-        match unsafe { $ptr.as_ref() } {
-            Some(value) => value,
-            None => return $ret,
-        }
-    }};
-}
-
-macro_rules! ffi_mut {
-    ($ptr:expr) => {{
-        // SAFETY: C callers may pass null. Non-null pointers retain the same
-        // validity/alignment/lifetime/exclusivity requirements as the public C
-        // API.
-        match unsafe { $ptr.as_mut() } {
-            Some(value) => value,
-            None => return,
-        }
-    }};
-    ($ptr:expr, $ret:expr) => {{
-        // SAFETY: C callers may pass null. Non-null pointers retain the same
-        // validity/alignment/lifetime/exclusivity requirements as the public
-        // C API.
-        match unsafe { $ptr.as_mut() } {
-            Some(value) => value,
-            None => return $ret,
-        }
-    }};
-}
-
-fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
-    if len == 0 {
-        return true;
-    }
-
-    if ptr.is_null() || !(ptr as usize).is_multiple_of(align_of::<T>()) {
-        return false;
-    }
-
-    size_of::<T>()
-        .checked_mul(len)
-        .is_some_and(|bytes| bytes <= isize::MAX as usize)
-}
-
-/// Builds a shared slice from a C pointer after validating null/alignment/size.
-///
-/// # Safety
-///
-/// For non-empty slices, \`ptr\` must still point to \`len\` initialized \`T\`
-/// values in one live allocation for the returned lifetime.
-unsafe fn ffi_slice_from_raw_parts<'a, T>(
-    ptr: *const T, len: usize,
-) -> Option<&'a [T]> {
-    if len == 0 {
-        return Some(unsafe {
-            slice::from_raw_parts(ptr::NonNull::<T>::dangling().as_ptr(), 0)
-        });
-    }
-
-    if !ffi_slice_layout_valid(ptr, len) {
-        return None;
-    }
-
-    Some(unsafe { slice::from_raw_parts(ptr, len) })
-}
-
-/// Builds a mutable slice from a C pointer after validating
-/// null/alignment/size.
-///
-/// # Safety
-///
-/// For non-empty slices, \`ptr\` must point to \`len\` initialized \`T\` values
-/// in one live allocation and be exclusively borrowed for the returned
-/// lifetime.
-unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
-    ptr: *mut T, len: usize,
-) -> Option<&'a mut [T]> {
-    if len == 0 {
-        return Some(unsafe {
-            slice::from_raw_parts_mut(ptr::NonNull::<T>::dangling().as_ptr(), 0)
-        });
-    }
-
-    if !ffi_slice_layout_valid(ptr.cast_const(), len) {
-        return None;
-    }
-
-    Some(unsafe { slice::from_raw_parts_mut(ptr, len) })
-}
-
-macro_rules! ffi_slice {
-    ($ptr:expr, $len:expr, $ret:expr) => {{
-        match unsafe { ffi_slice_from_raw_parts($ptr, $len) } {
-            Some(value) => value,
-            None => return $ret,
-        }
-    }};
-}
-
-macro_rules! ffi_slice_mut {
-    ($ptr:expr, $len:expr, $ret:expr) => {{
-        match unsafe { ffi_slice_from_raw_parts_mut($ptr, $len) } {
-            Some(value) => value,
-            None => return $ret,
-        }
-    }};
-}
+use crate::ffi::ffi_mut;
+use crate::ffi::ffi_ref;
+use crate::ffi::ffi_slice;
+use crate::ffi::ffi_slice_from_raw_parts;
+use crate::ffi::ffi_slice_mut;
 
 fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
@@ -722,6 +609,26 @@ mod tests {
         // APIs without an error channel use neutral sentinels.
         assert!(!quiche_h3_extended_connect_enabled_by_peer(ptr::null()));
         assert_eq!(quiche_h3_event_type(ptr::null()), u32::MAX);
+    }
+
+    #[test]
+    fn h3_ffi_rejects_misaligned_references() {
+        let mut config = h3::Config::new();
+        assert!(align_of::<h3::Config>() > 1);
+        let ptr = (&raw mut config)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<h3::Config>();
+        quiche_h3_config_set_max_field_section_size(ptr, 42);
+        assert_eq!(config.max_field_section_size, None);
+
+        let ev = h3::Event::Data;
+        assert!(align_of::<h3::Event>() > 1);
+        let ptr = (&raw const ev)
+            .cast::<u8>()
+            .wrapping_add(1)
+            .cast::<h3::Event>();
+        assert_eq!(quiche_h3_event_type(ptr), u32::MAX);
     }
 
     #[test]
