@@ -39,13 +39,13 @@ use std::cmp;
 )]
 pub struct PRR {
     // Total bytes delivered during recovery.
-    prr_delivered: usize,
+    prr_delivered: u64,
 
     // FlightSize at the start of recovery.
     recoverfs: usize,
 
     // Total bytes sent during recovery.
-    prr_out: usize,
+    prr_out: u64,
 
     // Total additional bytes can be sent for retransmit during recovery.
     pub snd_cnt: usize,
@@ -53,7 +53,7 @@ pub struct PRR {
 
 impl PRR {
     pub fn on_packet_sent(&mut self, sent_bytes: usize) {
-        self.prr_out += sent_bytes;
+        self.prr_out = self.prr_out.saturating_add(sent_bytes as u64);
 
         self.snd_cnt = self.snd_cnt.saturating_sub(sent_bytes);
     }
@@ -72,14 +72,24 @@ impl PRR {
         &mut self, delivered_data: usize, pipe: usize, ssthresh: usize,
         max_datagram_size: usize,
     ) {
-        self.prr_delivered += delivered_data;
+        self.prr_delivered =
+            self.prr_delivered.saturating_add(delivered_data as u64);
 
         self.snd_cnt = if pipe > ssthresh {
             // Proportional Rate Reduction.
             if self.recoverfs > 0 {
-                (self.prr_delivered * ssthresh)
-                    .div_ceil(self.recoverfs)
-                    .saturating_sub(self.prr_out)
+                // The intermediate product can exceed the address width
+                // even when the transmission allowance fits in a window.
+                let allowed = if let Some(product) =
+                    self.prr_delivered.checked_mul(ssthresh as u64)
+                {
+                    u128::from(product.div_ceil(self.recoverfs as u64))
+                } else {
+                    (u128::from(self.prr_delivered) * ssthresh as u128)
+                        .div_ceil(self.recoverfs as u128)
+                };
+                usize::try_from(allowed.saturating_sub(u128::from(self.prr_out)))
+                    .unwrap_or(usize::MAX)
             } else {
                 0
             }
@@ -87,15 +97,16 @@ impl PRR {
             // PRR-SSRB.
             let limit = cmp::max(
                 self.prr_delivered.saturating_sub(self.prr_out),
-                delivered_data,
-            ) + max_datagram_size;
+                delivered_data as u64,
+            )
+            .saturating_add(max_datagram_size as u64);
 
             // Attempt to catch up, as permitted by limit
-            cmp::min(ssthresh - pipe, limit)
+            cmp::min(
+                ssthresh - pipe,
+                usize::try_from(limit).unwrap_or(usize::MAX),
+            )
         };
-
-        // snd_cnt should be a positive number.
-        self.snd_cnt = cmp::max(self.snd_cnt, 0);
     }
 }
 
@@ -124,7 +135,7 @@ mod tests {
 
         prr.on_packet_sent(bytes_sent);
 
-        assert_eq!(prr.prr_out, bytes_sent);
+        assert_eq!(prr.prr_out, bytes_sent as u64);
         assert_eq!(prr.snd_cnt, 0);
     }
 
@@ -153,6 +164,40 @@ mod tests {
         prr.on_packet_acked(acked, pipe, ssthresh, max_datagram_size);
 
         assert_eq!(prr.snd_cnt, 500);
+    }
+
+    #[test]
+    fn proportional_allowance_does_not_overflow_intermediate_product() {
+        let mut prr = PRR::default();
+        // Just 256 KiB of delivered data and a 128 KiB threshold already
+        // exceed a 32-bit intermediate product.
+        let flight = 256 * 1024;
+        let threshold = flight / 2;
+        prr.congestion_event(flight);
+        prr.on_packet_acked(flight, flight, threshold, 1200);
+        assert_eq!(prr.snd_cnt, threshold);
+        prr.on_packet_sent(threshold);
+        prr.on_packet_acked(3, flight, threshold, 1200);
+        assert_eq!(prr.snd_cnt, 2);
+    }
+
+    #[test]
+    fn proportional_allowance_subtracts_sent_bytes_before_narrowing() {
+        let mut prr = PRR::default();
+        prr.congestion_event(2);
+        prr.prr_delivered = u64::MAX - 4;
+        prr.prr_out = u64::MAX - 7;
+        prr.on_packet_acked(2, 4, 2, 1200);
+        assert_eq!(prr.snd_cnt, 5);
+    }
+
+    #[test]
+    fn ssrb_caps_allowance_without_wrapping() {
+        let mut prr = PRR::default();
+        prr.congestion_event(usize::MAX);
+        prr.prr_delivered = u64::MAX - 1;
+        prr.on_packet_acked(1, 1, usize::MAX, 1200);
+        assert_eq!(prr.snd_cnt, usize::MAX - 1);
     }
 
     #[test]
