@@ -584,7 +584,7 @@ impl<F: BufFactory> SendBuf<F> {
     pub fn is_complete(&self) -> bool {
         if let Some(fin_off) = self.fin_off {
             if (self.fin_acked || self.shutdown || self.error.is_some()) &&
-                self.acked == (0..fin_off)
+                self.ack_off() == fin_off
             {
                 return true;
             }
@@ -721,6 +721,29 @@ mod tests {
         let (written, fin) = send.emit(&mut buf).unwrap();
         assert_eq!(written, 0);
         assert!(!fin);
+    }
+
+    #[test]
+    fn empty_stream_completion_requires_terminal_state_not_data_ranges() {
+        let mut send = <SendBuf>::new(0);
+        assert!(!send.is_complete());
+        assert_eq!(send.write(b"", true), Ok(0));
+        assert!(!send.is_complete());
+        assert_eq!(send.emit(&mut []), Ok((0, true)));
+        assert!(!send.is_complete());
+        send.ack_fin();
+        assert!(send.is_complete());
+        assert_eq!(send.acked.len(), 0);
+
+        let mut send = <SendBuf>::new(0);
+        assert_eq!(send.shutdown(), Ok((0, 0)));
+        assert!(send.is_complete());
+        assert_eq!(send.acked.len(), 0);
+
+        let mut send = <SendBuf>::new(0);
+        assert_eq!(send.stop(42), Ok((0, 0)));
+        assert!(send.is_complete());
+        assert_eq!(send.acked.len(), 0);
     }
 
     #[test]
