@@ -1722,7 +1722,9 @@ impl Datastore {
         }
 
         if let Some(pacing_rate) = mu.pacing_rate {
-            self.local_pacing_rate.push((ev_time, pacing_rate));
+            // The standard qlog pacing_rate is bits/sec; the plot and the
+            // Cloudflare extension rates use bytes/sec.
+            self.local_pacing_rate.push((ev_time, pacing_rate / 8));
         }
 
         // Extract rate metrics from ex_data
@@ -3441,6 +3443,27 @@ mod netlog_tests {
             })
         ));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod qlog_rate_tests {
+    use super::Datastore;
+    use qlog::events::quic::RecoveryMetricsUpdated;
+
+    #[test]
+    fn standard_pacing_rate_is_converted_to_bytes_for_the_plot() {
+        let mut ds = Datastore::default();
+        let mut metrics = RecoveryMetricsUpdated {
+            pacing_rate: Some(8_000),
+            ..RecoveryMetricsUpdated::default()
+        };
+        metrics
+            .ex_data
+            .insert("cf_delivery_rate".into(), 1000_u64.into());
+        ds.consume_qlog_metrics_updated(&metrics, 42.0);
+        assert_eq!(ds.local_pacing_rate, ds.local_delivery_rate);
+        assert_eq!(ds.local_pacing_rate, vec![(42.0, 1000)]);
     }
 }
 

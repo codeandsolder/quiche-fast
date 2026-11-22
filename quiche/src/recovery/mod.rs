@@ -38,8 +38,6 @@ use crate::Result;
 
 #[cfg(feature = "qlog")]
 use qlog::events::EventData;
-#[cfg(feature = "qlog")]
-use serde::Serialize;
 
 use smallvec::SmallVec;
 
@@ -591,224 +589,114 @@ struct QlogMetrics {
     ack_rate: Option<u64>,
     lost_packets: Option<u64>,
     lost_bytes: Option<u64>,
-    pto_count: Option<u32>,
+    pto_count: Option<u16>,
     app_limited: Option<bool>,
 }
 
+// Delta events contain observations, not a nullable complete snapshot.
+// Missing optional values must not cause empty events or forget a baseline.
 #[cfg(feature = "qlog")]
-trait CustomCfQlogField {
-    fn name(&self) -> &'static str;
-    fn as_json_value(&self) -> serde_json::Value;
+fn changed<T: Copy + PartialEq>(previous: &mut T, value: T) -> Option<T> {
+    if *previous == value {
+        return None;
+    }
+    *previous = value;
+    Some(value)
 }
 
 #[cfg(feature = "qlog")]
-#[serde_with::skip_serializing_none]
-#[derive(Serialize)]
-struct TotalAndDelta {
-    total: Option<u64>,
-    delta: Option<u64>,
-}
-
-#[cfg(feature = "qlog")]
-struct CustomQlogField<T> {
-    name: &'static str,
-    value: T,
-}
-
-#[cfg(feature = "qlog")]
-impl<T> CustomQlogField<T> {
-    fn new(name: &'static str, value: T) -> Self {
-        Self { name, value }
-    }
-}
-
-#[cfg(feature = "qlog")]
-impl<T: Serialize> CustomCfQlogField for CustomQlogField<T> {
-    fn name(&self) -> &'static str {
-        self.name
-    }
-
-    fn as_json_value(&self) -> serde_json::Value {
-        serde_json::json!(&self.value)
-    }
-}
-
-#[cfg(feature = "qlog")]
-struct CfExData(qlog::events::ExData);
-
-#[cfg(feature = "qlog")]
-impl CfExData {
-    fn new() -> Self {
-        Self(qlog::events::ExData::new())
-    }
-
-    fn insert<T: Serialize>(&mut self, name: &'static str, value: T) {
-        let field = CustomQlogField::new(name, value);
-        self.0
-            .insert(field.name().to_string(), field.as_json_value());
-    }
-
-    fn into_inner(self) -> qlog::events::ExData {
-        self.0
-    }
+fn observed<T: Copy + PartialEq>(
+    previous: &mut Option<T>, value: Option<T>,
+) -> Option<T> {
+    changed(previous, Some(value?)).flatten()
 }
 
 #[cfg(feature = "qlog")]
 impl QlogMetrics {
-    // Make a qlog event if the latest instance of QlogMetrics is different.
-    //
-    // This function diffs each of the fields. A qlog MetricsUpdated event is
-    // only generated if at least one field is different. Where fields are
-    // different, the qlog event contains the latest value.
-    fn maybe_update(&mut self, latest: Self) -> Option<EventData> {
-        let mut emit_event = false;
-
-        let new_min_rtt = if self.min_rtt != latest.min_rtt {
-            self.min_rtt = latest.min_rtt;
-            emit_event = true;
-            Some(latest.min_rtt.as_secs_f32() * 1000.0)
-        } else {
-            None
+    fn maybe_update(&mut self, latest: &Self) -> Option<EventData> {
+        let mut metrics = qlog::events::quic::RecoveryMetricsUpdated {
+            min_rtt: changed(&mut self.min_rtt, latest.min_rtt)
+                .map(duration_millis_f32),
+            smoothed_rtt: changed(&mut self.smoothed_rtt, latest.smoothed_rtt)
+                .map(duration_millis_f32),
+            latest_rtt: changed(&mut self.latest_rtt, latest.latest_rtt)
+                .map(duration_millis_f32),
+            rtt_variance: changed(&mut self.rttvar, latest.rttvar)
+                .map(duration_millis_f32),
+            congestion_window: changed(&mut self.cwnd, latest.cwnd),
+            bytes_in_flight: changed(
+                &mut self.bytes_in_flight,
+                latest.bytes_in_flight,
+            ),
+            ssthresh: observed(&mut self.ssthresh, latest.ssthresh),
+            pacing_rate: observed(&mut self.pacing_rate, latest.pacing_rate),
+            pto_count: observed(&mut self.pto_count, latest.pto_count),
+            ..Default::default()
         };
 
-        let new_smoothed_rtt = if self.smoothed_rtt != latest.smoothed_rtt {
-            self.smoothed_rtt = latest.smoothed_rtt;
-            emit_event = true;
-            Some(latest.smoothed_rtt.as_secs_f32() * 1000.0)
-        } else {
-            None
-        };
-
-        let new_latest_rtt = if self.latest_rtt != latest.latest_rtt {
-            self.latest_rtt = latest.latest_rtt;
-            emit_event = true;
-            Some(latest.latest_rtt.as_secs_f32() * 1000.0)
-        } else {
-            None
-        };
-
-        let new_rttvar = if self.rttvar != latest.rttvar {
-            self.rttvar = latest.rttvar;
-            emit_event = true;
-            Some(latest.rttvar.as_secs_f32() * 1000.0)
-        } else {
-            None
-        };
-
-        let new_cwnd = if self.cwnd != latest.cwnd {
-            self.cwnd = latest.cwnd;
-            emit_event = true;
-            Some(latest.cwnd)
-        } else {
-            None
-        };
-
-        let new_bytes_in_flight =
-            if self.bytes_in_flight != latest.bytes_in_flight {
-                self.bytes_in_flight = latest.bytes_in_flight;
-                emit_event = true;
-                Some(latest.bytes_in_flight)
-            } else {
-                None
-            };
-
-        let new_ssthresh = if self.ssthresh != latest.ssthresh {
-            self.ssthresh = latest.ssthresh;
-            emit_event = true;
-            latest.ssthresh
-        } else {
-            None
-        };
-
-        let new_pacing_rate = if self.pacing_rate != latest.pacing_rate {
-            self.pacing_rate = latest.pacing_rate;
-            emit_event = true;
-            latest.pacing_rate
-        } else {
-            None
-        };
-
-        let new_pto_count =
-            if latest.pto_count.is_some() && self.pto_count != latest.pto_count {
-                self.pto_count = latest.pto_count;
-                emit_event = true;
-                latest.pto_count.map(|v| v as u16)
-            } else {
-                None
-            };
-
-        // Build ex_data for rate metrics
-        let mut ex_data = CfExData::new();
-        if self.app_limited != latest.app_limited {
-            if let Some(app_limited) = latest.app_limited {
-                self.app_limited = latest.app_limited;
-                emit_event = true;
-                ex_data.insert("cf_app_limited", app_limited);
-            }
+        if let Some(app_limited) =
+            observed(&mut self.app_limited, latest.app_limited)
+        {
+            metrics
+                .ex_data
+                .insert("cf_app_limited".into(), app_limited.into());
         }
-        if self.delivery_rate != latest.delivery_rate {
-            if let Some(rate) = latest.delivery_rate {
-                self.delivery_rate = latest.delivery_rate;
-                emit_event = true;
-                ex_data.insert("cf_delivery_rate", rate);
-            }
-        }
-        if self.send_rate != latest.send_rate {
-            if let Some(rate) = latest.send_rate {
-                self.send_rate = latest.send_rate;
-                emit_event = true;
-                ex_data.insert("cf_send_rate", rate);
-            }
-        }
-        if self.ack_rate != latest.ack_rate {
-            if let Some(rate) = latest.ack_rate {
-                self.ack_rate = latest.ack_rate;
-                emit_event = true;
-                ex_data.insert("cf_ack_rate", rate);
+
+        for (name, previous, value) in [
+            (
+                "cf_delivery_rate",
+                &mut self.delivery_rate,
+                latest.delivery_rate,
+            ),
+            ("cf_send_rate", &mut self.send_rate, latest.send_rate),
+            ("cf_ack_rate", &mut self.ack_rate, latest.ack_rate),
+        ] {
+            if let Some(rate) = observed(previous, value) {
+                metrics.ex_data.insert(name.into(), rate.into());
             }
         }
 
-        if self.lost_packets != latest.lost_packets {
-            if let Some(val) = latest.lost_packets {
-                emit_event = true;
-                ex_data.insert("cf_lost_packets", TotalAndDelta {
-                    total: latest.lost_packets,
-                    delta: Some(val - self.lost_packets.unwrap_or(0)),
-                });
-                self.lost_packets = latest.lost_packets;
-            }
-        }
-        if self.lost_bytes != latest.lost_bytes {
-            if let Some(val) = latest.lost_bytes {
-                emit_event = true;
-                ex_data.insert("cf_lost_bytes", TotalAndDelta {
-                    total: latest.lost_bytes,
-                    delta: Some(val - self.lost_bytes.unwrap_or(0)),
-                });
-                self.lost_bytes = latest.lost_bytes;
+        for (name, previous, value) in [
+            (
+                "cf_lost_packets",
+                &mut self.lost_packets,
+                latest.lost_packets,
+            ),
+            ("cf_lost_bytes", &mut self.lost_bytes, latest.lost_bytes),
+        ] {
+            let baseline = previous.unwrap_or(0);
+            if let Some(total) = observed(previous, value) {
+                // If a counter resets, its new total is the first delta in
+                // the new counter generation, not an unsigned underflow.
+                let delta = total.checked_sub(baseline).unwrap_or(total);
+                metrics.ex_data.insert(
+                    name.into(),
+                    serde_json::json!({
+                        "total": total,
+                        "delta": delta,
+                    }),
+                );
             }
         }
 
-        if emit_event {
-            return Some(EventData::QuicMetricsUpdated(
-                qlog::events::quic::RecoveryMetricsUpdated {
-                    min_rtt: new_min_rtt,
-                    smoothed_rtt: new_smoothed_rtt,
-                    latest_rtt: new_latest_rtt,
-                    rtt_variance: new_rttvar,
-                    congestion_window: new_cwnd,
-                    bytes_in_flight: new_bytes_in_flight,
-                    ssthresh: new_ssthresh,
-                    pacing_rate: new_pacing_rate,
-                    pto_count: new_pto_count,
-                    ex_data: ex_data.into_inner(),
-                    ..Default::default()
-                },
-            ));
+        if metrics == qlog::events::quic::RecoveryMetricsUpdated::default() {
+            None
+        } else {
+            Some(EventData::QuicMetricsUpdated(metrics))
         }
-
-        None
     }
+}
+
+/// The standard qlog PTO counter has type `uint16` even though recovery
+/// tracks the count at `u32` width. Saturate rather than wrap.
+#[cfg(feature = "qlog")]
+fn qlog_pto_count(count: u32) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+#[cfg(feature = "qlog")]
+fn duration_millis_f32(duration: Duration) -> f32 {
+    duration.as_secs_f32() * 1000.0
 }
 
 /// When the pacer thinks is a good time to release the next packet
@@ -1060,7 +948,7 @@ mod tests {
         let mut metrics = QlogMetrics::default();
 
         let event = metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 app_limited: Some(false),
                 ..Default::default()
             })
@@ -1068,7 +956,7 @@ mod tests {
         assert_eq!(app_limited_value(event), Some(false.into()));
 
         let event = metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 app_limited: Some(true),
                 ..Default::default()
             })
@@ -1076,7 +964,7 @@ mod tests {
         assert_eq!(app_limited_value(event), Some(true.into()));
 
         let event = metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 app_limited: Some(false),
                 ..Default::default()
             })
@@ -1089,27 +977,76 @@ mod tests {
     fn qlog_app_limited_suppresses_unchanged_values() {
         let mut metrics = QlogMetrics::default();
         metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 app_limited: Some(false),
                 ..Default::default()
             })
             .unwrap();
 
         assert!(metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 app_limited: Some(false),
                 ..Default::default()
             })
             .is_none());
 
         let event = metrics
-            .maybe_update(QlogMetrics {
+            .maybe_update(&QlogMetrics {
                 cwnd: 1,
                 app_limited: Some(false),
                 ..Default::default()
             })
             .unwrap();
         assert_eq!(app_limited_value(event), None);
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_observations_do_not_emit_empty_events_or_forget_baselines() {
+        let mut metrics = QlogMetrics::default();
+        let latest = QlogMetrics {
+            pacing_rate: Some(800),
+            ssthresh: Some(12_000),
+            pto_count: Some(0),
+            ..Default::default()
+        };
+        assert!(metrics.maybe_update(&latest).is_some());
+        assert!(metrics.maybe_update(&QlogMetrics::default()).is_none());
+        assert!(metrics.maybe_update(&latest).is_none());
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_counter_deltas_survive_missing_observations_and_reset() {
+        let mut metrics = QlogMetrics::default();
+        for (total, expected_delta) in [(5, 5), (9, 4), (2, 2), (3, 1)] {
+            let event = metrics
+                .maybe_update(&QlogMetrics {
+                    lost_bytes: Some(total),
+                    lost_packets: Some(total),
+                    ..Default::default()
+                })
+                .unwrap();
+            let EventData::QuicMetricsUpdated(event) = event else {
+                panic!("expected recovery metrics");
+            };
+            let expected =
+                serde_json::json!({"total": total, "delta": expected_delta});
+            assert_eq!(event.ex_data.get("cf_lost_bytes"), Some(&expected));
+            assert_eq!(event.ex_data.get("cf_lost_packets"), Some(&expected));
+            assert!(metrics.maybe_update(&QlogMetrics::default()).is_none());
+        }
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_pto_count_saturates_at_schema_width() {
+        for count in [0, 1, 65_534, 65_535, 65_536, u32::MAX] {
+            assert_eq!(
+                u32::from(qlog_pto_count(count)),
+                count.min(u32::from(u16::MAX))
+            );
+        }
     }
 
     #[test]
