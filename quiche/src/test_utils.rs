@@ -46,6 +46,8 @@ use std::time::Instant;
 
 use smallvec::smallvec;
 
+#[cfg(test)]
+use crate::recovery::RecoveryOps as _;
 use crate::recovery::Sent;
 
 /// Curve preference list that excludes post-quantum groups.
