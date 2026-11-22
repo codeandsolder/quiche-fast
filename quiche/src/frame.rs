@@ -685,7 +685,7 @@ impl Frame {
     }
 
     #[cfg(feature = "qlog")]
-    pub fn to_qlog(&self) -> QuicFrame {
+    pub fn to_qlog(&self, ack_delay_exponent: u64) -> QuicFrame {
         use qlog::events::ConnectionClosedFrameError;
         use qlog::events::RawInfo;
 
@@ -721,7 +721,18 @@ impl Frame {
                 };
 
                 QuicFrame::Ack {
-                    ack_delay: Some(*ack_delay as f32 / 1000.0),
+                    // The ACK frame stores wire units; qlog uses milliseconds.
+                    // Omit unrepresentable delays rather than logging a
+                    // misleading value for a frame recovery will reject.
+                    ack_delay: crate::decode_ack_delay(
+                        *ack_delay,
+                        ack_delay_exponent,
+                    )
+                    .ok()
+                    .map(|micros| {
+                        std::time::Duration::from_micros(micros).as_secs_f32() *
+                            1000.0
+                    }),
                     acked_ranges: Some(ack_ranges),
                     ect1,
                     ect0,
@@ -1313,6 +1324,42 @@ mod tests {
                 assert!(decoded.is_err(), "{ty:?}");
             }
         }
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_ack_delay_uses_wire_exponent_and_milliseconds() {
+        let mut ranges = ranges::RangeSet::default();
+        ranges.insert(1..2);
+
+        for (encoded, exponent, expected) in [
+            (125, 0, 0.125),
+            (125, 3, 1.0),
+            (125, 8, 32.0),
+            (125, 20, 131_072.0),
+            (0, 20, 0.0),
+        ] {
+            let frame = Frame::ACK {
+                ack_delay: encoded,
+                ranges: ranges.clone(),
+                ecn_counts: None,
+            };
+            let QuicFrame::Ack { ack_delay, .. } = frame.to_qlog(exponent) else {
+                panic!("expected ACK");
+            };
+            let delay = ack_delay.unwrap();
+            assert!((delay - expected).abs() <= expected * f32::EPSILON);
+        }
+
+        let frame = Frame::ACK {
+            ack_delay: octets::MAX_VAR_INT,
+            ranges,
+            ecn_counts: None,
+        };
+        assert!(matches!(frame.to_qlog(20), QuicFrame::Ack {
+            ack_delay: None,
+            ..
+        }));
     }
 
     #[test]
