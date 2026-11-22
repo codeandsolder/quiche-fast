@@ -649,10 +649,15 @@ fn handshake_resumption(
     let mut oversized_params = session.to_vec();
     oversized_params[params_offset..params_offset + 8]
         .copy_from_slice(&(params_len + (1_u64 << 32)).to_be_bytes());
+    // A structurally complete suffix can still contain an invalid varint.
+    let mut invalid_params = session[..params_offset].to_vec();
+    invalid_params.extend_from_slice(&1_u64.to_be_bytes());
+    invalid_params.push(0x40);
 
     for malformed in [
         oversized_session.as_slice(),
         oversized_params.as_slice(),
+        invalid_params.as_slice(),
         &session[..params_offset + 7],
         &session[..session.len() - 1],
     ] {
@@ -9599,6 +9604,44 @@ fn dgram_send_max_size(
 
     let result2 = pipe.server.dgram_recv(&mut buf);
     assert_eq!(result2, Err(Error::Done));
+}
+
+#[rstest]
+fn large_peer_datagram_limits_do_not_truncate(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] discover_pmtu: bool,
+) {
+    const LARGE_LIMIT: u64 = 1_u64 << 32;
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_max_send_udp_payload_size(1400);
+    config.discover_pmtu(discover_pmtu);
+    config.enable_dgram(true, 10, 10);
+    // Set the original wire-domain values directly: the public usize setter
+    // cannot express them on a 32-bit test target.
+    config.local_transport_params.max_udp_payload_size = LARGE_LIMIT;
+    config.local_transport_params.max_datagram_frame_size = Some(LARGE_LIMIT);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    pipe.handshake().unwrap();
+    pipe.advance().unwrap();
+
+    assert_eq!(
+        pipe.client.peer_transport_params.max_udp_payload_size,
+        LARGE_LIMIT
+    );
+    assert_eq!(
+        pipe.client.peer_transport_params.max_datagram_frame_size,
+        Some(LARGE_LIMIT)
+    );
+    assert_eq!(pipe.client.max_send_udp_payload_size(), 1400);
+    assert_eq!(pipe.server.max_send_udp_payload_size(), 1400);
+    let payload_len = pipe.client.dgram_max_writable_len().unwrap();
+    assert_eq!(payload_len, 1360);
+    let payload = vec![42; payload_len];
+    pipe.client.dgram_send(&payload).unwrap();
+    pipe.advance().unwrap();
+    let mut received = vec![0; payload_len];
+    assert_eq!(pipe.server.dgram_recv(&mut received), Ok(payload_len));
+    assert_eq!(received, payload);
 }
 
 #[rstest]
