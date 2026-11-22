@@ -214,3 +214,135 @@ impl<F: BufFactory> PartialEq for RangeBuf<F> {
         self.off == other.off
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::RangeBuf;
+
+    #[test]
+    fn rangebuf_split_off() {
+        let mut buf = <RangeBuf>::from(b"helloworld", 5, true);
+        assert_eq!(buf.start, 0);
+        assert_eq!(buf.pos, 0);
+        assert_eq!(buf.len, 10);
+        assert_eq!(buf.off, 5);
+        assert!(buf.fin);
+
+        assert_eq!(buf.len(), 10);
+        assert_eq!(buf.off(), 5);
+        assert!(buf.fin());
+
+        assert_eq!(&buf[..], b"helloworld");
+
+        // Advance buffer.
+        buf.consume(5);
+
+        assert_eq!(buf.start, 0);
+        assert_eq!(buf.pos, 5);
+        assert_eq!(buf.len, 10);
+        assert_eq!(buf.off, 5);
+        assert!(buf.fin);
+
+        assert_eq!(buf.len(), 5);
+        assert_eq!(buf.off(), 10);
+        assert!(buf.fin());
+
+        assert_eq!(&buf[..], b"world");
+
+        // Split buffer before position.
+        let mut new_buf = buf.split_off(8).unwrap();
+
+        assert_eq!(buf.start, 0);
+        assert_eq!(buf.pos, 3);
+        assert_eq!(buf.len, 3);
+        assert_eq!(buf.off, 5);
+        assert!(!buf.fin);
+
+        assert_eq!(buf.len(), 0);
+        assert_eq!(buf.off(), 8);
+        assert!(!buf.fin());
+
+        assert_eq!(&buf[..], b"");
+
+        assert_eq!(new_buf.start, 3);
+        assert_eq!(new_buf.pos, 5);
+        assert_eq!(new_buf.len, 7);
+        assert_eq!(new_buf.off, 8);
+        assert!(new_buf.fin);
+
+        assert_eq!(new_buf.len(), 5);
+        assert_eq!(new_buf.off(), 10);
+        assert!(new_buf.fin());
+
+        assert_eq!(&new_buf[..], b"world");
+
+        // Advance buffer.
+        new_buf.consume(2);
+
+        assert_eq!(new_buf.start, 3);
+        assert_eq!(new_buf.pos, 7);
+        assert_eq!(new_buf.len, 7);
+        assert_eq!(new_buf.off, 8);
+        assert!(new_buf.fin);
+
+        assert_eq!(new_buf.len(), 3);
+        assert_eq!(new_buf.off(), 12);
+        assert!(new_buf.fin());
+
+        assert_eq!(&new_buf[..], b"rld");
+
+        // Split buffer after position.
+        let mut new_new_buf = new_buf.split_off(13).unwrap();
+
+        assert_eq!(new_buf.start, 3);
+        assert_eq!(new_buf.pos, 7);
+        assert_eq!(new_buf.len, 5);
+        assert_eq!(new_buf.off, 8);
+        assert!(!new_buf.fin);
+
+        assert_eq!(new_buf.len(), 1);
+        assert_eq!(new_buf.off(), 12);
+        assert!(!new_buf.fin());
+
+        assert_eq!(&new_buf[..], b"r");
+
+        assert_eq!(new_new_buf.start, 8);
+        assert_eq!(new_new_buf.pos, 8);
+        assert_eq!(new_new_buf.len, 2);
+        assert_eq!(new_new_buf.off, 13);
+        assert!(new_new_buf.fin);
+
+        assert_eq!(new_new_buf.len(), 2);
+        assert_eq!(new_new_buf.off(), 13);
+        assert!(new_new_buf.fin());
+
+        assert_eq!(&new_new_buf[..], b"ld");
+
+        // Advance buffer.
+        new_new_buf.consume(2);
+
+        assert_eq!(new_new_buf.start, 8);
+        assert_eq!(new_new_buf.pos, 10);
+        assert_eq!(new_new_buf.len, 2);
+        assert_eq!(new_new_buf.off, 13);
+        assert!(new_new_buf.fin);
+
+        assert_eq!(new_new_buf.len(), 0);
+        assert_eq!(new_new_buf.off(), 15);
+        assert!(new_new_buf.fin());
+
+        assert_eq!(&new_new_buf[..], b"");
+    }
+
+    #[test]
+    fn invalid_absolute_split_preserves_range() {
+        let mut buf = <RangeBuf>::from(b"hello", 7, true);
+        for offset in [0, 6, 13, u64::MAX] {
+            assert!(buf.split_off(offset).is_none());
+            assert_eq!(buf.off(), 7);
+            assert_eq!(buf.max_off(), 12);
+            assert_eq!(&buf[..], b"hello");
+            assert!(buf.fin());
+        }
+    }
+}
