@@ -48,6 +48,9 @@ pub enum Error {
     /// The provided buffer is too short.
     BufferTooShort,
 
+    /// The integer prefix width or representation flags are invalid.
+    InvalidPrefix,
+
     /// The QPACK header block's huffman encoding is invalid.
     InvalidHuffmanEncoding,
 
@@ -59,6 +62,22 @@ pub enum Error {
 
     /// The decoded header list exceeded the size limit.
     HeaderListTooLarge,
+}
+
+/// QPACK integers have a prefix of one through eight bits. Keeping the
+/// mask in the byte domain also makes the representation flags disjoint.
+const fn prefix_mask(prefix: usize) -> Result<u8> {
+    match prefix {
+        1..=8 => Ok(u8::MAX >> (8 - prefix)),
+        _ => Err(Error::InvalidPrefix),
+    }
+}
+
+/// A string has one additional bit for the Huffman encoding flag.
+fn string_huffman_bit(prefix: usize) -> Result<u8> {
+    prefix_mask(prefix)?
+        .checked_add(1)
+        .ok_or(Error::InvalidPrefix)
 }
 
 impl std::fmt::Display for Error {

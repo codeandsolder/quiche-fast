@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use super::prefix_mask;
+use super::string_huffman_bit;
 use super::Error;
 use super::Result;
 
@@ -263,16 +265,16 @@ impl Decoder {
     }
 }
 
-const fn lookup_static(idx: u64) -> Result<(&'static [u8], &'static [u8])> {
-    if idx >= super::static_table::STATIC_DECODE_TABLE.len() as u64 {
-        return Err(Error::InvalidStaticTableIndex);
-    }
-
-    Ok(super::static_table::STATIC_DECODE_TABLE[idx as usize])
+fn lookup_static(idx: u64) -> Result<(&'static [u8], &'static [u8])> {
+    let idx = usize::try_from(idx).map_err(|_| Error::InvalidStaticTableIndex)?;
+    super::static_table::STATIC_DECODE_TABLE
+        .get(idx)
+        .copied()
+        .ok_or(Error::InvalidStaticTableIndex)
 }
 
 fn decode_int(b: &mut octets::Octets, prefix: usize) -> Result<u64> {
-    let mask = 2u64.pow(prefix as u32) - 1;
+    let mask = u64::from(prefix_mask(prefix)?);
 
     let mut val = u64::from(b.get_u8()?);
     val &= mask;
@@ -309,7 +311,7 @@ fn decode_str(
 ) -> Result<Vec<u8>> {
     let first = b.peek_u8()?;
 
-    let huff = first & (1 << prefix) != 0;
+    let huff = first & string_huffman_bit(prefix)? != 0;
 
     let len = usize::try_from(decode_int(b, prefix)?)
         .map_err(|_| Error::BufferTooShort)?;
@@ -383,6 +385,73 @@ mod tests {
         wire[10] = 1;
         let mut reader = octets::Octets::with_slice(&wire);
         assert_eq!(decode_int(&mut reader, 8), Err(Error::BufferTooShort));
+    }
+
+    #[test]
+    fn integer_prefix_flags_and_widths() {
+        for prefix in 1..=8 {
+            let mask = prefix_mask(prefix).unwrap();
+            let first = !mask;
+            let boundary = u64::from(mask);
+            for value in
+                [0, boundary - 1, boundary, boundary + 1, 127, 128, u64::MAX]
+            {
+                let mut storage = [0; 16];
+                let mut writer = octets::OctetsMut::with_slice(&mut storage);
+                super::super::encode_int(value, first, prefix, &mut writer)
+                    .unwrap();
+                let len = writer.off();
+                assert_eq!(storage[0] & !mask, first);
+                let mut reader = octets::Octets::with_slice(&storage[..len]);
+                assert_eq!(decode_int(&mut reader, prefix), Ok(value));
+                assert_eq!(reader.cap(), 0);
+            }
+            let mut storage = [0; 16];
+            let mut writer = octets::OctetsMut::with_slice(&mut storage);
+            assert_eq!(
+                super::super::encode_int(1, 1, prefix, &mut writer),
+                Err(Error::InvalidPrefix)
+            );
+            assert_eq!(writer.off(), 0);
+        }
+        for prefix in [0, 9, usize::MAX] {
+            let mut storage = [0; 16];
+            let mut writer = octets::OctetsMut::with_slice(&mut storage);
+            assert_eq!(
+                super::super::encode_int(1, 0, prefix, &mut writer),
+                Err(Error::InvalidPrefix)
+            );
+            assert_eq!(writer.off(), 0);
+            let mut reader = octets::Octets::with_slice(&storage);
+            assert_eq!(
+                decode_int(&mut reader, prefix),
+                Err(Error::InvalidPrefix)
+            );
+            assert_eq!(reader.off(), 0);
+        }
+    }
+
+    #[test]
+    fn string_prefix_reserves_huffman_flag() {
+        let mut storage = [0; 16];
+        let mut writer = octets::OctetsMut::with_slice(&mut storage);
+        for (first, prefix) in
+            [(0, 0), (0, 8), (0, 9), (0, usize::MAX), (0x80, 7), (1, 7)]
+        {
+            assert_eq!(
+                super::super::encode_str::<false>(
+                    b"x",
+                    first,
+                    prefix,
+                    &mut writer
+                ),
+                Err(Error::InvalidPrefix)
+            );
+            assert_eq!(writer.off(), 0);
+        }
+        let mut reader = octets::Octets::with_slice(&storage);
+        assert_eq!(decode_str(&mut reader, 8, 16), Err(Error::InvalidPrefix));
+        assert_eq!(reader.off(), 0);
     }
 
     #[test]
