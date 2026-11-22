@@ -1376,6 +1376,43 @@ impl StreamsBlockedState {
     }
 }
 
+/// Origin of an explicit connection close.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseOrigin {
+    Local,
+    Peer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CloseCause {
+    Explicit(CloseOrigin),
+    IdleTimeout,
+    StatelessReset,
+    PacketNumbersExhausted,
+    NoViablePath,
+}
+
+/// The endpoint cannot return to active processing after entering draining
+/// or closed state. A closed endpoint retains its final cause, not a timer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum ConnectionLifecycle {
+    #[default]
+    Active,
+    Draining {
+        deadline: Instant,
+        origin: CloseOrigin,
+    },
+    Closed(CloseCause),
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HandshakeDoneState {
+    #[default]
+    Pending,
+    InFlight,
+    Acknowledged,
+}
+
 /// A QUIC connection.
 pub struct Connection<F = DefaultBufFactory>
 where
@@ -1535,8 +1572,8 @@ where
     /// Idle timeout expiration time.
     idle_timer: Option<Instant>,
 
-    /// Draining timeout expiration time.
-    draining_timer: Option<Instant>,
+    /// Connection processing lifecycle and terminal cause.
+    lifecycle: ConnectionLifecycle,
 
     /// List of raw packets that were received before they could be decrypted.
     undecryptable_pkts: VecDeque<(Vec<u8>, RecvInfo)>,
@@ -1569,11 +1606,8 @@ where
     /// Whether the connection handshake has been completed.
     handshake_completed: bool,
 
-    /// Whether the `HANDSHAKE_DONE` frame has been sent.
-    handshake_done_sent: bool,
-
-    /// Whether the `HANDSHAKE_DONE` frame has been acked.
-    handshake_done_acked: bool,
+    /// Server's reliable HANDSHAKE_DONE transmission state.
+    handshake_done: HandshakeDoneState,
 
     /// Whether the connection handshake has been confirmed.
     handshake_confirmed: bool,
@@ -1584,12 +1618,6 @@ where
     /// Whether an ack-eliciting packet has been sent since last receiving a
     /// packet.
     ack_eliciting_sent: bool,
-
-    /// Whether the connection is closed.
-    closed: bool,
-
-    /// Whether the connection was timed out.
-    timed_out: bool,
 
     /// Whether to send GREASE.
     grease: bool,
@@ -2273,7 +2301,7 @@ impl<F: BufFactory> Connection<F> {
 
             idle_timer: None,
 
-            draining_timer: None,
+            lifecycle: ConnectionLifecycle::Active,
 
             undecryptable_pkts: VecDeque::new(),
 
@@ -2296,18 +2324,13 @@ impl<F: BufFactory> Connection<F> {
 
             handshake_completed: false,
 
-            handshake_done_sent: false,
-            handshake_done_acked: false,
+            handshake_done: HandshakeDoneState::Pending,
 
             handshake_confirmed: false,
 
             key_phase: false,
 
             ack_eliciting_sent: false,
-
-            closed: false,
-
-            timed_out: false,
 
             grease: config.grease,
 
@@ -3141,7 +3164,7 @@ impl<F: BufFactory> Connection<F> {
                     if self.is_stateless_reset(&buf[len - left..len]) {
                         trace!("{} packet is a stateless reset", self.trace_id);
 
-                        self.mark_closed();
+                        self.mark_closed(CloseCause::StatelessReset);
                     }
 
                     // Long header packets carry their own length. A failed
@@ -3998,11 +4021,9 @@ impl<F: BufFactory> Connection<F> {
                     },
 
                     frame::Frame::HandshakeDone => {
-                        // Explicitly set this to true, so that if the frame was
-                        // already scheduled for retransmission, it is aborted.
-                        self.handshake_done_sent = true;
-
-                        self.handshake_done_acked = true;
+                        // An acknowledgment cancels any scheduled
+                        // retransmission.
+                        self.handshake_done = HandshakeDoneState::Acknowledged;
                     },
 
                     frame::Frame::ResetStream { stream_id, .. } => {
@@ -4282,7 +4303,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         if self.next_pkt_num >= octets::MAX_VAR_INT {
-            self.mark_closed();
+            self.mark_closed(CloseCause::PacketNumbersExhausted);
             return Err(Error::Done);
         }
 
@@ -4438,7 +4459,7 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::BufferTooShort);
         }
 
-        if self.is_draining() {
+        if self.is_closed() || self.is_draining() {
             return Err(Error::Done);
         }
 
@@ -4629,8 +4650,8 @@ impl<F: BufFactory> Connection<F> {
                     // Retransmit HANDSHAKE_DONE only if it hasn't been acked at
                     // least once already.
                     frame::Frame::HandshakeDone =>
-                        if !self.handshake_done_acked {
-                            self.handshake_done_sent = false;
+                        if self.handshake_done == HandshakeDoneState::InFlight {
+                            self.handshake_done = HandshakeDoneState::Pending;
                         },
 
                     frame::Frame::MaxStreamData { stream_id, .. } => {
@@ -4780,7 +4801,7 @@ impl<F: BufFactory> Connection<F> {
 
         let epoch = pkt_type.to_epoch()?;
         if self.next_pkt_num >= octets::MAX_VAR_INT {
-            self.mark_closed();
+            self.mark_closed(CloseCause::PacketNumbersExhausted);
             return Err(Error::Done);
         }
         // Don't skip the final usable packet number. The next increment
@@ -5118,13 +5139,13 @@ impl<F: BufFactory> Connection<F> {
             // Create HANDSHAKE_DONE frame.
             // self.should_send_handshake_done() but without the need to borrow
             if self.handshake_completed &&
-                !self.handshake_done_sent &&
+                matches!(self.handshake_done, HandshakeDoneState::Pending) &&
                 self.is_server
             {
                 let frame = frame::Frame::HandshakeDone;
 
                 if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.handshake_done_sent = true;
+                    self.handshake_done = HandshakeDoneState::InFlight;
 
                     ack_eliciting = true;
                     in_flight = true;
@@ -5392,7 +5413,10 @@ impl<F: BufFactory> Connection<F> {
 
                         if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                             let pto = path.recovery.pto();
-                            self.draining_timer = Some(now + (pto * 3));
+                            self.lifecycle = ConnectionLifecycle::Draining {
+                                deadline: now + (pto * 3),
+                                origin: CloseOrigin::Local,
+                            };
 
                             ack_eliciting = true;
                             in_flight = true;
@@ -5408,7 +5432,10 @@ impl<F: BufFactory> Connection<F> {
 
                     if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                         let pto = path.recovery.pto();
-                        self.draining_timer = Some(now + (pto * 3));
+                        self.lifecycle = ConnectionLifecycle::Draining {
+                            deadline: now + (pto * 3),
+                            origin: CloseOrigin::Local,
+                        };
 
                         ack_eliciting = true;
                         in_flight = true;
@@ -5922,7 +5949,7 @@ impl<F: BufFactory> Connection<F> {
         // RFC 9000 §12.3: when the send number reaches its maximum, close
         // silently, without attempting a CONNECTION_CLOSE packet.
         if self.next_pkt_num >= octets::MAX_VAR_INT {
-            self.mark_closed();
+            self.mark_closed(CloseCause::PacketNumbersExhausted);
         }
 
         Ok((pkt_type, written))
@@ -7477,34 +7504,30 @@ impl<F: BufFactory> Connection<F> {
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
     #[must_use = "the result determines when connection timeout handling is due"]
     pub fn timeout_instant(&self) -> Option<Instant> {
-        if self.is_closed() {
-            return None;
-        }
+        match self.lifecycle {
+            ConnectionLifecycle::Closed(_) => None,
+            ConnectionLifecycle::Draining { deadline, .. } => Some(deadline),
+            ConnectionLifecycle::Active => {
+                // Use the lowest timer value (i.e. "sooner") among idle and
+                // loss detection timers. If they are both unset (i.e. `None`)
+                // then the result is `None`, but if at least one of them is set
+                // then a `Some(...)` value is returned.
+                let path_timer = self
+                    .paths
+                    .iter()
+                    .filter_map(|(_, p)| p.recovery.loss_detection_timer())
+                    .min();
 
-        if self.is_draining() {
-            // Draining timer takes precedence over all other timers. If it is
-            // set it means the connection is closing so there's no point in
-            // processing the other timers.
-            self.draining_timer
-        } else {
-            // Use the lowest timer value (i.e. "sooner") among idle and loss
-            // detection timers. If they are both unset (i.e. `None`) then the
-            // result is `None`, but if at least one of them is set then a
-            // `Some(...)` value is returned.
-            let path_timer = self
-                .paths
-                .iter()
-                .filter_map(|(_, p)| p.recovery.loss_detection_timer())
-                .min();
+                let key_update_timer = self.crypto_ctx
+                    [packet::Epoch::Application]
+                    .key_update
+                    .as_ref()
+                    .map(|key_update| key_update.timer);
 
-            let key_update_timer = self.crypto_ctx[packet::Epoch::Application]
-                .key_update
-                .as_ref()
-                .map(|key_update| key_update.timer);
+                let timers = [self.idle_timer, path_timer, key_update_timer];
 
-            let timers = [self.idle_timer, path_timer, key_update_timer];
-
-            timers.iter().filter_map(|&x| x).min()
+                timers.into_iter().flatten().min()
+            },
         }
     }
 
@@ -7533,25 +7556,23 @@ impl<F: BufFactory> Connection<F> {
     pub fn on_timeout(&mut self) {
         let now = Instant::now();
 
-        if let Some(draining_timer) = self.draining_timer {
-            if draining_timer <= now {
-                trace!("{} draining timeout expired", self.trace_id);
-
-                self.mark_closed();
-            }
-
-            // Draining timer takes precedence over all other timers. If it is
-            // set it means the connection is closing so there's no point in
-            // processing the other timers.
-            return;
+        match self.lifecycle {
+            ConnectionLifecycle::Closed(_) => return,
+            ConnectionLifecycle::Draining { deadline, origin } => {
+                if deadline <= now {
+                    trace!("{} draining timeout expired", self.trace_id);
+                    self.mark_closed(CloseCause::Explicit(origin));
+                }
+                return;
+            },
+            ConnectionLifecycle::Active => (),
         }
 
         if let Some(timer) = self.idle_timer {
             if timer <= now {
                 trace!("{} idle timeout expired", self.trace_id);
 
-                self.mark_closed();
-                self.timed_out = true;
+                self.mark_closed(CloseCause::IdleTimeout);
                 return;
             }
         }
@@ -7605,13 +7626,13 @@ impl<F: BufFactory> Connection<F> {
                 Some(pid) => {
                     if self.set_active_path(pid, now).is_err() {
                         // The connection cannot continue.
-                        self.mark_closed();
+                        self.mark_closed(CloseCause::NoViablePath);
                     }
                 },
 
                 // The connection cannot continue.
                 None => {
-                    self.mark_closed();
+                    self.mark_closed(CloseCause::NoViablePath);
                 },
             }
         }
@@ -8077,7 +8098,7 @@ impl<F: BufFactory> Connection<F> {
 
         // Close immediately if no packet was processed successfully.
         if self.recv_count == 0 {
-            self.mark_closed();
+            self.mark_closed(CloseCause::Explicit(CloseOrigin::Local));
         }
 
         Ok(())
@@ -8324,7 +8345,7 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result indicates whether the connection is draining"]
     pub const fn is_draining(&self) -> bool {
-        self.draining_timer.is_some()
+        matches!(self.lifecycle, ConnectionLifecycle::Draining { .. })
     }
 
     /// Returns true if the connection is closed.
@@ -8333,14 +8354,17 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result indicates whether the connection can be cleaned up"]
     pub const fn is_closed(&self) -> bool {
-        self.closed
+        matches!(self.lifecycle, ConnectionLifecycle::Closed(_))
     }
 
     /// Returns true if the connection was closed due to the idle timeout.
     #[inline]
     #[must_use = "the result indicates whether timeout closed the connection"]
     pub const fn is_timed_out(&self) -> bool {
-        self.timed_out
+        matches!(
+            self.lifecycle,
+            ConnectionLifecycle::Closed(CloseCause::IdleTimeout)
+        )
     }
 
     /// Returns the error received from the peer, if any.
@@ -9449,7 +9473,10 @@ impl<F: BufFactory> Connection<F> {
                 });
 
                 let path = self.paths.get_active()?;
-                self.draining_timer = Some(now + (path.recovery.pto() * 3));
+                self.lifecycle = ConnectionLifecycle::Draining {
+                    deadline: now + (path.recovery.pto() * 3),
+                    origin: CloseOrigin::Peer,
+                };
             },
 
             frame::Frame::ApplicationClose { error_code, reason } => {
@@ -9460,7 +9487,10 @@ impl<F: BufFactory> Connection<F> {
                 });
 
                 let path = self.paths.get_active()?;
-                self.draining_timer = Some(now + (path.recovery.pto() * 3));
+                self.lifecycle = ConnectionLifecycle::Draining {
+                    deadline: now + (path.recovery.pto() * 3),
+                    origin: CloseOrigin::Peer,
+                };
             },
 
             frame::Frame::HandshakeDone => {
@@ -9529,7 +9559,9 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns true if the `HANDSHAKE_DONE` frame needs to be sent.
     const fn should_send_handshake_done(&self) -> bool {
-        self.is_established() && !self.handshake_done_sent && self.is_server
+        self.is_established() &&
+            matches!(self.handshake_done, HandshakeDoneState::Pending) &&
+            self.is_server
     }
 
     /// Returns the idle timeout value.
@@ -9918,100 +9950,107 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
-    // Marks the connection as closed and does any related tidyup.
-    fn mark_closed(&mut self) {
+    // Marks the connection as closed once, retaining the cause before
+    // generating any terminal telemetry.
+    fn mark_closed(&mut self, cause: CloseCause) {
+        if self.is_closed() {
+            return;
+        }
+        self.lifecycle = ConnectionLifecycle::Closed(cause);
         #[cfg(feature = "qlog")]
         {
-            let cc = match (self.is_established(), self.timed_out, &self.peer_error, &self.local_error) {
-                (false, _, _, _) => qlog::events::quic::ConnectionClosed {
-                    initiator: Some(TransportInitiator::Local),
-                    connection_error: None,
-                    application_error: None,
-                    error_code: None,
-                    internal_code: None,
-                    reason: Some("Failed to establish connection".to_string()),
-                    trigger: Some(qlog::events::quic::ConnectionClosedTrigger::HandshakeTimeout)
-                },
-
-                (true, true, _, _) => qlog::events::quic::ConnectionClosed {
-                    initiator: Some(TransportInitiator::Local),
-                    connection_error: None,
-                    application_error: None,
-                    error_code: None,
-                    internal_code: None,
-                    reason: Some("Idle timeout".to_string()),
-                    trigger: Some(qlog::events::quic::ConnectionClosedTrigger::IdleTimeout)
-                },
-
-                (true, false, Some(peer_error), None) => {
-                    let (connection_code, application_error, trigger) = if peer_error.is_app {
-                        (None, Some(qlog::events::ApplicationError::Unknown), None)
-                    } else {
-                        let trigger = if peer_error.error_code == WireErrorCode::NoError as u64 {
-                            Some(qlog::events::quic::ConnectionClosedTrigger::Clean)
-                        } else {
-                            Some(qlog::events::quic::ConnectionClosedTrigger::Error)
-                        };
-
-                        (Some(qlog::events::ConnectionClosedEventError::TransportError(qlog::events::quic::TransportError::Unknown)), None, trigger)
-                    };
-
-                    // TODO: select more appopriate connection_code and application_error than unknown.
-                    qlog::events::quic::ConnectionClosed {
-                        initiator: Some(TransportInitiator::Remote),
-                        connection_error: connection_code,
-                        application_error,
-                        error_code: Some(peer_error.error_code),
-                        internal_code: None,
-                        reason: Some(String::from_utf8_lossy(&peer_error.reason).to_string()),
-                        trigger,
-                    }
-                },
-
-                (true, false, None, Some(local_error)) => {
-                    let (connection_code, application_error, trigger) = if local_error.is_app {
-                        (None, Some(qlog::events::ApplicationError::Unknown), None)
-                    } else {
-                        let trigger = if local_error.error_code == WireErrorCode::NoError as u64 {
-                            Some(qlog::events::quic::ConnectionClosedTrigger::Clean)
-                        } else {
-                            Some(qlog::events::quic::ConnectionClosedTrigger::Error)
-                        };
-
-                        (Some(qlog::events::ConnectionClosedEventError::TransportError(qlog::events::quic::TransportError::Unknown)), None, trigger)
-                    };
-
-                    // TODO: select more appopriate connection_code and application_error than unknown.
-                    qlog::events::quic::ConnectionClosed {
-                        initiator: Some(TransportInitiator::Local),
-                        connection_error: connection_code,
-                        application_error,
-                        error_code: Some(local_error.error_code),
-                        internal_code: None,
-                        reason: Some(String::from_utf8_lossy(&local_error.reason).to_string()),
-                        trigger,
-                    }
-                },
-
-                _ => qlog::events::quic::ConnectionClosed {
-                    initiator: None,
-                    connection_error: None,
-                    application_error: None,
-                    error_code: None,
-                    internal_code: None,
-                    reason: None,
-                    trigger: None,
-                },
-            };
-
+            let event = self.close_event(cause);
             qlog_with_type!(QLOG_CONNECTION_CLOSED, self.qlog, q, {
-                let ev_data = EventData::QuicConnectionClosed(cc);
-
-                q.add_event_data_now(ev_data).ok();
+                q.add_event_data_now(EventData::QuicConnectionClosed(event))
+                    .ok();
             });
             self.qlog.streamer = None;
         }
-        self.closed = true;
+    }
+
+    #[cfg(feature = "qlog")]
+    fn close_event(
+        &self, cause: CloseCause,
+    ) -> qlog::events::quic::ConnectionClosed {
+        use qlog::events::quic::ConnectionClosed;
+        use qlog::events::quic::ConnectionClosedTrigger as Trigger;
+
+        let (initiator, error, trigger, reason) = match cause {
+            CloseCause::Explicit(CloseOrigin::Local) => (
+                TransportInitiator::Local,
+                self.local_error.as_ref(),
+                Trigger::Application,
+                None,
+            ),
+            CloseCause::Explicit(CloseOrigin::Peer) => (
+                TransportInitiator::Remote,
+                self.peer_error.as_ref(),
+                Trigger::Error,
+                None,
+            ),
+            CloseCause::IdleTimeout if self.is_established() => (
+                TransportInitiator::Local,
+                None,
+                Trigger::IdleTimeout,
+                Some("Idle timeout"),
+            ),
+            CloseCause::IdleTimeout => (
+                TransportInitiator::Local,
+                None,
+                Trigger::HandshakeTimeout,
+                Some("Handshake timeout"),
+            ),
+            CloseCause::StatelessReset => (
+                TransportInitiator::Remote,
+                None,
+                Trigger::StatelessReset,
+                Some("Stateless reset"),
+            ),
+            CloseCause::PacketNumbersExhausted => (
+                TransportInitiator::Local,
+                None,
+                Trigger::Error,
+                Some("Packet numbers exhausted"),
+            ),
+            CloseCause::NoViablePath => (
+                TransportInitiator::Local,
+                None,
+                Trigger::Error,
+                Some("No viable path"),
+            ),
+        };
+        let mut event = ConnectionClosed {
+            initiator: Some(initiator),
+            connection_error: None,
+            application_error: None,
+            error_code: None,
+            internal_code: None,
+            reason: reason.map(str::to_owned),
+            trigger: Some(trigger),
+        };
+        if let Some(error) = error {
+            event.error_code = Some(error.error_code);
+            event.reason =
+                Some(String::from_utf8_lossy(&error.reason).into_owned());
+            if error.is_app {
+                event.application_error =
+                    Some(qlog::events::ApplicationError::Unknown);
+                event.trigger = Some(Trigger::Application);
+            } else {
+                event.connection_error = Some(
+                    qlog::events::ConnectionClosedEventError::TransportError(
+                        qlog::events::quic::TransportError::Unknown,
+                    ),
+                );
+                event.trigger =
+                    Some(if error.error_code == WireErrorCode::NoError as u64 {
+                        Trigger::Clean
+                    } else {
+                        Trigger::Error
+                    });
+            }
+        }
+        event
     }
 }
 
