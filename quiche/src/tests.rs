@@ -3958,9 +3958,10 @@ fn stop_sending_recv_completion_preserves_unreported_error(
     assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
 }
 
-/// A duplicate FIN collects a stopped stream without another application read.
+/// The first FIN on previously consumed data must be delivered before
+/// collecting a stopped stream. Repeating the FIN must not reopen it.
 #[rstest]
-fn stop_sending_duplicate_fin_collects_stream(
+fn stop_sending_late_fin_collects_after_notification(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
     let mut buf = [0; 65535];
@@ -3982,7 +3983,8 @@ fn stop_sending_duplicate_fin_collects_stream(
     assert_eq!(pipe.server.writable().next(), None);
     let max_streams = pipe.server.streams.max_streams_bidi_next();
 
-    // The consumed data is discarded, but its FIN completes the receive side.
+    // Only the data is duplicate. This is the first FIN; the application
+    // must observe the terminal event independently of the send-side STOP.
     let frames = [frame::Frame::Stream {
         stream_id: 0,
         data: RangeBuf::from(b"req", 0, true),
@@ -3993,8 +3995,19 @@ fn stop_sending_duplicate_fin_collects_stream(
     assert_eq!(pipe.server_recv(&mut buf[..written]), Ok(written));
 
     assert!(pipe.server.stream_finished(0));
+    assert!(pipe.server.stream_readable(0));
+    assert!(!pipe.server.streams.is_collected(0));
+    assert_eq!(pipe.server.stream_recv(0, &mut []), Ok((0, true)));
     assert!(!pipe.server.stream_readable(0));
     assert_eq!(pipe.server.writable().next(), None);
+    assert!(pipe.server.streams.is_collected(0));
+    assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+
+    let written =
+        test_utils::encode_pkt(&mut pipe.client, Type::Short, &frames, &mut buf)
+            .unwrap();
+    assert_eq!(pipe.server_recv(&mut buf[..written]), Ok(written));
+    assert!(!pipe.server.stream_readable(0));
     assert!(pipe.server.streams.is_collected(0));
     assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
 }
