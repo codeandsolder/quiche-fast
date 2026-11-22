@@ -10543,6 +10543,27 @@ fn user_provided_boring_ctx(
 
 #[cfg(feature = "boringssl-boring-crate")]
 #[rstest]
+fn handshake_callback_state_is_not_retained(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    for conn in [&mut pipe.client, &mut pipe.server] {
+        assert_eq!(
+            <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
+            Err(Error::TlsFail),
+        );
+    }
+    pipe.handshake().unwrap();
+    for conn in [&mut pipe.client, &mut pipe.server] {
+        assert_eq!(
+            <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
+            Err(Error::TlsFail),
+        );
+    }
+}
+
+#[cfg(feature = "boringssl-boring-crate")]
+#[rstest]
 fn in_handshake_config(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     #[values(false, true)] use_session: bool,
