@@ -833,10 +833,7 @@ fn handshake_resumption(
         let mut rejected =
             test_utils::Pipe::with_server_config(&mut config).unwrap();
         let original_params = rejected.client.peer_transport_params.clone();
-        assert_eq!(
-            rejected.client.set_session(malformed),
-            Err(expected),
-        );
+        assert_eq!(rejected.client.set_session(malformed), Err(expected),);
         assert_eq!(rejected.client.peer_transport_params, original_params);
         rejected.handshake().unwrap();
         assert!(!rejected.client.is_resumed());
