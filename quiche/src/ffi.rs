@@ -276,22 +276,22 @@ fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     }
 }
 
-/// Converts a non-null NUL-terminated C string to owned UTF-8.
+/// Borrows a non-null NUL-terminated C string as UTF-8.
 ///
 /// # Safety
 ///
 /// `value` must point to a valid NUL-terminated C string for the duration of
-/// this call.
-unsafe fn c_str_to_string(
+/// the returned borrow, without mutation.
+unsafe fn c_str_to_str<'a>(
     value: *const c_char,
-) -> std::result::Result<String, ()> {
+) -> std::result::Result<&'a str, ()> {
     if value.is_null() {
         return Err(());
     }
 
+    // SAFETY: null was checked above; the C caller owns the valid string.
     unsafe { ffi::CStr::from_ptr(value) }
         .to_str()
-        .map(str::to_owned)
         .map_err(|_| ())
 }
 
@@ -344,89 +344,68 @@ pub extern "C" fn quiche_config_new(version: u32) -> *mut Config {
     }
 }
 
+// The C string configuration entry points have one common validation and
+// conversion path; only the Rust operation differs.
+fn config_string_operation(
+    config: *mut Config, value: *const c_char,
+    op: impl FnOnce(&mut Config, &str) -> Result<()>,
+) -> c_int {
+    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    // SAFETY: the C entry point requires a live NUL-terminated string.
+    let Ok(value) = (unsafe { c_str_to_str(value) }) else {
+        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
+    };
+    op(config, value).map_or_else(|e| c_int::from(e.to_c()), |()| 0)
+}
+
+// Likewise, the byte-input operations all borrow the validated input for
+// the duration of the call and return a C status code, not a byte count.
+fn bytes_operation<T>(
+    receiver: *mut T, input: *const u8, len: size_t,
+    op: impl FnOnce(&mut T, &[u8]) -> Result<()>,
+) -> c_int {
+    let receiver = ffi_mut!(receiver, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let input = ffi_slice!(input, len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    op(receiver, input).map_or_else(|e| c_int::from(e.to_c()), |()| 0)
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_config_load_cert_chain_from_pem_file(
     config: *mut Config, path: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match config.load_cert_chain_from_pem_file(&path) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(config, path, Config::load_cert_chain_from_pem_file)
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_priv_key_from_pem_file(
     config: *mut Config, path: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match config.load_priv_key_from_pem_file(&path) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(config, path, Config::load_priv_key_from_pem_file)
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_verify_locations_from_file(
     config: *mut Config, path: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match config.load_verify_locations_from_file(&path) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(config, path, Config::load_verify_locations_from_file)
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_load_verify_locations_from_directory(
     config: *mut Config, path: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(path) = (unsafe { c_str_to_string(path) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match config.load_verify_locations_from_directory(&path) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(
+        config,
+        path,
+        Config::load_verify_locations_from_directory,
+    )
 }
 
 #[no_mangle]
 pub extern "C" fn quiche_config_set_curves_list(
     config: *mut Config, curves: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(curves) = (unsafe { c_str_to_string(curves) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-
-    match config.set_curves_list(&curves) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(config, curves, Config::set_curves_list)
 }
 
 #[no_mangle]
@@ -479,16 +458,12 @@ pub extern "C" fn quiche_config_enable_early_data(config: *mut Config) {
 pub extern "C" fn quiche_config_set_application_protos(
     config: *mut Config, protos: *const u8, protos_len: size_t,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let protos =
-        ffi_slice!(protos, protos_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    match config.set_application_protos_wire_format(protos) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    bytes_operation(
+        config,
+        protos,
+        protos_len,
+        Config::set_application_protos_wire_format,
+    )
 }
 
 #[no_mangle]
@@ -601,16 +576,7 @@ pub extern "C" fn quiche_config_set_disable_active_migration(
 pub extern "C" fn quiche_config_set_cc_algorithm_name(
     config: *mut Config, name: *const c_char,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(name) = (unsafe { c_str_to_string(name) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    match config.set_cc_algorithm_name(&name) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    config_string_operation(config, name, Config::set_cc_algorithm_name)
 }
 
 #[no_mangle]
@@ -743,15 +709,7 @@ pub extern "C" fn quiche_config_set_disable_dcid_reuse(
 pub extern "C" fn quiche_config_set_ticket_key(
     config: *mut Config, key: *const u8, key_len: size_t,
 ) -> c_int {
-    let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let key = ffi_slice!(key, key_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    match config.set_ticket_key(key) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    bytes_operation(config, key, key_len, Config::set_ticket_key)
 }
 
 #[no_mangle]
@@ -885,7 +843,7 @@ pub extern "C" fn quiche_connect(
     let server_name = if server_name.is_null() {
         None
     } else {
-        let Ok(server_name) = (unsafe { c_str_to_string(server_name) }) else {
+        let Ok(server_name) = (unsafe { c_str_to_str(server_name) }) else {
             return ptr::null_mut();
         };
         Some(server_name)
@@ -901,7 +859,7 @@ pub extern "C" fn quiche_connect(
         return ptr::null_mut();
     };
 
-    match connect(server_name.as_deref(), &scid, local, peer, config) {
+    match connect(server_name, &scid, local, peer, config) {
         Ok(c) => Box::into_raw(Box::new(c)),
 
         Err(_) => ptr::null_mut(),
@@ -1097,14 +1055,14 @@ pub extern "C" fn quiche_conn_set_keylog_path(
 ) -> bool {
     let conn = ffi_mut!(conn, false);
 
-    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+    let Ok(filename) = (unsafe { c_str_to_str(path) }) else {
         return false;
     };
 
     let file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&filename);
+        .open(filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -1136,20 +1094,20 @@ pub extern "C" fn quiche_conn_set_qlog_path(
 ) -> bool {
     let conn = ffi_mut!(conn, false);
 
-    let Ok(filename) = (unsafe { c_str_to_string(path) }) else {
+    let Ok(filename) = (unsafe { c_str_to_str(path) }) else {
         return false;
     };
-    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+    let Ok(title) = (unsafe { c_str_to_str(log_title) }) else {
         return false;
     };
-    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+    let Ok(description) = (unsafe { c_str_to_str(log_desc) }) else {
         return false;
     };
 
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
-        .open(&filename);
+        .open(filename);
 
     let writer = match file {
         Ok(f) => std::io::BufWriter::new(f),
@@ -1159,7 +1117,7 @@ pub extern "C" fn quiche_conn_set_qlog_path(
 
     conn.set_qlog(
         Box::new(writer),
-        title,
+        title.to_owned(),
         format!("{} id={}", description, conn.trace_id),
     );
 
@@ -1174,10 +1132,10 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
 ) {
     let conn = ffi_mut!(conn);
 
-    let Ok(title) = (unsafe { c_str_to_string(log_title) }) else {
+    let Ok(title) = (unsafe { c_str_to_str(log_title) }) else {
         return;
     };
-    let Ok(description) = (unsafe { c_str_to_string(log_desc) }) else {
+    let Ok(description) = (unsafe { c_str_to_str(log_desc) }) else {
         return;
     };
 
@@ -1186,7 +1144,7 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
 
     conn.set_qlog(
         Box::new(writer),
-        title,
+        title.to_owned(),
         format!("{} id={}", description, conn.trace_id),
     );
 }
@@ -1195,15 +1153,7 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
 pub extern "C" fn quiche_conn_set_session(
     conn: *mut Connection, buf: *const u8, buf_len: size_t,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let buf = ffi_slice!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    match conn.set_session(buf) {
-        Ok(_) => 0,
-
-        Err(e) => c_int::from(e.to_c()),
-    }
+    bytes_operation(conn, buf, buf_len, Connection::set_session)
 }
 
 #[no_mangle]
@@ -2428,29 +2378,47 @@ pub extern "C" fn quiche_conn_is_path_validated(
     }
 }
 
+// Probing and migration both consume two addresses and produce a CID
+// sequence on success. Validate all C arguments before mutating the connection.
+fn path_operation(
+    conn: *mut Connection, local: (*const sockaddr, socklen_t),
+    peer: (*const sockaddr, socklen_t), seq: *mut u64,
+    op: impl FnOnce(&mut Connection, SocketAddr, SocketAddr) -> Result<u64>,
+) -> c_int {
+    let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let local_addr = ffi_ref!(local.0, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let peer_addr = ffi_ref!(peer.0, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let seq = ffi_mut!(
+        seq.cast::<MaybeUninit<u64>>(),
+        c_int::from(FFI_ERR_INVALID_ARGUMENT)
+    );
+    let Ok(local) = std_addr_from_c(local_addr, local.1) else {
+        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
+    };
+    let Ok(peer) = std_addr_from_c(peer_addr, peer.1) else {
+        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
+    };
+    match op(conn, local, peer) {
+        Ok(v) => {
+            seq.write(v);
+            0
+        },
+        Err(e) => c_int::from(e.to_c()),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_conn_probe_path(
     conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
     peer: *const sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let local = ffi_ref!(local, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let peer = ffi_ref!(peer, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let seq = ffi_mut!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    match conn.probe_path(local, peer) {
-        Ok(v) => {
-            *seq = v;
-            0
-        },
-        Err(e) => c_int::from(e.to_c()),
-    }
+    path_operation(
+        conn,
+        (local, local_len),
+        (peer, peer_len),
+        seq,
+        Connection::probe_path,
+    )
 }
 
 #[no_mangle]
@@ -2479,24 +2447,13 @@ pub extern "C" fn quiche_conn_migrate(
     conn: *mut Connection, local: *const sockaddr, local_len: socklen_t,
     peer: *const sockaddr, peer_len: socklen_t, seq: *mut u64,
 ) -> c_int {
-    let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let local = ffi_ref!(local, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let peer = ffi_ref!(peer, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let seq = ffi_mut!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let Ok(local) = std_addr_from_c(local, local_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    let Ok(peer) = std_addr_from_c(peer, peer_len) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
-    match conn.migrate(local, peer) {
-        Ok(v) => {
-            *seq = v;
-            0
-        },
-        Err(e) => c_int::from(e.to_c()),
-    }
+    path_operation(
+        conn,
+        (local, local_len),
+        (peer, peer_len),
+        seq,
+        Connection::migrate,
+    )
 }
 
 #[no_mangle]
@@ -3090,7 +3047,7 @@ mod tests {
             Some(octets::MAX_VAR_INT);
         config.local_transport_params.disable_active_migration = true;
         let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
-        let mut out = std::mem::MaybeUninit::<TransportParams>::uninit();
+        let mut out = MaybeUninit::<TransportParams>::uninit();
         assert!(!quiche_conn_peer_transport_params(
             &pipe.client,
             out.as_mut_ptr()
