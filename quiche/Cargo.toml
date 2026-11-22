@@ -19,7 +19,6 @@ include = [
   "/quiche.svg",
   "/src",
 ]
-rust-version = "1.88"
 
 [lints]
 workspace = true

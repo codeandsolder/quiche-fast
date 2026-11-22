@@ -10,7 +10,7 @@ on:
         type: boolean
         default: false
 
-name: Stable
+name: Pinned compiler
 
 permissions:
   contents: read
@@ -21,7 +21,6 @@ env:
   # Used by `quiche_multiarch`, which can't link `boring` for foreign targets.
   NO_BORING_OPTIONS: "--features=ffi,qlog --workspace --exclude h3i --exclude tokio-quiche"
   RUSTFLAGS: ${{ startsWith(github.ref, 'refs/tags/') && '-D warnings' || '-D warnings -C target-cpu=x86-64-v2' }}
-  RUSTTOOLCHAIN: "1.100.0"
 
 concurrency:
   # Manual cross-target validation must not share the pending slot with pushes.
@@ -36,11 +35,6 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
-
       - name: Reject allow attributes
         shell: bash
         run: |
@@ -49,11 +43,20 @@ jobs:
             exit 1
           fi
 
-      - name: Install stable toolchain
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
-          components: clippy
+          toolchain: ${{ steps.compiler.outputs.channel }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Install qlog-dancer dependencies
         run: |
@@ -66,7 +69,7 @@ jobs:
       - name: Keep Foundations on one ABI
         shell: bash
         run: |
-          cargo metadata --format-version 1 | python3 -c 'import json, sys; versions = sorted({p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "foundations"}); print("foundations versions:", ", ".join(versions)); raise SystemExit(0 if len(versions) == 1 else 1)'
+          cargo metadata --locked --format-version 1 | jq -e '[.packages[] | select(.name == "foundations") | .version] | unique | if length == 1 then . else error("expected exactly one Foundations ABI: " + tostring) end'
 
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
@@ -99,7 +102,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   qlog-dancer-wasm:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_only
@@ -112,16 +115,21 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install WASM stable target
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
           targets: wasm32-unknown-unknown
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Install chart backend build dependencies
         run: |
@@ -129,7 +137,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
 
       - name: Check qlog-dancer browser library
-        run: cargo +1.100.0 check --locked --target wasm32-unknown-unknown -p qlog-dancer --lib
+        run: cargo check --locked --target wasm32-unknown-unknown -p qlog-dancer --lib
 
       - name: Test browser JavaScript and exact 64-bit chart coordinates
         run: |
@@ -139,22 +147,21 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   shared-sccache:
     name: Linux workspace (shared sccache)
     if: (github.event_name == 'workflow_dispatch' && !inputs.windows_only) || (github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/master')
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
     with:
       command: |
         sudo apt-get update -qq
         sudo apt-get install -y --no-install-recommends libexpat1-dev libfreetype6-dev libfontconfig1-dev
-        cargo +1.100.0 test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
-        cargo +1.100.0 test --verbose --doc --features=async,ffi,qlog,rpk --workspace
-        cargo +1.100.0 clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
-      rust-toolchain: "1.100.0"
+        cargo test --verbose --all-targets --features=async,ffi,qlog,rpk --workspace
+        cargo test --verbose --doc --features=async,ffi,qlog,rpk --workspace
+        cargo clippy --features=async,ffi,qlog,rpk --workspace -- -D warnings
       rust-components: "clippy"
       rustflags: "-D warnings -C target-cpu=x86-64-v2"
       # rstest/proc_macro_crate spawns $CARGO locate-project, so keep stock
@@ -173,15 +180,20 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install stable toolchain
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
@@ -193,7 +205,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   quiche_ios:
     if: startsWith(github.ref, 'refs/tags/')
@@ -207,16 +219,21 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install stable toolchain
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
           targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Remove cdylib from iOS build
         run: |
@@ -230,7 +247,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   quiche_windows:
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.windows_only)
@@ -269,16 +286,21 @@ jobs:
         run: |
           "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 't')" >> $env:GITHUB_ENV
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install stable toolchain
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
           targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       # The hosted Windows image preinstalls MSYS2 at `C:\msys64` but doesn't
       # put it on PATH. For x86_64-pc-windows-gnu
@@ -345,7 +367,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   quiche_multiarch:
     if: startsWith(github.ref, 'refs/tags/')
@@ -357,10 +379,15 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install stable toolchain
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
+          components: clippy,rustfmt
 
       - name: Install cargo-binstall
         uses: cargo-bins/cargo-binstall@f1a7de174e4a50a2de9554a8eefc2340b34a18e9
@@ -378,16 +405,20 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install stable toolchain
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
-          components: clippy
+          toolchain: ${{ steps.compiler.outputs.channel }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Run cargo test
         run: cargo test --no-run --verbose --manifest-path=tools/http3_test/Cargo.toml
@@ -397,7 +428,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   docker:
     if: startsWith(github.ref, 'refs/tags/')
@@ -430,16 +461,21 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: "1.100.0"
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install stable toolchain for the target
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
-          toolchain: ${{ env.RUSTTOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
           targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Install cargo-ndk
         run: cargo install cargo-ndk
@@ -449,4 +485,4 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
