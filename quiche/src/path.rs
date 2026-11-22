@@ -200,7 +200,7 @@ pub struct Path {
     /// Number of packets received on this path.
     pub recv_count: usize,
 
-    /// Total number of packets sent with data retransmitted from this path.
+    /// Total number of packets carrying retransmissions sent on this path.
     pub retrans_count: usize,
 
     /// Total number of times PTO (probe timeout) fired.
@@ -226,8 +226,8 @@ pub struct Path {
     /// Total number of bytes received over this path.
     pub recv_bytes: u64,
 
-    /// Total number of bytes retransmitted from this path.
-    /// This counts only STREAM and CRYPTO data.
+    /// Total number of STREAM and CRYPTO payload bytes retransmitted on this
+    /// path. This counts only STREAM and CRYPTO data.
     pub stream_retrans_bytes: u64,
 
     /// Total number of bytes the server can send before the peer's address
@@ -1031,7 +1031,8 @@ pub struct PathStats {
     /// The number of QUIC packets that were lost.
     pub lost: usize,
 
-    /// The number of sent QUIC packets with retransmitted data.
+    /// The number of sent QUIC packets carrying retransmitted STREAM or
+    /// CRYPTO data, or a retransmitted FIN.
     pub retrans: usize,
 
     /// The number of times PTO (probe timeout) fired.
@@ -1076,7 +1077,7 @@ pub struct PathStats {
     /// The number of bytes lost.
     pub lost_bytes: u64,
 
-    /// The number of stream bytes retransmitted.
+    /// The number of STREAM and CRYPTO payload bytes actually retransmitted.
     pub stream_retrans_bytes: u64,
 
     /// The current PMTU for the connection.

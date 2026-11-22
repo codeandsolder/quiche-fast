@@ -14416,6 +14416,7 @@ fn stream_fin_is_retransmitted_after_data_acked_separately(
     assert_eq!(pipe.advance(), Ok(()));
     assert_eq!(pipe.server.stream_recv(4, &mut buf), Ok((5, true)));
 
+    let baseline = pipe.server.stats();
     assert_eq!(pipe.server.stream_send(4, b"response", false), Ok(8));
     let data_flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -14435,6 +14436,12 @@ fn stream_fin_is_retransmitted_after_data_acked_separately(
         frame::Frame::Stream { stream_id: 4, data }
             if data.off() == 0 && data.len() == 8 && data.fin()
     )));
+
+    assert_eq!(pipe.server.stats().retrans, baseline.retrans + 1);
+    assert_eq!(
+        pipe.server.stats().stream_retrans_bytes,
+        baseline.stream_retrans_bytes + 8
+    );
 
     // Lose the probe, but deliver and acknowledge the original data.
     test_utils::process_flight(&mut pipe.client, data_flight).unwrap();
@@ -14460,6 +14467,11 @@ fn stream_fin_is_retransmitted_after_data_acked_separately(
             if data.off() == 8 && data.is_empty() && data.fin()
     )));
 
+    assert_eq!(pipe.server.stats().retrans, baseline.retrans + 2);
+    assert_eq!(
+        pipe.server.stats().stream_retrans_bytes,
+        baseline.stream_retrans_bytes + 8
+    );
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
     assert_eq!(pipe.client.stream_recv(4, &mut buf), Ok((0, true)));
 }
