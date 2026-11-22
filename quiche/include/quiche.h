@@ -398,6 +398,7 @@ size_t quiche_conn_send_quantum(const quiche_conn *conn);
 
 // Writes a single QUIC packet to be sent to the peer from the specified
 // local address "from" to the destination address "to".
+// Omitted addresses must be passed as NULL with length zero.
 ssize_t quiche_conn_send_on_path(quiche_conn *conn, uint8_t *out, size_t out_len,
                                  const struct sockaddr *from, socklen_t from_len,
                                  const struct sockaddr *to, socklen_t to_len,
