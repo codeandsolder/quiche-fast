@@ -55,22 +55,22 @@ where
     /// To avoid needless allocations when a `RangeBuf` is split, this field
     /// should be reference-counted so it can be shared between multiple
     /// `RangeBuf` objects, and sliced using the `start` and `len` values.
-    pub(crate) data: F::Buf,
+    data: F::Buf,
 
     /// The initial offset within the internal buffer.
-    pub(crate) start: usize,
+    start: usize,
 
     /// The current offset within the internal buffer.
-    pub(crate) pos: usize,
+    pos: usize,
 
     /// The number of bytes in the buffer, from the initial offset.
-    pub(crate) len: usize,
+    len: usize,
 
     /// The offset of the buffer within a stream.
-    pub(crate) off: u64,
+    off: u64,
 
     /// Whether this contains the final byte in the stream.
-    pub(crate) fin: bool,
+    fin: bool,
 
     _bf: PhantomData<F>,
 }
@@ -103,7 +103,7 @@ where
 
     /// Returns the starting offset of `self`.
     pub const fn off(&self) -> u64 {
-        (self.off - self.start as u64) + self.pos as u64
+        self.off + (self.pos - self.start) as u64
     }
 
     /// Returns the final offset of `self`.
@@ -126,32 +126,63 @@ where
         self.pos += count;
     }
 
-    /// Splits the buffer into two at the given index.
-    pub fn split_off(&mut self, at: usize) -> Self
-    where
-        F::Buf: Clone + AsRef<[u8]>,
-    {
-        assert!(
-            at <= self.len,
-            "`at` split index (is {at}) should be <= len (is {})",
-            self.len
-        );
+    /// The stream offset of the retained range, including emitted bytes.
+    pub const fn start_offset(&self) -> u64 {
+        self.off
+    }
 
+    /// Split at an absolute stream offset, not an index into an allocation.
+    /// Both pieces retain their emitted/pending cursor positions.
+    pub fn split_off(&mut self, offset: u64) -> Option<Self> {
+        let at = usize::try_from(offset.checked_sub(self.off)?).ok()?;
+        if at > self.len {
+            return None;
+        }
+
+        let middle = self.start + at;
         let buf = Self {
             data: self.data.clone(),
-            start: self.start + at,
-            pos: cmp::max(self.pos, self.start + at),
+            start: middle,
+            pos: cmp::max(self.pos, middle),
             len: self.len - at,
-            off: self.off + at as u64,
+            off: offset,
             _bf: Default::default(),
             fin: self.fin,
         };
 
-        self.pos = cmp::min(self.pos, self.start + at);
+        self.pos = cmp::min(self.pos, middle);
         self.len = at;
         self.fin = false;
+        Some(buf)
+    }
 
-        buf
+    /// Rewind the emitted cursor no earlier than the retained range.
+    /// Return the newly pending byte count.
+    pub fn rewind_to(&mut self, offset: u64) -> u64 {
+        if offset >= self.off() {
+            return 0;
+        }
+        let relative =
+            usize::try_from(offset.saturating_sub(self.off)).unwrap_or(self.len);
+        let next = self.start + relative;
+        let restored = self.pos - next;
+        self.pos = next;
+        restored as u64
+    }
+
+    /// Drop a contiguous acknowledged prefix without cloning the backing
+    /// allocation. Return the number of pending bytes removed.
+    pub fn acknowledge_prefix(&mut self, offset: u64) -> u64 {
+        let bytes = usize::try_from(offset.saturating_sub(self.off))
+            .unwrap_or(self.len)
+            .min(self.len);
+        let start = self.start + bytes;
+        let pending = start.saturating_sub(self.pos);
+        self.start = start;
+        self.pos = self.pos.max(start);
+        self.len -= bytes;
+        self.off += bytes as u64;
+        pending as u64
     }
 }
 
