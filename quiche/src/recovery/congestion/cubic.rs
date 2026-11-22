@@ -280,8 +280,8 @@ fn on_packet_acked(
         let ca_start_time;
 
         // In CSS, use css_start_time instead of congestion_recovery_start_time.
-        if r.hystart.in_css() {
-            ca_start_time = r.hystart.css_start_time().unwrap();
+        if let Some(start) = r.hystart.css_start_time() {
+            ca_start_time = start;
 
             // Reset w_max and k when CSS started.
             if r.cubic_state.w_max == 0.0 {

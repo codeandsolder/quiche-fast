@@ -420,8 +420,8 @@ impl BBRv2NetworkModel {
 
         // `bandwidth_latest` and `inflight_latest` only increased within a
         // round.
-        if sample.sample_max_bandwidth > Some(self.bandwidth_latest) {
-            self.bandwidth_latest = sample.sample_max_bandwidth.unwrap();
+        if let Some(bandwidth) = sample.sample_max_bandwidth {
+            self.bandwidth_latest = self.bandwidth_latest.max(bandwidth);
         }
 
         if sample.sample_max_inflight > self.inflight_latest {
@@ -459,13 +459,11 @@ impl BBRv2NetworkModel {
             }
 
             if self.bytes_lost_in_round > 0 {
-                if self.bandwidth_lo.is_none() {
-                    self.bandwidth_lo = Some(self.max_bandwidth());
-                }
-
+                let prior_bandwidth =
+                    self.bandwidth_lo.unwrap_or_else(|| self.max_bandwidth());
                 self.bandwidth_lo = Some(
                     self.bandwidth_latest
-                        .max(self.bandwidth_lo.unwrap() * (1.0 - params.beta)),
+                        .max(prior_bandwidth * (1.0 - params.beta)),
                 );
 
                 if self.inflight_lo == usize::MAX {
@@ -583,20 +581,20 @@ impl BBRv2NetworkModel {
     pub(super) fn maybe_expire_min_rtt(
         &mut self, congestion_event: &BBRv2CongestionEvent, params: &Params,
     ) -> bool {
-        if congestion_event.sample_min_rtt.is_none() {
+        let Some(sample) = congestion_event.sample_min_rtt else {
             return false;
-        }
+        };
 
-        if congestion_event.event_time <
-            self.min_rtt_filter.min_rtt_timestamp + params.probe_rtt_period
+        if congestion_event
+            .event_time
+            .saturating_duration_since(self.min_rtt_filter.min_rtt_timestamp) <
+            params.probe_rtt_period
         {
             return false;
         }
 
-        self.min_rtt_filter.force_update(
-            congestion_event.sample_min_rtt.unwrap(),
-            congestion_event.event_time,
-        );
+        self.min_rtt_filter
+            .force_update(sample, congestion_event.event_time);
 
         true
     }

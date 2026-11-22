@@ -448,23 +448,15 @@ impl ProbeBW {
         &self, target_bytes_inflight: usize,
         congestion_event: &BBRv2CongestionEvent, params: &Params,
     ) -> bool {
-        if self.has_cycle_lasted(
-            self.cycle.probe_wait_time.unwrap(),
-            congestion_event,
-        ) {
-            return true;
-        }
-
-        if self.is_time_to_probe_for_reno_coexistence(
-            target_bytes_inflight,
-            1.0,
-            congestion_event,
-            params,
-        ) {
-            return true;
-        }
-
-        false
+        self.cycle
+            .probe_wait_time
+            .is_some_and(|wait| self.has_cycle_lasted(wait, congestion_event)) ||
+            self.is_time_to_probe_for_reno_coexistence(
+                target_bytes_inflight,
+                1.0,
+                congestion_event,
+                params,
+            )
     }
 
     fn maybe_adapt_upper_bounds(

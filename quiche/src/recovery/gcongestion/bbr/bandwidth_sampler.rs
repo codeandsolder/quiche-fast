@@ -416,25 +416,23 @@ impl From<(Instant, usize, usize, &BandwidthSampler)>
 }
 
 impl RecentAckPoints {
-    fn update(&mut self, ack_time: Instant, total_bytes_acked: u64) {
+    fn update(&mut self, ack_time: Instant, total_bytes_acked: u64) -> AckPoint {
         assert!(
             total_bytes_acked >=
                 self.ack_points[1].map_or(0, |p| p.total_bytes_acked)
         );
 
         self.ack_points[0] = self.ack_points[1];
-        self.ack_points[1] = Some(AckPoint {
+        let point = AckPoint {
             ack_time,
             total_bytes_acked,
-        });
+        };
+        self.ack_points[1] = Some(point);
+        point
     }
 
     fn clear(&mut self) {
         self.ack_points = Default::default();
-    }
-
-    const fn most_recent(&self) -> Option<AckPoint> {
-        self.ack_points[1]
     }
 
     fn less_recent_point(&self, choose_a0_point_fix: bool) -> Option<AckPoint> {
@@ -514,11 +512,11 @@ impl BandwidthSampler {
             self.last_acked_packet_ack_time = sent_time;
             if self.overestimate_avoidance {
                 self.recent_ack_points.clear();
-                self.recent_ack_points
+                let point = self
+                    .recent_ack_points
                     .update(sent_time, self.total_bytes_acked);
                 self.a0_candidates.clear();
-                self.a0_candidates
-                    .push_back(self.recent_ack_points.most_recent().unwrap());
+                self.a0_candidates.push_back(point);
             }
 
             self.total_bytes_sent_at_last_acked_packet = self.total_bytes_sent;
@@ -685,11 +683,12 @@ impl BandwidthSampler {
         // If `extra_acked` is zero, this ACK starts a new aggregation epoch.
         // Save the previous epoch's last ACK point as an A0 candidate.
         if self.overestimate_avoidance && extra_acked == 0 {
-            self.a0_candidates.push_back(
-                self.recent_ack_points
-                    .less_recent_point(self.choose_a0_point_fix)
-                    .unwrap(),
-            );
+            if let Some(point) = self
+                .recent_ack_points
+                .less_recent_point(self.choose_a0_point_fix)
+            {
+                self.a0_candidates.push_back(point);
+            }
         }
 
         usize::try_from(extra_acked).unwrap_or(usize::MAX)
@@ -789,10 +788,6 @@ impl BandwidthSampler {
         a0_candidates: &mut VecDeque<AckPoint>, total_bytes_acked: u64,
         choose_a0_point_fix: bool,
     ) -> Option<AckPoint> {
-        if a0_candidates.is_empty() {
-            return None;
-        }
-
         while let Some(candidate) = a0_candidates.get(1) {
             if candidate.total_bytes_acked > total_bytes_acked {
                 if choose_a0_point_fix {
@@ -803,7 +798,7 @@ impl BandwidthSampler {
             a0_candidates.pop_front();
         }
 
-        Some(a0_candidates[0])
+        a0_candidates.front().copied()
     }
 
     pub(crate) const fn total_bytes_acked(&self) -> u64 {
@@ -1767,6 +1762,31 @@ mod max_ack_height_tracker_tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn recent_ack_points_record_and_select_without_reconstruction() {
+        let mut recent = RecentAckPoints::default();
+        let now = Instant::now();
+        assert!(recent.less_recent_point(false).is_none());
+        let first = recent.update(now, 0);
+        assert_eq!(first.total_bytes_acked, 0);
+        let second = recent.update(now + Duration::from_millis(1), 1200);
+        assert_eq!(second.total_bytes_acked, 1200);
+        assert_eq!(
+            recent.less_recent_point(false).map(|p| p.total_bytes_acked),
+            Some(0)
+        );
+        assert_eq!(
+            recent.less_recent_point(true).map(|p| p.total_bytes_acked),
+            Some(1200)
+        );
+        recent.clear();
+        assert!(recent.less_recent_point(true).is_none());
+        assert!(
+            BandwidthSampler::choose_a0_point(&mut VecDeque::new(), 0, true)
+                .is_none()
+        );
+    }
 
     #[test]
     fn bandwidth_increase_preserves_ack_height_measurement_round() {
