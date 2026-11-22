@@ -97,15 +97,27 @@ pub enum State {
     Finished,
 }
 
-impl Type {
-    pub const fn deserialize(v: u64) -> Result<Self> {
-        match v {
-            HTTP3_CONTROL_STREAM_TYPE_ID => Ok(Self::Control),
-            HTTP3_PUSH_STREAM_TYPE_ID => Ok(Self::Push),
-            QPACK_ENCODER_STREAM_TYPE_ID => Ok(Self::QpackEncoder),
-            QPACK_DECODER_STREAM_TYPE_ID => Ok(Self::QpackDecoder),
+impl State {
+    const fn buffers_input(self) -> bool {
+        matches!(
+            self,
+            Self::StreamType |
+                Self::FrameType |
+                Self::FramePayloadLen |
+                Self::FramePayload |
+                Self::PushId
+        )
+    }
+}
 
-            _ => Ok(Self::Unknown),
+impl Type {
+    pub const fn deserialize(v: u64) -> Self {
+        match v {
+            HTTP3_CONTROL_STREAM_TYPE_ID => Self::Control,
+            HTTP3_PUSH_STREAM_TYPE_ID => Self::Push,
+            QPACK_ENCODER_STREAM_TYPE_ID => Self::QpackEncoder,
+            QPACK_DECODER_STREAM_TYPE_ID => Self::QpackDecoder,
+            _ => Self::Unknown,
         }
     }
 }
@@ -138,13 +150,13 @@ pub struct Stream {
     /// The buffer holding partial data for the current state.
     state_buf: Vec<u8>,
 
-    /// The expected amount of bytes required to complete the state.
-    state_len: usize,
+    /// The expected number of wire bytes required to complete the state.
+    /// Streaming payloads need not fit in the local address space.
+    state_len: u64,
 
-    /// The write offset in the state buffer, that is, how many bytes have
-    /// already been read from the transport for the current state. When
-    /// it reaches `stream_len` the state can be completed.
-    state_off: usize,
+    /// The number of wire bytes consumed in the current state. For buffered
+    /// states this equals the initialized length of the state buffer.
+    state_off: u64,
 
     /// The type of the frame currently being parsed.
     frame_type: Option<u64>,
@@ -280,7 +292,7 @@ impl Stream {
             Type::Unknown => State::Drain,
         };
 
-        self.state_transition(state, 1, true)?;
+        self.state_transition(state, 1)?;
 
         Ok(())
     }
@@ -291,7 +303,7 @@ impl Stream {
 
         // TODO: implement push ID.
 
-        self.state_transition(State::FrameType, 1, true)?;
+        self.state_transition(State::FrameType, 1)?;
 
         Ok(())
     }
@@ -366,7 +378,7 @@ impl Stream {
 
         self.frame_type = Some(ty);
 
-        self.state_transition(State::FramePayloadLen, 1, true)?;
+        self.state_transition(State::FramePayloadLen, 1)?;
 
         Ok(())
     }
@@ -451,15 +463,15 @@ impl Stream {
             return Err(Error::InternalError);
         }
 
-        let (state, resize) = match self.frame_type {
-            Some(frame::DATA_FRAME_TYPE_ID) => (State::Data, false),
+        let state = match self.frame_type {
+            Some(frame::DATA_FRAME_TYPE_ID) => State::Data,
 
             Some(frame::HEADERS_FRAME_TYPE_ID) => {
                 if len > self.max_encoded_headers_payload_size {
                     return Err(Error::ExcessiveLoad);
                 }
 
-                (State::FramePayload, true)
+                State::FramePayload
             },
 
             // These frames carry a mandatory single varint, so their payload
@@ -471,7 +483,7 @@ impl Stream {
                     return Err(Error::FrameError);
                 }
 
-                (State::FramePayload, true)
+                State::FramePayload
             },
 
             Some(frame::SETTINGS_FRAME_TYPE_ID) => {
@@ -479,7 +491,7 @@ impl Stream {
                     return Err(Error::FrameError);
                 }
 
-                (State::FramePayload, true)
+                State::FramePayload
             },
 
             Some(frame::PUSH_PROMISE_FRAME_TYPE_ID) => {
@@ -495,7 +507,7 @@ impl Stream {
                     return Err(Error::ExcessiveLoad);
                 }
 
-                (State::FramePayload, true)
+                State::FramePayload
             },
 
             Some(frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID) |
@@ -508,7 +520,7 @@ impl Stream {
                     return Err(Error::ExcessiveLoad);
                 }
 
-                (State::FramePayload, true)
+                State::FramePayload
             },
 
             // Ignore unknown frames' payloads.
@@ -517,15 +529,11 @@ impl Stream {
                     return Err(Error::ExcessiveLoad);
                 }
 
-                (State::SkipFramePayload, false)
+                State::SkipFramePayload
             },
         };
 
-        // Frame lengths arrive as QUIC varints (u64), but the streaming
-        // state tracks a usize. Never turn a 2^32-byte DATA frame into a
-        // zero-length frame on 32-bit targets.
-        let state_len = usize::try_from(len).map_err(|_| Error::ExcessiveLoad)?;
-        self.state_transition(state, state_len, resize)?;
+        self.state_transition(state, len)?;
 
         Ok(())
     }
@@ -533,13 +541,18 @@ impl Stream {
     /// Ensure bounded incremental growth and return the number of bytes that
     /// may be appended without allocating additional capacity. The transport
     /// writes through BufMut, which advances the initialized length itself.
-    fn state_buf_read_limit(&mut self) -> usize {
-        debug_assert_eq!(self.state_off, self.state_buf.len());
-        let need = self.state_len - self.state_off;
-        if self.state_buf.len() == self.state_buf.capacity() {
-            self.state_buf.reserve(MAX_STATE_BUF_ALLOC_SIZE.min(need));
+    fn state_buf_read_limit(&mut self) -> Result<usize> {
+        if !self.state.buffers_input() {
+            return Err(Error::InternalError);
         }
-        need.min(self.state_buf.capacity() - self.state_buf.len())
+        debug_assert_eq!(self.state_off, self.state_buf.len() as u64);
+        let need = self.addressable_remaining();
+        if self.state_buf.len() == self.state_buf.capacity() {
+            self.state_buf
+                .try_reserve(MAX_STATE_BUF_ALLOC_SIZE.min(need))
+                .map_err(|_| Error::ExcessiveLoad)?;
+        }
+        Ok(need.min(self.state_buf.capacity() - self.state_buf.len()))
     }
 
     /// Tries to fill the state buffer by reading data from the corresponding
@@ -558,13 +571,13 @@ impl Stream {
         loop {
             let stream_id = self.id;
 
-            let spare_len = self.state_buf_read_limit();
+            let spare_len = self.state_buf_read_limit()?;
             match conn.stream_recv_buf(
                 stream_id,
                 (&mut self.state_buf).limit(spare_len),
             ) {
                 Ok((read, fin)) => {
-                    self.state_off = self.state_buf.len();
+                    self.state_off = self.state_buf.len() as u64;
 
                     if self.critical_stream_closed(fin) {
                         super::close_conn_critical_stream(conn)?;
@@ -628,7 +641,7 @@ impl Stream {
             return Ok(());
         }
 
-        let len = self.state_len - self.state_off;
+        let len = self.addressable_remaining();
 
         let read = match conn.stream_discard(self.id, len) {
             Ok((len, fin)) => {
@@ -665,7 +678,7 @@ impl Stream {
             self.id,
         );
 
-        self.state_off += read;
+        self.state_off += read as u64;
 
         if !self.state_buffer_complete() {
             self.reset_data_event();
@@ -728,13 +741,13 @@ impl Stream {
 
         loop {
             use std::io::BufRead as _;
-            let spare_len = self.state_buf_read_limit();
+            let spare_len = self.state_buf_read_limit()?;
             let available =
                 stream.fill_buf().map_err(|_| Error::InternalError)?;
             let read = available.len().min(spare_len);
             self.state_buf.extend_from_slice(&available[..read]);
             stream.consume(read);
-            self.state_off = self.state_buf.len();
+            self.state_off = self.state_buf.len() as u64;
 
             if read < spare_len {
                 break;
@@ -752,11 +765,24 @@ impl Stream {
         Ok(())
     }
 
+    /// Read a complete varint, respecting incremental transport delivery.
+    pub fn read_varint<F: BufFactory>(
+        &mut self, conn: &mut crate::Connection<F>,
+    ) -> Result<u64> {
+        self.try_fill_buffer(conn)?;
+        match self.try_consume_varint() {
+            Err(Error::Done) => {
+                self.try_fill_buffer(conn)?;
+                self.try_consume_varint()
+            },
+            result => result,
+        }
+    }
+
     /// Tries to parse a varint (including length) from the state buffer.
     pub fn try_consume_varint(&mut self) -> Result<u64> {
         if self.state_off == 1 {
-            self.state_len = octets::varint_parse_len(self.state_buf[0]);
-            self.state_buf.reserve(self.state_len);
+            self.state_len = octets::varint_parse_len(self.state_buf[0]) as u64;
         }
 
         // Return early if we don't have enough data in the state buffer to
@@ -780,11 +806,11 @@ impl Stream {
         if !self.state_buffer_complete() {
             return Err(Error::Done);
         }
-        let payload_len = self.state_len as u64;
+        let payload_len = self.state_len;
         let ty = self.frame_type.ok_or(Error::InternalError)?;
         let frame = frame::Frame::from_bytes(ty, payload_len, &self.state_buf)?;
 
-        self.state_transition(State::FrameType, 1, true)?;
+        self.state_transition(State::FrameType, 1)?;
         // Processing a frame other than DATA, so re-arm the Data event.
         self.reset_data_event();
 
@@ -800,7 +826,7 @@ impl Stream {
         // Processing a frame other than DATA, so re-arm the Data event.
         self.reset_data_event();
 
-        self.state_transition(State::FrameType, 1, true)?;
+        self.state_transition(State::FrameType, 1)?;
 
         Ok(())
     }
@@ -810,7 +836,7 @@ impl Stream {
         &mut self, conn: &mut crate::Connection<F>, out: OUT,
     ) -> Result<(usize, bool)> {
         debug_assert_eq!(self.state, State::Data);
-        let out = out.limit(self.state_len - self.state_off);
+        let out = out.limit(self.addressable_remaining());
 
         let (len, fin) = match conn.stream_recv_buf(self.id, out) {
             Ok(v) => v,
@@ -825,7 +851,7 @@ impl Stream {
             },
         };
 
-        self.state_off += len;
+        self.state_off += len as u64;
         debug_assert!(self.state_len >= self.state_off);
 
         // The stream is not readable anymore, so re-arm the Data event.
@@ -834,7 +860,7 @@ impl Stream {
         }
 
         if self.state_buffer_complete() {
-            self.state_transition(State::FrameType, 1, true)?;
+            self.state_transition(State::FrameType, 1)?;
         }
 
         Ok((len, fin))
@@ -842,7 +868,7 @@ impl Stream {
 
     /// Marks the stream as finished.
     pub fn finished(&mut self) {
-        let _ = self.state_transition(State::Finished, 0, false);
+        let _ = self.state_transition(State::Finished, 0);
     }
 
     /// Tries to read DATA payload from the given cursor.
@@ -853,14 +879,14 @@ impl Stream {
     fn try_consume_data_for_tests(
         &mut self, stream: &mut std::io::Cursor<Vec<u8>>, out: &mut [u8],
     ) -> Result<usize> {
-        let left = std::cmp::min(out.len(), self.state_len - self.state_off);
+        let left = out.len().min(self.addressable_remaining());
 
         let len = std::io::Read::read(stream, &mut out[..left]).unwrap();
 
-        self.state_off += len;
+        self.state_off += len as u64;
 
         if self.state_buffer_complete() {
-            self.state_transition(State::FrameType, 1, true)?;
+            self.state_transition(State::FrameType, 1)?;
         }
 
         Ok(len)
@@ -915,30 +941,32 @@ impl Stream {
         self.state_off == self.state_len
     }
 
-    /// Transitions the stream to a new state, and optionally resets the state
-    /// buffer.
+    /// Limit a single read to the local address space, not the whole frame.
+    fn addressable_remaining(&self) -> usize {
+        usize::try_from(self.state_len - self.state_off).unwrap_or(usize::MAX)
+    }
+
+    /// Transitions the stream to a new state. Only buffered states allocate,
+    /// and their lengths must satisfy the state-buffer limit.
     fn state_transition(
-        &mut self, new_state: State, expected_len: usize, resize: bool,
+        &mut self, new_state: State, expected_len: u64,
     ) -> Result<()> {
-        // A peer can influence the size of the state buffer. Validate the
-        // limit before discarding any buffered state.
-        if resize && expected_len > MAX_STATE_BUF_SIZE {
-            return Err(Error::ExcessiveLoad);
+        if new_state.buffers_input() {
+            let len = usize::try_from(expected_len)
+                .map_err(|_| Error::ExcessiveLoad)?;
+            if len > MAX_STATE_BUF_SIZE {
+                return Err(Error::ExcessiveLoad);
+            }
+            let reserve_len = len.min(MAX_STATE_BUF_ALLOC_SIZE);
+            self.state_buf
+                .try_reserve(reserve_len.saturating_sub(self.state_buf.len()))
+                .map_err(|_| Error::ExcessiveLoad)?;
         }
 
         self.state_buf.clear();
-
-        // Some states stream/discard payloads without buffering them.
-        if resize {
-            let reserve_len =
-                std::cmp::min(expected_len, MAX_STATE_BUF_ALLOC_SIZE);
-            self.state_buf.reserve(reserve_len);
-        }
-
         self.state = new_state;
         self.state_off = 0;
         self.state_len = expected_len;
-
         Ok(())
     }
 }
@@ -981,7 +1009,7 @@ mod tests {
 
         let stream_ty = stream.try_consume_varint()?;
         assert_eq!(stream_ty, ty);
-        stream.set_ty(Type::deserialize(stream_ty).unwrap())?;
+        stream.set_ty(Type::deserialize(stream_ty))?;
 
         Ok(())
     }
@@ -1034,22 +1062,25 @@ mod tests {
         stream.set_frame_type(DATA_FRAME_TYPE_ID).unwrap();
 
         let length = u64::from(u32::MAX) + 1;
-        #[cfg(target_pointer_width = "32")]
-        {
-            assert_eq!(
-                stream.set_frame_payload_len(length),
-                Err(Error::ExcessiveLoad),
-            );
-            assert_eq!(stream.state, State::FramePayloadLen);
-        }
-        #[cfg(target_pointer_width = "64")]
-        {
-            // DATA frames stream incrementally, so this valid large value
-            // doesn't trigger a huge state-buffer allocation on 64-bit.
-            stream.set_frame_payload_len(length).unwrap();
-            assert_eq!(stream.state, State::Data);
-            assert_eq!(stream.state_len as u64, length);
-        }
+        let capacity = stream.state_buf.capacity();
+        stream.set_frame_payload_len(length).unwrap();
+        assert_eq!(stream.state, State::Data);
+        assert_eq!(stream.state_len, length);
+        assert_eq!(stream.state_buf.capacity(), capacity);
+
+        // Seed the streamed offset near the 32-bit boundary rather than
+        // allocating several GiB just to test the arithmetic.
+        stream.state_off = length - 2;
+        let mut cursor = std::io::Cursor::new(vec![1, 2, 3]);
+        let mut out = [0; 8];
+        assert_eq!(
+            stream.try_consume_data_for_tests(&mut cursor, &mut out),
+            Ok(2)
+        );
+        assert_eq!(&out[..2], &[1, 2]);
+        assert_eq!(cursor.position(), 2);
+        assert_eq!(stream.state, State::FrameType);
+        assert_eq!(stream.state_buf.capacity(), capacity);
     }
 
     #[test]
@@ -1502,9 +1533,7 @@ mod tests {
 
         let stream_ty = stream.try_consume_varint().unwrap();
         assert_eq!(stream_ty, 33);
-        stream
-            .set_ty(Type::deserialize(stream_ty).unwrap())
-            .unwrap();
+        stream.set_ty(Type::deserialize(stream_ty)).unwrap();
         assert_eq!(stream.state, State::Drain);
     }
 
@@ -2095,8 +2124,7 @@ mod tests {
         assert_eq!(
             stream.state_transition(
                 State::FramePayload,
-                MAX_STATE_BUF_SIZE + 1,
-                true
+                MAX_STATE_BUF_SIZE as u64 + 1
             ),
             Err(Error::ExcessiveLoad),
         );
@@ -2180,13 +2208,13 @@ mod tests {
 
             if fed < LARGE_HEADER_LEN {
                 assert_eq!(result, Err(Error::Done));
-                assert_eq!(stream.state_off, fed);
+                assert_eq!(stream.state_off, fed as u64);
                 // state_buf_read_limit should have reserved on each re-entry
                 // since previous chunk consumed all spare.
                 assert!(stream.state_buf.capacity() >= fed);
             } else {
                 assert_eq!(result, Ok(()));
-                assert_eq!(stream.state_off, LARGE_HEADER_LEN);
+                assert_eq!(stream.state_off, LARGE_HEADER_LEN as u64);
             }
         }
 
@@ -2257,7 +2285,7 @@ mod tests {
 
             if fed < LARGE_HEADER_LEN {
                 assert_eq!(result, Err(Error::Done));
-                assert_eq!(stream.state_off, fed);
+                assert_eq!(stream.state_off, fed as u64);
                 // Capacity must always be at least as large as what we've
                 // buffered.
                 assert!(stream.state_buf.capacity() >= stream.state_buf.len());
@@ -2340,8 +2368,8 @@ mod tests {
         fn assert_state_buf_props(
             stream: &Stream, len: usize, off: usize, capacity: usize,
         ) {
-            assert_eq!(stream.state_len, len, "state_len");
-            assert_eq!(stream.state_off, off, "state_off");
+            assert_eq!(stream.state_len, len as u64, "state_len");
+            assert_eq!(stream.state_off, off as u64, "state_off");
             assert_eq!(stream.state_buf.capacity(), capacity, "capacity");
         }
 
