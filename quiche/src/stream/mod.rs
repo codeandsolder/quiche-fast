@@ -2103,7 +2103,7 @@ mod tests {
 
         assert_eq!(stream.send.retransmit(8, 2), 1);
 
-        assert_stream_emits(&mut stream, 2, b"d", false, 10);
+        assert_stream_emits(&mut stream, 1, b"d", false, 10);
 
         assert_stream_emits(&mut stream, 1, b"o", false, 11);
 
