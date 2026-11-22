@@ -99,11 +99,78 @@ pub(crate) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize 
     usize::try_from(scale_u64(value, gain, rounding)).unwrap_or(usize::MAX)
 }
 
+/// Scale by an exact nonnegative rational. Round only once, after the
+/// full-width multiplication; never round the input or the ratio to a float.
+/// A zero denominator represents an unavailable ratio and yields zero.
+#[inline]
+pub(crate) fn scale_ratio_u64(
+    value: u64, numerator: u64, denominator: u64, rounding: Rounding,
+) -> u64 {
+    if denominator == 0 {
+        return 0;
+    }
+    let product = u128::from(value) * u128::from(numerator);
+    let denominator = u128::from(denominator);
+    let quotient = product / denominator;
+    let remainder = product % denominator;
+    let increment = match rounding {
+        Rounding::Down => false,
+        Rounding::Up => remainder != 0,
+        Rounding::Nearest => remainder >= denominator.div_ceil(2),
+    };
+    u64::try_from(quotient + u128::from(increment)).unwrap_or(u64::MAX)
+}
+
+#[inline]
+pub(crate) fn scale_ratio_usize(
+    value: usize, numerator: u64, denominator: u64, rounding: Rounding,
+) -> usize {
+    usize::try_from(scale_ratio_u64(
+        u64::try_from(value).unwrap_or(u64::MAX),
+        numerator,
+        denominator,
+        rounding,
+    ))
+    .unwrap_or(usize::MAX)
+}
+
 #[cfg(test)]
 mod tests {
+    use super::scale_ratio_u64;
+    use super::scale_ratio_usize;
     use super::scale_u64;
     use super::scale_usize;
     use super::Rounding;
+
+    #[test]
+    fn rational_scaling_preserves_integer_loss_and_rounding() {
+        for value in [0, 1, 7, 10, 11, (1 << 53) + 1, u64::MAX] {
+            let product = u128::from(value) * 7;
+            for (rounding, expected) in [
+                (Rounding::Down, product / 10),
+                (Rounding::Up, product.div_ceil(10)),
+                (Rounding::Nearest, (product + 5) / 10),
+            ] {
+                assert_eq!(
+                    scale_ratio_u64(value, 7, 10, rounding),
+                    u64::try_from(expected).unwrap()
+                );
+            }
+            assert_eq!(
+                scale_ratio_u64(value, u64::MAX, u64::MAX, Rounding::Nearest),
+                value
+            );
+        }
+        assert_eq!(scale_ratio_u64(10, 1, 0, Rounding::Nearest), 0);
+        assert_eq!(
+            scale_ratio_u64(u64::MAX, u64::MAX, 1, Rounding::Up),
+            u64::MAX
+        );
+        assert_eq!(
+            scale_ratio_usize(usize::MAX, 7, 10, Rounding::Down),
+            usize::try_from((usize::MAX as u128) * 7 / 10).unwrap()
+        );
+    }
 
     #[test]
     fn exact_integer_scaling_at_precision_boundaries() {
