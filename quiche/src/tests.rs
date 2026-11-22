@@ -6472,9 +6472,8 @@ fn retry(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
 
     let token = b"quiche test retry token";
 
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
+    len = crate::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
+        .unwrap();
 
     // Client receives Retry and sends new Initial.
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -6535,9 +6534,8 @@ fn retry_with_pto(
 
     let token = b"quiche test retry token";
 
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
+    len = crate::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
+        .unwrap();
 
     // Client receives Retry and sends new Initial.
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -6601,9 +6599,8 @@ fn retry_missing_original_destination_connection_id(
 
     let token = b"quiche test retry token";
 
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
+    len = crate::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
+        .unwrap();
 
     // Client receives Retry and sends new Initial.
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -6663,9 +6660,8 @@ fn retry_invalid_original_destination_connection_id(
 
     let token = b"quiche test retry token";
 
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
+    len = crate::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
+        .unwrap();
 
     // Client receives Retry and sends new Initial.
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -6724,7 +6720,7 @@ fn retry_separate_source_connection_id(
     let (retry_scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
     let token = b"quiche test retry token";
 
-    len = packet::retry(
+    len = crate::retry(
         &hdr.scid,
         &hdr.dcid,
         &retry_scid,
@@ -6795,9 +6791,8 @@ fn retry_invalid_source_connection_id(
     let (scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
     let token = b"quiche test retry token";
 
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
+    len = crate::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
+        .unwrap();
 
     // Client receives Retry and sends new Initial.
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -8827,7 +8822,12 @@ fn pto_probe_not_stranded_by_earlier_epoch_data(
     // the earlier Handshake data.
     let (ty, _) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Short);
     assert_eq!(
@@ -9224,7 +9224,12 @@ fn handshake_packet_type_corruption(
     let active_pid = pipe.client.paths.get_active_path_id().expect("no active");
     let (ty, len) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Initial);
 
@@ -9233,7 +9238,12 @@ fn handshake_packet_type_corruption(
     // Client sends Handshake packet.
     let (ty, len) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Handshake);
 

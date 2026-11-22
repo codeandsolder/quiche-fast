@@ -255,8 +255,9 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Writes data from the send buffer into the given output buffer.
-    pub fn emit(&mut self, out: &mut [u8]) -> (usize, bool) {
-        let mut out_len = out.len();
+    pub fn emit(&mut self, mut out: impl bytes::BufMut) -> (usize, bool) {
+        let capacity = out.remaining_mut();
+        let mut out_len = capacity;
         let mut next_off = self.off_front();
 
         while out_len > 0 {
@@ -283,8 +284,7 @@ impl<F: BufFactory> SendBuf<F> {
             let partial = buf_len < buf.len();
 
             // Copy data to the output buffer.
-            let out_pos = out.len() - out_len;
-            out[out_pos..out_pos + buf_len].copy_from_slice(&buf[..buf_len]);
+            out.put_slice(&buf[..buf_len]);
 
             self.buffered_bytes -= buf_len as u64;
 
@@ -318,7 +318,7 @@ impl<F: BufFactory> SendBuf<F> {
         // report final_size
         self.emit_off = cmp::max(self.emit_off, next_off);
 
-        (out.len() - out_len, fin)
+        (capacity - out_len, fin)
     }
 
     /// Updates the `max_data` limit to the given value.
@@ -656,7 +656,7 @@ mod tests {
         streams.sub_tx_buffered(baseline);
         assert_eq!(streams.tx_buffered(), 5);
         let mut buf = [0; 5];
-        let (written, _) = streams.get_mut(4).unwrap().send.emit(&mut buf);
+        let (written, _) = streams.get_mut(4).unwrap().send.emit(&mut buf[..]);
         streams.sub_tx_buffered(written as u64);
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
@@ -669,7 +669,7 @@ mod tests {
         let mut send = <SendBuf>::new(u64::MAX);
         assert_eq!(send.buffered_bytes, 0);
 
-        let (written, fin) = send.emit(&mut buf);
+        let (written, fin) = send.emit(&mut buf[..]);
         assert_eq!(written, 0);
         assert!(!fin);
     }
@@ -680,7 +680,7 @@ mod tests {
         assert!(!send.is_complete());
         assert_eq!(send.write(b"", true), Ok(0));
         assert!(!send.is_complete());
-        assert_eq!(send.emit(&mut []), (0, true));
+        assert_eq!(send.emit(&mut [0_u8; 0][..]), (0, true));
         assert!(!send.is_complete());
         send.ack_fin();
         assert!(send.is_complete());
@@ -724,7 +724,7 @@ mod tests {
         send.seed_offsets_for_test(OFFSET);
         assert_eq!(send.write(b"hello", false), Ok(5));
         let mut output = [0; 2];
-        assert_eq!(send.emit(&mut output), (2, false));
+        assert_eq!(send.emit(&mut output[..]), (2, false));
         assert_eq!(send.shutdown(), Ok((OFFSET + 2, 3)));
         assert_eq!(send.ack_off(), OFFSET + 2);
         assert_eq!(send.off_back(), OFFSET + 2);
@@ -968,14 +968,14 @@ mod tests {
         let mut send = <SendBuf>::new(u64::MAX);
         let mut out = [0; 5];
         assert_eq!(send.write(b"hello", true), Ok(5));
-        assert_eq!(send.emit(&mut out), (5, true));
+        assert_eq!(send.emit(&mut out[..]), (5, true));
         assert_eq!(send.retransmit(0, 5), 5);
 
         assert_eq!(send.ack_and_drop(0, 2), 2);
         assert_eq!(send.buffered_bytes(), 3);
         assert_eq!(send.off_front(), 2);
         assert_eq!(send.retransmit(0, 5), 0);
-        assert_eq!(send.emit(&mut out), (3, true));
+        assert_eq!(send.emit(&mut out[..]), (3, true));
         assert_eq!(&out[..3], b"llo");
         assert_eq!(send.retransmit(0, 5), 3);
         assert_eq!(send.off_front(), 2);
@@ -990,7 +990,7 @@ mod tests {
         assert_eq!(send.off_front(), 0);
 
         // Emit the whole buffer
-        let (written, _fin) = send.emit(&mut buf);
+        let (written, _fin) = send.emit(&mut buf[..]);
         assert_eq!(written, buf.len());
         assert_eq!(send.off_front(), buf.len() as u64);
 
@@ -1015,13 +1015,13 @@ mod tests {
         assert_eq!(send.write(b"hello", false), Ok(5));
         assert!(!send.is_fin_pending());
 
-        assert_eq!(send.emit(&mut buf), (5, false));
+        assert_eq!(send.emit(&mut buf[..]), (5, false));
 
         // The final size became known after all data was sent.
         assert_eq!(send.write(b"", true), Ok(0));
         assert!(send.is_fin_pending());
 
-        assert_eq!(send.emit(&mut buf), (0, true));
+        assert_eq!(send.emit(&mut buf[..]), (0, true));
         assert!(!send.is_fin_pending());
 
         // Writing the FIN again doesn't schedule another one.

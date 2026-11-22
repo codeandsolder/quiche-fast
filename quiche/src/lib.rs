@@ -1915,7 +1915,11 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
 pub fn negotiate_version(
     scid: &ConnectionId, dcid: &ConnectionId, out: &mut [u8],
 ) -> Result<usize> {
-    packet::negotiate_version(scid, dcid, out)
+    packet::negotiate_version(
+        scid,
+        dcid,
+        &mut packet::PacketWriter::from_initialized(out),
+    )
 }
 
 /// Writes a stateless retry packet.
@@ -1989,7 +1993,14 @@ pub fn retry(
     scid: &ConnectionId, dcid: &ConnectionId, new_scid: &ConnectionId,
     token: &[u8], version: u32, out: &mut [u8],
 ) -> Result<usize> {
-    packet::retry(scid, dcid, new_scid, token, version, out)
+    packet::retry(
+        scid,
+        dcid,
+        new_scid,
+        token,
+        version,
+        &mut packet::PacketWriter::from_initialized(out),
+    )
 }
 
 /// Returns true if the given protocol version is supported.
@@ -2005,14 +2016,14 @@ pub const fn version_is_supported(version: u32) -> bool {
 /// there is no room to add the frame in the packet. You may retry to add the
 /// frame later.
 fn push_frame_to_pkt(
-    out: &mut octets::OctetsMut, frames: &mut SmallVec<[frame::Frame; 1]>,
+    out: &mut impl frame::FrameSink, frames: &mut SmallVec<[frame::Frame; 1]>,
     frame: frame::Frame, left: &mut usize,
 ) -> Result<bool> {
     let wire_len = frame.wire_len()?;
     if wire_len > *left {
         return Ok(false);
     }
-    frame.to_bytes(out)?;
+    frame.encode(out)?;
     *left -= wire_len;
     frames.push(frame);
     Ok(true)
@@ -4248,7 +4259,18 @@ impl<F: BufFactory> Connection<F> {
         &mut self, out: &mut [u8], from: Option<SocketAddr>,
         to: Option<SocketAddr>,
     ) -> Result<(usize, SendInfo)> {
-        if out.is_empty() {
+        self.send_on_path_into(
+            &mut packet::PacketWriter::from_initialized(out),
+            from,
+            to,
+        )
+    }
+
+    fn send_on_path_into(
+        &mut self, out: &mut packet::PacketWriter<'_>, from: Option<SocketAddr>,
+        to: Option<SocketAddr>,
+    ) -> Result<(usize, SendInfo)> {
+        if out.cap() == 0 {
             return Err(Error::BufferTooShort);
         }
 
@@ -4318,7 +4340,7 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        let mut left = out.len().min(limit);
+        let mut left = out.cap().min(limit);
 
         // Limit data sent by the server based on the amount of data received
         // from the client before its address is validated.
@@ -4328,12 +4350,9 @@ impl<F: BufFactory> Connection<F> {
 
         // Generate coalesced packets.
         while left > 0 {
-            let (ty, written) = match self.send_single(
-                &mut out[done..done + left],
-                send_pid,
-                has_initial,
-                now,
-            ) {
+            let (ty, written) = match out.with_limit(left, |packet| {
+                self.send_single(packet, send_pid, has_initial, now)
+            }) {
                 Ok(v) => v,
 
                 Err(Error::BufferTooShort | Error::Done) => break,
@@ -4380,7 +4399,7 @@ impl<F: BufFactory> Connection<F> {
 
             // Fill padding area with null bytes, to avoid leaking information
             // in case the application reuses the packet buffer.
-            out[done..done + pad_len].fill(0);
+            frame::FrameSink::put_padding(out, pad_len)?;
 
             done += pad_len;
         }
@@ -4398,10 +4417,10 @@ impl<F: BufFactory> Connection<F> {
     }
 
     fn send_single(
-        &mut self, out: &mut [u8], send_pid: usize, has_initial: bool,
-        now: Instant,
+        &mut self, out: &mut packet::PacketWriter<'_>, send_pid: usize,
+        has_initial: bool, now: Instant,
     ) -> Result<(Type, usize)> {
-        if out.is_empty() {
+        if out.cap() == 0 {
             return Err(Error::BufferTooShort);
         }
 
@@ -4462,14 +4481,13 @@ impl<F: BufFactory> Connection<F> {
     }
 
     fn send_single_for_type(
-        &mut self, out: &mut [u8], send_pid: usize, has_initial: bool,
-        now: Instant, pkt_type: Type, bypass_cwnd: bool,
+        &mut self, b: &mut packet::PacketWriter<'_>, send_pid: usize,
+        has_initial: bool, now: Instant, pkt_type: Type, bypass_cwnd: bool,
     ) -> Result<(Type, usize)> {
         let is_closing = self.local_error.is_some();
 
-        let out_len = out.len();
-
-        let mut b = octets::OctetsMut::with_slice(out);
+        b.reset();
+        let out_len = b.cap();
 
         let max_dgram_len = if self.dgram_send_queue.is_empty() {
             None
@@ -4814,7 +4832,7 @@ impl<F: BufFactory> Connection<F> {
             key_phase: self.key_phase,
         };
 
-        hdr.to_bytes(&mut b)?;
+        hdr.to_bytes(b)?;
 
         let hdr_trace = if log::max_level() == log::LevelFilter::Trace {
             Some(format!("{hdr:?}"))
@@ -4885,10 +4903,10 @@ impl<F: BufFactory> Connection<F> {
         //
         // Only long header packets have an explicit length field.
         if pkt_type != Type::Short {
-            b.skip(PAYLOAD_LENGTH_LEN)?;
+            frame::FrameSink::put_padding(b, PAYLOAD_LENGTH_LEN)?;
         }
 
-        packet::encode_pkt_num(pn, pn_len, &mut b)?;
+        packet::encode_pkt_num(pn, pn_len, b)?;
 
         let payload_offset = b.off();
 
@@ -4950,7 +4968,7 @@ impl<F: BufFactory> Connection<F> {
                 // ACK-only packets are not congestion controlled so ACKs must
                 // be bundled considering the buffer capacity only, and not the
                 // available cwnd.
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     pkt_space.ack_elicited = false;
                 }
             }
@@ -5001,8 +5019,8 @@ impl<F: BufFactory> Connection<F> {
                     mtu_probe: Some(probe_size),
                 };
 
-                if !push_frame_to_pkt(&mut b, &mut frames, padding, &mut left)? ||
-                    !push_frame_to_pkt(&mut b, &mut frames, ping, &mut left)?
+                if !push_frame_to_pkt(b, &mut frames, padding, &mut left)? ||
+                    !push_frame_to_pkt(b, &mut frames, ping, &mut left)?
                 {
                     return Err(Error::Done);
                 }
@@ -5017,7 +5035,7 @@ impl<F: BufFactory> Connection<F> {
             while let Some(challenge) = path.pop_received_challenge() {
                 let frame = frame::Frame::PathResponse { data: challenge };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     has_path_frame = true;
                     ack_eliciting = true;
                     in_flight = true;
@@ -5035,7 +5053,7 @@ impl<F: BufFactory> Connection<F> {
 
                 let frame = frame::Frame::PathChallenge { data };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     // Let's notify the path once we know the packet size.
                     challenge_data = Some(data);
                     has_path_frame = true;
@@ -5057,7 +5075,7 @@ impl<F: BufFactory> Connection<F> {
             while let Some(seq_num) = self.ids.next_advertise_new_scid_seq() {
                 let frame = self.ids.get_new_connection_id_frame_for(seq_num)?;
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.ids.mark_advertise_new_scid_seq(seq_num, false);
 
                     ack_eliciting = true;
@@ -5077,7 +5095,7 @@ impl<F: BufFactory> Connection<F> {
             {
                 let frame = frame::Frame::HandshakeDone;
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.handshake_done_sent = true;
 
                     ack_eliciting = true;
@@ -5093,7 +5111,7 @@ impl<F: BufFactory> Connection<F> {
                     max: self.streams.max_streams_bidi_next(),
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.streams.update_max_streams_bidi();
                     self.should_send_max_streams_bidi = false;
 
@@ -5110,7 +5128,7 @@ impl<F: BufFactory> Connection<F> {
                     max: self.streams.max_streams_uni_next(),
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.streams.update_max_streams_uni();
                     self.should_send_max_streams_uni = false;
 
@@ -5123,7 +5141,7 @@ impl<F: BufFactory> Connection<F> {
             if let Some(limit) = self.blocked_limit {
                 let frame = frame::Frame::DataBlocked { limit };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.blocked_limit = None;
                     self.data_blocked_sent_count =
                         self.data_blocked_sent_count.saturating_add(1);
@@ -5142,7 +5160,7 @@ impl<F: BufFactory> Connection<F> {
                 if let Some(limit) = self.streams_blocked_bidi_state.blocked_at {
                     let frame = frame::Frame::StreamsBlockedBidi { limit };
 
-                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                         // Record the limit we just notified the peer about so
                         // that redundant frames for the same limit are
                         // suppressed.
@@ -5164,7 +5182,7 @@ impl<F: BufFactory> Connection<F> {
                 if let Some(limit) = self.streams_blocked_uni_state.blocked_at {
                     let frame = frame::Frame::StreamsBlockedUni { limit };
 
-                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                         // Record the limit we just notified the peer about so
                         // that redundant frames for the same limit are
                         // suppressed.
@@ -5200,7 +5218,7 @@ impl<F: BufFactory> Connection<F> {
                     max: stream.recv.max_data_next(),
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     let recv_win = stream.recv.window();
 
                     stream.recv.update_max_data(now);
@@ -5235,7 +5253,7 @@ impl<F: BufFactory> Connection<F> {
                     max: flow_control.max_data_next(),
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.should_send_max_data = false;
 
                     // Commits the new max_rx_data limit.
@@ -5258,7 +5276,7 @@ impl<F: BufFactory> Connection<F> {
                     error_code,
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.streams.remove_stopped(stream_id);
 
                     ack_eliciting = true;
@@ -5279,7 +5297,7 @@ impl<F: BufFactory> Connection<F> {
                     final_size,
                 };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.streams.remove_reset(stream_id);
 
                     ack_eliciting = true;
@@ -5296,7 +5314,7 @@ impl<F: BufFactory> Connection<F> {
             {
                 let frame = frame::Frame::StreamDataBlocked { stream_id, limit };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.streams.remove_blocked(stream_id);
                     self.stream_data_blocked_sent_count =
                         self.stream_data_blocked_sent_count.saturating_add(1);
@@ -5321,7 +5339,7 @@ impl<F: BufFactory> Connection<F> {
 
                 let frame = frame::Frame::RetireConnectionId { seq_num };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     self.ids.mark_retire_dcid_seq(seq_num, false)?;
 
                     ack_eliciting = true;
@@ -5344,12 +5362,7 @@ impl<F: BufFactory> Connection<F> {
                             reason: conn_err.reason.clone(),
                         };
 
-                        if push_frame_to_pkt(
-                            &mut b,
-                            &mut frames,
-                            frame,
-                            &mut left,
-                        )? {
+                        if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                             let pto = path.recovery.pto();
                             self.draining_timer = Some(now + (pto * 3));
 
@@ -5365,7 +5378,7 @@ impl<F: BufFactory> Connection<F> {
                         reason: conn_err.reason.clone(),
                     };
 
-                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                         let pto = path.recovery.pto();
                         self.draining_timer = Some(now + (pto * 3));
 
@@ -5403,31 +5416,17 @@ impl<F: BufFactory> Connection<F> {
                 2; // length, always encode as 2-byte varint
 
             if let Some(max_len) = left.checked_sub(hdr_len) {
-                let (mut crypto_hdr, mut crypto_payload) =
-                    b.split_at(hdr_off + hdr_len)?;
-
-                // Write stream data into the packet buffer.
+                frame::FrameSink::put_padding(b, hdr_len)?;
                 let (len, _) = crypto_ctx
                     .crypto_stream
                     .send
-                    .emit(&mut crypto_payload.as_mut()[..max_len]);
-
-                // Encode the frame's header.
-                //
-                // Due to how `OctetsMut::split_at()` works, `crypto_hdr` starts
-                // from the initial offset of `b` (rather than the current
-                // offset), so it needs to be advanced to the
-                // initial frame offset.
-                crypto_hdr.skip(hdr_off)?;
-
+                    .emit(bytes::BufMut::limit(&mut *b, max_len));
+                let mut crypto_hdr = b.patch(hdr_off, hdr_len)?;
                 frame::encode_crypto_header(
                     crypto_off,
                     len as u64,
                     &mut crypto_hdr,
                 )?;
-
-                // Advance the packet buffer's offset.
-                b.skip(hdr_len + len)?;
 
                 // The payload and its header were encoded above. Only
                 // record recovery metadata and account for the written bytes.
@@ -5467,7 +5466,6 @@ impl<F: BufFactory> Connection<F> {
         {
             if let Some(max_dgram_payload) = max_dgram_len {
                 while let Some(len) = self.dgram_send_queue.peek_front_len() {
-                    let hdr_off = b.off();
                     let hdr_len = 1 + // frame type
                         2; // length, always encode as 2-byte varint
 
@@ -5475,44 +5473,10 @@ impl<F: BufFactory> Connection<F> {
                         // Front of the queue fits this packet, send it.
                         match self.dgram_send_queue.pop() {
                             Some(data) => {
-                                // Encode the frame.
-                                //
-                                // Instead of creating a `frame::Frame` object,
-                                // encode the frame directly into the packet
-                                // buffer.
-                                //
-                                // First we reserve some space in the output
-                                // buffer for writing the frame header (we
-                                // assume the length field is always a 2-byte
-                                // varint as we don't know the value yet).
-                                //
-                                // Then we emit the data from the DATAGRAM's
-                                // buffer.
-                                //
-                                // Finally we go back and encode the frame
-                                // header with the now available information.
-                                let (mut dgram_hdr, mut dgram_payload) =
-                                    b.split_at(hdr_off + hdr_len)?;
-
-                                dgram_payload.as_mut()[..len]
-                                    .copy_from_slice(data.as_ref());
-
-                                // Encode the frame's header.
-                                //
-                                // Due to how `OctetsMut::split_at()` works,
-                                // `dgram_hdr` starts from the initial offset
-                                // of `b` (rather than the current offset), so
-                                // it needs to be advanced to the initial frame
-                                // offset.
-                                dgram_hdr.skip(hdr_off)?;
-
-                                frame::encode_dgram_header(
-                                    len as u64,
-                                    &mut dgram_hdr,
-                                )?;
-
-                                // Advance the packet buffer's offset.
-                                b.skip(hdr_len + len)?;
+                                // The queued datagram already has a known
+                                // length.
+                                frame::encode_dgram_header(len as u64, b)?;
+                                frame::FrameSink::put_bytes(b, data.as_ref())?;
 
                                 // The DATAGRAM header and payload were already
                                 // encoded directly above. Avoid routing the
@@ -5608,31 +5572,22 @@ impl<F: BufFactory> Connection<F> {
                     },
                 };
 
-                let (mut stream_hdr, mut stream_payload) =
-                    b.split_at(hdr_off + hdr_len)?;
-
-                // Write stream data into the packet buffer.
+                frame::FrameSink::put_padding(b, hdr_len)?;
                 let (len, fin) =
-                    stream.send.emit(&mut stream_payload.as_mut()[..max_len]);
+                    stream.send.emit(bytes::BufMut::limit(&mut *b, max_len));
 
                 // ACK processing can leave a stream in the flushable queue
                 // after removing all of its retransmission data. Unlink the
                 // stale entry and continue with the next stream;
                 // future retransmits or writedata will queue the stream again.
                 if len == 0 && !fin {
+                    b.rewind(hdr_len)?;
                     let priority_key = Arc::clone(stream.priority_key());
                     self.streams.remove_flushable(&priority_key);
                     continue;
                 }
 
-                // Encode the frame's header.
-                //
-                // Due to how `OctetsMut::split_at()` works, `stream_hdr` starts
-                // from the initial offset of `b` (rather than the current
-                // offset), so it needs to be advanced to the initial frame
-                // offset.
-                stream_hdr.skip(hdr_off)?;
-
+                let mut stream_hdr = b.patch(hdr_off, hdr_len)?;
                 frame::encode_stream_header(
                     stream_id,
                     stream_off,
@@ -5640,9 +5595,6 @@ impl<F: BufFactory> Connection<F> {
                     fin,
                     &mut stream_hdr,
                 )?;
-
-                // Advance the packet buffer's offset.
-                b.skip(hdr_len + len)?;
 
                 // The payload and its header were encoded above. Only
                 // record recovery metadata and account for the written bytes.
@@ -5696,7 +5648,7 @@ impl<F: BufFactory> Connection<F> {
         {
             let frame = frame::Frame::Ping { mtu_probe: None };
 
-            if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+            if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                 ack_eliciting = true;
                 in_flight = true;
             }
@@ -5744,7 +5696,7 @@ impl<F: BufFactory> Connection<F> {
             if pad_len > 0 {
                 let frame = frame::Frame::Padding { len: pad_len };
 
-                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
                     in_flight = true;
                 }
             }
@@ -5759,7 +5711,7 @@ impl<F: BufFactory> Connection<F> {
             };
 
             if frame.wire_len()? <= left {
-                frame.to_bytes(&mut b)?;
+                frame.encode(b)?;
                 frames.push(frame);
                 in_flight = true;
             }
@@ -5771,7 +5723,8 @@ impl<F: BufFactory> Connection<F> {
         if pkt_type != Type::Short {
             let len = pn_len + payload_len + crypto_overhead;
 
-            let (_, mut payload_with_len) = b.split_at(header_offset)?;
+            let mut payload_with_len =
+                b.patch(header_offset, PAYLOAD_LENGTH_LEN)?;
             payload_with_len
                 .put_varint_with_len(len as u64, PAYLOAD_LENGTH_LEN)?;
         }
@@ -5829,8 +5782,12 @@ impl<F: BufFactory> Connection<F> {
             None => return Err(Error::InvalidState),
         };
 
+        // The AEAD interface needs an initialized output slice. Initialize only
+        // the fixed tag bytes, not the caller's unused packet capacity.
+        frame::FrameSink::put_padding(b, crypto_overhead)?;
+        let mut encrypted = octets::OctetsMut::with_slice(b.written_mut());
         let written = packet::encrypt_pkt(
-            &mut b,
+            &mut encrypted,
             pn,
             pn_len,
             payload_len,
@@ -5838,6 +5795,9 @@ impl<F: BufFactory> Connection<F> {
             None,
             aead,
         )?;
+        if written != b.off() {
+            return Err(Error::CryptoFail);
+        }
 
         let sent_pkt_has_data = if path.recovery.gcongestion_enabled() {
             has_data || dgram_emitted

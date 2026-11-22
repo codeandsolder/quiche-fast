@@ -25,6 +25,12 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::fmt::Display;
+use std::mem::MaybeUninit;
+
+use bytes::buf::UninitSlice;
+use bytes::BufMut;
+
+use crate::frame::FrameSink;
 
 use std::ops::Index;
 use std::ops::IndexMut;
@@ -61,6 +67,137 @@ const MIN_SKIP_COUNTER_VALUE: u64 =
     DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS as u64 * 2;
 
 const RETRY_AEAD_ALG: crypto::Algorithm = crypto::Algorithm::AES128_GCM;
+
+/// Sequential packet output with an initialized-prefix invariant.
+/// Only the committed prefix can be read or patched. The unused capacity
+/// may be uninitialized, as is common for caller-owned C buffers.
+pub(crate) struct PacketWriter<'a> {
+    storage: &'a mut [MaybeUninit<u8>],
+    off: usize,
+}
+
+impl<'a> PacketWriter<'a> {
+    pub(crate) const fn new(storage: &'a mut [MaybeUninit<u8>]) -> Self {
+        Self { storage, off: 0 }
+    }
+
+    pub(crate) fn from_initialized(storage: &'a mut [u8]) -> Self {
+        // SAFETY: MaybeUninit<u8> has the same layout as u8. The writer and
+        // its safe operations never deinitialize storage; the exclusive
+        // borrow prevents access to the original slice until it is dropped.
+        let storage = unsafe {
+            std::slice::from_raw_parts_mut(
+                storage.as_mut_ptr().cast(),
+                storage.len(),
+            )
+        };
+        Self::new(storage)
+    }
+
+    pub(crate) const fn off(&self) -> usize {
+        self.off
+    }
+
+    pub(crate) const fn cap(&self) -> usize {
+        self.storage.len() - self.off
+    }
+
+    pub(crate) const fn reset(&mut self) {
+        self.off = 0;
+    }
+
+    pub(crate) fn rewind(&mut self, len: usize) -> Result<()> {
+        self.off = self.off.checked_sub(len).ok_or(Error::BufferTooShort)?;
+        Ok(())
+    }
+
+    pub(crate) fn written_mut(&mut self) -> &mut [u8] {
+        // SAFETY: every advance is either preceded by an initialized write
+        // or covered by the caller's unsafe BufMut::advance_mut contract.
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.storage.as_mut_ptr().cast(),
+                self.off,
+            )
+        }
+    }
+
+    pub(crate) fn patch(
+        &mut self, offset: usize, len: usize,
+    ) -> Result<octets::OctetsMut<'_>> {
+        let end = offset.checked_add(len).ok_or(Error::BufferTooShort)?;
+        let bytes = self
+            .written_mut()
+            .get_mut(offset..end)
+            .ok_or(Error::BufferTooShort)?;
+        Ok(octets::OctetsMut::with_slice(bytes))
+    }
+
+    /// Write a bounded subpacket; publish its initialized bytes only on
+    /// success.
+    pub(crate) fn with_limit<T>(
+        &mut self, limit: usize,
+        write: impl FnOnce(&mut PacketWriter<'_>) -> Result<T>,
+    ) -> Result<T> {
+        if limit > self.cap() {
+            return Err(Error::BufferTooShort);
+        }
+        let mut child =
+            PacketWriter::new(&mut self.storage[self.off..self.off + limit]);
+        let result = write(&mut child)?;
+        self.off += child.off;
+        Ok(result)
+    }
+}
+
+// SAFETY: remaining_mut reports the actual writable capacity, chunk_mut
+// exposes only that capacity, and advance_mut requires initialization of
+// the advanced prefix as specified by BufMut.
+unsafe impl BufMut for PacketWriter<'_> {
+    fn remaining_mut(&self) -> usize {
+        self.cap()
+    }
+
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
+        UninitSlice::uninit(&mut self.storage[self.off..])
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        assert!(cnt <= self.cap());
+        self.off += cnt;
+    }
+
+    fn put_slice(&mut self, src: &[u8]) {
+        let mut remaining = &mut self.storage[self.off..];
+        remaining.put_slice(src);
+        self.off += src.len();
+    }
+}
+
+impl FrameSink for PacketWriter<'_> {
+    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
+        let mut bytes = [0; 8];
+        let mut encoded = octets::OctetsMut::with_slice(&mut bytes);
+        let bytes = encoded.put_varint_with_len(value, len)?;
+        FrameSink::put_bytes(self, bytes)
+    }
+
+    fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
+        if value.len() > self.cap() {
+            return Err(Error::BufferTooShort);
+        }
+        self.put_slice(value);
+        Ok(())
+    }
+
+    fn put_padding(&mut self, len: usize) -> Result<()> {
+        if len > self.cap() {
+            return Err(Error::BufferTooShort);
+        }
+        BufMut::put_bytes(self, 0, len);
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum Epoch {
@@ -459,7 +596,7 @@ impl Header<'_> {
         })
     }
 
-    pub(crate) fn to_bytes(&self, out: &mut octets::OctetsMut) -> Result<()> {
+    pub(crate) fn to_bytes(&self, out: &mut impl FrameSink) -> Result<()> {
         if self.pkt_num_len > MAX_PKT_NUM_LEN {
             return Err(Error::InvalidPacket);
         }
@@ -483,7 +620,7 @@ impl Header<'_> {
                 first &= !KEY_PHASE_BIT;
             }
 
-            out.put_u8(first)?;
+            out.put_bytes(&[first])?;
             out.put_bytes(&self.dcid)?;
 
             return Ok(());
@@ -513,14 +650,14 @@ impl Header<'_> {
 
         first |= FORM_BIT | FIXED_BIT | (ty << 4);
 
-        out.put_u8(first)?;
+        out.put_bytes(&[first])?;
 
-        out.put_u32(self.version)?;
+        out.put_bytes(&self.version.to_be_bytes())?;
 
-        out.put_u8(dcid_len)?;
+        out.put_bytes(&[dcid_len])?;
         out.put_bytes(&self.dcid)?;
 
-        out.put_u8(scid_len)?;
+        out.put_bytes(&[scid_len])?;
         out.put_bytes(&self.scid)?;
 
         // Only Initial and Retry packets have a token.
@@ -722,8 +859,12 @@ pub fn decrypt_pkt<'a>(
 pub fn encrypt_hdr(
     b: &mut octets::OctetsMut, pn_len: usize, payload: &[u8], aead: &crypto::Seal,
 ) -> Result<()> {
-    let sample = &payload
-        [MAX_PKT_NUM_LEN - pn_len..SAMPLE_LEN + (MAX_PKT_NUM_LEN - pn_len)];
+    let start = MAX_PKT_NUM_LEN
+        .checked_sub(pn_len)
+        .ok_or(Error::InvalidPacket)?;
+    let sample = payload
+        .get(start..start + SAMPLE_LEN)
+        .ok_or(Error::BufferTooShort)?;
 
     let mask = aead.new_mask(sample)?;
 
@@ -759,13 +900,17 @@ pub fn encrypt_pkt(
         extra_in,
     )?;
 
-    encrypt_hdr(&mut header, pn_len, payload.as_ref(), aead)?;
+    let ciphertext = payload
+        .as_ref()
+        .get(..ciphertext_len)
+        .ok_or(Error::CryptoFail)?;
+    encrypt_hdr(&mut header, pn_len, ciphertext, aead)?;
 
     Ok(payload_offset + ciphertext_len)
 }
 
 pub fn encode_pkt_num(
-    pn: u64, pn_len: usize, b: &mut octets::OctetsMut,
+    pn: u64, pn_len: usize, b: &mut impl FrameSink,
 ) -> Result<()> {
     if !(1..=MAX_PKT_NUM_LEN).contains(&pn_len) || pn > octets::MAX_VAR_INT {
         return Err(Error::InvalidPacket);
@@ -784,32 +929,29 @@ fn checked_cid_len(cid: &[u8], max_len: u8) -> Result<u8> {
 }
 
 pub fn negotiate_version(
-    scid: &[u8], dcid: &[u8], out: &mut [u8],
+    scid: &[u8], dcid: &[u8], b: &mut PacketWriter<'_>,
 ) -> Result<usize> {
     let scid_len = checked_cid_len(scid, u8::MAX)?;
     let dcid_len = checked_cid_len(dcid, u8::MAX)?;
-    let mut b = octets::OctetsMut::with_slice(out);
 
     let first = rand::rand_u8() | FORM_BIT;
 
-    b.put_u8(first)?;
-    b.put_u32(0)?;
+    FrameSink::put_bytes(b, &[first])?;
+    FrameSink::put_bytes(b, &0_u32.to_be_bytes())?;
 
-    b.put_u8(scid_len)?;
-    b.put_bytes(scid)?;
-    b.put_u8(dcid_len)?;
-    b.put_bytes(dcid)?;
-    b.put_u32(crate::PROTOCOL_VERSION_V1)?;
+    FrameSink::put_bytes(b, &[scid_len])?;
+    FrameSink::put_bytes(b, scid)?;
+    FrameSink::put_bytes(b, &[dcid_len])?;
+    FrameSink::put_bytes(b, dcid)?;
+    FrameSink::put_bytes(b, &crate::PROTOCOL_VERSION_V1.to_be_bytes())?;
 
     Ok(b.off())
 }
 
 pub fn retry(
     scid: &[u8], dcid: &[u8], new_scid: &[u8], token: &[u8], version: u32,
-    out: &mut [u8],
+    b: &mut PacketWriter<'_>,
 ) -> Result<usize> {
-    let mut b = octets::OctetsMut::with_slice(out);
-
     if !crate::version_is_supported(version) {
         return Err(Error::UnknownVersion);
     }
@@ -827,11 +969,11 @@ pub fn retry(
         key_phase: false,
     };
 
-    hdr.to_bytes(&mut b)?;
+    hdr.to_bytes(b)?;
 
-    let tag = compute_retry_integrity_tag(&b, dcid, version)?;
+    let tag = compute_retry_integrity_tag(b.written_mut(), dcid, version)?;
 
-    b.put_bytes(tag.as_ref())?;
+    FrameSink::put_bytes(b, tag.as_ref())?;
 
     Ok(b.off())
 }
@@ -842,13 +984,13 @@ pub fn verify_retry_integrity(
     const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
 
     let received = b.as_ref().get(..TAG_LEN).ok_or(Error::InvalidPacket)?;
-    let tag = compute_retry_integrity_tag(b, odcid, version)?;
+    let tag = compute_retry_integrity_tag(&b.buf()[..b.off()], odcid, version)?;
 
     crypto::verify_slices_are_equal(received, tag.as_ref())
 }
 
 fn compute_retry_integrity_tag(
-    b: &octets::OctetsMut, odcid: &[u8], version: u32,
+    header: &[u8], odcid: &[u8], version: u32,
 ) -> Result<Vec<u8>> {
     const KEY_LEN: usize = RETRY_AEAD_ALG.key_len();
     const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
@@ -868,7 +1010,7 @@ fn compute_retry_integrity_tag(
     let odcid_len = checked_cid_len(odcid, MAX_CID_LEN)?;
     let (key, nonce) = (&RETRY_INTEGRITY_KEY_V1, RETRY_INTEGRITY_NONCE_V1);
 
-    let hdr_len = b.off();
+    let hdr_len = header.len();
 
     let mut pseudo = vec![0; 1 + odcid.len() + hdr_len];
 
@@ -876,7 +1018,7 @@ fn compute_retry_integrity_tag(
 
     pb.put_u8(odcid_len)?;
     pb.put_bytes(odcid)?;
-    pb.put_bytes(&b.buf()[..hdr_len])?;
+    pb.put_bytes(header)?;
 
     let mut key =
         crypto::PacketKey::new(RETRY_AEAD_ALG, key.to_vec(), nonce.to_vec())?;
@@ -1225,6 +1367,39 @@ mod tests {
     use crate::MAX_SEND_UDP_PAYLOAD_SIZE;
 
     #[test]
+    fn packet_writer_publishes_only_initialized_successful_prefixes() {
+        let mut storage = [MaybeUninit::<u8>::uninit(); 16];
+        let mut writer = PacketWriter::new(&mut storage);
+        writer.put_padding(2).unwrap();
+        writer
+            .with_limit(4, |child| {
+                child.put_slice(b"data");
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(writer.off(), 6);
+        assert_eq!(
+            writer.with_limit(3, |child| {
+                child.put_slice(b"bad");
+                Err::<(), _>(Error::Done)
+            }),
+            Err(Error::Done)
+        );
+        assert_eq!(writer.off(), 6);
+        assert!(writer.patch(6, 1).is_err());
+        writer
+            .patch(0, 2)
+            .unwrap()
+            .put_varint_with_len(4, 2)
+            .unwrap();
+        assert_eq!(writer.written_mut(), b"\x40\x04data");
+        writer.rewind(4).unwrap();
+        writer.put_slice(b"new");
+        assert_eq!(writer.written_mut(), b"\x40\x04new");
+        assert_eq!(writer.cap(), 11);
+    }
+
+    #[test]
     fn retry() {
         let hdr = Header {
             ty: Type::Retry,
@@ -1368,14 +1543,27 @@ mod tests {
         let cid = [0; 256];
         let max_cid = [1; 255];
         assert_eq!(
-            negotiate_version(&cid, &[], &mut out),
+            negotiate_version(
+                &cid,
+                &[],
+                &mut PacketWriter::from_initialized(&mut out)
+            ),
             Err(Error::InvalidPacket)
         );
         assert_eq!(
-            negotiate_version(&[], &cid, &mut out),
+            negotiate_version(
+                &[],
+                &cid,
+                &mut PacketWriter::from_initialized(&mut out)
+            ),
             Err(Error::InvalidPacket)
         );
-        let len = negotiate_version(&max_cid, &max_cid, &mut out).unwrap();
+        let len = negotiate_version(
+            &max_cid,
+            &max_cid,
+            &mut PacketWriter::from_initialized(&mut out),
+        )
+        .unwrap();
         let hdr = Header::from_slice(&mut out[..len], 0).unwrap();
         assert_eq!(hdr.scid.as_ref(), max_cid);
         assert_eq!(hdr.dcid.as_ref(), max_cid);
@@ -1411,7 +1599,7 @@ mod tests {
                 &[],
                 &[],
                 crate::PROTOCOL_VERSION,
-                &mut out
+                &mut PacketWriter::from_initialized(&mut out)
             ),
             Err(Error::InvalidPacket)
         );

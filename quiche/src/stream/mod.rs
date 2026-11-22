@@ -2004,7 +2004,7 @@ mod tests {
         assert_eq!(stream.send.off_front(), 0);
         assert!(!stream.send.is_fin());
 
-        let (written, fin) = stream.send.emit(&mut buf);
+        let (written, fin) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"hello");
@@ -2013,7 +2013,7 @@ mod tests {
         assert!(stream.send.is_fin());
         assert_eq!(stream.send.off_front(), 5);
 
-        let (written, fin) = stream.send.emit(&mut buf);
+        let (written, fin) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 0);
         assert!(fin);
         assert_eq!(&buf[..written], b"");
@@ -2140,14 +2140,14 @@ mod tests {
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
 
         let mut buf = [0; 5];
-        assert_eq!(stream.send.emit(&mut buf), (5, false));
+        assert_eq!(stream.send.emit(&mut buf[..]), (5, false));
         assert!(!stream.send.empty_fin_next());
 
         assert_eq!(stream.send.write(b"", true), Ok(0));
         assert!(stream.send.empty_fin_next());
 
         let mut empty = [];
-        assert_eq!(stream.send.emit(&mut empty), (0, true));
+        assert_eq!(stream.send.emit(&mut empty[..]), (0, true));
     }
 
     /// RFC9000 2.1: A stream ID that is used out of order results in all
@@ -2596,7 +2596,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 5);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2624,7 +2624,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 10);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 10);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2655,7 +2655,7 @@ mod tests {
 
         // Emit it.
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2680,7 +2680,7 @@ mod tests {
         assert_eq!(stream.send.buffered_bytes(), 10);
 
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 10);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
@@ -2707,7 +2707,7 @@ mod tests {
         // Write and emit data.
         assert_eq!(stream.send.write(b"hello", false), Ok(5));
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
 
         // Ack data that's already been fully emitted and not retransmitted.
@@ -2764,7 +2764,7 @@ mod tests {
         let mut buf = [0; 10];
         let written = {
             let stream = streams.get_mut(stream_id).unwrap();
-            let (written, _) = stream.send.emit(&mut buf);
+            let (written, _) = stream.send.emit(&mut buf[..]);
             written
         };
         assert_eq!(written, 5);
@@ -2810,7 +2810,7 @@ mod tests {
 
         // After emit.
         let mut buf = [0; 10];
-        let (written, _) = stream.send.emit(&mut buf);
+        let (written, _) = stream.send.emit(&mut buf[..]);
         assert_eq!(written, 5);
         assert_eq!(stream.send.buffered_bytes(), 0);
 
