@@ -509,8 +509,14 @@ impl Handshake {
             unsafe { SSL_set_tlsext_host_name(self.as_mut_ptr(), cstr.as_ptr()) };
         self.map_result_ssl(rc)?;
 
+        // SAFETY: the SSL object is live and exclusively borrowed.
         let param = unsafe { SSL_get0_param(self.as_mut_ptr()) };
+        if param.is_null() {
+            return Err(Error::TlsFail);
+        }
 
+        // SAFETY: param is borrowed from self, and cstr is valid for the
+        // specified length and the duration of the call.
         map_result(unsafe {
             X509_VERIFY_PARAM_set1_host(param, cstr.as_ptr(), name.len())
         })
@@ -542,10 +548,11 @@ impl Handshake {
             SSL_get_peer_quic_transport_params(self.as_ptr(), &mut ptr, &mut len);
         }
 
-        if len == 0 {
-            return &mut [];
+        if ptr.is_null() || len == 0 || len > isize::MAX as usize {
+            return &[];
         }
 
+        // SAFETY: BoringSSL supplies len bytes valid for the SSL lifetime.
         unsafe { slice::from_raw_parts(ptr, len) }
     }
 
@@ -557,11 +564,14 @@ impl Handshake {
             SSL_get0_alpn_selected(self.as_ptr(), &mut ptr, &mut len);
         }
 
-        if len == 0 {
-            return &mut [];
+        let len = len as usize;
+        if ptr.is_null() || len == 0 || len > isize::MAX as usize {
+            return &[];
         }
 
-        unsafe { slice::from_raw_parts(ptr, len as usize) }
+        // SAFETY: The selected ALPN name belongs to the SSL object, which
+        // cannot be changed during this shared borrow.
+        unsafe { slice::from_raw_parts(ptr, len) }
     }
 
     pub fn server_name(&self) -> Option<&str> {
@@ -626,10 +636,12 @@ impl Handshake {
     }
 
     pub fn cipher(&self) -> Option<crypto::Algorithm> {
-        let cipher =
-            map_result_ptr(unsafe { SSL_get_current_cipher(self.as_ptr()) });
-
-        get_cipher_from_ptr(cipher.ok()?).ok()
+        // SAFETY: self owns a live SSL object. The returned cipher is a
+        // static descriptor (or null if one has not been selected).
+        let cipher = unsafe { SSL_get_current_cipher(self.as_ptr()) };
+        // SAFETY: the pointer came from SSL_get_current_cipher; null is
+        // checked by get_cipher_from_ptr.
+        unsafe { get_cipher_from_ptr(cipher) }.ok()
     }
 
     #[cfg(test)]
@@ -806,7 +818,15 @@ fn get_ex_data_from_ptr<'a, T>(ptr: *const SSL, idx: c_int) -> Option<&'a mut T>
     }
 }
 
-fn get_cipher_from_ptr(cipher: *const SSL_CIPHER) -> Result<crypto::Algorithm> {
+/// # Safety
+/// A non-null cipher must point to a live BoringSSL cipher descriptor.
+unsafe fn get_cipher_from_ptr(
+    cipher: *const SSL_CIPHER,
+) -> Result<crypto::Algorithm> {
+    if cipher.is_null() {
+        return Err(Error::TlsFail);
+    }
+    // SAFETY: The caller guarantees the validity of the non-null pointer.
     let cipher_id = unsafe { SSL_CIPHER_get_id(cipher) };
 
     let alg = match cipher_id {
@@ -841,7 +861,8 @@ extern "C" fn set_read_secret(
             &mut ex_data.crypto_ctx[packet::Epoch::Application],
     };
 
-    let aead = match get_cipher_from_ptr(cipher) {
+    // SAFETY: BoringSSL passes the cipher descriptor for this callback.
+    let aead = match unsafe { get_cipher_from_ptr(cipher) } {
         Ok(v) => v,
 
         Err(_) => return 0,
@@ -890,7 +911,8 @@ extern "C" fn set_write_secret(
             &mut ex_data.crypto_ctx[packet::Epoch::Application],
     };
 
-    let aead = match get_cipher_from_ptr(cipher) {
+    // SAFETY: BoringSSL passes the cipher descriptor for this callback.
+    let aead = match unsafe { get_cipher_from_ptr(cipher) } {
         Ok(v) => v,
 
         Err(_) => return 0,
@@ -1073,7 +1095,11 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
     let peer_params = handshake.quic_transport_params();
 
     // Serialize session object into buffer.
-    let session_bytes = match get_session_bytes(session) {
+    let Some(session) = NonNull::new(session) else {
+        return 0;
+    };
+    // SAFETY: BoringSSL supplies a live, borrowed session to this callback.
+    let session_bytes = match unsafe { get_session_bytes(session) } {
         Ok(v) => v,
         Err(_) => return 0,
     };
@@ -1117,13 +1143,6 @@ pub const fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
     match bssl_result {
         0 => Ok(()),
         _ => Err(Error::TlsFail),
-    }
-}
-
-pub const fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
-    match unsafe { bssl_result.as_ref() } {
-        Some(v) => Ok(v),
-        None => Err(Error::TlsFail),
     }
 }
 
