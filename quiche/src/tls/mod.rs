@@ -177,18 +177,14 @@ impl Context {
     // Note: some vendor-specific methods are implemented in the boringssl
     // submodule.
     pub fn new() -> Result<Self> {
-        unsafe {
-            let ctx_raw =
-                NonNull::new(SSL_CTX_new(TLS_method())).ok_or(Error::TlsFail)?;
-
-            let mut ctx = Self(ctx_raw);
-
-            ctx.set_session_callback();
-
-            ctx.load_ca_certs()?;
-
-            Ok(ctx)
-        }
+        // SAFETY: TLS_method returns a static method descriptor. SSL_CTX_new
+        // transfers ownership of a fresh context or returns null.
+        let ctx_raw = NonNull::new(unsafe { SSL_CTX_new(TLS_method()) })
+            .ok_or(Error::TlsFail)?;
+        let mut ctx = Self(ctx_raw);
+        ctx.set_session_callback();
+        ctx.load_ca_certs()?;
+        Ok(ctx)
     }
 
     #[cfg(feature = "boringssl-boring-crate")]
@@ -207,16 +203,17 @@ impl Context {
     }
 
     pub fn new_handshake(&mut self) -> Result<Handshake> {
-        unsafe {
-            let ssl =
-                NonNull::new(SSL_new(self.as_mut_ptr())).ok_or(Error::TlsFail)?;
-
-            Ok(Handshake::new(ssl))
-        }
+        // SAFETY: The live context is exclusively borrowed. SSL_new retains
+        // its own context reference and returns a newly owned SSL or null.
+        let ssl = NonNull::new(unsafe { SSL_new(self.as_mut_ptr()) })
+            .ok_or(Error::TlsFail)?;
+        Ok(Handshake::new(ssl))
     }
 
     pub fn load_verify_locations_from_file(&mut self, file: &str) -> Result<()> {
         let file = ffi::CString::new(file).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The context is live and exclusively borrowed; the non-null
+        // path is a C string valid for the call.
         map_result(unsafe {
             SSL_CTX_load_verify_locations(
                 self.as_mut_ptr(),
@@ -230,6 +227,8 @@ impl Context {
         &mut self, path: &str,
     ) -> Result<()> {
         let path = ffi::CString::new(path).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The context is live and exclusively borrowed; the non-null
+        // path is a C string valid for the call.
         map_result(unsafe {
             SSL_CTX_load_verify_locations(
                 self.as_mut_ptr(),
@@ -241,6 +240,8 @@ impl Context {
 
     pub fn use_certificate_chain_file(&mut self, file: &str) -> Result<()> {
         let cstr = ffi::CString::new(file).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The live context is exclusively borrowed and the path is a
+        // valid C string.
         map_result(unsafe {
             SSL_CTX_use_certificate_chain_file(self.as_mut_ptr(), cstr.as_ptr())
         })
@@ -248,6 +249,8 @@ impl Context {
 
     pub fn use_privkey_file(&mut self, file: &str) -> Result<()> {
         let cstr = ffi::CString::new(file).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The live context is exclusively borrowed and the path is a
+        // valid C string. Type 1 selects PEM.
         map_result(unsafe {
             SSL_CTX_use_PrivateKey_file(self.as_mut_ptr(), cstr.as_ptr(), 1)
         })
@@ -255,62 +258,81 @@ impl Context {
 
     #[cfg(not(windows))]
     fn load_ca_certs(&mut self) -> Result<()> {
+        // SAFETY: The live context is exclusively borrowed.
         unsafe { map_result(SSL_CTX_set_default_verify_paths(self.as_mut_ptr())) }
     }
 
     #[cfg(windows)]
     fn load_ca_certs(&mut self) -> Result<()> {
-        unsafe {
-            let cstr = ffi::CString::new("Root").map_err(|_| Error::TlsFail)?;
-            let sys_store =
-                windows_sys::Win32::Security::Cryptography::CertOpenSystemStoreA(
-                    0,
-                    cstr.as_ptr() as windows_sys::core::PCSTR,
-                );
-            if sys_store.is_null() {
-                return Err(Error::TlsFail);
-            }
+        use windows_sys::Win32::Security::Cryptography::CertCloseStore;
+        use windows_sys::Win32::Security::Cryptography::CertEnumCertificatesInStore;
+        use windows_sys::Win32::Security::Cryptography::CertOpenSystemStoreA;
 
-            let ctx_store = SSL_CTX_get_cert_store(self.as_mut_ptr());
-            if ctx_store.is_null() {
-                return Err(Error::TlsFail);
-            }
-
-            let mut ctx_p = windows_sys::Win32::Security::Cryptography::CertEnumCertificatesInStore(
-                sys_store,
-                ptr::null(),
-            );
-
-            while !ctx_p.is_null() {
-                let in_p = (*ctx_p).pbCertEncoded as *const u8;
-
-                let cert = d2i_X509(
-                    ptr::null_mut(),
-                    &in_p,
-                    (*ctx_p).cbCertEncoded as i32,
-                );
-                if !cert.is_null() {
-                    X509_STORE_add_cert(ctx_store, cert);
-                }
-
-                X509_free(cert);
-
-                ctx_p = windows_sys::Win32::Security::Cryptography::CertEnumCertificatesInStore(
-                    sys_store, ctx_p,
-                );
-            }
-
-            // tidy up
-            windows_sys::Win32::Security::Cryptography::CertFreeCertificateContext(ctx_p);
-            windows_sys::Win32::Security::Cryptography::CertCloseStore(
-                sys_store, 0,
-            );
+        // SAFETY: The context is live and owns the returned X509_STORE.
+        let ctx_store = unsafe { SSL_CTX_get_cert_store(self.as_mut_ptr()) };
+        if ctx_store.is_null() {
+            return Err(Error::TlsFail);
         }
 
+        // SAFETY: The store name is NUL-terminated and static. The returned
+        // non-null store is owned until CertCloseStore below.
+        let sys_store =
+            unsafe { CertOpenSystemStoreA(0, c"Root".as_ptr().cast()) };
+        if sys_store.is_null() {
+            return Err(Error::TlsFail);
+        }
+
+        // Each enumeration call consumes the previous certificate context.
+        // No early exit between opening and closing the Windows store.
+        let mut previous = ptr::null();
+        loop {
+            // SAFETY: The store is open; previous is null or is the owned
+            // certificate context returned by the preceding enumeration.
+            let current =
+                unsafe { CertEnumCertificatesInStore(sys_store, previous) };
+            if current.is_null() {
+                break;
+            }
+            previous = current;
+
+            // SAFETY: current identifies a live certificate context whose
+            // encoded buffer remains readable until the next enumeration.
+            let (mut input, length) = unsafe {
+                (
+                    (*current).pbCertEncoded.cast_const(),
+                    (*current).cbCertEncoded,
+                )
+            };
+            let Ok(length) = libc::c_long::try_from(length) else {
+                continue;
+            };
+            if input.is_null() || length == 0 {
+                continue;
+            }
+
+            // SAFETY: input contains length readable bytes and d2i_X509
+            // advances the writable local cursor. A successful decode
+            // transfers ownership of one certificate reference.
+            let cert = unsafe { d2i_X509(ptr::null_mut(), &mut input, length) };
+            if !cert.is_null() {
+                // SAFETY: Both objects are live. The store retains a
+                // reference on success, so release the decoded reference.
+                unsafe {
+                    X509_STORE_add_cert(ctx_store, cert);
+                    X509_free(cert);
+                }
+            }
+        }
+
+        // SAFETY: All enumeration contexts have been consumed; release the
+        // one owned Windows store reference.
+        unsafe { CertCloseStore(sys_store, 0) };
         Ok(())
     }
 
     fn set_session_callback(&mut self) {
+        // SAFETY: The live context is exclusively borrowed. The registered
+        // callback has static lifetime and matches the C ABI.
         unsafe {
             // This is needed to enable the session callback on the client. On
             // the server it doesn't do anything.
@@ -330,12 +352,16 @@ impl Context {
 
         // The two modes above work for both BoringSSL and OpenSSL. This may
         // need adjustment if modes must be combined.
+        // SAFETY: The live context is exclusively borrowed; mode is a valid
+        // verification flag and no verification callback is installed.
         unsafe {
             SSL_CTX_set_verify(self.as_mut_ptr(), mode, None);
         }
     }
 
     pub fn enable_keylog(&mut self) {
+        // SAFETY: The live context is exclusively borrowed. The callback
+        // has static lifetime and matches the C ABI.
         unsafe {
             SSL_CTX_set_keylog_callback(self.as_mut_ptr(), Some(keylog));
         }
@@ -360,6 +386,8 @@ impl Context {
         }
 
         // Configure ALPN for servers.
+        // SAFETY: The context is live, the callback is static, and the
+        // unused callback argument is null.
         unsafe {
             SSL_CTX_set_alpn_select_cb(
                 self.as_mut_ptr(),
@@ -369,6 +397,8 @@ impl Context {
         }
 
         // Configure ALPN for clients.
+        // SAFETY: The context is live and BoringSSL copies the validated
+        // length-prefixed protocol list before returning.
         map_result_zero_is_success(unsafe {
             SSL_CTX_set_alpn_protos(
                 self.as_mut_ptr(),
@@ -379,6 +409,8 @@ impl Context {
     }
 
     pub fn set_ticket_key(&mut self, key: &[u8]) -> Result<()> {
+        // SAFETY: The live context is exclusively borrowed; key provides
+        // exactly key.len() readable bytes.
         map_result(unsafe {
             SSL_CTX_set_tlsext_ticket_keys(
                 self.as_mut_ptr(),
@@ -395,6 +427,8 @@ impl Context {
         // `SSL_CTX_set1_groups_list` shim in the per-vendor module so this
         // call site can be backend-agnostic.
         let cstr = ffi::CString::new(curves).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The live context is exclusively borrowed and cstr is a valid
+        // C string.
         map_result(unsafe {
             SSL_CTX_set1_groups_list(self.as_mut_ptr(), cstr.as_ptr())
         })
@@ -405,14 +439,15 @@ impl Context {
     }
 }
 
-// These traits are not automatically implemented because NonNull does not
-// convey ownership. Context uniquely owns the underlying data, and its API
-// preserves Rust's borrowing guarantees.
+// SAFETY: Moving Context transfers its owned BoringSSL context reference.
 unsafe impl Send for Context {}
+// SAFETY: Mutating context configuration requires an exclusive Rust borrow.
+// BoringSSL manages references held by the SSL objects created from it.
 unsafe impl Sync for Context {}
 
 impl Drop for Context {
     fn drop(&mut self) {
+        // SAFETY: Drop releases precisely the owned context reference.
         unsafe { SSL_CTX_free(self.as_mut_ptr()) }
     }
 }
@@ -434,6 +469,9 @@ pub struct Handshake {
 impl Handshake {
     // Note: some vendor-specific methods are implemented in the boringssl
     // submodule.
+    /// # Safety
+    /// The pointer must be null or a live, exclusively owned SSL reference
+    /// transferred to this Handshake. It must not be freed by the caller.
     #[cfg(any(feature = "ffi", feature = "boringssl-boring-crate"))]
     pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Self> {
         let ptr = NonNull::new(ssl.cast()).ok_or(Error::TlsFail)?;
@@ -450,6 +488,8 @@ impl Handshake {
     }
 
     pub fn get_error(&self, ret_code: c_int) -> c_int {
+        // SAFETY: The live SSL is borrowed, and ret_code is the preceding SSL
+        // operation result.
         unsafe { SSL_get_error(self.as_ptr(), ret_code) }
     }
 
@@ -471,15 +511,18 @@ impl Handshake {
     }
 
     pub fn use_legacy_codepoint(&mut self, use_legacy: bool) {
+        // SAFETY: The live SSL is exclusively borrowed.
         unsafe {
             SSL_set_quic_use_legacy_codepoint(
                 self.as_mut_ptr(),
-                use_legacy as c_int,
+                c_int::from(use_legacy),
             );
         }
     }
 
     pub fn set_state(&mut self, is_server: bool) {
+        // SAFETY: The live SSL is exclusively borrowed; both calls configure
+        // its endpoint role before the handshake.
         unsafe {
             if is_server {
                 SSL_set_accept_state(self.as_mut_ptr());
@@ -490,29 +533,38 @@ impl Handshake {
     }
 
     pub fn set_quic_method(&mut self) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed and the static method
+        // table outlives it.
         map_result(unsafe {
             SSL_set_quic_method(self.as_mut_ptr(), &QUICHE_STREAM_METHOD)
         })
     }
 
     pub fn set_min_proto_version(&mut self, version: u16) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed; BoringSSL validates the
+        // version.
         map_result(unsafe {
             SSL_set_min_proto_version(self.as_mut_ptr(), version)
         })
     }
 
     pub fn set_max_proto_version(&mut self, version: u16) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed; BoringSSL validates the
+        // version.
         map_result(unsafe {
             SSL_set_max_proto_version(self.as_mut_ptr(), version)
         })
     }
 
     pub fn set_quiet_shutdown(&mut self, mode: bool) {
+        // SAFETY: The live SSL is exclusively borrowed; mode is 0 or 1.
         unsafe { SSL_set_quiet_shutdown(self.as_mut_ptr(), i32::from(mode)) }
     }
 
     pub fn set_host_name(&mut self, name: &str) -> Result<()> {
         let cstr = ffi::CString::new(name).map_err(|_| Error::TlsFail)?;
+        // SAFETY: The live SSL is exclusively borrowed and BoringSSL copies
+        // the hostname from the NUL-terminated string.
         let rc =
             unsafe { SSL_set_tlsext_host_name(self.as_mut_ptr(), cstr.as_ptr()) };
         self.map_result_ssl(rc)?;
@@ -538,6 +590,8 @@ impl Handshake {
         let raw_params =
             crate::TransportParams::encode(params, is_server, &mut raw_params)?;
 
+        // SAFETY: The live SSL is exclusively borrowed and BoringSSL copies
+        // the encoded transport parameters.
         let rc = unsafe {
             SSL_set_quic_transport_params(
                 self.as_mut_ptr(),
@@ -552,6 +606,7 @@ impl Handshake {
         let mut ptr: *const u8 = ptr::null();
         let mut len: usize = 0;
 
+        // SAFETY: The SSL is live and the two output slots are writable.
         unsafe {
             SSL_get_peer_quic_transport_params(self.as_ptr(), &mut ptr, &mut len);
         }
@@ -568,6 +623,7 @@ impl Handshake {
         let mut ptr: *const u8 = ptr::null();
         let mut len: u32 = 0;
 
+        // SAFETY: The SSL is live and the two output slots are writable.
         unsafe {
             SSL_get0_alpn_selected(self.as_ptr(), &mut ptr, &mut len);
         }
@@ -583,6 +639,8 @@ impl Handshake {
     }
 
     pub fn server_name(&self) -> Option<&str> {
+        // SAFETY: The SSL is live. A non-null server name points to a
+        // NUL-terminated string borrowed from it.
         let s = unsafe {
             let ptr = SSL_get_servername(
                 self.as_ptr(),
@@ -602,7 +660,8 @@ impl Handshake {
     pub fn provide_data(
         &mut self, level: crypto::Level, buf: &[u8],
     ) -> Result<()> {
-        self.provided_data_outstanding = true;
+        // SAFETY: The live SSL is exclusively borrowed; buf is readable
+        // for its length and BoringSSL copies the handshake data.
         let rc = unsafe {
             SSL_provide_quic_data(
                 self.as_mut_ptr(),
@@ -611,7 +670,9 @@ impl Handshake {
                 buf.len(),
             )
         };
-        self.map_result_ssl(rc)
+        self.map_result_ssl(rc)?;
+        self.provided_data_outstanding = true;
+        Ok(())
     }
 
     pub fn do_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
@@ -655,6 +716,10 @@ impl Handshake {
             }
         };
 
+        // Snapshot the failing SSL operation's error before making another
+        // BoringSSL call, which may interact with its thread-local error queue.
+        let error = (rc != 1).then(|| self.get_error(rc));
+
         // SAFETY: The slot already exists, so BoringSSL replaces its value
         // without allocating. It must not retain the borrowed pointer after
         // the operation ends. If this invariant ever fails, abort rather
@@ -665,11 +730,22 @@ impl Handshake {
             std::process::abort();
         }
 
-        self.set_transport_error(ex_data, rc);
-        self.map_result_ssl(rc)
+        let Some(error) = error else {
+            return Ok(());
+        };
+        if error == 1 && ex_data.local_error.is_none() {
+            *ex_data.local_error = Some(ConnectionError {
+                is_app: false,
+                error_code: INTERNAL_ERROR,
+                reason: Vec::new(),
+            });
+        }
+        self.map_ssl_error(error)
     }
 
     pub fn write_level(&self) -> crypto::Level {
+        // SAFETY: The live SSL is borrowed and initialized with the QUIC
+        // method.
         unsafe { SSL_quic_write_level(self.as_ptr()) }
     }
 
@@ -690,17 +766,21 @@ impl Handshake {
     }
 
     pub fn is_completed(&self) -> bool {
+        // SAFETY: The live SSL is borrowed.
         unsafe { SSL_in_init(self.as_ptr()) == 0 }
     }
 
     pub fn is_resumed(&self) -> bool {
+        // SAFETY: The live SSL is borrowed.
         unsafe { SSL_session_reused(self.as_ptr()) == 1 }
     }
 
     pub fn clear(&mut self) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed.
         let rc = unsafe { SSL_clear(self.as_mut_ptr()) };
         self.map_result_ssl(rc)?;
         self.early_data_rejected = false;
+        self.provided_data_outstanding = false;
         Ok(())
     }
 
@@ -716,73 +796,34 @@ impl Handshake {
         self.ptr.as_ptr()
     }
 
-    fn map_result_ssl(&mut self, bssl_result: c_int) -> Result<()> {
-        match bssl_result {
-            1 => Ok(()),
-
-            _ => {
-                let ssl_err = self.get_error(bssl_result);
-                match ssl_err {
-                    // SSL_ERROR_SSL
-                    1 => {
-                        log_ssl_error();
-
-                        Err(Error::TlsFail)
-                    },
-
-                    // SSL_ERROR_WANT_READ
-                    2 => Err(Error::Done),
-
-                    // SSL_ERROR_WANT_WRITE
-                    3 => Err(Error::Done),
-
-                    // SSL_ERROR_WANT_X509_LOOKUP
-                    4 => Err(Error::Done),
-
-                    // SSL_ERROR_SYSCALL
-                    5 => Err(Error::TlsFail),
-
-                    // SSL_ERROR_PENDING_SESSION
-                    11 => Err(Error::Done),
-
-                    // SSL_ERROR_PENDING_CERTIFICATE
-                    12 => Err(Error::Done),
-
-                    // SSL_ERROR_WANT_PRIVATE_KEY_OPERATION
-                    13 => Err(Error::Done),
-
-                    // SSL_ERROR_PENDING_TICKET
-                    14 => Err(Error::Done),
-
-                    // SSL_ERROR_EARLY_DATA_REJECTED
-                    15 => {
-                        self.reset_early_data_reject();
-                        self.early_data_rejected = true;
-                        Err(Error::Done)
-                    },
-
-                    // SSL_ERROR_WANT_CERTIFICATE_VERIFY
-                    16 => Err(Error::Done),
-
-                    _ => Err(Error::TlsFail),
-                }
-            },
+    fn map_result_ssl(&mut self, result: c_int) -> Result<()> {
+        if result == 1 {
+            return Ok(());
         }
+        let error = self.get_error(result);
+        self.map_ssl_error(error)
     }
 
-    fn set_transport_error(&mut self, ex_data: &mut ExData, bssl_result: c_int) {
-        // SSL_ERROR_SSL
-        if self.get_error(bssl_result) == 1 {
-            // SSL_ERROR_SSL can't be recovered so ensure we set a
-            // local_error so the connection is closed.
-            // See https://www.openssl.org/docs/man1.1.1/man3/SSL_get_error.html
-            if ex_data.local_error.is_none() {
-                *ex_data.local_error = Some(ConnectionError {
-                    is_app: false,
-                    error_code: INTERNAL_ERROR,
-                    reason: Vec::new(),
-                })
-            }
+    fn map_ssl_error(&mut self, error: c_int) -> Result<()> {
+        match error {
+            // SSL_ERROR_SSL
+            1 => {
+                log_ssl_error();
+                Err(Error::TlsFail)
+            },
+            // SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE,
+            // SSL_ERROR_WANT_X509_LOOKUP, SSL_ERROR_PENDING_SESSION,
+            // SSL_ERROR_PENDING_CERTIFICATE,
+            // SSL_ERROR_WANT_PRIVATE_KEY_OPERATION, SSL_ERROR_PENDING_TICKET,
+            // SSL_ERROR_WANT_CERTIFICATE_VERIFY
+            2..=4 | 11..=14 | 16 => Err(Error::Done),
+            // SSL_ERROR_EARLY_DATA_REJECTED
+            15 => {
+                self.reset_early_data_reject();
+                self.early_data_rejected = true;
+                Err(Error::Done)
+            },
+            _ => Err(Error::TlsFail),
         }
     }
 
@@ -790,18 +831,23 @@ impl Handshake {
     pub(crate) fn ssl_mut(&mut self) -> &mut boring::ssl::SslRef {
         use foreign_types_shared::ForeignTypeRef;
 
-        unsafe { boring::ssl::SslRef::from_ptr_mut(self.as_mut_ptr() as _) }
+        // SAFETY: This is the same BoringSSL SSL type used by boring.
+        // The reference borrows the owned SSL exclusively without transferring
+        // it.
+        unsafe { boring::ssl::SslRef::from_ptr_mut(self.as_mut_ptr().cast()) }
     }
 }
 
-// These traits are not automatically implemented because NonNull does not
-// convey ownership. Handshake uniquely owns the underlying data, and its API
-// preserves Rust's borrowing guarantees.
+// SAFETY: Handshake owns the SSL reference; moving transfers ownership.
+// The temporary callback slot cannot outlive the exclusive TLS operation.
 unsafe impl Send for Handshake {}
+// SAFETY: Shared access exposes only read-only SSL queries and borrowed
+// immutable data. State-changing TLS operations require an exclusive borrow.
 unsafe impl Sync for Handshake {}
 
 impl Drop for Handshake {
     fn drop(&mut self) {
+        // SAFETY: Drop releases precisely the owned SSL reference.
         unsafe { SSL_free(self.as_mut_ptr()) }
     }
 }
@@ -977,11 +1023,19 @@ extern "C" fn add_handshake_data(
         len
     );
 
+    if len == 0 {
+        return 1;
+    }
+    if data.is_null() || len > isize::MAX as usize {
+        return 0;
+    }
+    // SAFETY: BoringSSL supplies len readable bytes for this callback.
     let buf = unsafe { slice::from_raw_parts(data, len) };
 
     let space = match level {
         crypto::Level::Initial => &mut ex_data.crypto_ctx[packet::Epoch::Initial],
-        crypto::Level::ZeroRTT => unreachable!(),
+        // TLS handshake messages are never supplied at the early-data level.
+        crypto::Level::ZeroRTT => return 0,
         crypto::Level::Handshake =>
             &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
         crypto::Level::OneRTT =>
@@ -1039,7 +1093,11 @@ extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {
         None => return,
     };
 
+    if line.is_null() {
+        return;
+    }
     if let Some(keylog) = &mut ex_data.keylog {
+        // SAFETY: BoringSSL passes a NUL-terminated string for this callback.
         let data = unsafe { ffi::CStr::from_ptr(line).to_bytes() };
 
         let mut full_line = Vec::with_capacity(data.len() + 1);
@@ -1051,62 +1109,65 @@ extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {
     }
 }
 
+// Select the first offered protocol that is supported locally. Returning
+// the peer's actual entry avoids borrowing the mutable callback configuration
+// across the FFI boundary.
+fn select_offered_alpn<'a>(
+    mut offered: &'a [u8], supported: &[Vec<u8>],
+) -> Option<&'a [u8]> {
+    let mut selected = None;
+    while let Some((&len, rest)) = offered.split_first() {
+        let len = usize::from(len);
+        if len == 0 {
+            return None;
+        }
+        let (proto, remaining) = rest.split_at_checked(len)?;
+        if selected.is_none() &&
+            supported.iter().any(|expected| expected == proto)
+        {
+            selected = Some(proto);
+        }
+        offered = remaining;
+    }
+    selected
+}
+
 extern "C" fn select_alpn(
-    ssl: *mut SSL, out: *mut *const u8, out_len: *mut u8, inp: *mut u8,
+    ssl: *mut SSL, out: *mut *const u8, out_len: *mut u8, inp: *const u8,
     in_len: c_uint, _arg: *mut c_void,
 ) -> c_int {
-    // SSL_TLSEXT_ERR_OK 0
-    // SSL_TLSEXT_ERR_ALERT_WARNING 1
-    // SSL_TLSEXT_ERR_ALERT_FATAL 2
-    // SSL_TLSEXT_ERR_NOACK 3
-
-    // Boringssl internally overwrite the return value from this callback, if
-    // the returned value is SSL_TLSEXT_ERR_NOACK and is quic, then the value
-    // gets overwritten to SSL_TLSEXT_ERR_ALERT_FATAL.
     // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
     // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
-
-        None => return TLS_ERROR,
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return TLS_ERROR;
     };
-
-    if ex_data.application_protos.is_empty() {
+    let Ok(len) = usize::try_from(in_len) else {
+        return TLS_ERROR;
+    };
+    if inp.is_null() ||
+        out.is_null() ||
+        out_len.is_null() ||
+        len == 0 ||
+        len > isize::MAX as usize
+    {
         return TLS_ERROR;
     }
-
-    let mut protos = octets::Octets::with_slice(unsafe {
-        slice::from_raw_parts(inp, in_len as usize)
-    });
-
-    while let Ok(proto) = protos.get_bytes_with_u8_length() {
-        let found = ex_data.application_protos.iter().any(|expected| {
-            trace!(
-                "checking peer ALPN {:?} against {:?}",
-                std::str::from_utf8(proto.as_ref()),
-                std::str::from_utf8(expected.as_slice())
-            );
-
-            if expected.len() == proto.len() &&
-                expected.as_slice() == proto.as_ref()
-            {
-                unsafe {
-                    *out = expected.as_slice().as_ptr();
-                    *out_len = expected.len() as u8;
-                }
-
-                return true;
-            }
-
-            false
-        });
-
-        if found {
-            return 0; // SSL_TLSEXT_ERR_OK
-        }
+    // SAFETY: BoringSSL supplies the offered list, readable for len bytes.
+    let input = unsafe { slice::from_raw_parts(inp, len) };
+    let Some(proto) = select_offered_alpn(input, ex_data.application_protos)
+    else {
+        return TLS_ERROR;
+    };
+    let Ok(proto_len) = u8::try_from(proto.len()) else {
+        return TLS_ERROR;
+    };
+    // SAFETY: BoringSSL supplies writable output slots and explicitly
+    // permits returning a pointer to the matching entry in the input list.
+    unsafe {
+        *out = proto.as_ptr();
+        *out_len = proto_len;
     }
-
-    TLS_ERROR
+    0 // SSL_TLSEXT_ERR_OK
 }
 
 extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
@@ -1139,28 +1200,21 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
         Err(_) => return 0,
     };
 
-    let mut buffer =
-        Vec::with_capacity(8 + peer_params.len() + 8 + session_bytes.len());
-
-    let session_bytes_len = session_bytes.len() as u64;
-
-    if buffer.write(&session_bytes_len.to_be_bytes()).is_err() {
+    let Some(capacity) = session_bytes
+        .len()
+        .checked_add(peer_params.len())
+        .and_then(|len| len.checked_add(16))
+    else {
+        return 0;
+    };
+    let mut buffer = Vec::new();
+    if buffer.try_reserve_exact(capacity).is_err() {
         return 0;
     }
-
-    if buffer.write(&session_bytes).is_err() {
-        return 0;
-    }
-
-    let peer_params_len = peer_params.len() as u64;
-
-    if buffer.write(&peer_params_len.to_be_bytes()).is_err() {
-        return 0;
-    }
-
-    if buffer.write(peer_params).is_err() {
-        return 0;
-    }
+    buffer.extend_from_slice(&(session_bytes.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(&session_bytes);
+    buffer.extend_from_slice(&(peer_params.len() as u64).to_be_bytes());
+    buffer.extend_from_slice(peer_params);
 
     *ex_data.session = Some(buffer);
 
@@ -1184,19 +1238,16 @@ pub const fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
 fn log_ssl_error() {
     let mut err = [0u8; 1024];
 
+    // SAFETY: The error queue is thread-local. The output buffer is writable
+    // for its entire length and ERR_error_string_n bounds its writes.
     unsafe {
         let e = ERR_peek_error();
-        ERR_error_string_n(e, err.as_mut_ptr() as *mut c_char, err.len());
+        ERR_error_string_n(e, err.as_mut_ptr().cast(), err.len());
     }
 
-    let cstr = ffi::CStr::from_bytes_until_nul(&err)
-        .expect("ERR_error_string_n should write a null terminated string");
-
-    trace!(
-        "{}",
-        cstr.to_str()
-            .expect("ERR_error_string_n should create a valid UTF-8 message")
-    );
+    if let Ok(message) = ffi::CStr::from_bytes_until_nul(&err) {
+        trace!("{}", message.to_string_lossy());
+    }
 }
 
 extern "C" {
@@ -1254,7 +1305,7 @@ extern "C" {
                 ssl: *mut SSL,
                 out: *mut *const u8,
                 out_len: *mut u8,
-                inp: *mut u8,
+                inp: *const u8,
                 in_len: c_uint,
                 arg: *mut c_void,
             ) -> c_int,
@@ -1353,7 +1404,9 @@ extern "C" {
     #[cfg(windows)]
     fn X509_free(x: *mut X509);
     #[cfg(windows)]
-    fn d2i_X509(px: *mut X509, input: *const *const u8, len: c_int) -> *mut X509;
+    fn d2i_X509(
+        px: *mut *mut X509, input: *mut *const u8, len: libc::c_long,
+    ) -> *mut X509;
 
     // ERR
     fn ERR_peek_error() -> c_uint;
@@ -1367,3 +1420,27 @@ extern "C" {
 
 mod boringssl;
 use boringssl::*;
+
+#[cfg(test)]
+mod tests {
+    use super::select_offered_alpn;
+
+    #[test]
+    fn offered_alpn_selection_preserves_peer_order_and_validates_entire_list() {
+        let supported = vec![b"h3".to_vec(), b"hq".to_vec()];
+        let offered = b"\x02hq\x02h3";
+        let selected = select_offered_alpn(offered, &supported).unwrap();
+        assert_eq!(selected, b"hq");
+        assert_eq!(selected.as_ptr(), offered[1..].as_ptr());
+        for malformed in [
+            b"".as_slice(),
+            b"\x00",
+            b"\x03h3",
+            b"\x02h3\x00",
+            b"\x02h3\x03hq",
+            b"\x02xx",
+        ] {
+            assert_eq!(select_offered_alpn(malformed, &supported), None);
+        }
+    }
+}

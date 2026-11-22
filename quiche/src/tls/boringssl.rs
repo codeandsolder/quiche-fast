@@ -94,18 +94,18 @@ pub(super) static QUICHE_STREAM_METHOD: SSL_QUIC_METHOD = SSL_QUIC_METHOD {
 };
 
 impl Context {
-    pub fn set_early_data_enabled(&mut self, _enabled: bool) {
+    pub fn set_early_data_enabled(&mut self, enabled: bool) {
+        // SAFETY: The live context is exclusively borrowed.
         unsafe {
-            SSL_CTX_set_early_data_enabled(
-                self.as_mut_ptr(),
-                i32::from(_enabled),
-            );
+            SSL_CTX_set_early_data_enabled(self.as_mut_ptr(), i32::from(enabled));
         }
     }
 }
 
 impl Handshake {
     pub fn set_quic_early_data_context(&mut self, context: &[u8]) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed and BoringSSL
+        // copies the supplied early-data context bytes.
         map_result(unsafe {
             SSL_set_quic_early_data_context(
                 self.as_mut_ptr(),
@@ -116,6 +116,9 @@ impl Handshake {
     }
 
     pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
+        // SAFETY: The live SSL is exclusively borrowed; its context is owned
+        // by the SSL. The serialized session bytes are readable. On success,
+        // SSL_set_session retains a reference; release the decoded reference.
         unsafe {
             let ctx = SSL_get_SSL_CTX(self.as_ptr());
 
@@ -138,6 +141,8 @@ impl Handshake {
     }
 
     pub fn reset_early_data_reject(&mut self) {
+        // SAFETY: The live SSL is exclusively borrowed and the operation
+        // is called after the backend reports early-data rejection.
         unsafe { SSL_reset_early_data_reject(self.as_mut_ptr()) };
     }
 
