@@ -13473,6 +13473,54 @@ fn challenge_no_cids(
 }
 
 #[rstest]
+fn pmtud_peer_limit_and_confirmed_size(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut config = test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    config.set_max_send_udp_payload_size(1400);
+    config.discover_pmtu(true);
+
+    let mut server_config =
+        test_utils::Pipe::default_config(cc_algorithm_name).unwrap();
+    server_config.set_max_recv_udp_payload_size(1280);
+    let mut pipe = test_utils::Pipe::with_client_and_server_config(
+        &mut config,
+        &mut server_config,
+    )
+    .unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    assert_eq!(
+        pipe.client
+            .paths
+            .get_active()
+            .unwrap()
+            .recovery
+            .max_datagram_size(),
+        MIN_CLIENT_INITIAL_LEN,
+    );
+
+    assert_eq!(pipe.advance(), Ok(()));
+    assert_eq!(
+        pipe.client
+            .paths
+            .get_active()
+            .unwrap()
+            .pmtud
+            .as_ref()
+            .unwrap()
+            .get_pmtu(),
+        Some(1280)
+    );
+    assert_eq!(pipe.client.max_send_udp_payload_size(), 1280);
+
+    pipe.client.revalidate_pmtu();
+    assert_eq!(
+        pipe.client.max_send_udp_payload_size(),
+        MIN_CLIENT_INITIAL_LEN
+    );
+}
+
+#[rstest]
 fn pmtud_probe_success(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
