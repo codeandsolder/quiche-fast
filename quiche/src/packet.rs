@@ -596,7 +596,7 @@ impl Header<'_> {
             },
 
             Type::Retry => {
-                const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
+                const TAG_LEN: usize = crypto::TAG_LEN;
 
                 // Exclude the integrity tag from the token.
                 if b.cap() < TAG_LEN {
@@ -1054,7 +1054,7 @@ pub fn retry(
 pub fn verify_retry_integrity(
     b: &octets::OctetsMut, odcid: &[u8], version: u32,
 ) -> Result<()> {
-    const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
+    const TAG_LEN: usize = crypto::TAG_LEN;
 
     let received = b.as_ref().get(..TAG_LEN).ok_or(Error::InvalidPacket)?;
     let tag = compute_retry_integrity_tag(&b.buf()[..b.off()], odcid, version)?;
@@ -1064,16 +1064,16 @@ pub fn verify_retry_integrity(
 
 fn compute_retry_integrity_tag(
     header: &[u8], odcid: &[u8], version: u32,
-) -> Result<Vec<u8>> {
+) -> Result<[u8; crypto::TAG_LEN]> {
     const KEY_LEN: usize = RETRY_AEAD_ALG.key_len();
-    const TAG_LEN: usize = RETRY_AEAD_ALG.tag_len();
+    const TAG_LEN: usize = crypto::TAG_LEN;
 
     const RETRY_INTEGRITY_KEY_V1: [u8; KEY_LEN] = [
         0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a, 0x1d, 0x76, 0x6b, 0x54,
         0xe3, 0x68, 0xc8, 0x4e,
     ];
 
-    const RETRY_INTEGRITY_NONCE_V1: [u8; crypto::MAX_NONCE_LEN] = [
+    const RETRY_INTEGRITY_NONCE_V1: [u8; crypto::NONCE_LEN] = [
         0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb,
     ];
 
@@ -1093,10 +1093,9 @@ fn compute_retry_integrity_tag(
     pb.put_bytes(odcid)?;
     pb.put_bytes(header)?;
 
-    let mut key =
-        crypto::PacketKey::new(RETRY_AEAD_ALG, key.to_vec(), nonce.to_vec())?;
+    let mut key = crypto::PacketKey::new(RETRY_AEAD_ALG, key, &nonce)?;
 
-    let mut out_tag = vec![0_u8; TAG_LEN];
+    let mut out_tag = [0; TAG_LEN];
 
     let out_len = key.seal_with_u64_counter(0, &pseudo, &mut out_tag, 0, None)?;
 
@@ -1224,7 +1223,7 @@ impl CryptoContext {
     }
 
     pub fn crypto_overhead(&self) -> Option<usize> {
-        Some(self.crypto_seal.as_ref()?.alg().tag_len())
+        self.crypto_seal.as_ref().map(|_| crypto::TAG_LEN)
     }
 
     pub const fn has_keys(&self) -> bool {
@@ -2014,9 +2013,8 @@ mod tests {
 
         let (aead, _) = crypto::derive_initial_key_material(
             dcid,
-            hdr.version,
             is_server,
-            false,
+            crypto::CounterInitialization::FirstPacket,
         )
         .unwrap();
 
@@ -2231,7 +2229,12 @@ mod tests {
 
         let alg = crypto::Algorithm::ChaCha20_Poly1305;
 
-        let aead = crypto::Open::from_secret(alg, &secret).unwrap();
+        let aead = crypto::Open::from_secret(
+            alg,
+            &secret,
+            crypto::CounterInitialization::Prime,
+        )
+        .unwrap();
 
         let mut hdr = Header::from_mutable_cursor(&mut b, 0).unwrap();
         assert_eq!(hdr.ty, Type::Short);
@@ -2268,9 +2271,8 @@ mod tests {
 
         let (_, mut aead) = crypto::derive_initial_key_material(
             dcid,
-            hdr.version,
             is_server,
-            false,
+            crypto::CounterInitialization::FirstPacket,
         )
         .unwrap();
 
@@ -2604,7 +2606,12 @@ mod tests {
 
         let alg = crypto::Algorithm::ChaCha20_Poly1305;
 
-        let mut aead = crypto::Seal::from_secret(alg, &secret).unwrap();
+        let mut aead = crypto::Seal::from_secret(
+            alg,
+            &secret,
+            crypto::CounterInitialization::Prime,
+        )
+        .unwrap();
 
         let pn = 654_360_564;
         let pn_len = 3;
@@ -2655,9 +2662,12 @@ mod tests {
 
         let payload_len = b.get_varint().unwrap() as usize;
 
-        let (aead, _) =
-            crypto::derive_initial_key_material(b"", hdr.version, true, false)
-                .unwrap();
+        let (aead, _) = crypto::derive_initial_key_material(
+            b"",
+            true,
+            crypto::CounterInitialization::FirstPacket,
+        )
+        .unwrap();
 
         assert_eq!(
             decrypt_pkt(&mut b, 0, 1, payload_len, &aead),
@@ -2689,9 +2699,12 @@ mod tests {
         // No space for decryption.
         let payload_len = 1;
 
-        let (aead, _) =
-            crypto::derive_initial_key_material(b"", hdr.version, true, false)
-                .unwrap();
+        let (aead, _) = crypto::derive_initial_key_material(
+            b"",
+            true,
+            crypto::CounterInitialization::FirstPacket,
+        )
+        .unwrap();
 
         assert_eq!(
             decrypt_pkt(&mut b, 0, 1, payload_len, &aead),

@@ -5599,7 +5599,7 @@ fn invalid_initial_payload(
     // In the wide case, narrowing the varint to u32 would make it match
     // the exact packet size, including the authentication tag.
     let len = if exceeds_address_width {
-        (1_u64 << 32) + (pn_len + payload_len + aead.alg().tag_len()) as u64
+        (1_u64 << 32) + (pn_len + payload_len + crypto::TAG_LEN) as u64
     } else {
         (pn_len + 4096) as u64
     };

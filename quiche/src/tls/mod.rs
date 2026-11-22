@@ -994,7 +994,11 @@ unsafe fn install_secret<const READ: bool>(
     let space = &mut ex_data.crypto_ctx[epoch];
 
     if READ {
-        let Ok(open) = crypto::Open::from_secret(aead, secret) else {
+        let Ok(open) = crypto::Open::from_secret(
+            aead,
+            secret,
+            crypto::CounterInitialization::Prime,
+        ) else {
             return 0;
         };
         if level == crypto::Level::ZeroRTT {
@@ -1003,7 +1007,11 @@ unsafe fn install_secret<const READ: bool>(
             space.crypto_open = Some(open);
         }
     } else {
-        let Ok(seal) = crypto::Seal::from_secret(aead, secret) else {
+        let Ok(seal) = crypto::Seal::from_secret(
+            aead,
+            secret,
+            crypto::CounterInitialization::Prime,
+        ) else {
             return 0;
         };
         space.crypto_seal = Some(seal);
