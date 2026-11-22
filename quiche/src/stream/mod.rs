@@ -686,7 +686,7 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Returns the new `max_streams_bidi` limit.
-    pub const fn max_streams_bidi_next(&mut self) -> u64 {
+    pub const fn max_streams_bidi_next(&self) -> u64 {
         self.local_max_streams_bidi_next
     }
 
@@ -696,7 +696,7 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Returns the new `max_streams_uni` limit.
-    pub const fn max_streams_uni_next(&mut self) -> u64 {
+    pub const fn max_streams_uni_next(&self) -> u64 {
         self.local_max_streams_uni_next
     }
 
@@ -730,8 +730,7 @@ impl<F: BufFactory> StreamMap<F> {
         stream.send.mark_stop_reported();
 
         if stream.is_collectable() {
-            let local = stream.local;
-            self.collect(stream_id, local);
+            self.collect(stream_id);
         } else {
             let priority_key = Arc::clone(&stream.priority_key);
             self.remove_writable(&priority_key);
@@ -742,8 +741,12 @@ impl<F: BufFactory> StreamMap<F> {
     ///
     /// This should only be called when `Stream::is_collectable()` returns true
     /// for the given stream.
-    pub fn collect(&mut self, stream_id: u64, local: bool) {
-        if !local {
+    pub fn collect(&mut self, stream_id: u64) {
+        let Some(s) = self.streams.remove(&stream_id) else {
+            return;
+        };
+
+        if !s.local {
             // If the stream was created by the peer, give back a max streams
             // credit.
             if is_bidi(stream_id) {
@@ -758,8 +761,6 @@ impl<F: BufFactory> StreamMap<F> {
                     .min(crate::MAX_STREAM_COUNT);
             }
         }
-
-        let s = self.streams.remove(&stream_id).unwrap();
 
         self.remove_readable(&s.priority_key);
 
@@ -777,10 +778,9 @@ impl<F: BufFactory> StreamMap<F> {
         };
 
         let collect = stream.is_collectable();
-        let local = stream.local;
 
         if collect {
-            self.collect(stream_id, local);
+            self.collect(stream_id);
         }
     }
 
@@ -1119,10 +1119,10 @@ impl Default for StreamPriorityKey {
             incremental: true,
             id: Default::default(),
             owner: None,
-            readable: Default::default(),
-            writable: Default::default(),
-            stopped_writable: Default::default(),
-            flushable: Default::default(),
+            readable: RBTreeAtomicLink::default(),
+            writable: RBTreeAtomicLink::default(),
+            stopped_writable: RBTreeAtomicLink::default(),
+            flushable: RBTreeAtomicLink::default(),
         }
     }
 }
@@ -1484,11 +1484,39 @@ mod tests {
             .unwrap();
         // Collect one peer-created stream. No additional stream ID in this
         // type exists once the maximum has already been advertised.
-        streams.collect(stream_type, false);
+        streams.collect(stream_type);
         assert_eq!(streams.max_streams_bidi_next(), max);
         assert_eq!(streams.max_streams_uni_next(), max);
         assert!(!streams.should_update_max_streams_bidi());
         assert!(!streams.should_update_max_streams_uni());
+    }
+
+    #[rstest]
+    fn stream_collection_returns_credit_only_once(
+        #[values(0, 1, 2, 3)] stream_type: u64,
+        #[values(true, false)] local: bool,
+    ) {
+        let params = crate::TransportParams::default();
+        let mut streams = <StreamMap>::new(1, 1, DEFAULT_STREAM_WINDOW);
+        streams.update_peer_max_streams_bidi(1);
+        streams.update_peer_max_streams_uni(1);
+        let is_server = (stream_type & 1 != 0) == local;
+        streams.collect(stream_type);
+        streams
+            .get_or_create(stream_type, &params, &params, local, is_server)
+            .unwrap();
+        streams.collect(stream_type);
+        streams.collect(stream_type);
+        assert_eq!(streams.len(), 0);
+        assert!(streams.collected.contains(stream_type));
+        assert_eq!(
+            streams.max_streams_bidi_next(),
+            1 + u64::from(!local && is_bidi(stream_type))
+        );
+        assert_eq!(
+            streams.max_streams_uni_next(),
+            1 + u64::from(!local && !is_bidi(stream_type))
+        );
     }
 
     #[rstest]
@@ -2311,13 +2339,13 @@ mod tests {
         assert_eq!(walk_2, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
 
         // Removing streams doesn't break expected ordering.
-        streams.collect(24, true);
+        streams.collect(24);
 
         let walk_3: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_3, vec![40, 36, 32, 28, 20, 16, 12, 8, 4, 0]);
 
-        streams.collect(40, true);
-        streams.collect(0, true);
+        streams.collect(40);
+        streams.collect(0);
 
         let walk_4: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_4, vec![36, 32, 28, 20, 16, 12, 8, 4]);
@@ -2412,7 +2440,7 @@ mod tests {
         assert_eq!(walk_9, vec![40, 36, 4, 12, 20, 28, 32, 16, 24, 0, 8]);
 
         // Removing streams doesn't break expected ordering.
-        streams.collect(20, true);
+        streams.collect(20);
 
         let walk_10: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_10, vec![40, 4, 12, 36, 28, 32, 24, 16, 8, 0]);
@@ -2481,7 +2509,7 @@ mod tests {
         assert!(!foreign.flushable.is_linked());
 
         let current = Arc::clone(right.get(0).unwrap().priority_key());
-        right.collect(0, false);
+        right.collect(0);
         right.enqueue(&current, PriorityQueue::Readable);
         right.enqueue(&current, PriorityQueue::StoppedWritable);
         right.enqueue(&current, PriorityQueue::Flushable);
