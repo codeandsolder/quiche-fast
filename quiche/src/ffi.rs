@@ -106,7 +106,6 @@ use std::time::Instant;
 use crate::accept;
 use crate::connect;
 use crate::packet;
-use crate::recovery::RecoveryOps;
 use crate::tls;
 use crate::version_is_supported;
 use crate::Config;
@@ -2989,6 +2988,7 @@ fn std_time_to_c(_time: &Instant, out: &mut timespec) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::recovery::RecoveryOps;
     use crate::test_utils;
     use crate::PROTOCOL_VERSION;
     use std::time::Duration;
