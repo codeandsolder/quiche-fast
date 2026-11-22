@@ -421,12 +421,13 @@ impl ProbeBW {
                 let mut queuing_threshold_extra_bytes =
                     self.model.queueing_threshold_extra_bytes();
                 if params.add_ack_height_to_queueing_threshold {
-                    queuing_threshold_extra_bytes += self.model.max_ack_height();
+                    queuing_threshold_extra_bytes = queuing_threshold_extra_bytes
+                        .saturating_add(self.model.max_ack_height());
                 }
-                let queuing_threshold = (params.full_bw_threshold *
+                let queuing_threshold = ((params.full_bw_threshold *
                     self.model.bdp0() as f32)
-                    as usize +
-                    queuing_threshold_extra_bytes;
+                    as usize)
+                    .saturating_add(queuing_threshold_extra_bytes);
 
                 is_queuing =
                     congestion_event.bytes_in_flight >= queuing_threshold;
@@ -616,23 +617,39 @@ impl ProbeBW {
                 // Not fully using inflight_hi, so don't grow it.
                 return;
             }
-
-            self.cycle.probe_up_acked += congestion_event.bytes_acked;
         }
 
+        let acked = congestion_event.bytes_acked;
         if let Some(probe_up_bytes) = self.cycle.probe_up_bytes {
-            if self.cycle.probe_up_acked >= probe_up_bytes {
-                let delta = self.cycle.probe_up_acked / probe_up_bytes;
-                // probe_up_acked is set to the remainder mod probe_up_bytes;
-                // probe_up_acked >= delta * probe_up_bytes so this
-                // can't underflow.
-                self.cycle.probe_up_acked -= delta * probe_up_bytes;
-                let new_inflight_hi =
-                    self.model.inflight_hi() + delta * DEFAULT_MSS;
-                if new_inflight_hi > self.model.inflight_hi() {
-                    self.model.set_inflight_hi(new_inflight_hi);
+            // Preserve the exact quotient and remainder even when the sum
+            // exceeds the size of an address-sized congestion window.
+            let (delta, remainder) = if let Some(total) =
+                self.cycle.probe_up_acked.checked_add(acked)
+            {
+                if total < probe_up_bytes {
+                    (0, total)
+                } else {
+                    (total / probe_up_bytes, total % probe_up_bytes)
                 }
+            } else {
+                let total = self.cycle.probe_up_acked as u128 + acked as u128;
+                let divisor = probe_up_bytes as u128;
+                (
+                    usize::try_from(total / divisor).unwrap_or(usize::MAX),
+                    usize::try_from(total % divisor).unwrap_or(usize::MAX),
+                )
+            };
+            self.cycle.probe_up_acked = remainder;
+            let new_inflight_hi = self
+                .model
+                .inflight_hi()
+                .saturating_add(delta.saturating_mul(DEFAULT_MSS));
+            if new_inflight_hi > self.model.inflight_hi() {
+                self.model.set_inflight_hi(new_inflight_hi);
             }
+        } else {
+            self.cycle.probe_up_acked =
+                self.cycle.probe_up_acked.saturating_add(acked);
         }
 
         if congestion_event.end_of_round_trip {
@@ -776,6 +793,35 @@ mod datagram_cwnd_tests {
             probe.probe_inflight_high_upward(&event, &DEFAULT_PARAMS);
         }
         (initial_hi, probe.model.inflight_hi())
+    }
+
+    #[test]
+    fn probe_up_preserves_ack_remainder_at_width_limit() {
+        let mut probe = ProbeBW {
+            model: BBRv2NetworkModel::new(
+                &DEFAULT_PARAMS,
+                Duration::from_millis(60),
+            ),
+            cycle: Cycle {
+                phase: CyclePhase::Up,
+                probe_up_bytes: Some(usize::MAX - 1),
+                probe_up_acked: usize::MAX - 2,
+                ..Cycle::default()
+            },
+        };
+        let cwnd = usize::MAX - 10;
+        probe.model.set_inflight_hi(cwnd);
+        let mut event = BBRv2CongestionEvent::new(
+            Instant::now(),
+            cwnd,
+            cwnd,
+            true,
+            DEFAULT_MSS,
+        );
+        event.bytes_acked = 10;
+        probe.probe_inflight_high_upward(&event, &DEFAULT_PARAMS);
+        assert_eq!(probe.cycle.probe_up_acked, 9);
+        assert_eq!(probe.model.inflight_hi(), usize::MAX);
     }
 
     #[test]

@@ -10535,6 +10535,12 @@ fn in_handshake_config(
         )
         .unwrap();
 
+        <Connection>::set_max_send_udp_payload_size_in_handshake(
+            hello.ssl_mut(),
+            0,
+        )
+        .unwrap();
+
         <Connection>::set_max_idle_timeout_in_handshake(
             hello.ssl_mut(),
             CUSTOM_MAX_IDLE_TIMEOUT.as_millis() as u64,
@@ -10619,6 +10625,10 @@ fn in_handshake_config(
     assert_eq!(
         pipe.server.recovery_config.cc_algorithm,
         custom_cc_algorithm
+    );
+    assert_eq!(
+        pipe.server.recovery_config.max_send_udp_payload_size,
+        MAX_SEND_UDP_PAYLOAD_SIZE
     );
     assert_eq!(
         pipe.server.paths.get_active().unwrap().recovery.cwnd(),

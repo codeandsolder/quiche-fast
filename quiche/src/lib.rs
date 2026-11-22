@@ -2676,7 +2676,8 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
-        ex_data.recovery_config.max_send_udp_payload_size = v;
+        ex_data.recovery_config.max_send_udp_payload_size =
+            cmp::max(v, MAX_SEND_UDP_PAYLOAD_SIZE);
 
         Ok(())
     }

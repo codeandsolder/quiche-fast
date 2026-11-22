@@ -269,7 +269,8 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) fn bdp(&self, bandwidth: Bandwidth, gain: f32) -> usize {
-        (bandwidth * gain).to_bytes_per_period(self.min_rtt()) as usize
+        usize::try_from((bandwidth * gain).to_bytes_per_period(self.min_rtt()))
+            .unwrap_or(usize::MAX)
     }
 
     pub(super) fn bdp1(&self, bandwidth: Bandwidth) -> usize {
@@ -686,9 +687,10 @@ impl BBRv2NetworkModel {
     pub(super) fn check_persistent_queue(
         &mut self, target_gain: f32, params: &Params,
     ) {
-        let target = self
-            .bdp(self.max_bandwidth(), target_gain)
-            .max(self.bdp0() + self.queueing_threshold_extra_bytes());
+        let target = self.bdp(self.max_bandwidth(), target_gain).max(
+            self.bdp0()
+                .saturating_add(self.queueing_threshold_extra_bytes()),
+        );
 
         if self.min_bytes_in_flight_in_round < target {
             self.rounds_with_queueing = 0;
@@ -833,6 +835,19 @@ mod tests {
     use super::*;
     use crate::recovery::gcongestion::bbr2::DEFAULT_PARAMS;
     use crate::recovery::gcongestion::BbrRttJumpDetector;
+
+    #[test]
+    fn bandwidth_delay_product_preserves_width() {
+        let model =
+            BBRv2NetworkModel::new(&DEFAULT_PARAMS, Duration::from_secs(1));
+        let bytes = 1_u64 << 32;
+        let bandwidth = Bandwidth::from_bytes_per_second(bytes);
+        assert_eq!(
+            model.bdp1(bandwidth),
+            usize::try_from(bytes).unwrap_or(usize::MAX)
+        );
+        assert_eq!(model.bdp1(Bandwidth::infinite()), usize::MAX);
+    }
 
     fn ms(millis: u64) -> Duration {
         Duration::from_millis(millis)
