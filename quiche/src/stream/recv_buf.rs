@@ -164,7 +164,7 @@ impl RecvBuf {
         let previous_end = self.len;
         let mut buf = buf;
         // Trim already-consumed data without cloning the backing allocation.
-        buf.discard_prefix(self.off);
+        buf.discard_prefix(self.off_front());
         self.len = self.len.max(buf.max_off());
 
         // In-order data cannot overlap anything already buffered.
