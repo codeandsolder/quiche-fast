@@ -109,7 +109,7 @@ const FFI_ERR_INVALID_ARGUMENT: i16 = -24;
 /// # Safety
 /// A non-null, aligned pointer must identify a live initialized T for the
 /// returned lifetime. The C caller must not mutate it during that borrow.
-pub(super) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+pub(crate) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
     if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
@@ -124,7 +124,7 @@ pub(super) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
 /// # Safety
 /// A non-null, aligned pointer must identify a live initialized T, with
 /// exclusive access for the returned lifetime.
-pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+pub(crate) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
     if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
@@ -132,6 +132,39 @@ pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
     // SAFETY: null and alignment are checked above. Allocation validity,
     // lifetime and exclusivity remain part of the C caller contract.
     Some(unsafe { &mut *ptr })
+}
+
+/// Reclaim an allocation returned by a C constructor once.
+///
+/// # Safety
+/// A non-null, aligned pointer must come from `Box::into_raw` for the same
+/// type and transfer sole ownership to this call.
+pub(crate) unsafe fn ffi_drop_box<T>(ptr: *mut T) {
+    if !ptr.is_null() && ptr.is_aligned() {
+        // SAFETY: the caller supplies the original owned box pointer.
+        unsafe { drop(Box::from_raw(ptr)) };
+    }
+}
+
+macro_rules! ffi_free {
+    ($ptr:expr) => {{
+        // SAFETY: the C destructor requires the corresponding constructor's
+        // allocation, with exclusive ownership transferred exactly once.
+        unsafe { $crate::ffi::ffi_drop_box($ptr) }
+    }};
+}
+
+pub(crate) use ffi_free;
+
+macro_rules! ffi_c_str {
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: a non-null C string must be readable through its terminator
+        // for the duration of the call.
+        match unsafe { c_str_to_str($ptr) } {
+            Ok(value) => value,
+            Err(()) => return $ret,
+        }
+    }};
 }
 
 macro_rules! ffi_addr {
@@ -200,7 +233,7 @@ macro_rules! ffi_mut {
 /// # Safety
 /// A non-null, aligned pointer must identify writable storage for one T with
 /// exclusive access for the returned lifetime.
-pub(super) unsafe fn ffi_ptr_out<'a, T>(
+pub(crate) unsafe fn ffi_ptr_out<'a, T>(
     ptr: *mut T,
 ) -> Option<&'a mut MaybeUninit<T>> {
     // SAFETY: MaybeUninit has the same layout as T and permits uninitialized
@@ -246,7 +279,7 @@ fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
 ///
 /// For non-empty slices, \`ptr\` must still point to \`len\` initialized \`T\`
 /// values in one live allocation for the returned lifetime.
-pub(super) unsafe fn ffi_slice_from_raw_parts<'a, T>(
+pub(crate) unsafe fn ffi_slice_from_raw_parts<'a, T>(
     ptr: *const T, len: usize,
 ) -> Option<&'a [T]> {
     if len == 0 {
@@ -270,7 +303,7 @@ pub(super) unsafe fn ffi_slice_from_raw_parts<'a, T>(
 /// For non-empty slices, \`ptr\` must point to \`len\` initialized \`T\` values
 /// in one live allocation and be exclusively borrowed for the returned
 /// lifetime.
-pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
+pub(crate) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
     ptr: *mut T, len: usize,
 ) -> Option<&'a mut [T]> {
     if len == 0 {
@@ -290,7 +323,7 @@ pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
 ///
 /// # Safety
 /// Non-empty storage must be writable and exclusive for the returned lifetime.
-pub(super) unsafe fn ffi_slice_output<'a, T>(
+pub(crate) unsafe fn ffi_slice_output<'a, T>(
     ptr: *mut T, len: usize,
 ) -> Option<&'a mut [MaybeUninit<T>]> {
     // SAFETY: MaybeUninit has T's layout and permits uninitialized storage;
@@ -397,8 +430,12 @@ impl log::Log for Logger {
 
 #[no_mangle]
 pub extern "C" fn quiche_enable_debug_logging(
-    cb: extern "C" fn(line: *const u8, argp: *mut c_void), argp: *mut c_void,
+    cb: Option<extern "C" fn(line: *const u8, argp: *mut c_void)>,
+    argp: *mut c_void,
 ) -> c_int {
+    let Some(cb) = cb else {
+        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
+    };
     let argp = atomic::AtomicPtr::new(argp);
     let logger = Box::new(Logger { cb, argp });
 
@@ -427,10 +464,7 @@ fn config_string_operation(
     op: impl FnOnce(&mut Config, &str) -> Result<()>,
 ) -> c_int {
     let config = ffi_mut!(config, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    // SAFETY: the C entry point requires a live NUL-terminated string.
-    let Ok(value) = (unsafe { c_str_to_str(value) }) else {
-        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
-    };
+    let value = ffi_c_str!(value, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     op(config, value).map_or_else(|e| c_int::from(e.to_c()), |()| 0)
 }
 
@@ -791,9 +825,7 @@ pub extern "C" fn quiche_config_set_ticket_key(
 
 #[no_mangle]
 pub extern "C" fn quiche_config_free(config: *mut Config) {
-    if !config.is_null() {
-        drop(unsafe { Box::from_raw(config) });
-    }
+    ffi_free!(config);
 }
 
 #[no_mangle]
@@ -892,9 +924,7 @@ pub extern "C" fn quiche_connect(
     let server_name = if server_name.is_null() {
         None
     } else {
-        let Ok(server_name) = (unsafe { c_str_to_str(server_name) }) else {
-            return ptr::null_mut();
-        };
+        let server_name = ffi_c_str!(server_name, ptr::null_mut());
         Some(server_name)
     };
 
@@ -1009,6 +1039,7 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
         let local = ffi_addr!(local, local_len, ptr::null_mut());
         let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
+        // SAFETY: the caller transfers ownership of a live SSL object here.
         let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
             Ok(v) => v,
 
@@ -1074,6 +1105,7 @@ pub extern "C" fn quiche_conn_new_with_tls(
     let local = ffi_addr!(local, local_len, ptr::null_mut());
     let peer = ffi_addr!(peer, peer_len, ptr::null_mut());
 
+    // SAFETY: the caller transfers ownership of a live SSL object here.
     let tls = match unsafe { tls::Handshake::from_ptr(ssl) } {
         Ok(v) => v,
 
@@ -1095,9 +1127,7 @@ pub extern "C" fn quiche_conn_set_keylog_path(
 ) -> bool {
     let conn = ffi_mut!(conn, false);
 
-    let Ok(filename) = (unsafe { c_str_to_str(path) }) else {
-        return false;
-    };
+    let filename = ffi_c_str!(path, false);
 
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -1115,15 +1145,37 @@ pub extern "C" fn quiche_conn_set_keylog_path(
     true
 }
 
+/// Adopt a live descriptor supplied by the caller.
+///
+/// # Safety
+/// A valid descriptor must be exclusively owned by the caller, who transfers
+/// ownership on success and must not close it thereafter.
+#[cfg(unix)]
+unsafe fn file_from_owned_fd(fd: c_int) -> Option<std::fs::File> {
+    // SAFETY: F_GETFD only queries a descriptor and takes no variadic argument.
+    if fd < 0 || unsafe { libc::fcntl(fd, libc::F_GETFD) } < 0 {
+        return None;
+    }
+
+    // SAFETY: the descriptor exists and the caller transfers its ownership.
+    Some(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
 #[no_mangle]
 #[cfg(unix)]
-pub extern "C" fn quiche_conn_set_keylog_fd(conn: *mut Connection, fd: c_int) {
-    let conn = ffi_mut!(conn);
+pub extern "C" fn quiche_conn_set_keylog_fd(
+    conn: *mut Connection, fd: c_int,
+) -> bool {
+    let conn = ffi_mut!(conn, false);
 
-    let f = unsafe { std::fs::File::from_raw_fd(fd) };
+    // SAFETY: this API takes ownership of the descriptor only on acceptance.
+    let Some(f) = (unsafe { file_from_owned_fd(fd) }) else {
+        return false;
+    };
     let writer = std::io::BufWriter::new(f);
 
     conn.set_keylog(Box::new(writer));
+    true
 }
 
 #[no_mangle]
@@ -1134,15 +1186,9 @@ pub extern "C" fn quiche_conn_set_qlog_path(
 ) -> bool {
     let conn = ffi_mut!(conn, false);
 
-    let Ok(filename) = (unsafe { c_str_to_str(path) }) else {
-        return false;
-    };
-    let Ok(title) = (unsafe { c_str_to_str(log_title) }) else {
-        return false;
-    };
-    let Ok(description) = (unsafe { c_str_to_str(log_desc) }) else {
-        return false;
-    };
+    let filename = ffi_c_str!(path, false);
+    let title = ffi_c_str!(log_title, false);
+    let description = ffi_c_str!(log_desc, false);
 
     let file = std::fs::OpenOptions::new()
         .write(true)
@@ -1169,17 +1215,16 @@ pub extern "C" fn quiche_conn_set_qlog_path(
 pub extern "C" fn quiche_conn_set_qlog_fd(
     conn: *mut Connection, fd: c_int, log_title: *const c_char,
     log_desc: *const c_char,
-) {
-    let conn = ffi_mut!(conn);
+) -> bool {
+    let conn = ffi_mut!(conn, false);
 
-    let Ok(title) = (unsafe { c_str_to_str(log_title) }) else {
-        return;
-    };
-    let Ok(description) = (unsafe { c_str_to_str(log_desc) }) else {
-        return;
-    };
+    let title = ffi_c_str!(log_title, false);
+    let description = ffi_c_str!(log_desc, false);
 
-    let f = unsafe { std::fs::File::from_raw_fd(fd) };
+    // SAFETY: this API takes ownership of the descriptor only on acceptance.
+    let Some(f) = (unsafe { file_from_owned_fd(fd) }) else {
+        return false;
+    };
     let writer = std::io::BufWriter::new(f);
 
     conn.set_qlog(
@@ -1187,6 +1232,7 @@ pub extern "C" fn quiche_conn_set_qlog_fd(
         title.to_owned(),
         format!("{} id={}", description, conn.trace_id),
     );
+    true
 }
 
 #[no_mangle]
@@ -1653,9 +1699,7 @@ pub extern "C" fn quiche_connection_id_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_connection_id_iter_free(iter: *mut ConnectionIdIter) {
-    if !iter.is_null() {
-        drop(unsafe { Box::from_raw(iter) });
-    }
+    ffi_free!(iter);
 }
 
 #[no_mangle]
@@ -1824,9 +1868,7 @@ pub extern "C" fn quiche_stream_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_stream_iter_free(iter: *mut StreamIter) {
-    if !iter.is_null() {
-        drop(unsafe { Box::from_raw(iter) });
-    }
+    ffi_free!(iter);
 }
 
 #[repr(C)]
@@ -2209,9 +2251,7 @@ pub extern "C" fn quiche_conn_send_ack_eliciting_on_path(
 
 #[no_mangle]
 pub extern "C" fn quiche_conn_free(conn: *mut Connection) {
-    if !conn.is_null() {
-        drop(unsafe { Box::from_raw(conn) });
-    }
+    ffi_free!(conn);
 }
 
 #[no_mangle]
@@ -2364,9 +2404,7 @@ pub extern "C" fn quiche_socket_addr_iter_next(
 
 #[no_mangle]
 pub extern "C" fn quiche_socket_addr_iter_free(iter: *mut SocketAddrIter) {
-    if !iter.is_null() {
-        drop(unsafe { Box::from_raw(iter) });
-    }
+    ffi_free!(iter);
 }
 
 #[no_mangle]
@@ -2636,9 +2674,7 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
 
 #[no_mangle]
 pub extern "C" fn quiche_path_event_free(ev: *mut PathEvent) {
-    if !ev.is_null() {
-        drop(unsafe { Box::from_raw(ev) });
-    }
+    ffi_free!(ev);
 }
 
 #[no_mangle]
@@ -3996,5 +4032,61 @@ mod tests {
         fn inet_ntop(
             af: c_int, src: *const c_void, dst: *mut c_char, size: socklen_t,
         ) -> *mut c_char;
+    }
+}
+
+#[cfg(test)]
+mod foreign_ownership_tests {
+    use super::*;
+
+    #[test]
+    fn null_log_callback_is_rejected() {
+        assert_eq!(
+            quiche_enable_debug_logging(None, ptr::null_mut()),
+            c_int::from(FFI_ERR_INVALID_ARGUMENT)
+        );
+    }
+
+    #[test]
+    fn free_rejects_null_and_misaligned_pointers() {
+        quiche_config_free(ptr::null_mut());
+        let config = quiche_config_new(PROTOCOL_VERSION);
+        assert!(!config.is_null());
+        quiche_config_free(config.cast::<u8>().wrapping_add(1).cast());
+        quiche_config_free(config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keylog_descriptor_ownership_is_transferred_only_on_acceptance() {
+        use std::os::fd::AsRawFd;
+        use std::os::fd::IntoRawFd;
+
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        assert!(!quiche_conn_set_keylog_fd(
+            ptr::null_mut(),
+            file.as_raw_fd()
+        ));
+        // The caller still owns this descriptor; the function has not closed
+        // it.
+        assert!(file.metadata().is_ok());
+        assert!(quiche_conn_set_keylog_fd(
+            &mut pipe.client,
+            file.into_raw_fd()
+        ));
+        assert!(!quiche_conn_set_keylog_fd(&mut pipe.client, -1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn invalid_owned_descriptors_are_rejected() {
+        for fd in [-1, c_int::MAX] {
+            // SAFETY: neither descriptor is open; no ownership is transferred.
+            assert!(unsafe { file_from_owned_fd(fd) }.is_none());
+        }
     }
 }
