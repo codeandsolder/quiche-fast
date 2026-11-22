@@ -4523,15 +4523,6 @@ impl<F: BufFactory> Connection<F> {
                 match lost {
                     frame::Frame::CryptoHeader { offset, length } => {
                         crypto_ctx.crypto_stream.send.retransmit(offset, length);
-
-                        self.stream_retrans_bytes = self
-                            .stream_retrans_bytes
-                            .saturating_add(length as u64);
-                        p.stream_retrans_bytes =
-                            p.stream_retrans_bytes.saturating_add(length as u64);
-
-                        self.retrans_count = self.retrans_count.saturating_add(1);
-                        p.retrans_count = p.retrans_count.saturating_add(1);
                     },
 
                     frame::Frame::StreamHeader {
@@ -4598,15 +4589,6 @@ impl<F: BufFactory> Connection<F> {
                         // which may be less than `length` if some data was
                         // already acked.
                         self.streams.add_tx_buffered(retransmitted);
-
-                        self.stream_retrans_bytes = self
-                            .stream_retrans_bytes
-                            .saturating_add(length as u64);
-                        p.stream_retrans_bytes =
-                            p.stream_retrans_bytes.saturating_add(length as u64);
-
-                        self.retrans_count = self.retrans_count.saturating_add(1);
-                        p.retrans_count = p.retrans_count.saturating_add(1);
                     },
 
                     frame::Frame::ACK { .. } => {
@@ -4929,6 +4911,8 @@ impl<F: BufFactory> Connection<F> {
         let mut is_pmtud_probe = false;
         let mut has_data = false;
         let mut stream_data_skipped = false;
+        let mut retransmitted_bytes = 0_u64;
+        let mut retransmitted_fin = false;
 
         // Whether a PING frame must explicitly elicit an ACK when no other
         // frame does so implicitly.
@@ -5462,10 +5446,12 @@ impl<F: BufFactory> Connection<F> {
 
             if let Some(max_len) = left.checked_sub(hdr_len) {
                 frame::FrameSink::put_padding(b, hdr_len)?;
-                let (len, _) = crypto_ctx
+                let emission = crypto_ctx
                     .crypto_stream
                     .send
                     .emit(bytes::BufMut::limit(&mut *b, max_len));
+                let len = emission.len;
+                retransmitted_bytes = emission.retransmitted_bytes;
                 let mut crypto_hdr = b.patch(hdr_off, hdr_len)?;
                 frame::encode_crypto_header(
                     crypto_off,
@@ -5615,8 +5601,10 @@ impl<F: BufFactory> Connection<F> {
                 };
 
                 frame::FrameSink::put_padding(b, hdr_len)?;
-                let (len, fin) =
+                let emission =
                     stream.send.emit(bytes::BufMut::limit(&mut *b, max_len));
+                let len = emission.len;
+                let fin = emission.fin;
 
                 // ACK processing can leave a stream in the flushable queue
                 // after removing all of its retransmission data. Unlink the
@@ -5637,6 +5625,10 @@ impl<F: BufFactory> Connection<F> {
                     fin,
                     &mut stream_hdr,
                 )?;
+
+                retransmitted_bytes = retransmitted_bytes
+                    .saturating_add(emission.retransmitted_bytes);
+                retransmitted_fin = emission.retransmitted_fin;
 
                 // The payload and its header were encoded above. Only
                 // record recovery metadata and account for the written bytes.
@@ -5897,6 +5889,19 @@ impl<F: BufFactory> Connection<F> {
         // Record sent packet size if we probe the path.
         if let Some(data) = challenge_data {
             path.add_challenge_sent(data, written, now);
+        }
+
+        // Attribute retransmission to the packet and path that actually
+        // carried the repeated payload or FIN, not the lost frame's path.
+        if retransmitted_bytes != 0 || retransmitted_fin {
+            self.retrans_count = self.retrans_count.saturating_add(1);
+            path.retrans_count = path.retrans_count.saturating_add(1);
+            self.stream_retrans_bytes = self
+                .stream_retrans_bytes
+                .saturating_add(retransmitted_bytes);
+            path.stream_retrans_bytes = path
+                .stream_retrans_bytes
+                .saturating_add(retransmitted_bytes);
         }
 
         self.sent_count += 1;
@@ -10154,7 +10159,8 @@ pub struct Stats {
     /// The number of QUIC packets that were marked as lost but later acked.
     pub spurious_lost: usize,
 
-    /// The number of sent QUIC packets with retransmitted data.
+    /// The number of sent QUIC packets carrying retransmitted STREAM or
+    /// CRYPTO data, or a retransmitted FIN.
     pub retrans: usize,
 
     /// The number of sent bytes.
@@ -10169,7 +10175,7 @@ pub struct Stats {
     /// The number of bytes sent lost.
     pub lost_bytes: u64,
 
-    /// The number of stream bytes retransmitted.
+    /// The number of STREAM and CRYPTO payload bytes actually retransmitted.
     pub stream_retrans_bytes: u64,
 
     /// The number of DATAGRAM frames received.

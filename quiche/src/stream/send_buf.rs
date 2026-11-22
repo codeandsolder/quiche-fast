@@ -85,6 +85,7 @@ enum FinalSize {
     #[default]
     Open,
     Pending(u64),
+    Retransmit(u64),
     InFlight(u64),
     Acknowledged(u64),
     Reset {
@@ -105,11 +106,21 @@ impl FinalSize {
         match *self {
             Self::Open => None,
             Self::Pending(offset) |
+            Self::Retransmit(offset) |
             Self::InFlight(offset) |
             Self::Acknowledged(offset) |
             Self::Reset { offset, .. } => Some(offset),
         }
     }
+}
+
+/// The bytes and final-size signal actually emitted into one frame.
+#[derive(Debug)]
+pub struct Emission {
+    pub len: usize,
+    pub fin: bool,
+    pub retransmitted_bytes: u64,
+    pub retransmitted_fin: bool,
 }
 
 /// Send-side stream buffer.
@@ -270,10 +281,11 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Writes data from the send buffer into the given output buffer.
-    pub fn emit(&mut self, mut out: impl bytes::BufMut) -> (usize, bool) {
+    pub fn emit(&mut self, mut out: impl bytes::BufMut) -> Emission {
         let capacity = out.remaining_mut();
         let mut out_len = capacity;
-        let mut next_off = self.off_front();
+        let start_off = self.off_front();
+        let mut next_off = start_off;
 
         while out_len > 0 {
             let off_front = self.off_front();
@@ -324,7 +336,8 @@ impl<F: BufFactory> SendBuf<F> {
         // themselves, and lets us avoid queueing empty buffers just so we can
         // propagate the final size.
         let fin = match self.final_size {
-            FinalSize::Pending(offset) => offset == next_off,
+            FinalSize::Pending(offset) | FinalSize::Retransmit(offset) =>
+                offset == next_off,
             // Piggyback the final size on retransmitted data if it has not
             // been acknowledged. Never emit another empty FIN unless pending.
             FinalSize::InFlight(offset) =>
@@ -332,15 +345,27 @@ impl<F: BufFactory> SendBuf<F> {
             _ => false,
         };
 
+        let retransmitted_fin = fin &&
+            matches!(
+                self.final_size,
+                FinalSize::Retransmit(_) | FinalSize::InFlight(_)
+            );
         if fin {
             self.final_size = FinalSize::InFlight(next_off);
         }
 
         // Record the largest offset that has been sent so we can accurately
         // report final_size
+        let retransmitted_bytes =
+            self.emit_off.min(next_off).saturating_sub(start_off);
         self.emit_off = cmp::max(self.emit_off, next_off);
 
-        (capacity - out_len, fin)
+        Emission {
+            len: capacity - out_len,
+            fin,
+            retransmitted_bytes,
+            retransmitted_fin,
+        }
     }
 
     /// Updates the `max_data` limit to the given value.
@@ -360,7 +385,7 @@ impl<F: BufFactory> SendBuf<F> {
 
     /// Marks the stream's final size as acknowledged by the peer.
     pub(crate) const fn ack_fin(&mut self) {
-        if let FinalSize::Pending(offset) | FinalSize::InFlight(offset) =
+        if let FinalSize::Retransmit(offset) | FinalSize::InFlight(offset) =
             self.final_size
         {
             self.final_size = FinalSize::Acknowledged(offset);
@@ -461,7 +486,7 @@ impl<F: BufFactory> SendBuf<F> {
     /// packet, as the FIN still has to reach the peer.
     pub(crate) const fn retransmit_fin(&mut self) {
         if let FinalSize::InFlight(offset) = self.final_size {
-            self.final_size = FinalSize::Pending(offset);
+            self.final_size = FinalSize::Retransmit(offset);
         }
     }
 
@@ -555,7 +580,7 @@ impl<F: BufFactory> SendBuf<F> {
 
     /// Returns true if the next call to [`Self::emit`] will emit an empty FIN.
     pub fn empty_fin_next(&self) -> bool {
-        matches!(self.final_size, FinalSize::Pending(offset) if offset == self.off_front())
+        matches!(self.final_size, FinalSize::Pending(offset) | FinalSize::Retransmit(offset) if offset == self.off_front())
     }
 
     /// The maximum offset we are allowed to send to the peer.
@@ -573,7 +598,10 @@ impl<F: BufFactory> SendBuf<F> {
 
     /// Returns true if the final size still needs to be sent to the peer.
     pub const fn is_fin_pending(&self) -> bool {
-        matches!(self.final_size, FinalSize::Pending(_))
+        matches!(
+            self.final_size,
+            FinalSize::Pending(_) | FinalSize::Retransmit(_)
+        )
     }
 
     /// Returns true if the send-side of the stream is complete.
@@ -718,7 +746,8 @@ mod tests {
         streams.sub_tx_buffered(baseline);
         assert_eq!(streams.tx_buffered(), 5);
         let mut buf = [0; 5];
-        let (written, _) = streams.get_mut(4).unwrap().send.emit(&mut buf[..]);
+        let Emission { len: written, .. } =
+            streams.get_mut(4).unwrap().send.emit(&mut buf[..]);
         streams.sub_tx_buffered(written as u64);
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
@@ -731,7 +760,9 @@ mod tests {
         let mut send = <SendBuf>::new(u64::MAX);
         assert_eq!(send.buffered_bytes, 0);
 
-        let (written, fin) = send.emit(&mut buf[..]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..]);
         assert_eq!(written, 0);
         assert!(!fin);
     }
@@ -742,7 +773,8 @@ mod tests {
         assert!(!send.is_complete());
         assert_eq!(send.write(b"", true), Ok(0));
         assert!(!send.is_complete());
-        assert_eq!(send.emit(&mut [0_u8; 0][..]), (0, true));
+        let Emission { len, fin, .. } = send.emit(&mut [0_u8; 0][..]);
+        assert_eq!((len, fin), (0, true));
         assert!(!send.is_complete());
         send.ack_fin();
         assert!(send.is_complete());
@@ -786,7 +818,8 @@ mod tests {
         send.seed_offsets_for_test(OFFSET);
         assert_eq!(send.write(b"hello", false), Ok(5));
         let mut output = [0; 2];
-        assert_eq!(send.emit(&mut output[..]), (2, false));
+        let Emission { len, fin, .. } = send.emit(&mut output[..]);
+        assert_eq!((len, fin), (2, false));
         assert_eq!(send.shutdown(), Ok((OFFSET + 2, 3)));
         assert_eq!(send.ack_off(), OFFSET + 2);
         assert_eq!(send.off_back(), OFFSET + 2);
@@ -825,7 +858,9 @@ mod tests {
         assert!(send.write(second, true).is_ok());
         assert_eq!(send.buffered_bytes, 19);
 
-        let (written, fin) = send.emit(&mut buf[..128]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..128]);
         assert_eq!(written, 19);
         assert!(fin);
         assert_eq!(&buf[..written], b"somethinghelloworld");
@@ -838,7 +873,12 @@ mod tests {
         buffered: u64, next_off: u64,
     ) {
         let mut buf = [0; 15];
-        assert_eq!(send.emit(&mut buf[..capacity]), (data.len(), fin));
+        let Emission {
+            len,
+            fin: emitted_fin,
+            ..
+        } = send.emit(&mut buf[..capacity]);
+        assert_eq!((len, emitted_fin), (data.len(), fin));
         assert_eq!(&buf[..data.len()], data);
         assert_eq!(send.buffered_bytes, buffered);
         assert_eq!(send.off_front(), next_off);
@@ -929,7 +969,9 @@ mod tests {
 
         assert_eq!(send.off_front(), 0);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..10]);
         assert_eq!(written, 5);
         assert!(!fin);
         assert_eq!(&buf[..written], b"somet");
@@ -937,7 +979,9 @@ mod tests {
 
         assert_eq!(send.off_front(), 5);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..10]);
         assert_eq!(written, 0);
         assert!(!fin);
         assert_eq!(&buf[..written], b"");
@@ -953,7 +997,9 @@ mod tests {
 
         assert_eq!(send.off_front(), 5);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..10]);
         assert_eq!(written, 10);
         assert!(!fin);
         assert_eq!(&buf[..10], b"hinghellow");
@@ -966,7 +1012,9 @@ mod tests {
 
         assert_eq!(send.off_front(), 15);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..10]);
         assert_eq!(written, 4);
         assert!(fin);
         assert_eq!(&buf[..written], b"orld");
@@ -990,7 +1038,9 @@ mod tests {
 
         assert_eq!(send.off_front(), 0);
 
-        let (written, fin) = send.emit(&mut buf[..10]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..10]);
         assert_eq!(written, 9);
         assert!(fin);
         assert_eq!(&buf[..written], b"something");
@@ -1013,7 +1063,9 @@ mod tests {
 
         assert_eq!(send.buffered_bytes, 9);
 
-        let (written, fin) = send.emit(&mut buf[..4]);
+        let Emission {
+            len: written, fin, ..
+        } = send.emit(&mut buf[..4]);
         assert_eq!(written, 4);
         assert!(!fin);
         assert_eq!(&buf[..written], b"some");
@@ -1030,17 +1082,42 @@ mod tests {
         let mut send = <SendBuf>::new(u64::MAX);
         let mut out = [0; 5];
         assert_eq!(send.write(b"hello", true), Ok(5));
-        assert_eq!(send.emit(&mut out[..]), (5, true));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (5, true));
         assert_eq!(send.retransmit(0, 5), 5);
 
         assert_eq!(send.ack_and_drop(0, 2), 2);
         assert_eq!(send.buffered_bytes(), 3);
         assert_eq!(send.off_front(), 2);
         assert_eq!(send.retransmit(0, 5), 0);
-        assert_eq!(send.emit(&mut out[..]), (3, true));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (3, true));
         assert_eq!(&out[..3], b"llo");
         assert_eq!(send.retransmit(0, 5), 3);
         assert_eq!(send.off_front(), 2);
+    }
+
+    #[test]
+    fn emission_reports_repeated_bytes_and_final_size_separately() {
+        let mut send = <SendBuf>::new(30);
+        let mut out = [0; 10];
+        assert_eq!(send.write(b"abcdefghij", false), Ok(10));
+        let emission = send.emit(&mut out[..5]);
+        assert_eq!((emission.len, emission.retransmitted_bytes), (5, 0));
+        assert_eq!(send.retransmit(2, 3), 3);
+        assert_eq!(send.write(b"", true), Ok(0));
+        let emission = send.emit(&mut out[..]);
+        assert_eq!((emission.len, emission.fin), (8, true));
+        assert_eq!(emission.retransmitted_bytes, 3);
+        assert!(!emission.retransmitted_fin);
+        send.ack_and_drop(0, 10);
+        send.retransmit_fin();
+        let emission = send.emit(&mut out[..]);
+        assert_eq!((emission.len, emission.fin), (0, true));
+        assert_eq!(emission.retransmitted_bytes, 0);
+        assert!(emission.retransmitted_fin);
+        send.ack_fin();
+        assert!(send.is_complete());
     }
 
     #[test]
@@ -1048,7 +1125,8 @@ mod tests {
         let mut send = <SendBuf>::new(30);
         let mut out = [0; 15];
         assert_eq!(send.write(b"abcdefghijklmno", true), Ok(15));
-        assert_eq!(send.emit(&mut out[..]), (15, true));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (15, true));
         assert_eq!(send.retransmit(0, 15), 15);
         assert_eq!(send.ack_and_drop(3, 9), 9);
         assert_eq!(send.ack_and_drop(5, 4), 0);
@@ -1123,7 +1201,18 @@ mod tests {
                             .take_while(|&&s| s == Pending)
                             .count();
                         let mut out = [0; DATA.len()];
-                        assert_eq!(send.emit(&mut out[..len]), (count, false));
+                        let Emission {
+                            len: written,
+                            fin,
+                            retransmitted_bytes,
+                            ..
+                        } = send.emit(&mut out[..len]);
+                        assert_eq!((written, fin), (count, false));
+                        assert_eq!(
+                            retransmitted_bytes,
+                            highest.min(start + count).saturating_sub(start)
+                                as u64
+                        );
                         assert_eq!(&out[..count], &DATA[start..start + count]);
                         model[start..start + count].fill(InFlight);
                         highest = highest.max(start + count);
@@ -1165,7 +1254,7 @@ mod tests {
         assert_eq!(send.off_front(), 0);
 
         // Emit the whole buffer
-        let (written, _fin) = send.emit(&mut buf[..]);
+        let Emission { len: written, .. } = send.emit(&mut buf[..]);
         assert_eq!(written, buf.len());
         assert_eq!(send.off_front(), buf.len() as u64);
 
@@ -1190,13 +1279,15 @@ mod tests {
         assert_eq!(send.write(b"hello", false), Ok(5));
         assert!(!send.is_fin_pending());
 
-        assert_eq!(send.emit(&mut buf[..]), (5, false));
+        let Emission { len, fin, .. } = send.emit(&mut buf[..]);
+        assert_eq!((len, fin), (5, false));
 
         // The final size became known after all data was sent.
         assert_eq!(send.write(b"", true), Ok(0));
         assert!(send.is_fin_pending());
 
-        assert_eq!(send.emit(&mut buf[..]), (0, true));
+        let Emission { len, fin, .. } = send.emit(&mut buf[..]);
+        assert_eq!((len, fin), (0, true));
         assert!(!send.is_fin_pending());
 
         // Writing the FIN again doesn't schedule another one.
@@ -1221,15 +1312,19 @@ mod tests {
         let mut send = <SendBuf>::new(10);
         let mut out = [0; 5];
         assert_eq!(send.write(b"hello", true), Ok(5));
-        assert_eq!(send.emit(&mut out[..]), (5, true));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (5, true));
         assert!(!send.empty_fin_next());
-        assert_eq!(send.emit(&mut out[..]), (0, false));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (0, false));
         send.ack_fin();
         assert_eq!(send.retransmit(0, 5), 5);
         send.retransmit_fin();
-        assert_eq!(send.emit(&mut out[..]), (5, false));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (5, false));
         assert!(!send.empty_fin_next());
-        assert_eq!(send.emit(&mut out[..]), (0, false));
+        let Emission { len, fin, .. } = send.emit(&mut out[..]);
+        assert_eq!((len, fin), (0, false));
         send.ack_and_drop(0, 5);
         assert!(send.is_complete());
     }
@@ -1259,7 +1354,8 @@ mod tests {
             send.ack_fin();
             send.retransmit_fin();
             assert!(!send.empty_fin_next());
-            assert_eq!(send.emit(&mut [0; 5][..]), (0, false));
+            let Emission { len, fin, .. } = send.emit(&mut [0; 5][..]);
+            assert_eq!((len, fin), (0, false));
         }
     }
 
