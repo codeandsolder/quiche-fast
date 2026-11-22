@@ -1903,8 +1903,9 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
 ///
 /// # Errors
 ///
-/// Returns `Error::BufferTooShort` if the output buffer cannot hold the
-/// version negotiation packet.
+/// Returns `Error::InvalidPacket` for a connection ID exceeding the
+/// version-independent 255-byte limit, or `Error::BufferTooShort` if the output
+/// buffer cannot hold the version negotiation packet.
 ///
 /// ## Examples:
 ///
@@ -1946,6 +1947,7 @@ pub fn negotiate_version(
 /// # Errors
 ///
 /// Returns `Error::UnknownVersion` for an unsupported version,
+/// `Error::InvalidPacket` if a connection ID exceeds the version's limit,
 /// `Error::BufferTooShort` if the output buffer is too small, or a
 /// cryptographic error if Retry integrity tag generation fails.
 ///
