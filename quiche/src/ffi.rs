@@ -38,6 +38,8 @@ use std::net::SocketAddrV6;
 #[cfg(unix)]
 use std::os::unix::io::FromRawFd;
 
+use bytes::BufMut as _;
+
 use libc::c_char;
 use libc::c_int;
 use libc::c_void;
@@ -284,6 +286,28 @@ pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
     Some(unsafe { slice::from_raw_parts_mut(ptr, len) })
 }
 
+/// Borrows a C output buffer without assuming that any bytes are initialized.
+///
+/// # Safety
+/// Non-empty storage must be writable and exclusive for the returned lifetime.
+pub(super) unsafe fn ffi_slice_output<'a, T>(
+    ptr: *mut T, len: usize,
+) -> Option<&'a mut [MaybeUninit<T>]> {
+    // SAFETY: MaybeUninit has T's layout and permits uninitialized storage;
+    // the caller supplies the exclusive output allocation.
+    unsafe { ffi_slice_from_raw_parts_mut(ptr.cast::<MaybeUninit<T>>(), len) }
+}
+
+macro_rules! ffi_slice_out {
+    ($ptr:expr, $len:expr, $ret:expr) => {{
+        // SAFETY: the C caller supplies writable, exclusive output storage.
+        match unsafe { $crate::ffi::ffi_slice_output($ptr, $len) } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
 macro_rules! ffi_slice {
     ($ptr:expr, $len:expr) => {{
         // SAFETY: the C caller supplies one allocation of initialized elements,
@@ -318,7 +342,7 @@ pub(super) use ffi_mut;
 pub(super) use ffi_out;
 pub(super) use ffi_ref;
 pub(super) use ffi_slice;
-pub(super) use ffi_slice_mut;
+pub(super) use ffi_slice_out;
 
 fn validate_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
@@ -790,8 +814,30 @@ pub extern "C" fn quiche_header_info(
         Err(e) => return c_int::from(e.to_c()),
     };
 
-    version.write(hdr.version);
+    let token_bytes = hdr.token.as_deref().unwrap_or(&[]);
+    if *scid_len < hdr.scid.len() ||
+        *dcid_len < hdr.dcid.len() ||
+        *token_len < token_bytes.len()
+    {
+        return c_int::from(Error::BufferTooShort.to_c());
+    }
+    let mut scid =
+        ffi_slice_out!(scid, *scid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let mut dcid =
+        ffi_slice_out!(dcid, *dcid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let mut token = if hdr.token.is_some() {
+        ffi_slice_out!(token, *token_len, c_int::from(FFI_ERR_INVALID_ARGUMENT))
+    } else {
+        &mut []
+    };
 
+    scid.put_slice(&hdr.scid);
+    dcid.put_slice(&hdr.dcid);
+    token.put_slice(token_bytes);
+    *scid_len = hdr.scid.len();
+    *dcid_len = hdr.dcid.len();
+    *token_len = token_bytes.len();
+    version.write(hdr.version);
     ty.write(match hdr.ty {
         Type::Initial => 1,
         Type::Retry => 2,
@@ -800,48 +846,6 @@ pub extern "C" fn quiche_header_info(
         Type::Short => 5,
         Type::VersionNegotiation => 6,
     });
-
-    if *scid_len < hdr.scid.len() {
-        return -1;
-    }
-
-    let scid =
-        ffi_slice_mut!(scid, *scid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let scid = &mut scid[..hdr.scid.len()];
-    scid.copy_from_slice(&hdr.scid);
-
-    *scid_len = hdr.scid.len();
-
-    if *dcid_len < hdr.dcid.len() {
-        return -1;
-    }
-
-    let dcid =
-        ffi_slice_mut!(dcid, *dcid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let dcid = &mut dcid[..hdr.dcid.len()];
-    dcid.copy_from_slice(&hdr.dcid);
-
-    *dcid_len = hdr.dcid.len();
-
-    match hdr.token {
-        Some(tok) => {
-            if *token_len < tok.len() {
-                return -1;
-            }
-
-            let token = ffi_slice_mut!(
-                token,
-                *token_len,
-                c_int::from(FFI_ERR_INVALID_ARGUMENT)
-            );
-            let token = &mut token[..tok.len()];
-            token.copy_from_slice(&tok);
-
-            *token_len = tok.len();
-        },
-
-        None => *token_len = 0,
-    }
 
     0
 }
@@ -1349,9 +1353,9 @@ pub extern "C" fn quiche_conn_stream_recv(
     }
 
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    let (out_len, out_fin) = match conn.stream_recv(stream_id, out) {
+    let (out_len, out_fin) = match conn.stream_recv_buf(stream_id, out) {
         Ok(v) => v,
 
         Err(e) => {
@@ -2120,9 +2124,9 @@ pub extern "C" fn quiche_conn_dgram_recv(
     }
 
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    let out_len = match conn.dgram_recv(out) {
+    let out_len = match conn.dgram_recv_into(out) {
         Ok(v) => v,
 
         Err(e) => return ssize_t::from(e.to_c()),
@@ -2629,16 +2633,17 @@ pub extern "C" fn quiche_path_event_free(ev: *mut PathEvent) {
 pub extern "C" fn quiche_put_varint(
     buf: *mut u8, buf_len: size_t, val: u64,
 ) -> c_int {
-    let buf = ffi_slice_mut!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-
-    let mut b = octets::OctetsMut::with_slice(buf);
+    let mut buf =
+        ffi_slice_out!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let mut encoded = [0; 8];
+    let mut b = octets::OctetsMut::with_slice(&mut encoded);
     match b.put_varint(val) {
-        Ok(_) => 0,
-
-        Err(e) => {
-            let err: Error = e.into();
-            c_int::from(err.to_c())
+        Ok(bytes) if bytes.len() <= buf.len() => {
+            buf.put_slice(bytes);
+            0
         },
+        Ok(_) => c_int::from(Error::BufferTooShort.to_c()),
+        Err(e) => c_int::from(Error::from(e).to_c()),
     }
 }
 
@@ -3209,6 +3214,117 @@ mod tests {
         assert_eq!(pipe.server.stream_recv(4, &mut data), Ok((1, false)));
         assert_eq!(&data, b"a");
         assert_eq!(quiche_conn_stream_shutdown(&mut pipe.server, 4, 0, 42), 0);
+    }
+
+    #[rstest::rstest]
+    fn c_varint_writes_uninitialized_prefix(
+        #[values(0, 63, 64, 16383, 16384, 1_073_741_824, octets::MAX_VAR_INT)]
+        value: u64,
+    ) {
+        let mut out = [MaybeUninit::<u8>::uninit(); 8];
+        let len = octets::varint_len(value);
+        assert_eq!(quiche_put_varint(out.as_mut_ptr().cast(), len, value), 0);
+        let mut decoded = MaybeUninit::<u64>::uninit();
+        assert_eq!(
+            quiche_get_varint(out.as_ptr().cast(), len, decoded.as_mut_ptr()),
+            ssize_t::try_from(len).unwrap()
+        );
+        // SAFETY: successful getter initialized decoded.
+        assert_eq!(unsafe { decoded.assume_init() }, value);
+        let mut sentinel = [0xaa; 8];
+        assert_eq!(
+            quiche_put_varint(sentinel.as_mut_ptr(), len - 1, value),
+            c_int::from(Error::BufferTooShort.to_c())
+        );
+        assert_eq!(sentinel, [0xaa; 8]);
+    }
+
+    #[test]
+    fn c_header_info_writes_uninitialized_connection_ids() {
+        // Version negotiation with 2-byte DCID, 3-byte SCID and one version.
+        let mut packet = [0x80, 0, 0, 0, 0, 2, 1, 2, 3, 3, 4, 5, 0, 0, 0, 1];
+        let mut scid = [MaybeUninit::<u8>::uninit(); 20];
+        let mut dcid = [MaybeUninit::<u8>::uninit(); 20];
+        let mut version = MaybeUninit::<u32>::uninit();
+        let mut ty = MaybeUninit::<u8>::uninit();
+        let mut sl = scid.len();
+        let mut dl = dcid.len();
+        let mut tl = 0;
+        assert_eq!(
+            quiche_header_info(
+                packet.as_mut_ptr(),
+                packet.len(),
+                0,
+                version.as_mut_ptr(),
+                ty.as_mut_ptr(),
+                scid.as_mut_ptr().cast(),
+                &mut sl,
+                dcid.as_mut_ptr().cast(),
+                &mut dl,
+                ptr::null_mut(),
+                &mut tl
+            ),
+            0
+        );
+        let (version, ty) = unsafe { (version.assume_init(), ty.assume_init()) };
+        assert_eq!((version, ty, sl, dl, tl), (0, 6, 3, 2, 0));
+        // SAFETY: reported lengths delimit initialized output prefixes.
+        let (scid, dcid) = unsafe {
+            (
+                slice::from_raw_parts(scid.as_ptr().cast::<u8>(), sl),
+                slice::from_raw_parts(dcid.as_ptr().cast::<u8>(), dl),
+            )
+        };
+        assert_eq!(scid, &[3, 4, 5]);
+        assert_eq!(dcid, &[1, 2]);
+    }
+
+    #[test]
+    fn c_receive_writes_only_initialized_payload_prefix() {
+        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+        config.enable_dgram(true, 4, 4);
+        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+        pipe.handshake().unwrap();
+        pipe.client.stream_send(4, b"payload", true).unwrap();
+        pipe.client.dgram_send(b"datagram").unwrap();
+        pipe.advance().unwrap();
+
+        let mut out = [MaybeUninit::<u8>::uninit(); 32];
+        let mut fin = MaybeUninit::<bool>::uninit();
+        let mut err = MaybeUninit::<u64>::uninit();
+        let len = quiche_conn_stream_recv(
+            &mut pipe.server,
+            4,
+            out.as_mut_ptr().cast(),
+            out.len(),
+            fin.as_mut_ptr(),
+            err.as_mut_ptr(),
+        );
+        assert_eq!(len, 7);
+        // SAFETY: success initialized FIN and the first seven bytes of out.
+        let (fin, payload) = unsafe {
+            (
+                fin.assume_init(),
+                slice::from_raw_parts(out.as_ptr().cast::<u8>(), 7),
+            )
+        };
+        assert!(fin);
+        assert_eq!(payload, b"payload");
+        let mut datagram = [MaybeUninit::<u8>::uninit(); 32];
+        assert_eq!(
+            quiche_conn_dgram_recv(
+                &mut pipe.server,
+                datagram.as_mut_ptr().cast(),
+                datagram.len()
+            ),
+            8
+        );
+        // SAFETY: an eight-byte datagram was written into the output prefix.
+        assert_eq!(
+            unsafe { slice::from_raw_parts(datagram.as_ptr().cast::<u8>(), 8) },
+            b"datagram"
+        );
+        assert_eq!(pipe.server.dgram_recv_queue_len(), 0);
     }
 
     #[test]
