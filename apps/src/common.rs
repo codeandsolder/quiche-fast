@@ -93,8 +93,6 @@ pub struct Client {
 
     pub partial_responses: std::collections::HashMap<u64, PartialResponse>,
 
-    pub max_datagram_size: usize,
-
     pub loss_rate: f64,
 
     pub max_send_burst: usize,
