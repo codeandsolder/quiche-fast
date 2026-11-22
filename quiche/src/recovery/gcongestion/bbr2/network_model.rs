@@ -470,8 +470,11 @@ impl BBRv2NetworkModel {
                     self.inflight_lo = congestion_event.prior_cwnd;
                 }
 
-                let inflight_lo_new =
-                    (self.inflight_lo as f32 * (1.0 - params.beta)) as usize;
+                let inflight_lo_new = crate::scale::scale_usize(
+                    self.inflight_lo,
+                    f64::from(1.0 - params.beta),
+                    crate::scale::Rounding::Down,
+                );
                 self.inflight_lo = self.inflight_latest.max(inflight_lo_new);
             }
             return;
@@ -620,8 +623,11 @@ impl BBRv2NetworkModel {
         let bytes_lost_in_round = self.bytes_lost_in_round;
 
         if inflight_at_send > 0 && bytes_lost_in_round > 0 {
-            let lost_in_round_threshold =
-                (inflight_at_send as f32 * params.loss_threshold) as u64;
+            let lost_in_round_threshold = crate::scale::scale_u64(
+                u64::try_from(inflight_at_send).unwrap_or(u64::MAX),
+                f64::from(params.loss_threshold),
+                crate::scale::Rounding::Down,
+            );
             if bytes_lost_in_round > lost_in_round_threshold {
                 return true;
             }
@@ -776,8 +782,11 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) fn inflight_hi_with_headroom(&self, params: &Params) -> usize {
-        let headroom =
-            (self.inflight_hi as f32 * params.inflight_hi_headroom) as usize;
+        let headroom = crate::scale::scale_usize(
+            self.inflight_hi,
+            f64::from(params.inflight_hi_headroom),
+            crate::scale::Rounding::Down,
+        );
         self.inflight_hi.saturating_sub(headroom)
     }
 

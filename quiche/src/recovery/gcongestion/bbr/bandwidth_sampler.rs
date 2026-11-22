@@ -343,7 +343,8 @@ impl MaxAckHeightTracker {
                 self.aggregation_epoch_start_time = Some(ack_time);
                 self.last_sent_packet_number_before_epoch =
                     last_sent_packet_number;
-                self.num_ack_aggregation_epochs += 1;
+                self.num_ack_aggregation_epochs =
+                    self.num_ack_aggregation_epochs.saturating_add(1);
                 return 0;
             },
         };
@@ -356,22 +357,28 @@ impl MaxAckHeightTracker {
         // Reset the current aggregation epoch as soon as the ack arrival rate
         // is less than or equal to the max bandwidth.
         if self.aggregation_epoch_bytes <=
-            (self.ack_aggregation_bandwidth_threshold *
-                expected_bytes_acked as f64) as u64
+            crate::scale::scale_u64(
+                expected_bytes_acked,
+                self.ack_aggregation_bandwidth_threshold,
+                crate::scale::Rounding::Down,
+            )
         {
             // Reset to start measuring a new aggregation epoch.
             self.aggregation_epoch_bytes = bytes_acked;
             self.aggregation_epoch_start_time = Some(ack_time);
             self.last_sent_packet_number_before_epoch = last_sent_packet_number;
-            self.num_ack_aggregation_epochs += 1;
+            self.num_ack_aggregation_epochs =
+                self.num_ack_aggregation_epochs.saturating_add(1);
             return 0;
         }
 
-        self.aggregation_epoch_bytes += bytes_acked;
+        self.aggregation_epoch_bytes =
+            self.aggregation_epoch_bytes.saturating_add(bytes_acked);
 
         // Compute how many extra bytes were delivered vs max bandwidth.
-        let extra_bytes_acked =
-            self.aggregation_epoch_bytes - expected_bytes_acked;
+        let extra_bytes_acked = self
+            .aggregation_epoch_bytes
+            .saturating_sub(expected_bytes_acked);
 
         let new_event = ExtraAckedEvent {
             extra_acked: extra_bytes_acked,

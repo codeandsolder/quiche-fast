@@ -424,10 +424,12 @@ impl ProbeBW {
                     queuing_threshold_extra_bytes = queuing_threshold_extra_bytes
                         .saturating_add(self.model.max_ack_height());
                 }
-                let queuing_threshold = ((params.full_bw_threshold *
-                    self.model.bdp0() as f32)
-                    as usize)
-                    .saturating_add(queuing_threshold_extra_bytes);
+                let queuing_threshold = crate::scale::scale_usize(
+                    self.model.bdp0(),
+                    f64::from(params.full_bw_threshold),
+                    crate::scale::Rounding::Down,
+                )
+                .saturating_add(queuing_threshold_extra_bytes);
 
                 is_queuing =
                     congestion_event.bytes_in_flight >= queuing_threshold;
@@ -488,9 +490,11 @@ impl ProbeBW {
                 if !send_state.is_app_limited ||
                     params.max_probe_up_queue_rounds > 0
                 {
-                    let inflight_target = (target_bytes_inflight as f32 *
-                        (1.0 - params.beta))
-                        as usize;
+                    let inflight_target = crate::scale::scale_usize(
+                        target_bytes_inflight,
+                        f64::from(1.0 - params.beta),
+                        crate::scale::Rounding::Down,
+                    );
 
                     let mut new_inflight_hi =
                         inflight_at_send.max(inflight_target);
@@ -550,7 +554,11 @@ impl ProbeBW {
         }
 
         self.cycle.rounds_since_probe >=
-            (rounds as f64 * probe_wait_fraction) as usize
+            crate::scale::scale_usize(
+                rounds,
+                probe_wait_fraction,
+                crate::scale::Rounding::Down,
+            )
     }
 
     // Used to prevent a BBR2 flow from staying in PROBE_DOWN for too
