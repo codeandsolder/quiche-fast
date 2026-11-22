@@ -114,7 +114,7 @@ impl BoundedNonEmptyConnectionIdVecDeque {
     /// Updates the maximum capacity of the inner `VecDeque` to `new_capacity`.
     /// Does nothing if `new_capacity` is lower or equal to the current
     /// `capacity`.
-    fn resize(&mut self, new_capacity: usize) {
+    const fn resize(&mut self, new_capacity: usize) {
         if new_capacity > self.capacity {
             self.capacity = new_capacity;
         }
@@ -812,13 +812,13 @@ impl ConnectionIdentifiers {
 
     /// Returns whether zero-length source CIDs are used.
     #[inline]
-    pub fn zero_length_scid(&self) -> bool {
+    pub const fn zero_length_scid(&self) -> bool {
         self.zero_length_scid
     }
 
     /// Returns whether zero-length destination CIDs are used.
     #[inline]
-    pub fn zero_length_dcid(&self) -> bool {
+    pub const fn zero_length_dcid(&self) -> bool {
         self.zero_length_dcid
     }
 

@@ -182,7 +182,7 @@ pub enum WireErrorCode {
 }
 
 impl Error {
-    pub(crate) fn to_wire(self) -> u64 {
+    pub(crate) const fn to_wire(self) -> u64 {
         match self {
             Self::Done => WireErrorCode::NoError as u64,
             Self::InvalidFrame => WireErrorCode::FrameEncodingError as u64,

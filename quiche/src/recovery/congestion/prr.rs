@@ -52,13 +52,13 @@ pub struct PRR {
 }
 
 impl PRR {
-    pub fn on_packet_sent(&mut self, sent_bytes: usize) {
+    pub const fn on_packet_sent(&mut self, sent_bytes: usize) {
         self.prr_out = self.prr_out.saturating_add(sent_bytes as u64);
 
         self.snd_cnt = self.snd_cnt.saturating_sub(sent_bytes);
     }
 
-    pub fn congestion_event(&mut self, bytes_in_flight: usize) {
+    pub const fn congestion_event(&mut self, bytes_in_flight: usize) {
         self.prr_delivered = 0;
 
         self.recoverfs = bytes_in_flight;

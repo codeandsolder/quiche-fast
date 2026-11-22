@@ -56,7 +56,7 @@ pub(super) enum CyclePhase {
 }
 
 impl CyclePhase {
-    pub(super) fn pacing_gain(&self, params: &Params) -> f32 {
+    pub(super) const fn pacing_gain(&self, params: &Params) -> f32 {
         match self {
             Self::Up => params.probe_bw_probe_up_pacing_gain,
             Self::Down => params.probe_bw_probe_down_pacing_gain,
@@ -64,7 +64,7 @@ impl CyclePhase {
         }
     }
 
-    pub(super) fn cwnd_gain(&self, params: &Params) -> f32 {
+    pub(super) const fn cwnd_gain(&self, params: &Params) -> f32 {
         match self {
             Self::Up => params.probe_bw_up_cwnd_gain,
             _ => params.probe_bw_cwnd_gain,
@@ -169,7 +169,7 @@ impl Default for Mode {
 }
 
 impl Mode {
-    pub(super) fn startup(model: BBRv2NetworkModel) -> Self {
+    pub(super) const fn startup(model: BBRv2NetworkModel) -> Self {
         Self::Startup(Startup { model })
     }
 
@@ -180,7 +180,7 @@ impl Mode {
         })
     }
 
-    pub(super) fn probe_bw(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
+    pub(super) const fn probe_bw(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
         Self::ProbeBW(ProbeBW { model, cycle })
     }
 

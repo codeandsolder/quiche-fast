@@ -152,7 +152,7 @@ impl State {
     }
 }
 
-fn on_init(_r: &mut Congestion) {}
+const fn on_init(_r: &mut Congestion) {}
 
 fn on_packet_sent(
     r: &mut Congestion, sent_bytes: usize, bytes_in_flight: usize, now: Instant,

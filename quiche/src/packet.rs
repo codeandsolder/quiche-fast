@@ -139,7 +139,7 @@ pub enum Type {
 }
 
 impl Type {
-    pub(crate) fn from_epoch(e: Epoch) -> Self {
+    pub(crate) const fn from_epoch(e: Epoch) -> Self {
         match e {
             Epoch::Initial => Self::Initial,
 
@@ -149,7 +149,7 @@ impl Type {
         }
     }
 
-    pub(crate) fn to_epoch(self) -> Result<Epoch> {
+    pub(crate) const fn to_epoch(self) -> Result<Epoch> {
         match self {
             Self::Initial => Ok(Epoch::Initial),
 
@@ -531,7 +531,7 @@ impl<'a> Header<'a> {
     /// Returns true if the packet has a long header.
     ///
     /// The `b` parameter represents the first byte of the QUIC header.
-    fn is_long(b: u8) -> bool {
+    const fn is_long(b: u8) -> bool {
         b & FORM_BIT != 0
     }
 }
@@ -655,7 +655,9 @@ pub fn decrypt_hdr(
     Ok(())
 }
 
-pub fn decode_pkt_num(largest_pn: u64, truncated_pn: u64, pn_len: usize) -> u64 {
+pub const fn decode_pkt_num(
+    largest_pn: u64, truncated_pn: u64, pn_len: usize,
+) -> u64 {
     let pn_nbits = pn_len * 8;
     let expected_pn = largest_pn + 1;
     let pn_win = 1 << pn_nbits;
@@ -917,11 +919,11 @@ impl PktNumSpace {
         }
     }
 
-    pub fn clear(&mut self) {
+    pub const fn clear(&mut self) {
         self.ack_elicited = false;
     }
 
-    pub fn ready(&self) -> bool {
+    pub const fn ready(&self) -> bool {
         self.ack_elicited
     }
 
@@ -980,7 +982,7 @@ impl CryptoContext {
         Some(self.crypto_seal.as_ref()?.alg().tag_len())
     }
 
-    pub fn has_keys(&self) -> bool {
+    pub const fn has_keys(&self) -> bool {
         self.crypto_open.is_some() && self.crypto_seal.is_some()
     }
 }
@@ -1046,7 +1048,7 @@ pub struct PktNumManager {
 }
 
 impl PktNumManager {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             skip_pn: None,
             skip_pn_counter: None,
@@ -1065,7 +1067,7 @@ impl PktNumManager {
         }
     }
 
-    fn should_arm_skip_counter(&self, handshake_completed: bool) -> bool {
+    const fn should_arm_skip_counter(&self, handshake_completed: bool) -> bool {
         // Arm if the counter is not set
         let counter_not_set = self.skip_pn_counter.is_none();
         // Don't arm until we have verified the current skip_pn. Rearming the
@@ -1077,7 +1079,7 @@ impl PktNumManager {
         counter_not_set && no_current_skip_packet && handshake_completed
     }
 
-    pub fn should_skip_pn(&self, handshake_completed: bool) -> bool {
+    pub const fn should_skip_pn(&self, handshake_completed: bool) -> bool {
         // Only skip after confirming the peer did not send the current skip
         // packet. For OACK, an ACK for a higher packet number validates
         // `skip_pn`.
@@ -1093,7 +1095,7 @@ impl PktNumManager {
         counter_expired && no_current_skip_packet && handshake_completed
     }
 
-    pub fn skip_pn(&self) -> Option<u64> {
+    pub const fn skip_pn(&self) -> Option<u64> {
         self.skip_pn
     }
 

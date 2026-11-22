@@ -174,7 +174,7 @@ impl Rate {
         }
     }
 
-    fn update_delivery_rate(&mut self, bandwidth: Bandwidth) {
+    const fn update_delivery_rate(&mut self, bandwidth: Bandwidth) {
         self.rate_sample.bandwidth = bandwidth;
     }
 
@@ -183,7 +183,7 @@ impl Rate {
             if v { self.last_sent_packet.max(1) } else { 0 };
     }
 
-    pub fn app_limited(&mut self) -> bool {
+    pub const fn app_limited(&mut self) -> bool {
         self.end_of_app_limited != 0
     }
 
@@ -192,7 +192,7 @@ impl Rate {
         self.delivered
     }
 
-    pub fn sample_delivery_rate(&self) -> Bandwidth {
+    pub const fn sample_delivery_rate(&self) -> Bandwidth {
         self.rate_sample.bandwidth
     }
 

@@ -97,12 +97,12 @@ where
     }
 
     /// Returns whether `self` holds the final offset in the stream.
-    pub fn fin(&self) -> bool {
+    pub const fn fin(&self) -> bool {
         self.fin
     }
 
     /// Returns the starting offset of `self`.
-    pub fn off(&self) -> u64 {
+    pub const fn off(&self) -> u64 {
         (self.off - self.start as u64) + self.pos as u64
     }
 
@@ -112,7 +112,7 @@ where
     }
 
     /// Returns the length of `self`.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len - (self.pos - self.start)
     }
 
@@ -122,7 +122,7 @@ where
     }
 
     /// Consumes the starting `count` bytes of `self`.
-    pub fn consume(&mut self, count: usize) {
+    pub const fn consume(&mut self, count: usize) {
         self.pos += count;
     }
 

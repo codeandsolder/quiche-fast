@@ -95,7 +95,7 @@ impl Pmtud {
     }
 
     /// Returns the PMTUD probe size.
-    pub fn get_probe_size(&self) -> usize {
+    pub const fn get_probe_size(&self) -> usize {
         self.probe_size
     }
 
@@ -106,7 +106,7 @@ impl Pmtud {
     }
 
     /// Returns the PMTU.
-    pub fn get_pmtu(&self) -> Option<usize> {
+    pub const fn get_pmtu(&self) -> Option<usize> {
         self.pmtu
     }
 
@@ -161,7 +161,7 @@ impl Pmtud {
     }
 
     /// Sets whether a probe is currently in flight for this connection.
-    pub fn set_in_flight(&mut self, in_flight: bool) {
+    pub const fn set_in_flight(&mut self, in_flight: bool) {
         self.in_flight = in_flight;
     }
 
@@ -236,7 +236,7 @@ impl Pmtud {
         }
     }
 
-    fn set_pmtu(&mut self, successful_probe_size: usize) {
+    const fn set_pmtu(&mut self, successful_probe_size: usize) {
         self.pmtu = Some(successful_probe_size);
         self.probe_size = successful_probe_size;
         self.probe_failure_count = 0;

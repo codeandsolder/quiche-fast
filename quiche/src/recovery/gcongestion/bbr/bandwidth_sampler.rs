@@ -433,7 +433,7 @@ impl RecentAckPoints {
         self.ack_points = Default::default();
     }
 
-    fn most_recent(&self) -> Option<AckPoint> {
+    const fn most_recent(&self) -> Option<AckPoint> {
         self.ack_points[1]
     }
 
@@ -487,7 +487,7 @@ impl BandwidthSampler {
             reason = "BBR sampler tests inspect app-limited state through this accessor; production reads the state internally"
         )
     )]
-    pub(crate) fn is_app_limited(&self) -> bool {
+    pub(crate) const fn is_app_limited(&self) -> bool {
         self.is_app_limited
     }
 
@@ -807,11 +807,11 @@ impl BandwidthSampler {
         Some(a0_candidates[0])
     }
 
-    pub(crate) fn total_bytes_acked(&self) -> u64 {
+    pub(crate) const fn total_bytes_acked(&self) -> u64 {
         self.total_bytes_acked
     }
 
-    pub(crate) fn total_bytes_lost(&self) -> u64 {
+    pub(crate) const fn total_bytes_lost(&self) -> u64 {
         self.total_bytes_lost
     }
 
@@ -822,7 +822,7 @@ impl BandwidthSampler {
             .map(|b| usize::try_from(b.extra_acked).unwrap_or(usize::MAX))
     }
 
-    pub(crate) fn on_app_limited(&mut self) {
+    pub(crate) const fn on_app_limited(&mut self) {
         self.is_app_limited = true;
         self.end_of_app_limited_phase = Some(self.last_sent_packet);
     }

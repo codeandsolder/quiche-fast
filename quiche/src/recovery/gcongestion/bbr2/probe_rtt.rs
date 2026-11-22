@@ -50,7 +50,7 @@ pub(super) struct ProbeRTT {
 }
 
 impl ProbeRTT {
-    pub(super) fn new(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
+    pub(super) const fn new(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
         Self {
             model,
             cycle,

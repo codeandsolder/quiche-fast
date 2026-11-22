@@ -71,11 +71,11 @@ enum SentStatus {
 }
 
 impl SentStatus {
-    fn ack(&mut self) -> Self {
+    const fn ack(&mut self) -> Self {
         std::mem::replace(self, Self::Acked)
     }
 
-    fn lose(&mut self) -> Self {
+    const fn lose(&mut self) -> Self {
         if !matches!(self, Self::Acked) {
             std::mem::replace(self, Self::Lost)
         } else {
@@ -428,7 +428,7 @@ struct LossThreshold {
 }
 
 impl LossThreshold {
-    fn new(recovery_config: &RecoveryConfig) -> Self {
+    const fn new(recovery_config: &RecoveryConfig) -> Self {
         let time_thresh_overhead =
             if recovery_config.enable_relaxed_loss_threshold {
                 Some(INITIAL_TIME_THRESHOLD_OVERHEAD)
@@ -442,11 +442,11 @@ impl LossThreshold {
         }
     }
 
-    fn pkt_thresh(&self) -> Option<u64> {
+    const fn pkt_thresh(&self) -> Option<u64> {
         self.pkt_thresh
     }
 
-    fn time_thresh(&self) -> f64 {
+    const fn time_thresh(&self) -> f64 {
         self.time_thresh
     }
 

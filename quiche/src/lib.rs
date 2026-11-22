@@ -610,7 +610,7 @@ pub struct Config {
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
-fn is_reserved_version(version: u32) -> bool {
+const fn is_reserved_version(version: u32) -> bool {
     version & RESERVED_VERSION_MASK == version
 }
 
@@ -823,7 +823,7 @@ impl Config {
     /// through [`PathEvent::PmtuUpdated`].
     ///
     /// The default value is `false`.
-    pub fn discover_pmtu(&mut self, discover: bool) {
+    pub const fn discover_pmtu(&mut self, discover: bool) {
         self.pmtud = discover;
     }
 
@@ -832,14 +832,14 @@ impl Config {
     ///
     /// Defaults to 3 per [RFC 8899 Section 5.1.2](https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2).
     /// If 0 is passed, the default value is used.
-    pub fn set_pmtud_max_probes(&mut self, max_probes: u8) {
+    pub const fn set_pmtud_max_probes(&mut self, max_probes: u8) {
         self.pmtud_max_probes = max_probes;
     }
 
     /// Configures whether to send GREASE values.
     ///
     /// The default value is `true`.
-    pub fn grease(&mut self, grease: bool) {
+    pub const fn grease(&mut self, grease: bool) {
         self.grease = grease;
     }
 
@@ -952,7 +952,7 @@ impl Config {
     /// Sets the anti-amplification limit factor.
     ///
     /// The default value is `3`.
-    pub fn set_max_amplification_factor(&mut self, v: usize) {
+    pub const fn set_max_amplification_factor(&mut self, v: usize) {
         self.max_amplification_factor = v;
     }
 
@@ -961,14 +961,14 @@ impl Config {
     /// Values above one allow buffering beyond the congestion window, but
     /// cannot increase the peer's connection-level flow-control credit.
     /// The default value is `1`.
-    pub fn set_send_capacity_factor(&mut self, v: f64) {
+    pub const fn set_send_capacity_factor(&mut self, v: f64) {
         self.tx_cap_factor = v;
     }
 
     /// Sets the connection's initial RTT.
     ///
     /// The default value is `333`.
-    pub fn set_initial_rtt(&mut self, v: Duration) {
+    pub const fn set_initial_rtt(&mut self, v: Duration) {
         self.initial_rtt = v;
     }
 
@@ -1142,14 +1142,14 @@ impl Config {
     /// Sets the `disable_active_migration` transport parameter.
     ///
     /// The default value is `false`.
-    pub fn set_disable_active_migration(&mut self, v: bool) {
+    pub const fn set_disable_active_migration(&mut self, v: bool) {
         self.local_transport_params.disable_active_migration = v;
     }
 
     /// Sets the congestion control algorithm used.
     ///
     /// The default value is `CongestionControlAlgorithm::CUBIC`.
-    pub fn set_cc_algorithm(&mut self, algo: CongestionControlAlgorithm) {
+    pub const fn set_cc_algorithm(&mut self, algo: CongestionControlAlgorithm) {
         self.cc_algorithm = algo;
     }
 
@@ -1192,14 +1192,16 @@ impl Config {
     /// Sets initial congestion window size in terms of packet count.
     ///
     /// The default value is 10.
-    pub fn set_initial_congestion_window_packets(&mut self, packets: usize) {
+    pub const fn set_initial_congestion_window_packets(
+        &mut self, packets: usize,
+    ) {
         self.initial_congestion_window_packets = packets;
     }
 
     /// Configure whether to enable relaxed loss detection on spurious loss.
     ///
     /// The default value is false.
-    pub fn set_enable_relaxed_loss_threshold(&mut self, enable: bool) {
+    pub const fn set_enable_relaxed_loss_threshold(&mut self, enable: bool) {
         self.enable_relaxed_loss_threshold = enable;
     }
 
@@ -1210,7 +1212,7 @@ impl Config {
     /// when bytes-in-flight transiently hits zero.
     ///
     /// The default value is `true`.
-    pub fn set_enable_cubic_idle_restart_fix(&mut self, enable: bool) {
+    pub const fn set_enable_cubic_idle_restart_fix(&mut self, enable: bool) {
         self.enable_cubic_idle_restart_fix = enable;
     }
 
@@ -1221,28 +1223,28 @@ impl Config {
     /// but is unable to do so due to the maximum stream limit set by its peer.
     ///
     /// The default value is false.
-    pub fn set_enable_send_streams_blocked(&mut self, enable: bool) {
+    pub const fn set_enable_send_streams_blocked(&mut self, enable: bool) {
         self.enable_send_streams_blocked = enable;
     }
 
     /// Configures whether to enable `HyStart`++.
     ///
     /// The default value is `true`.
-    pub fn enable_hystart(&mut self, v: bool) {
+    pub const fn enable_hystart(&mut self, v: bool) {
         self.hystart = v;
     }
 
     /// Configures whether to enable pacing.
     ///
     /// The default value is `true`.
-    pub fn enable_pacing(&mut self, v: bool) {
+    pub const fn enable_pacing(&mut self, v: bool) {
         self.pacing = v;
     }
 
     /// Sets the max value for pacing rate.
     ///
     /// By default pacing rate is not limited.
-    pub fn set_max_pacing_rate(&mut self, v: u64) {
+    pub const fn set_max_pacing_rate(&mut self, v: u64) {
         self.max_pacing_rate = Some(v);
     }
 
@@ -1252,7 +1254,7 @@ impl Config {
     /// to 65536 as recommended by draft-ietf-quic-datagram-01.
     ///
     /// The default is `false`.
-    pub fn enable_dgram(
+    pub const fn enable_dgram(
         &mut self, enabled: bool, recv_queue_len: usize, send_queue_len: usize,
     ) {
         self.local_transport_params.max_datagram_frame_size = if enabled {
@@ -1270,21 +1272,23 @@ impl Config {
     /// full, the frame is discarded.
     ///
     /// The default is 3.
-    pub fn set_path_challenge_recv_max_queue_len(&mut self, queue_len: usize) {
+    pub const fn set_path_challenge_recv_max_queue_len(
+        &mut self, queue_len: usize,
+    ) {
         self.path_challenge_recv_max_queue_len = queue_len;
     }
 
     /// Sets the maximum size of the connection window.
     ///
     /// The default value is `MAX_CONNECTION_WINDOW` (24MBytes).
-    pub fn set_max_connection_window(&mut self, v: u64) {
+    pub const fn set_max_connection_window(&mut self, v: u64) {
         self.max_connection_window = v;
     }
 
     /// Sets the maximum size of the stream window.
     ///
     /// The default value is `MAX_STREAM_WINDOW` (16MBytes).
-    pub fn set_max_stream_window(&mut self, v: u64) {
+    pub const fn set_max_stream_window(&mut self, v: u64) {
         self.max_stream_window = v;
     }
 
@@ -1294,7 +1298,7 @@ impl Config {
     /// token as a client has no effect on the connection.
     ///
     /// The default value is `None`.
-    pub fn set_stateless_reset_token(&mut self, v: Option<u128>) {
+    pub const fn set_stateless_reset_token(&mut self, v: Option<u128>) {
         self.local_transport_params.stateless_reset_token = v;
     }
 
@@ -1308,7 +1312,7 @@ impl Config {
     /// event.
     ///
     /// The default value is `false`.
-    pub fn set_disable_dcid_reuse(&mut self, v: bool) {
+    pub const fn set_disable_dcid_reuse(&mut self, v: bool) {
         self.disable_dcid_reuse = v;
     }
 
@@ -1320,7 +1324,9 @@ impl Config {
     /// dropped.
     ///
     /// The default is that the feature is disabled.
-    pub fn enable_track_unknown_transport_parameters(&mut self, size: usize) {
+    pub const fn enable_track_unknown_transport_parameters(
+        &mut self, size: usize,
+    ) {
         self.track_unknown_transport_params = Some(size);
     }
 
@@ -1330,7 +1336,10 @@ impl Config {
     /// This is now always enabled and this method is a no-op. It will be
     /// removed in a future release.
     #[deprecated(note = "This is now always enabled. This method is a no-op.")]
-    pub fn set_use_initial_max_data_as_flow_control_win(&mut self, _v: bool) {}
+    pub const fn set_use_initial_max_data_as_flow_control_win(
+        &mut self, _v: bool,
+    ) {
+    }
 }
 
 /// Tracks the health of the `tx_buffered` value.
@@ -1997,7 +2006,7 @@ pub fn retry(
 
 /// Returns true if the given protocol version is supported.
 #[inline]
-pub fn version_is_supported(version: u32) -> bool {
+pub const fn version_is_supported(version: u32) -> bool {
     matches!(version, PROTOCOL_VERSION_V1)
 }
 
@@ -2990,7 +2999,7 @@ impl<F: BufFactory> Connection<F> {
     #[cfg(feature = "boringssl-boring-crate")]
     #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
     #[deprecated(note = "This is now always enabled. This method is a no-op.")]
-    pub fn set_use_initial_max_data_as_flow_control_win_in_handshake(
+    pub const fn set_use_initial_max_data_as_flow_control_win_in_handshake(
         _ssl: &mut boring::ssl::SslRef,
     ) -> Result<()> {
         Ok(())
@@ -6029,7 +6038,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns whether pacing is enabled.
     #[inline]
-    pub fn pacing_enabled(&self) -> bool {
+    pub const fn pacing_enabled(&self) -> bool {
         self.recovery_config.pacing
     }
 
@@ -7519,7 +7528,7 @@ impl<F: BufFactory> Connection<F> {
         }
     }
 
-    fn dgram_enabled(&self) -> bool {
+    const fn dgram_enabled(&self) -> bool {
         self.local_transport_params
             .max_datagram_frame_size
             .is_some()
@@ -8278,7 +8287,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns true if the connection handshake is complete.
     #[inline]
-    pub fn is_established(&self) -> bool {
+    pub const fn is_established(&self) -> bool {
         self.handshake_completed
     }
 
@@ -8359,7 +8368,7 @@ impl<F: BufFactory> Connection<F> {
     /// [`on_timeout()`]: struct.Connection.html#method.on_timeout
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    pub fn is_draining(&self) -> bool {
+    pub const fn is_draining(&self) -> bool {
         self.draining_timer.is_some()
     }
 
@@ -8367,13 +8376,13 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// If this returns true, the connection object can be dropped.
     #[inline]
-    pub fn is_closed(&self) -> bool {
+    pub const fn is_closed(&self) -> bool {
         self.closed
     }
 
     /// Returns true if the connection was closed due to the idle timeout.
     #[inline]
-    pub fn is_timed_out(&self) -> bool {
+    pub const fn is_timed_out(&self) -> bool {
         self.timed_out
     }
 
@@ -8384,7 +8393,7 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    pub fn peer_error(&self) -> Option<&ConnectionError> {
+    pub const fn peer_error(&self) -> Option<&ConnectionError> {
         self.peer_error.as_ref()
     }
 
@@ -8399,7 +8408,7 @@ impl<F: BufFactory> Connection<F> {
     /// [`close()`]: struct.Connection.html#method.close
     /// [`is_closed()`]: struct.Connection.html#method.is_closed
     #[inline]
-    pub fn local_error(&self) -> Option<&ConnectionError> {
+    pub const fn local_error(&self) -> Option<&ConnectionError> {
         self.local_error.as_ref()
     }
 
@@ -8457,7 +8466,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns reference to peer's transport parameters. Returns `None` if we
     /// have not yet processed the peer's transport parameters.
-    pub fn peer_transport_params(&self) -> Option<&TransportParams> {
+    pub const fn peer_transport_params(&self) -> Option<&TransportParams> {
         if !self.parsed_peer_transport_params {
             return None;
         }
@@ -8483,7 +8492,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     /// Returns whether or not this is a server-side connection.
-    pub fn is_server(&self) -> bool {
+    pub const fn is_server(&self) -> bool {
         self.is_server
     }
 

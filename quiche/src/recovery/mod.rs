@@ -106,11 +106,11 @@ struct LossDetectionTimer {
 }
 
 impl LossDetectionTimer {
-    fn update(&mut self, timeout: Instant) {
+    const fn update(&mut self, timeout: Instant) {
         self.time = Some(timeout);
     }
 
-    fn clear(&mut self) {
+    const fn clear(&mut self) {
         self.time = None;
     }
 }
@@ -148,7 +148,7 @@ pub struct RecoveryConfig {
 }
 
 impl RecoveryConfig {
-    pub fn from_config(config: &Config) -> Self {
+    pub const fn from_config(config: &Config) -> Self {
         Self {
             initial_rtt: config.initial_rtt,
             max_send_udp_payload_size: config.max_send_udp_payload_size,
@@ -784,7 +784,7 @@ impl ReleaseDecision {
 
     /// Can this packet be appended to a previous burst
     #[inline]
-    pub fn can_burst(&self) -> bool {
+    pub const fn can_burst(&self) -> bool {
         self.allow_burst
     }
 
@@ -810,7 +810,7 @@ pub struct RecoveryStats {
 
 impl RecoveryStats {
     // Record statistics when a CCA first exits startup.
-    pub fn set_startup_exit(&mut self, startup_exit: StartupExit) {
+    pub const fn set_startup_exit(&mut self, startup_exit: StartupExit) {
         if self.startup_exit.is_none() {
             self.startup_exit = Some(startup_exit);
         }

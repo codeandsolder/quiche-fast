@@ -118,7 +118,7 @@ impl RttStats {
         self.smoothed_rtt = self.smoothed_rtt * 7 / 8 + adjusted_rtt / 8;
     }
 
-    pub(crate) fn rtt(&self) -> Duration {
+    pub(crate) const fn rtt(&self) -> Duration {
         self.smoothed_rtt
     }
 
@@ -127,7 +127,7 @@ impl RttStats {
         self.latest_rtt
     }
 
-    pub(crate) fn rttvar(&self) -> Duration {
+    pub(crate) const fn rttvar(&self) -> Duration {
         self.rttvar
     }
 
@@ -139,7 +139,7 @@ impl RttStats {
         }
     }
 
-    pub(crate) fn max_rtt(&self) -> Option<Duration> {
+    pub(crate) const fn max_rtt(&self) -> Option<Duration> {
         if self.has_first_rtt_sample {
             Some(self.max_rtt)
         } else {

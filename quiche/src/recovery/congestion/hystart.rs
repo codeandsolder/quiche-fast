@@ -95,11 +95,11 @@ impl Hystart {
         }
     }
 
-    pub fn enabled(&self) -> bool {
+    pub const fn enabled(&self) -> bool {
         self.enabled
     }
 
-    pub fn css_start_time(&self) -> Option<Instant> {
+    pub const fn css_start_time(&self) -> Option<Instant> {
         self.css_start_time
     }
 
@@ -107,7 +107,7 @@ impl Hystart {
         self.enabled && self.css_start_time().is_some()
     }
 
-    pub fn start_round(&mut self, pkt_num: u64) {
+    pub const fn start_round(&mut self, pkt_num: u64) {
         if self.window_end.is_none() {
             self.window_end = Some(pkt_num);
 
@@ -188,12 +188,12 @@ impl Hystart {
     }
 
     // Return a cwnd increment during CSS (Conservative Slow Start).
-    pub fn css_cwnd_inc(&self, pkt_size: usize) -> usize {
+    pub const fn css_cwnd_inc(&self, pkt_size: usize) -> usize {
         pkt_size / CSS_GROWTH_DIVISOR
     }
 
     // Exit HyStart++ when entering congestion avoidance.
-    pub fn congestion_event(&mut self) {
+    pub const fn congestion_event(&mut self) {
         self.window_end = None;
         self.css_start_time = None;
     }
