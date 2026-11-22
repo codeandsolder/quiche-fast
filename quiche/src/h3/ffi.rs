@@ -39,7 +39,7 @@ use crate::*;
 use crate::h3::NameValue;
 use crate::h3::Priority;
 
-const H3_FFI_ERR_INVALID_ARGUMENT: ssize_t = -21;
+const H3_FFI_ERR_INVALID_ARGUMENT: i16 = -21;
 
 use crate::ffi::ffi_mut;
 use crate::ffi::ffi_ref;
@@ -49,7 +49,7 @@ use crate::ffi::ffi_slice_mut;
 
 fn validate_h3_ssize_len(len: size_t) -> std::result::Result<(), ssize_t> {
     if len > ssize_t::MAX as usize {
-        Err(H3_FFI_ERR_INVALID_ARGUMENT)
+        Err(ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT))
     } else {
         Ok(())
     }
@@ -132,7 +132,7 @@ pub extern "C" fn quiche_h3_for_each_setting(
     cb: extern "C" fn(identifier: u64, value: u64, argp: *mut c_void) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
-    let conn = ffi_ref!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_ref!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.peer_settings_raw() {
         Some(raw) => {
@@ -156,18 +156,18 @@ pub extern "C" fn quiche_h3_conn_poll(
     conn: *mut h3::Connection, quic_conn: *mut Connection,
     ev: *mut *const h3::Event,
 ) -> i64 {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
-    let ev = ffi_mut!(ev, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+    let conn = ffi_mut!(conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let ev = ffi_mut!(ev, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.poll(quic_conn) {
         Ok((id, v)) => {
             *ev = Box::into_raw(Box::new(v));
 
-            id as i64
+            i64::try_from(id).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT))
         },
 
-        Err(e) => e.to_c() as i64,
+        Err(e) => i64::from(e.to_c()),
     }
 }
 
@@ -204,7 +204,7 @@ pub extern "C" fn quiche_h3_event_for_each_header(
     ) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
-    let ev = ffi_ref!(ev, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let ev = ffi_ref!(ev, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match ev {
         h3::Event::Headers { list, .. } =>
@@ -222,7 +222,7 @@ pub extern "C" fn quiche_h3_event_for_each_header(
                 }
             },
 
-        _ => return H3_FFI_ERR_INVALID_ARGUMENT as c_int,
+        _ => return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT),
     }
 
     0
@@ -271,17 +271,18 @@ pub extern "C" fn quiche_h3_send_request(
     conn: *mut h3::Connection, quic_conn: *mut Connection,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> i64 {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as i64);
+    let conn = ffi_mut!(conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, i64::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     let Ok(req_headers) = headers_from_ptr(headers, headers_len) else {
-        return H3_FFI_ERR_INVALID_ARGUMENT as i64;
+        return i64::from(H3_FFI_ERR_INVALID_ARGUMENT);
     };
 
     match conn.send_request(quic_conn, &req_headers, fin) {
-        Ok(v) => v as i64,
+        Ok(v) =>
+            i64::try_from(v).unwrap_or(i64::from(H3_FFI_ERR_INVALID_ARGUMENT)),
 
-        Err(e) => e.to_c() as i64,
+        Err(e) => i64::from(e.to_c()),
     }
 }
 
@@ -290,17 +291,17 @@ pub extern "C" fn quiche_h3_send_response(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     headers: *const Header, headers_len: size_t, fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     let Ok(resp_headers) = headers_from_ptr(headers, headers_len) else {
-        return H3_FFI_ERR_INVALID_ARGUMENT as c_int;
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
     };
 
     match conn.send_response(quic_conn, stream_id, &resp_headers, fin) {
         Ok(_) => 0,
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -310,12 +311,12 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
     headers: *const Header, headers_len: size_t, priority: *const Priority,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let priority = ffi_ref!(priority, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let priority = ffi_ref!(priority, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     let Ok(resp_headers) = headers_from_ptr(headers, headers_len) else {
-        return H3_FFI_ERR_INVALID_ARGUMENT as c_int;
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
     };
 
     match conn.send_response_with_priority(
@@ -327,7 +328,7 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
     ) {
         Ok(_) => 0,
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -337,11 +338,11 @@ pub extern "C" fn quiche_h3_send_additional_headers(
     headers: *const Header, headers_len: size_t, is_trailer_section: bool,
     fin: bool,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     let Ok(headers) = headers_from_ptr(headers, headers_len) else {
-        return H3_FFI_ERR_INVALID_ARGUMENT as c_int;
+        return c_int::from(H3_FFI_ERR_INVALID_ARGUMENT);
     };
 
     match conn.send_additional_headers(
@@ -353,7 +354,7 @@ pub extern "C" fn quiche_h3_send_additional_headers(
     ) {
         Ok(_) => 0,
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -362,19 +363,21 @@ pub extern "C" fn quiche_h3_send_body(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     body: *const u8, body_len: size_t, fin: bool,
 ) -> ssize_t {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+    let conn = ffi_mut!(conn, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn =
+        ffi_mut!(quic_conn, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_h3_ssize_len(body_len) {
         return e;
     }
 
-    let body = ffi_slice!(body, body_len, H3_FFI_ERR_INVALID_ARGUMENT);
+    let body =
+        ffi_slice!(body, body_len, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.send_body(quic_conn, stream_id, body, fin) {
-        Ok(v) => v as ssize_t,
+        Ok(v) => ssize_t::try_from(v).unwrap_or(ssize_t::MAX),
 
-        Err(e) => e.to_c(),
+        Err(e) => ssize_t::from(e.to_c()),
     }
 }
 
@@ -383,19 +386,21 @@ pub extern "C" fn quiche_h3_recv_body(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     out: *mut u8, out_len: size_t,
 ) -> ssize_t {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as ssize_t);
+    let conn = ffi_mut!(conn, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn =
+        ffi_mut!(quic_conn, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_h3_ssize_len(out_len) {
         return e;
     }
 
-    let out = ffi_slice_mut!(out, out_len, H3_FFI_ERR_INVALID_ARGUMENT);
+    let out =
+        ffi_slice_mut!(out, out_len, ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.recv_body(quic_conn, stream_id, out) {
-        Ok(v) => v as ssize_t,
+        Ok(v) => ssize_t::try_from(v).unwrap_or(ssize_t::MAX),
 
-        Err(e) => e.to_c(),
+        Err(e) => ssize_t::from(e.to_c()),
     }
 }
 
@@ -403,13 +408,13 @@ pub extern "C" fn quiche_h3_recv_body(
 pub extern "C" fn quiche_h3_send_goaway(
     conn: *mut h3::Connection, quic_conn: *mut Connection, id: u64,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.send_goaway(quic_conn, id) {
         Ok(()) => 0,
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -418,10 +423,13 @@ pub extern "C" fn quiche_h3_send_goaway(
 pub extern "C" fn quiche_h3_parse_extensible_priority(
     priority: *const u8, priority_len: size_t, parsed: *mut Priority,
 ) -> c_int {
-    let parsed = ffi_mut!(parsed, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let parsed = ffi_mut!(parsed, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
-    let priority =
-        ffi_slice!(priority, priority_len, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let priority = ffi_slice!(
+        priority,
+        priority_len,
+        c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
+    );
 
     match Priority::try_from(priority) {
         Ok(v) => {
@@ -430,7 +438,7 @@ pub extern "C" fn quiche_h3_parse_extensible_priority(
             0
         },
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -439,14 +447,14 @@ pub extern "C" fn quiche_h3_send_priority_update_for_request(
     conn: *mut h3::Connection, quic_conn: *mut Connection, stream_id: u64,
     priority: *const Priority,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let quic_conn = ffi_mut!(quic_conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
-    let priority = ffi_ref!(priority, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
+    let priority = ffi_ref!(priority, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.send_priority_update_for_request(quic_conn, stream_id, priority) {
         Ok(()) => 0,
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -460,7 +468,7 @@ pub extern "C" fn quiche_h3_take_last_priority_update(
     ) -> c_int,
     argp: *mut c_void,
 ) -> c_int {
-    let conn = ffi_mut!(conn, H3_FFI_ERR_INVALID_ARGUMENT as c_int);
+    let conn = ffi_mut!(conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
     match conn.take_last_priority_update(prioritized_element_id) {
         Ok(priority) => {
@@ -473,7 +481,7 @@ pub extern "C" fn quiche_h3_take_last_priority_update(
             0
         },
 
-        Err(e) => e.to_c() as c_int,
+        Err(e) => c_int::from(e.to_c()),
     }
 }
 
@@ -550,7 +558,7 @@ mod tests {
         if usize::BITS > ssize_t::BITS {
             assert_eq!(
                 validate_h3_ssize_len((ssize_t::MAX as usize) + 1),
-                Err(H3_FFI_ERR_INVALID_ARGUMENT)
+                Err(ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT))
             );
         }
     }
@@ -561,7 +569,7 @@ mod tests {
 
         assert_eq!(
             quiche_h3_event_for_each_header(&ev, count_header, ptr::null_mut(),),
-            H3_FFI_ERR_INVALID_ARGUMENT as c_int
+            c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert!(!quiche_h3_event_headers_has_more_frames(&ev));
     }
@@ -583,7 +591,7 @@ mod tests {
         let mut ev: *const h3::Event = ptr::null();
         assert_eq!(
             quiche_h3_conn_poll(ptr::null_mut(), ptr::null_mut(), &mut ev),
-            H3_FFI_ERR_INVALID_ARGUMENT as i64
+            i64::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert!(ev.is_null());
         assert_eq!(
@@ -592,7 +600,7 @@ mod tests {
                 count_header,
                 ptr::null_mut(),
             ),
-            H3_FFI_ERR_INVALID_ARGUMENT as c_int
+            c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert_eq!(
             quiche_h3_send_body(
@@ -603,7 +611,7 @@ mod tests {
                 0,
                 false,
             ),
-            H3_FFI_ERR_INVALID_ARGUMENT as ssize_t
+            ssize_t::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
 
         // APIs without an error channel use neutral sentinels.

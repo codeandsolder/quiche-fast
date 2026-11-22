@@ -703,8 +703,8 @@ typedef struct {
     // The active connection ID limit.
     uint64_t peer_active_conn_id_limit;
 
-    // DATAGRAM frame extension parameter, if any.
-    ssize_t peer_max_datagram_frame_size;
+    // DATAGRAM frame extension parameter (62-bit maximum), or -1 if absent.
+    int64_t peer_max_datagram_frame_size;
 } quiche_transport_params;
 
 // Returns the peer's transport parameters in |out|. Returns false if we have
