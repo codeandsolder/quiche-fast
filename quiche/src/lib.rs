@@ -2418,17 +2418,23 @@ impl<F: BufFactory> Connection<F> {
     /// This must only be called immediately after creating a connection, that
     /// is, before any packet is sent or received.
     ///
+    /// # Errors
+    /// Returns [`Error::BufferTooShort`] if a serialized field is truncated
+    /// or its declared length cannot fit in the target's address space.
+    /// Returns the transport parameter decoding or TLS error if the stored
+    /// parameters or session are invalid.
+    ///
     /// [`session()`]: struct.Connection.html#method.session
     #[inline]
     pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
         let mut b = octets::Octets::with_slice(session);
 
-        let session_len = b.get_u64()? as usize;
+        let session_len =
+            usize::try_from(b.get_u64()?).map_err(|_| Error::BufferTooShort)?;
         let session_bytes = b.get_bytes(session_len)?;
 
-        self.handshake.set_session(session_bytes.as_ref())?;
-
-        let raw_params_len = b.get_u64()? as usize;
+        let raw_params_len =
+            usize::try_from(b.get_u64()?).map_err(|_| Error::BufferTooShort)?;
         let raw_params_bytes = b.get_bytes(raw_params_len)?;
 
         let peer_params = TransportParams::decode(
@@ -2437,6 +2443,10 @@ impl<F: BufFactory> Connection<F> {
             self.peer_transport_params_track_unknown,
         )?;
 
+        // Validate both serialized fields before installing the TLS session.
+        // In particular, a malformed transport-parameter suffix must not
+        // leave a usable resumption ticket configured on error.
+        self.handshake.set_session(session_bytes.as_ref())?;
         self.process_peer_transport_params(peer_params)?;
 
         Ok(())
@@ -7197,8 +7207,12 @@ impl<F: BufFactory> Connection<F> {
                     self.crypto_ctx[packet::Epoch::Application]
                         .crypto_overhead()?,
                 );
-                // ...clamp to what peer can support...
-                max_len = cmp::min(peer_frame_len as usize, max_len);
+                // ...clamp to what the peer can support. A limit larger
+                // than the address space cannot constrain a local packet.
+                max_len = cmp::min(
+                    usize::try_from(peer_frame_len).unwrap_or(usize::MAX),
+                    max_len,
+                );
                 // ...subtract frame overhead, checked for underflow.
                 // (1 byte of frame type + len of length )
                 max_len.checked_sub(1 + frame::MAX_DGRAM_OVERHEAD)
@@ -8220,6 +8234,10 @@ impl<F: BufFactory> Connection<F> {
 
         active_path.recovery.update_max_ack_delay(max_ack_delay);
 
+        // The peer advertises a u64 wire limit, while recovery works with
+        // locally addressable packet sizes. Oversized limits must not wrap.
+        let peer_udp_limit = usize::try_from(peer_params.max_udp_payload_size)
+            .unwrap_or(usize::MAX);
         if active_path
             .pmtud
             .as_ref()
@@ -8232,12 +8250,12 @@ impl<F: BufFactory> Connection<F> {
                     .as_mut()
                     .expect("PMTUD existence verified above")
                     .get_probe_size()
-                    .min(peer_params.max_udp_payload_size as usize),
+                    .min(peer_udp_limit),
             );
         } else {
-            active_path.recovery.update_max_datagram_size(
-                peer_params.max_udp_payload_size as usize,
-            );
+            active_path
+                .recovery
+                .update_max_datagram_size(peer_udp_limit);
         }
 
         // Record the max_active_conn_id parameter advertised by the peer.
