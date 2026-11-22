@@ -485,7 +485,7 @@ pub fn encode_raw_pkt<F: BufFactory>(
 
     // Always encode packet number in 4 bytes, to allow encoding packets
     // with empty payloads.
-    b.put_u32(pn as u32)?;
+    packet::encode_pkt_num(pn, pn_len, &mut b)?;
 
     let payload_offset = b.off();
 
@@ -529,7 +529,7 @@ pub fn decode_pkt<F: BufFactory>(
         conn.pkt_num_spaces[epoch].largest_rx_pkt_num,
         hdr.pkt_num,
         hdr.pkt_num_len,
-    );
+    )?;
 
     let mut payload =
         packet::decrypt_pkt(&mut b, pn, hdr.pkt_num_len, payload_len, aead)

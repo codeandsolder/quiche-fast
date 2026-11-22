@@ -3644,12 +3644,10 @@ fn early_1rtt_packet(
     assert!(!pipe.server.is_established());
 
     // Client sent 1-RTT packets 0 and 1, but server hasn't received them.
-    //
-    // Note that `largest_rx_pkt_num` is initialized to 0, so we need to
-    // send another 1-RTT packet to make this check meaningful.
+    // Neither has been authenticated yet.
     assert_eq!(
         pipe.server.pkt_num_spaces[packet::Epoch::Application].largest_rx_pkt_num,
-        0
+        None
     );
 
     // Process delayed packet.
@@ -3659,8 +3657,47 @@ fn early_1rtt_packet(
 
     assert_eq!(
         pipe.server.pkt_num_spaces[packet::Epoch::Application].largest_rx_pkt_num,
-        0
+        None
     );
+}
+
+#[rstest]
+fn packet_number_exhaustion_closes_without_sending_close_frame(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    pipe.handshake().unwrap();
+    let max = octets::MAX_VAR_INT;
+    pipe.client.next_pkt_num = max;
+    let sent = pipe.client.sent_count;
+    let mut out = [0x5a; 1500];
+    assert!(matches!(pipe.client.send(&mut out), Err(Error::Done)));
+    assert!(pipe.client.is_closed());
+    assert!(pipe.client.local_error().is_none());
+    assert_eq!(pipe.client.sent_count, sent);
+    assert_eq!(out, [0x5a; 1500]);
+}
+
+#[rstest]
+fn packet_number_width_uses_connection_space_ack_history(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    pipe.handshake().unwrap();
+    let epoch = packet::Epoch::Application;
+    // The connection-wide acknowledgment is newer than the path's local
+    // recovery state (as when a fresh path is selected).
+    let base = 1_u64 << 40;
+    pipe.client.pkt_num_spaces[epoch].largest_acked_pkt_num = Some(base);
+    pipe.client.next_pkt_num = base + 1;
+    pipe.server.pkt_num_spaces[epoch].largest_rx_pkt_num = Some(base);
+    pipe.client.stream_send(0, b"packet number", true).unwrap();
+    let mut out = [0; 1500];
+    let (len, _) = pipe.client.send(&mut out).unwrap();
+    assert_eq!(pipe.server_recv(&mut out[..len]), Ok(len));
+    let mut received = [0; 32];
+    assert_eq!(pipe.server.stream_recv(0, &mut received), Ok((13, true)));
+    assert_eq!(&received[..13], b"packet number");
 }
 
 #[rstest]
@@ -5542,7 +5579,7 @@ fn invalid_initial_payload(
     let epoch = Type::Initial.to_epoch().unwrap();
 
     let pn = 0;
-    let pn_len = packet::pkt_num_len(pn, 0);
+    let pn_len = packet::pkt_num_len(pn, None).unwrap();
 
     let dcid = pipe.client.destination_id();
     let scid = pipe.client.source_id();

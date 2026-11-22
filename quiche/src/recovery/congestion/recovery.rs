@@ -632,6 +632,7 @@ impl RecoveryOps for LegacyRecovery {
         self.epochs[epoch].next_lost_frame()
     }
 
+    #[cfg(test)]
     fn get_largest_acked_on_epoch(&self, epoch: Epoch) -> Option<u64> {
         self.epochs[epoch].largest_acked_packet
     }
