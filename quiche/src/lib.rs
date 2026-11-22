@@ -2015,20 +2015,18 @@ pub const fn version_is_supported(version: u32) -> bool {
 /// Returns `true` on success, `false` otherwise. In case of failure it means
 /// there is no room to add the frame in the packet. You may retry to add the
 /// frame later.
-macro_rules! push_frame_to_pkt {
-    ($out:expr, $frames:expr, $frame:expr, $left:expr) => {{
-        if $frame.wire_len() <= $left {
-            $left -= $frame.wire_len();
-
-            $frame.to_bytes(&mut $out)?;
-
-            $frames.push($frame);
-
-            true
-        } else {
-            false
-        }
-    }};
+fn push_frame_to_pkt(
+    out: &mut octets::OctetsMut, frames: &mut SmallVec<[frame::Frame; 1]>,
+    frame: frame::Frame, left: &mut usize,
+) -> Result<bool> {
+    let wire_len = frame.wire_len()?;
+    if wire_len > *left {
+        return Ok(false);
+    }
+    frame.to_bytes(out)?;
+    *left -= wire_len;
+    frames.push(frame);
+    Ok(true)
 }
 
 /// Executes the provided body if the qlog feature is enabled, quiche has been
@@ -4970,11 +4968,12 @@ impl<F: BufFactory> Connection<F> {
             // there is not enough cwnd available for both (note that PING
             // frames are always 1 byte, so we just need to check that the
             // ACK's length is lower than cwnd).
-            if pkt_space.ack_elicited || frame.wire_len() < send_limit_from_cwnd {
+            if pkt_space.ack_elicited || frame.wire_len()? < send_limit_from_cwnd
+            {
                 // ACK-only packets are not congestion controlled so ACKs must
                 // be bundled considering the buffer capacity only, and not the
                 // available cwnd.
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     pkt_space.ack_elicited = false;
                 }
             }
@@ -5046,12 +5045,22 @@ impl<F: BufFactory> Connection<F> {
                             len: probe_size - overhead - 1,
                         };
 
-                        if push_frame_to_pkt!(b, frames, frame, left) {
+                        if push_frame_to_pkt(
+                            &mut b,
+                            &mut frames,
+                            frame,
+                            &mut left,
+                        )? {
                             let frame = frame::Frame::Ping {
                                 mtu_probe: Some(probe_size),
                             };
 
-                            if push_frame_to_pkt!(b, frames, frame, left) {
+                            if push_frame_to_pkt(
+                                &mut b,
+                                &mut frames,
+                                frame,
+                                &mut left,
+                            )? {
                                 ack_eliciting = true;
                                 in_flight = true;
                             }
@@ -5071,7 +5080,7 @@ impl<F: BufFactory> Connection<F> {
             while let Some(challenge) = path.pop_received_challenge() {
                 let frame = frame::Frame::PathResponse { data: challenge };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     has_path_frame = true;
                     ack_eliciting = true;
                     in_flight = true;
@@ -5089,7 +5098,7 @@ impl<F: BufFactory> Connection<F> {
 
                 let frame = frame::Frame::PathChallenge { data };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     // Let's notify the path once we know the packet size.
                     challenge_data = Some(data);
                     has_path_frame = true;
@@ -5111,7 +5120,7 @@ impl<F: BufFactory> Connection<F> {
             while let Some(seq_num) = self.ids.next_advertise_new_scid_seq() {
                 let frame = self.ids.get_new_connection_id_frame_for(seq_num)?;
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.ids.mark_advertise_new_scid_seq(seq_num, false);
 
                     ack_eliciting = true;
@@ -5131,7 +5140,7 @@ impl<F: BufFactory> Connection<F> {
             {
                 let frame = frame::Frame::HandshakeDone;
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.handshake_done_sent = true;
 
                     ack_eliciting = true;
@@ -5147,7 +5156,7 @@ impl<F: BufFactory> Connection<F> {
                     max: self.streams.max_streams_bidi_next(),
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.streams.update_max_streams_bidi();
                     self.should_send_max_streams_bidi = false;
 
@@ -5164,7 +5173,7 @@ impl<F: BufFactory> Connection<F> {
                     max: self.streams.max_streams_uni_next(),
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.streams.update_max_streams_uni();
                     self.should_send_max_streams_uni = false;
 
@@ -5177,7 +5186,7 @@ impl<F: BufFactory> Connection<F> {
             if let Some(limit) = self.blocked_limit {
                 let frame = frame::Frame::DataBlocked { limit };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.blocked_limit = None;
                     self.data_blocked_sent_count =
                         self.data_blocked_sent_count.saturating_add(1);
@@ -5196,7 +5205,7 @@ impl<F: BufFactory> Connection<F> {
                 if let Some(limit) = self.streams_blocked_bidi_state.blocked_at {
                     let frame = frame::Frame::StreamsBlockedBidi { limit };
 
-                    if push_frame_to_pkt!(b, frames, frame, left) {
+                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                         // Record the limit we just notified the peer about so
                         // that redundant frames for the same limit are
                         // suppressed.
@@ -5218,7 +5227,7 @@ impl<F: BufFactory> Connection<F> {
                 if let Some(limit) = self.streams_blocked_uni_state.blocked_at {
                     let frame = frame::Frame::StreamsBlockedUni { limit };
 
-                    if push_frame_to_pkt!(b, frames, frame, left) {
+                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                         // Record the limit we just notified the peer about so
                         // that redundant frames for the same limit are
                         // suppressed.
@@ -5256,7 +5265,7 @@ impl<F: BufFactory> Connection<F> {
                     max: stream.recv.max_data_next(),
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     let recv_win = stream.recv.window();
 
                     stream.recv.update_max_data(now);
@@ -5289,7 +5298,7 @@ impl<F: BufFactory> Connection<F> {
                     max: flow_control.max_data_next(),
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.should_send_max_data = false;
 
                     // Commits the new max_rx_data limit.
@@ -5312,7 +5321,7 @@ impl<F: BufFactory> Connection<F> {
                     error_code,
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.streams.remove_stopped(stream_id);
 
                     ack_eliciting = true;
@@ -5333,7 +5342,7 @@ impl<F: BufFactory> Connection<F> {
                     final_size,
                 };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.streams.remove_reset(stream_id);
 
                     ack_eliciting = true;
@@ -5350,7 +5359,7 @@ impl<F: BufFactory> Connection<F> {
             {
                 let frame = frame::Frame::StreamDataBlocked { stream_id, limit };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.streams.remove_blocked(stream_id);
                     self.stream_data_blocked_sent_count =
                         self.stream_data_blocked_sent_count.saturating_add(1);
@@ -5375,7 +5384,7 @@ impl<F: BufFactory> Connection<F> {
 
                 let frame = frame::Frame::RetireConnectionId { seq_num };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     self.ids.mark_retire_dcid_seq(seq_num, false)?;
 
                     ack_eliciting = true;
@@ -5398,7 +5407,12 @@ impl<F: BufFactory> Connection<F> {
                             reason: conn_err.reason.clone(),
                         };
 
-                        if push_frame_to_pkt!(b, frames, frame, left) {
+                        if push_frame_to_pkt(
+                            &mut b,
+                            &mut frames,
+                            frame,
+                            &mut left,
+                        )? {
                             let pto = path.recovery.pto();
                             self.draining_timer = Some(now + (pto * 3));
 
@@ -5414,7 +5428,7 @@ impl<F: BufFactory> Connection<F> {
                         reason: conn_err.reason.clone(),
                     };
 
-                    if push_frame_to_pkt!(b, frames, frame, left) {
+                    if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                         let pto = path.recovery.pto();
                         self.draining_timer = Some(now + (pto * 3));
 
@@ -5478,16 +5492,16 @@ impl<F: BufFactory> Connection<F> {
                 // Advance the packet buffer's offset.
                 b.skip(hdr_len + len)?;
 
-                let frame = frame::Frame::CryptoHeader {
+                // The payload and its header were encoded above. Only
+                // record recovery metadata and account for the written bytes.
+                left -= hdr_len + len;
+                frames.push(frame::Frame::CryptoHeader {
                     offset: crypto_off,
                     length: len,
-                };
-
-                if push_frame_to_pkt!(b, frames, frame, left) {
-                    ack_eliciting = true;
-                    in_flight = true;
-                    has_data = true;
-                }
+                });
+                ack_eliciting = true;
+                in_flight = true;
+                has_data = true;
             }
         }
 
@@ -5566,8 +5580,7 @@ impl<F: BufFactory> Connection<F> {
                                 // The DATAGRAM header and payload were already
                                 // encoded directly above. Avoid routing the
                                 // metadata-only DatagramHeader through
-                                // push_frame_to_pkt!(), which redundantly calls
-                                // wire_len() twice and to_bytes() once.
+                                // the frame serializer.
                                 left -= hdr_len + len;
                                 frames.push(frame::Frame::DatagramHeader {
                                     length: len,
@@ -5694,18 +5707,18 @@ impl<F: BufFactory> Connection<F> {
                 // Advance the packet buffer's offset.
                 b.skip(hdr_len + len)?;
 
-                let frame = frame::Frame::StreamHeader {
+                // The payload and its header were encoded above. Only
+                // record recovery metadata and account for the written bytes.
+                left -= hdr_len + len;
+                frames.push(frame::Frame::StreamHeader {
                     stream_id,
                     offset: stream_off,
                     length: len,
                     fin,
-                };
-
-                if push_frame_to_pkt!(b, frames, frame, left) {
-                    ack_eliciting = true;
-                    in_flight = true;
-                    has_data = true;
-                }
+                });
+                ack_eliciting = true;
+                in_flight = true;
+                has_data = true;
 
                 let priority_key = Arc::clone(stream.priority_key());
                 // Remove the stream when it is no longer flushable.
@@ -5746,7 +5759,7 @@ impl<F: BufFactory> Connection<F> {
         {
             let frame = frame::Frame::Ping { mtu_probe: None };
 
-            if push_frame_to_pkt!(b, frames, frame, left) {
+            if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                 ack_eliciting = true;
                 in_flight = true;
             }
@@ -5794,7 +5807,7 @@ impl<F: BufFactory> Connection<F> {
             if pad_len > 0 {
                 let frame = frame::Frame::Padding { len: pad_len };
 
-                if push_frame_to_pkt!(b, frames, frame, left) {
+                if push_frame_to_pkt(&mut b, &mut frames, frame, &mut left)? {
                     in_flight = true;
                 }
             }
@@ -5808,7 +5821,7 @@ impl<F: BufFactory> Connection<F> {
                 len: PAYLOAD_MIN_LEN - payload_len,
             };
 
-            if frame.wire_len() <= left {
+            if frame.wire_len()? <= left {
                 frame.to_bytes(&mut b)?;
                 frames.push(frame);
                 in_flight = true;

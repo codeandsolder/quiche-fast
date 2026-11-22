@@ -547,7 +547,10 @@ pub fn encode_pkt<F: BufFactory>(
 
     hdr.to_bytes(&mut b)?;
 
-    let payload_len = frames.iter().fold(0, |acc, x| acc + x.wire_len());
+    let payload_len = frames.iter().try_fold(0_usize, |acc, frame| {
+        acc.checked_add(frame.wire_len()?)
+            .ok_or(Error::BufferTooShort)
+    })?;
 
     if pkt_type != Type::Short {
         let len = pn_len + payload_len + crypto_ctx.crypto_overhead().unwrap();

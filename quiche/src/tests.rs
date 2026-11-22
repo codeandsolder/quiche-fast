@@ -13546,7 +13546,7 @@ fn challenge_no_cids(
         key_phase: pipe.client.key_phase,
     };
     hdr.to_bytes(&mut b).expect("encode header");
-    let payload_len = frames.iter().fold(0, |acc, x| acc + x.wire_len());
+    let payload_len: usize = frames.iter().map(|f| f.wire_len().unwrap()).sum();
     b.put_u32(pn as u32).expect("put pn");
 
     let payload_offset = b.off();
