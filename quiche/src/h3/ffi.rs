@@ -34,7 +34,8 @@ use libc::c_void;
 use libc::size_t;
 use libc::ssize_t;
 
-use crate::*;
+use crate::h3;
+use crate::Connection;
 
 use crate::h3::NameValue;
 use crate::h3::Priority;
@@ -119,11 +120,9 @@ pub extern "C" fn quiche_h3_conn_new_with_transport(
     let quic_conn = ffi_mut!(quic_conn, ptr::null_mut());
     let config = ffi_mut!(config, ptr::null_mut());
 
-    match h3::Connection::with_transport(quic_conn, config) {
-        Ok(c) => Box::into_raw(Box::new(c)),
-
-        Err(_) => ptr::null_mut(),
-    }
+    crate::ffi::into_raw_or_null(h3::Connection::with_transport(
+        quic_conn, config,
+    ))
 }
 
 #[no_mangle]
@@ -293,7 +292,7 @@ fn header_operation<T>(
     // to remain readable for this call; no borrow escapes the operation.
     let headers = unsafe { headers_from_ptr(headers, headers_len) }
         .map_err(|()| H3_FFI_ERR_INVALID_ARGUMENT)?;
-    op(conn, quic_conn, &headers).map_err(|e| e.to_c())
+    op(conn, quic_conn, &headers).map_err(h3::Error::to_c)
 }
 
 #[no_mangle]
