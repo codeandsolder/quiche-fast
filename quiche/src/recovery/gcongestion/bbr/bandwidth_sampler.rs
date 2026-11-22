@@ -166,15 +166,13 @@ pub struct SendTimeState {
     pub bytes_in_flight: usize,
 }
 
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Default)]
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy)]
 struct ExtraAckedEvent {
     /// The excess bytes acknowlwedged in the time delta for this event.
     extra_acked: u64,
     /// The bytes acknowledged and time delta from the event.
     bytes_acked: u64,
     time_delta: Duration,
-    /// The round trip of the event.
-    round: usize,
 }
 
 // BandwidthSample holds per-packet rate measurements
@@ -319,44 +317,15 @@ impl MaxAckHeightTracker {
         let mut force_new_epoch = false;
 
         if self.reduce_extra_acked_on_bandwidth_increase && is_new_max_bandwidth {
-            // Save and clear existing entries.
-            let mut best =
-                self.max_ack_height_filter.get_best().unwrap_or_default();
-            let mut second_best = self
-                .max_ack_height_filter
-                .get_second_best()
-                .unwrap_or_default();
-            let mut third_best = self
-                .max_ack_height_filter
-                .get_third_best()
-                .unwrap_or_default();
-            self.max_ack_height_filter.clear();
-
-            // Reinsert the heights into the filter after recalculating.
-            let expected_bytes_acked =
-                bandwidth_estimate.to_bytes_per_period(best.time_delta);
-            if expected_bytes_acked < best.bytes_acked {
-                best.extra_acked = best.bytes_acked - expected_bytes_acked;
-                self.max_ack_height_filter.update(best, best.round);
-            }
-
-            let expected_bytes_acked =
-                bandwidth_estimate.to_bytes_per_period(second_best.time_delta);
-            if expected_bytes_acked < second_best.bytes_acked {
-                second_best.extra_acked =
-                    second_best.bytes_acked - expected_bytes_acked;
-                self.max_ack_height_filter
-                    .update(second_best, second_best.round);
-            }
-
-            let expected_bytes_acked =
-                bandwidth_estimate.to_bytes_per_period(third_best.time_delta);
-            if expected_bytes_acked < third_best.bytes_acked {
-                third_best.extra_acked =
-                    third_best.bytes_acked - expected_bytes_acked;
-                self.max_ack_height_filter
-                    .update(third_best, third_best.round);
-            }
+            self.max_ack_height_filter.recompute(|mut event| {
+                let expected =
+                    bandwidth_estimate.to_bytes_per_period(event.time_delta);
+                event.extra_acked = event
+                    .bytes_acked
+                    .checked_sub(expected)
+                    .filter(|&bytes| bytes > 0)?;
+                Some(event)
+            });
         }
 
         // Start a new epoch if this epoch includes any acknowledged packet.
@@ -408,7 +377,6 @@ impl MaxAckHeightTracker {
             extra_acked: extra_bytes_acked,
             bytes_acked: self.aggregation_epoch_bytes,
             time_delta: aggregation_delta,
-            round: 0,
         };
 
         self.max_ack_height_filter
@@ -1800,6 +1768,75 @@ mod max_ack_height_tracker_tests {
     use rstest::rstest;
 
     use super::*;
+
+    #[test]
+    fn bandwidth_increase_preserves_ack_height_measurement_round() {
+        let mut tracker = MaxAckHeightTracker::new(10, false);
+        let start = Instant::now();
+        let initial_bw = Bandwidth::from_bytes_per_second(1000);
+        let increased_bw = Bandwidth::from_bytes_per_second(2000);
+
+        assert_eq!(
+            tracker.update(initial_bw, false, 10, 0, 0, start, 10_000),
+            0
+        );
+        assert_eq!(
+            tracker.update(
+                initial_bw,
+                false,
+                11,
+                0,
+                0,
+                start + Duration::from_secs(1),
+                1000
+            ),
+            10_000
+        );
+        assert_eq!(
+            tracker.update(
+                increased_bw,
+                true,
+                12,
+                0,
+                0,
+                start + Duration::from_secs(2),
+                100
+            ),
+            7100
+        );
+        // The best previous sample is only one round old. Recomputing it
+        // with the increased bandwidth reduces it to 9000, not to zero.
+        assert_eq!(
+            tracker
+                .max_ack_height_filter
+                .get_best()
+                .unwrap()
+                .extra_acked,
+            9000
+        );
+
+        assert_eq!(
+            tracker.update(
+                increased_bw,
+                false,
+                23,
+                0,
+                0,
+                start + Duration::from_secs(3),
+                100
+            ),
+            5200
+        );
+        // Now that both previous samples have expired, the new one wins.
+        assert_eq!(
+            tracker
+                .max_ack_height_filter
+                .get_best()
+                .unwrap()
+                .extra_acked,
+            5200
+        );
+    }
 
     struct TestTracker {
         tracker: MaxAckHeightTracker,
