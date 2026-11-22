@@ -28,6 +28,67 @@ use std::cmp;
 
 use std::io;
 
+/// A contiguous sequence of UDP datagrams with one route and GSO stride.
+/// Every segment except the last must have exactly that stride.
+#[derive(Debug)]
+pub struct DatagramBatch {
+    bytes: std::ops::Range<usize>,
+    segment_size: usize,
+    info: quiche::SendInfo,
+}
+
+impl DatagramBatch {
+    /// Group a generated datagram with the previous batch when representable
+    /// by a single GSO operation (or by the same segmentation in fallback).
+    pub fn push(
+        batches: &mut Vec<Self>, bytes: std::ops::Range<usize>,
+        info: quiche::SendInfo,
+    ) {
+        if bytes.is_empty() {
+            return;
+        }
+        let len = bytes.len();
+        if let Some(batch) = batches.last_mut() {
+            // Linux supports at least 64 segments per UDP GSO submission.
+            // A shorter tail terminates the batch. A larger datagram needs a
+            // new stride. Never join packets for different paths.
+            if batch.info.from == info.from &&
+                batch.info.to == info.to &&
+                batch.bytes.end == bytes.start &&
+                batch.bytes.len().is_multiple_of(batch.segment_size) &&
+                batch.bytes.len() / batch.segment_size < 64 &&
+                len <= batch.segment_size
+            {
+                batch.bytes.end = bytes.end;
+                return;
+            }
+        }
+        batches.push(Self {
+            bytes,
+            segment_size: len,
+            info,
+        });
+    }
+
+    /// Send all datagrams in this batch using their actual boundaries.
+    pub fn send(
+        &self, socket: &mio::net::UdpSocket, output: &[u8], pacing: bool,
+        enable_gso: bool,
+    ) -> io::Result<usize> {
+        let buf = output
+            .get(self.bytes.clone())
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        send_to(
+            socket,
+            buf,
+            &self.info,
+            self.segment_size,
+            pacing,
+            enable_gso,
+        )
+    }
+}
+
 /// For Linux, try to detect GSO is available.
 #[cfg(target_os = "linux")]
 pub fn detect_gso(socket: &mio::net::UdpSocket, segment_size: usize) -> bool {
@@ -38,7 +99,10 @@ pub fn detect_gso(socket: &mio::net::UdpSocket, segment_size: usize) -> bool {
     let Ok(size) = valid_gso_segment_size(segment_size) else {
         return false;
     };
-    setsockopt(&socket.as_fd(), UdpGsoSegment, &i32::from(size)).is_ok()
+    // Probe support but leave the socket default unsegmented. Individual
+    // batches carry their own UDP_SEGMENT control message.
+    setsockopt(&socket.as_fd(), UdpGsoSegment, &i32::from(size)).is_ok() &&
+        setsockopt(&socket.as_fd(), UdpGsoSegment, &0).is_ok()
 }
 
 #[cfg(target_os = "linux")]
@@ -62,9 +126,9 @@ pub fn detect_gso(_socket: &mio::net::UdpSocket, _segment_size: usize) -> bool {
 
 /// Send packets using sendmsg() with GSO.
 #[cfg(target_os = "linux")]
-fn send_to_gso_pacing(
+fn send_gso(
     socket: &mio::net::UdpSocket, buf: &[u8], send_info: &quiche::SendInfo,
-    segment_size: usize,
+    segment_size: usize, pacing: bool,
 ) -> io::Result<usize> {
     use nix::sys::socket::sendmsg;
     use nix::sys::socket::ControlMessage;
@@ -81,14 +145,16 @@ fn send_to_gso_pacing(
     // GSO option.
     let cmsg_gso = ControlMessage::UdpGsoSegments(&segment_size);
 
-    // Pacing option.
-    let send_time = std_time_to_u64(&send_info.at)?;
-    let cmsg_txtime = ControlMessage::TxTime(&send_time);
-
+    let send_time = pacing.then(|| std_time_to_u64(&send_info.at)).transpose()?;
+    let messages = [
+        cmsg_gso,
+        ControlMessage::TxTime(send_time.as_ref().unwrap_or(&0)),
+    ];
+    let count = if pacing { 2 } else { 1 };
     match sendmsg(
         sockfd,
         &iov,
-        &[cmsg_gso, cmsg_txtime],
+        &messages[..count],
         MsgFlags::empty(),
         Some(&dst),
     ) {
@@ -99,9 +165,9 @@ fn send_to_gso_pacing(
 
 /// A wrapper function of send_to().
 ///
-/// When GSO and SO_TXTIME are enabled, send packets using send_to_gso().
-/// Otherwise, send packets using socket.send_to().
-pub fn send_to(
+/// When GSO is enabled, send with UDP_SEGMENT and optionally SO_TXTIME.
+/// Otherwise send individual UDP datagrams with the given stride.
+fn send_to(
     socket: &mio::net::UdpSocket, buf: &[u8], send_info: &quiche::SendInfo,
     segment_size: usize, pacing: bool, enable_gso: bool,
 ) -> io::Result<usize> {
@@ -113,8 +179,8 @@ pub fn send_to(
     }
 
     #[cfg(target_os = "linux")]
-    if pacing && enable_gso {
-        return send_to_gso_pacing(socket, buf, send_info, segment_size);
+    if enable_gso {
+        return send_gso(socket, buf, send_info, segment_size, pacing);
     }
     #[cfg(not(target_os = "linux"))]
     let _ = (pacing, enable_gso);
@@ -214,6 +280,63 @@ mod pacing_tests {
             at: std::time::Instant::now(),
         };
         Ok((mio::net::UdpSocket::from_std(sender), info))
+    }
+
+    #[test]
+    fn datagram_batches_preserve_actual_lengths_and_routes() -> io::Result<()> {
+        use std::time::Duration;
+        use std::time::Instant;
+        let sender = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let a = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let b = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        for receiver in [&a, &b] {
+            receiver.set_read_timeout(Some(Duration::from_secs(1)))?;
+        }
+        sender.set_nonblocking(true)?;
+        let info = quiche::SendInfo {
+            from: sender.local_addr()?,
+            to: a.local_addr()?,
+            at: Instant::now(),
+        };
+        let other = quiche::SendInfo {
+            to: b.local_addr()?,
+            ..info
+        };
+        let sender = mio::net::UdpSocket::from_std(sender);
+
+        // A smaller tail, a larger PMTU probe, then a path change.
+        let mut batches = Vec::new();
+        let datagrams = [(4, info), (4, info), (2, info), (7, info), (7, other)];
+        let mut output = Vec::new();
+        for (index, (len, route)) in datagrams.into_iter().enumerate() {
+            let start = output.len();
+            output.resize(start + len, u8::try_from(index + 1).unwrap());
+            DatagramBatch::push(&mut batches, start..start + len, route);
+        }
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].bytes, 0..10);
+        assert_eq!(batches[0].segment_size, 4);
+        assert_eq!(batches[1].bytes, 10..17);
+        assert_eq!(batches[1].segment_size, 7);
+        assert_eq!(batches[2].info, other);
+
+        for gso in [false, true] {
+            if gso && !detect_gso(&sender, 7) {
+                continue;
+            }
+            for batch in &batches {
+                batch.send(&sender, &output, false, gso)?;
+            }
+
+            let mut received = [0; 32];
+            for (receiver, len, marker) in
+                [(&a, 4, 1), (&a, 4, 2), (&a, 2, 3), (&a, 7, 4), (&b, 7, 5)]
+            {
+                assert_eq!(receiver.recv(&mut received)?, len);
+                assert_eq!(&received[..len], vec![marker; len]);
+            }
+        }
+        Ok(())
     }
 
     #[test]

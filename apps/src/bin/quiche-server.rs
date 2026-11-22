@@ -57,6 +57,7 @@ fn main() {
     let mut buf = [0; MAX_BUF_SIZE];
     let mut out = [0; MAX_BUF_SIZE];
     let mut pacing = false;
+    let mut batches = Vec::new();
 
     env_logger::builder().format_timestamp_nanos().init();
 
@@ -412,7 +413,6 @@ fn main() {
                     partial_requests: HashMap::new(),
                     partial_responses: HashMap::new(),
                     app_proto_selected: false,
-                    max_datagram_size,
                     loss_rate: 0.0,
                     max_send_burst: MAX_BUF_SIZE,
                 };
@@ -498,10 +498,6 @@ fn main() {
 
                     client.app_proto_selected = true;
                 }
-
-                // Update max_datagram_size after connection established.
-                client.max_datagram_size =
-                    client.conn.max_send_udp_payload_size();
             }
 
             if let Some(http_conn) = client.http_conn.as_mut() {
@@ -559,17 +555,22 @@ fn main() {
             if loss_rate > client.loss_rate + 0.001 {
                 client.max_send_burst = client.max_send_burst / 4 * 3;
                 // Minimum bound of 10xMSS.
-                client.max_send_burst =
-                    client.max_send_burst.max(client.max_datagram_size * 10);
+                client.max_send_burst = client
+                    .max_send_burst
+                    .max(client.conn.max_send_udp_payload_size() * 10);
                 client.loss_rate = loss_rate;
             }
 
-            let max_send_burst =
-                client.conn.send_quantum().min(client.max_send_burst) /
-                    client.max_datagram_size *
-                    client.max_datagram_size;
+            // Always leave enough room for a single maximum-sized probe,
+            // even before its candidate size is reflected in the path MSS.
+            let max_send_burst = client
+                .conn
+                .send_quantum()
+                .min(client.max_send_burst)
+                .max(MAX_DATAGRAM_SIZE)
+                .min(out.len());
             let mut total_write = 0;
-            let mut dst_info = None;
+            batches.clear();
 
             while total_write < max_send_burst {
                 let (write, send_info) = match client
@@ -591,40 +592,40 @@ fn main() {
                     },
                 };
 
+                let start = total_write;
                 total_write += write;
+                DatagramBatch::push(&mut batches, start..total_write, send_info);
 
-                // Use the first packet time to send, not the last.
-                let _ = dst_info.get_or_insert(send_info);
-
-                if write < client.max_datagram_size {
+                if write < client.conn.max_send_udp_payload_size() {
                     continue_write = true;
                     break;
                 }
             }
 
-            if total_write == 0 || dst_info.is_none() {
+            if batches.is_empty() {
                 continue;
             }
 
-            if let Err(e) = send_to(
-                &socket,
-                &out[..total_write],
-                &dst_info.unwrap(),
-                client.max_datagram_size,
-                pacing,
-                enable_gso,
-            ) {
-                if e.kind() == std::io::ErrorKind::WouldBlock {
-                    trace!("send() would block");
-                    break;
+            let mut blocked = false;
+            for batch in &batches {
+                match batch.send(&socket, &out, pacing, enable_gso) {
+                    Ok(_) => (),
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        trace!("send() would block");
+                        blocked = true;
+                        break;
+                    },
+                    Err(e) => panic!("send_to() failed: {e:?}"),
                 }
-
-                panic!("send_to() failed: {e:?}");
+            }
+            if blocked {
+                break;
             }
 
             trace!(
-                "{} written {total_write} bytes with {dst_info:?}",
-                client.conn.trace_id()
+                "{} written {total_write} bytes in {} datagram batches",
+                client.conn.trace_id(),
+                batches.len(),
             );
 
             if total_write >= max_send_burst {
