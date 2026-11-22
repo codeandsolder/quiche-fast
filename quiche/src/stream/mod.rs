@@ -1670,7 +1670,7 @@ mod tests {
         let first = RangeBuf::from(b"hello", 0, true);
 
         assert_eq!(stream.recv.write(first), Ok(()));
-        assert_eq!(stream.recv.reset(0, 10), Err(Error::FinalSize));
+        assert_eq!(stream.recv.reset(0, 10, u64::MAX), Err(Error::FinalSize));
     }
 
     #[test]
@@ -1685,14 +1685,17 @@ mod tests {
         assert_eq!(stream.recv.emit(&mut [0; 1]), Ok((1, false)));
         // Reset with a final size > than max previously received
         assert_eq!(
-            stream.recv.reset(0, 10),
+            stream.recv.reset(0, 10, u64::MAX),
             Ok(RecvBufResetReturn {
                 max_data_delta: 5,
                 // consumed_flowcontrol is 9, since we already read 1 byte
                 consumed_flowcontrol: 9
             })
         );
-        assert_eq!(stream.recv.reset(0, 10), Ok(RecvBufResetReturn::zero()));
+        assert_eq!(
+            stream.recv.reset(0, 10, u64::MAX),
+            Ok(RecvBufResetReturn::zero())
+        );
     }
 
     #[test]
@@ -1704,13 +1707,16 @@ mod tests {
 
         assert_eq!(stream.recv.write(first), Ok(()));
         assert_eq!(
-            stream.recv.reset(0, 5),
+            stream.recv.reset(0, 5, u64::MAX),
             Ok(RecvBufResetReturn {
                 max_data_delta: 0,
                 consumed_flowcontrol: 5
             })
         );
-        assert_eq!(stream.recv.reset(0, 5), Ok(RecvBufResetReturn::zero()));
+        assert_eq!(
+            stream.recv.reset(0, 5, u64::MAX),
+            Ok(RecvBufResetReturn::zero())
+        );
     }
 
     #[test]
@@ -1722,13 +1728,13 @@ mod tests {
 
         assert_eq!(stream.recv.write(first), Ok(()));
         assert_eq!(
-            stream.recv.reset(0, 5),
+            stream.recv.reset(0, 5, u64::MAX),
             Ok(RecvBufResetReturn {
                 max_data_delta: 0,
                 consumed_flowcontrol: 5
             })
         );
-        assert_eq!(stream.recv.reset(0, 10), Err(Error::FinalSize));
+        assert_eq!(stream.recv.reset(0, 10, u64::MAX), Err(Error::FinalSize));
     }
 
     #[test]
@@ -1739,7 +1745,7 @@ mod tests {
         let first = RangeBuf::from(b"hello", 0, false);
 
         assert_eq!(stream.recv.write(first), Ok(()));
-        assert_eq!(stream.recv.reset(0, 4), Err(Error::FinalSize));
+        assert_eq!(stream.recv.reset(0, 4, u64::MAX), Err(Error::FinalSize));
     }
 
     #[test]

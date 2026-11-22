@@ -6762,6 +6762,61 @@ fn data_blocked(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) 
 }
 
 #[rstest]
+fn stream_data_blocked_validates_stream_opening_and_direction(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(0, 2, 1, 3, 42)] stream_id: u64,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let frame = frame::Frame::StreamDataBlocked {
+        stream_id,
+        limit: 0,
+    };
+    let result = pipe.send_pkt_to_server(Type::Short, &[frame], &mut [0; 1500]);
+    match stream_id {
+        0 | 2 => {
+            assert!(result.is_ok());
+            assert!(pipe.server.streams.get(stream_id).is_some());
+            assert_eq!(pipe.server.stream_data_blocked_recv_count, 1);
+        },
+        1 | 3 => assert_eq!(result, Err(Error::InvalidStreamState(stream_id))),
+        _ => assert_eq!(result, Err(Error::StreamLimit)),
+    }
+}
+
+#[rstest]
+fn reset_after_out_of_order_fin_delivers_error(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let mut packet = [0; 1500];
+    let tail = frame::Frame::Stream {
+        stream_id: 2,
+        data: <RangeBuf>::from(b"tail", 6, true),
+    };
+    assert!(pipe
+        .send_pkt_to_server(Type::Short, &[tail], &mut packet)
+        .is_ok());
+    assert_eq!(pipe.server.readable().next(), None);
+    let reset = frame::Frame::ResetStream {
+        stream_id: 2,
+        error_code: 42,
+        final_size: 10,
+    };
+    assert!(pipe
+        .send_pkt_to_server(Type::Short, &[reset], &mut packet)
+        .is_ok());
+    assert_eq!(pipe.server.readable().next(), Some(2));
+    assert_eq!(
+        pipe.server.stream_recv(2, &mut [0; 10]),
+        Err(Error::StreamReset(42))
+    );
+    assert_eq!(pipe.server.readable().next(), None);
+    assert_eq!(pipe.server.flow_control.consumed(), 10);
+}
+
+#[rstest]
 fn stream_data_blocked(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {

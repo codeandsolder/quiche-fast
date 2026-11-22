@@ -307,45 +307,52 @@ impl RecvBuf {
         Ok((len, self.is_fin()))
     }
 
-    /// Resets the stream at the given offset.
+    /// Reset the stream at the supplied final size. Validate both the
+    /// stream and connection flow-control budgets before changing state.
     pub fn reset(
-        &mut self, error_code: u64, final_size: u64,
+        &mut self, error_code: u64, final_size: u64, connection_credit: u64,
     ) -> Result<RecvBufResetReturn> {
         // Stream's size is already known, forbid changing it.
-        if let Some(fin_off) = self.fin_off {
-            if fin_off != final_size {
-                return Err(Error::FinalSize);
-            }
-        }
-
-        // Stream's known size is lower than data already received.
-        if final_size < self.len {
+        if self.fin_off.is_some_and(|offset| offset != final_size) ||
+            final_size < self.len
+        {
             return Err(Error::FinalSize);
         }
 
+        let max_data_delta = final_size - self.len;
+        if final_size > self.max_data() || max_data_delta > connection_credit {
+            return Err(Error::FlowControl);
+        }
+
         if self.error.is_some() {
-            // We already verified that the final size matches
             return Ok(RecvBufResetReturn::zero());
         }
 
-        // Calculate how many bytes need to be removed from the connection flow
-        // control.
+        // The application has already consumed the FIN and all data.
+        // RFC 9000 permits ignoring a reset once all data is received.
+        if self.is_fin() && self.data.is_empty() {
+            return Ok(RecvBufResetReturn::zero());
+        }
+
         let result = RecvBufResetReturn {
-            max_data_delta: final_size - self.len,
+            max_data_delta,
             consumed_flowcontrol: final_size - self.off,
         };
 
         self.error = Some(error_code);
-
-        // Clear all data already buffered.
+        self.fin_off = Some(final_size);
+        self.len = final_size;
         self.off = final_size;
-
         self.data.clear();
 
-        // In order to ensure the application is notified when the stream is
-        // reset, enqueue a zero-length buffer at the final size offset.
-        let buf = RangeBuf::from(b"", final_size, true);
-        self.write(buf)?;
+        // Keep exactly one terminal notification, even if a FIN arrived
+        // earlier with missing data below it. Do not route it through
+        // ordinary data insertion, which discards duplicate empty FINs.
+        // After local shutdown the application does not need a notification.
+        if !self.drain {
+            self.data
+                .insert(final_size, RangeBuf::from(b"", final_size, true));
+        }
 
         Ok(result)
     }
@@ -706,7 +713,7 @@ mod tests {
         // Send a reset
         assert_emit_discard_done(&mut recv, emit);
         assert_eq!(
-            recv.reset(42, 123),
+            recv.reset(42, 123, u64::MAX),
             Ok(RecvBufResetReturn {
                 max_data_delta: 104,
                 consumed_flowcontrol: 104,
@@ -736,12 +743,57 @@ mod tests {
         assert_eq!(recv.data.len(), 0);
 
         assert_eq!(
-            recv.reset(42, 10),
+            recv.reset(42, 10, u64::MAX),
             Ok(RecvBufResetReturn {
                 max_data_delta: 0,
                 consumed_flowcontrol: 0,
             })
         );
+    }
+
+    #[rstest]
+    fn reset_after_fin_preserves_single_terminal_notification(
+        #[values(false, true)] drain: bool,
+    ) {
+        let mut recv = RecvBuf::new(20, 20, DEFAULT_STREAM_WINDOW);
+        assert_eq!(recv.write(RangeBuf::from(b"tail", 6, true)), Ok(()));
+        assert!(!recv.ready());
+        if drain {
+            assert_eq!(recv.shutdown(), Ok(10));
+        }
+        let expected_consumed = if drain { 0 } else { 10 };
+        assert_eq!(
+            recv.reset(42, 10, 0),
+            Ok(RecvBufResetReturn {
+                max_data_delta: 0,
+                consumed_flowcontrol: expected_consumed,
+            })
+        );
+        assert!(recv.is_fin());
+        assert_eq!(recv.reset(43, 10, 0), Ok(RecvBufResetReturn::zero()));
+        assert_eq!(recv.ready(), !drain);
+        if !drain {
+            assert_eq!(recv.emit(&mut [0; 10]), Err(Error::StreamReset(42)));
+        }
+        assert_eq!(recv.emit(&mut [0; 10]), Err(Error::Done));
+        assert!(!recv.ready());
+    }
+
+    #[test]
+    fn rejected_reset_leaves_receive_state_unchanged() {
+        let mut recv = RecvBuf::new(20, 20, DEFAULT_STREAM_WINDOW);
+        assert_eq!(recv.write(RangeBuf::from(b"hello", 0, false)), Ok(()));
+        for (size, credit) in [(21, u64::MAX), (10, 4)] {
+            assert_eq!(recv.reset(42, size, credit), Err(Error::FlowControl));
+            assert_eq!(recv.max_off(), 5);
+            assert_eq!(recv.off_front(), 0);
+            assert!(recv.ready());
+            assert!(!recv.is_fin());
+            assert!(recv.error.is_none());
+        }
+        let mut data = [0; 5];
+        assert_eq!(recv.emit(&mut data), Ok((5, false)));
+        assert_eq!(&data, b"hello");
     }
 
     #[rstest]

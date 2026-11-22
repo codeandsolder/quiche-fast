@@ -1376,6 +1376,13 @@ impl StreamsBlockedState {
     }
 }
 
+/// Which side of a stream an incoming frame addresses.
+#[derive(Clone, Copy)]
+enum PeerStreamSide {
+    Sending,
+    Receiving,
+}
+
 /// Origin of an explicit connection close.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CloseOrigin {
@@ -8878,11 +8885,18 @@ impl<F: BufFactory> Connection<F> {
         )
     }
 
-    /// Gets or creates a stream referenced by a received frame.
+    /// Validate the stream direction and opening state for an incoming frame.
+    /// Collected streams can be referenced by late retransmissions; ignore
+    /// those without recreating their state.
     fn get_or_create_stream_for_received_frame(
-        &mut self, id: u64,
-    ) -> Result<&mut stream::Stream<F>> {
+        &mut self, id: u64, side: PeerStreamSide,
+    ) -> Result<Option<&mut stream::Stream<F>>> {
         let local = stream::is_local(id, self.is_server);
+        if !stream::is_bidi(id) &&
+            (local == matches!(side, PeerStreamSide::Sending))
+        {
+            return Err(Error::InvalidStreamState(id));
+        }
 
         // Opening a higher-numbered stream also opens lower streams of the
         // same type, even if they do not have Stream objects yet.
@@ -8890,7 +8904,11 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::InvalidStreamState(id));
         }
 
-        self.get_or_create_stream(id, local)
+        match self.get_or_create_stream(id, local) {
+            Ok(stream) => Ok(Some(stream)),
+            Err(Error::Done) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Processes a DATAGRAM payload parsed directly from the decrypted
@@ -9015,33 +9033,14 @@ impl<F: BufFactory> Connection<F> {
                 error_code,
                 final_size,
             } => {
-                // Peer can't send on our unidirectional streams.
-                if !stream::is_bidi(stream_id) &&
-                    stream::is_local(stream_id, self.is_server)
-                {
-                    return Err(Error::InvalidStreamState(stream_id));
-                }
-
                 let max_rx_data_left = self.max_rx_data() - self.rx_data;
 
-                // Get existing stream or create a new one, but if the stream
-                // has already been closed and collected, ignore the frame.
-                //
-                // This can happen if e.g. an ACK frame is lost, and the peer
-                // retransmits another frame before it realizes that the stream
-                // is gone.
-                //
-                // Note that it makes it impossible to check if the frame is
-                // illegal, since we have no state, but since we ignore the
-                // frame, it should be fine.
-                let stream = match self
-                    .get_or_create_stream_for_received_frame(stream_id)
-                {
-                    Ok(v) => v,
-
-                    Err(Error::Done) => return Ok(()),
-
-                    Err(e) => return Err(e),
+                let Some(stream) = self.get_or_create_stream_for_received_frame(
+                    stream_id,
+                    PeerStreamSide::Sending,
+                )?
+                else {
+                    return Ok(());
                 };
 
                 let was_readable = stream.is_readable();
@@ -9050,11 +9049,11 @@ impl<F: BufFactory> Connection<F> {
                 let stream::RecvBufResetReturn {
                     max_data_delta,
                     consumed_flowcontrol,
-                } = stream.recv.reset(error_code, final_size)?;
-
-                if max_data_delta > max_rx_data_left {
-                    return Err(Error::FlowControl);
-                }
+                } = stream.recv.reset(
+                    error_code,
+                    final_size,
+                    max_rx_data_left,
+                )?;
 
                 // The receive side can complete without the stream becoming
                 // readable, so no later read would collect it.
@@ -9082,31 +9081,12 @@ impl<F: BufFactory> Connection<F> {
                 stream_id,
                 error_code,
             } => {
-                // STOP_SENDING on a receive-only stream is a fatal error.
-                if !stream::is_local(stream_id, self.is_server) &&
-                    !stream::is_bidi(stream_id)
-                {
-                    return Err(Error::InvalidStreamState(stream_id));
-                }
-
-                // Get existing stream or create a new one, but if the stream
-                // has already been closed and collected, ignore the frame.
-                //
-                // This can happen if e.g. an ACK frame is lost, and the peer
-                // retransmits another frame before it realizes that the stream
-                // is gone.
-                //
-                // Note that it makes it impossible to check if the frame is
-                // illegal, since we have no state, but since we ignore the
-                // frame, it should be fine.
-                let stream = match self
-                    .get_or_create_stream_for_received_frame(stream_id)
-                {
-                    Ok(v) => v,
-
-                    Err(Error::Done) => return Ok(()),
-
-                    Err(e) => return Err(e),
+                let Some(stream) = self.get_or_create_stream_for_received_frame(
+                    stream_id,
+                    PeerStreamSide::Receiving,
+                )?
+                else {
+                    return Ok(());
                 };
 
                 let priority_key = Arc::clone(stream.priority_key());
@@ -9198,33 +9178,14 @@ impl<F: BufFactory> Connection<F> {
                 },
 
             frame::Frame::Stream { stream_id, data } => {
-                // Peer can't send on our unidirectional streams.
-                if !stream::is_bidi(stream_id) &&
-                    stream::is_local(stream_id, self.is_server)
-                {
-                    return Err(Error::InvalidStreamState(stream_id));
-                }
-
                 let max_rx_data_left = self.max_rx_data() - self.rx_data;
 
-                // Get existing stream or create a new one, but if the stream
-                // has already been closed and collected, ignore the frame.
-                //
-                // This can happen if e.g. an ACK frame is lost, and the peer
-                // retransmits another frame before it realizes that the stream
-                // is gone.
-                //
-                // Note that it makes it impossible to check if the frame is
-                // illegal, since we have no state, but since we ignore the
-                // frame, it should be fine.
-                let stream = match self
-                    .get_or_create_stream_for_received_frame(stream_id)
-                {
-                    Ok(v) => v,
-
-                    Err(Error::Done) => return Ok(()),
-
-                    Err(e) => return Err(e),
+                let Some(stream) = self.get_or_create_stream_for_received_frame(
+                    stream_id,
+                    PeerStreamSide::Sending,
+                )?
+                else {
+                    return Ok(());
                 };
 
                 // Check for the connection-level flow control limit.
@@ -9273,31 +9234,12 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::MaxStreamData { stream_id, max } => {
-                // Peer can't receive on its own unidirectional streams.
-                if !stream::is_bidi(stream_id) &&
-                    !stream::is_local(stream_id, self.is_server)
-                {
-                    return Err(Error::InvalidStreamState(stream_id));
-                }
-
-                // Get existing stream or create a new one, but if the stream
-                // has already been closed and collected, ignore the frame.
-                //
-                // This can happen if e.g. an ACK frame is lost, and the peer
-                // retransmits another frame before it realizes that the stream
-                // is gone.
-                //
-                // Note that it makes it impossible to check if the frame is
-                // illegal, since we have no state, but since we ignore the
-                // frame, it should be fine.
-                let stream = match self
-                    .get_or_create_stream_for_received_frame(stream_id)
-                {
-                    Ok(v) => v,
-
-                    Err(Error::Done) => return Ok(()),
-
-                    Err(e) => return Err(e),
+                let Some(stream) = self.get_or_create_stream_for_received_frame(
+                    stream_id,
+                    PeerStreamSide::Receiving,
+                )?
+                else {
+                    return Ok(());
                 };
 
                 let was_flushable = stream.is_flushable();
@@ -9343,9 +9285,19 @@ impl<F: BufFactory> Connection<F> {
                     self.data_blocked_recv_count.saturating_add(1);
             },
 
-            frame::Frame::StreamDataBlocked { .. } => {
-                self.stream_data_blocked_recv_count =
-                    self.stream_data_blocked_recv_count.saturating_add(1);
+            frame::Frame::StreamDataBlocked { stream_id, .. } => {
+                // A blocked sender references its sending side and can open
+                // a stream before the first byte of STREAM data arrives.
+                if self
+                    .get_or_create_stream_for_received_frame(
+                        stream_id,
+                        PeerStreamSide::Sending,
+                    )?
+                    .is_some()
+                {
+                    self.stream_data_blocked_recv_count =
+                        self.stream_data_blocked_recv_count.saturating_add(1);
+                }
             },
 
             frame::Frame::StreamsBlockedBidi { limit } => {
