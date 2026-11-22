@@ -172,6 +172,36 @@ macro_rules! ffi_mut {
     }};
 }
 
+/// Borrow writable C output storage without requiring an initialized value.
+///
+/// # Safety
+/// A non-null, aligned pointer must identify writable storage for one T with
+/// exclusive access for the returned lifetime.
+pub(super) unsafe fn ffi_ptr_out<'a, T>(
+    ptr: *mut T,
+) -> Option<&'a mut MaybeUninit<T>> {
+    // SAFETY: MaybeUninit has the same layout as T and permits uninitialized
+    // storage. The caller provides the exclusive writable allocation.
+    unsafe { ffi_ptr_mut(ptr.cast::<MaybeUninit<T>>()) }
+}
+
+macro_rules! ffi_out {
+    ($ptr:expr) => {{
+        // SAFETY: a C output parameter must be exclusively writable.
+        match unsafe { $crate::ffi::ffi_ptr_out($ptr) } {
+            Some(value) => value,
+            None => return,
+        }
+    }};
+    ($ptr:expr, $ret:expr) => {{
+        // SAFETY: a C output parameter must be exclusively writable.
+        match unsafe { $crate::ffi::ffi_ptr_out($ptr) } {
+            Some(value) => value,
+            None => return $ret,
+        }
+    }};
+}
+
 fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
     if len == 0 {
         return true;
@@ -264,6 +294,7 @@ macro_rules! ffi_slice_mut {
 }
 
 pub(super) use ffi_mut;
+pub(super) use ffi_out;
 pub(super) use ffi_ref;
 pub(super) use ffi_slice;
 pub(super) use ffi_slice_mut;
@@ -688,9 +719,8 @@ pub extern "C" fn quiche_config_set_stateless_reset_token(
     let config = ffi_mut!(config);
 
     let reset_token = ffi_slice!(v, 16);
-    let reset_token = match reset_token.try_into() {
-        Ok(rt) => rt,
-        Err(_) => unreachable!(),
+    let Ok(reset_token) = reset_token.try_into() else {
+        return;
     };
     let reset_token = u128::from_be_bytes(reset_token);
     config.set_stateless_reset_token(Some(reset_token));
@@ -725,8 +755,8 @@ pub extern "C" fn quiche_header_info(
     scid: *mut u8, scid_len: *mut size_t, dcid: *mut u8, dcid_len: *mut size_t,
     token: *mut u8, token_len: *mut size_t,
 ) -> c_int {
-    let version = ffi_mut!(version, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let ty = ffi_mut!(ty, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let version = ffi_out!(version, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let ty = ffi_out!(ty, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let scid_len = ffi_mut!(scid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let dcid_len = ffi_mut!(dcid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let token_len = ffi_mut!(token_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
@@ -737,16 +767,16 @@ pub extern "C" fn quiche_header_info(
         Err(e) => return c_int::from(e.to_c()),
     };
 
-    *version = hdr.version;
+    version.write(hdr.version);
 
-    *ty = match hdr.ty {
+    ty.write(match hdr.ty {
         Type::Initial => 1,
         Type::Retry => 2,
         Type::Handshake => 3,
         Type::ZeroRTT => 4,
         Type::Short => 5,
         Type::VersionNegotiation => 6,
-    };
+    });
 
     if *scid_len < hdr.scid.len() {
         return -1;
@@ -1293,9 +1323,9 @@ pub extern "C" fn quiche_conn_stream_recv(
     fin: *mut bool, out_error_code: *mut u64,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let fin = ffi_mut!(fin, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+    let fin = ffi_out!(fin, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let out_error_code =
-        ffi_mut!(out_error_code, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_out!(out_error_code, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
@@ -1309,15 +1339,16 @@ pub extern "C" fn quiche_conn_stream_recv(
 
         Err(e) => {
             match e {
-                Error::StreamReset(error) => *out_error_code = error,
-                Error::StreamStopped(error) => *out_error_code = error,
+                Error::StreamReset(error) | Error::StreamStopped(error) => {
+                    out_error_code.write(error);
+                },
                 _ => {},
             }
             return ssize_t::from(e.to_c());
         },
     };
 
-    *fin = out_fin;
+    fin.write(out_fin);
 
     ssize_t::try_from(out_len).unwrap_or(ssize_t::MAX)
 }
@@ -1329,7 +1360,7 @@ pub extern "C" fn quiche_conn_stream_send(
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let out_error_code =
-        ffi_mut!(out_error_code, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_out!(out_error_code, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_ssize_len(buf_len) {
         return e;
@@ -1342,8 +1373,9 @@ pub extern "C" fn quiche_conn_stream_send(
 
         Err(e) => {
             match e {
-                Error::StreamReset(error) => *out_error_code = error,
-                Error::StreamStopped(error) => *out_error_code = error,
+                Error::StreamReset(error) | Error::StreamStopped(error) => {
+                    out_error_code.write(error);
+                },
                 _ => {},
             }
             ssize_t::from(e.to_c())
@@ -1525,18 +1557,23 @@ pub extern "C" fn quiche_conn_on_timeout(conn: *mut Connection) {
     conn.on_timeout()
 }
 
+fn write_borrowed_bytes(
+    out: &mut MaybeUninit<*const u8>, out_len: &mut MaybeUninit<size_t>,
+    bytes: Option<&[u8]>,
+) {
+    let (ptr, len) = bytes.map_or((ptr::null(), 0), |v| (v.as_ptr(), v.len()));
+    out.write(ptr);
+    out_len.write(len);
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_conn_trace_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    let trace_id = conn.trace_id();
-
-    *out = trace_id.as_ptr();
-    *out_len = trace_id.len();
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, Some(conn.trace_id().as_bytes()));
 }
 
 /// An iterator over connection ids.
@@ -1564,13 +1601,11 @@ pub extern "C" fn quiche_connection_id_iter_next(
     iter: *mut ConnectionIdIter, out: *mut *const u8, out_len: *mut size_t,
 ) -> bool {
     let iter = ffi_mut!(iter, false);
-    let out = ffi_mut!(out, false);
-    let out_len = ffi_mut!(out_len, false);
+    let out = ffi_out!(out, false);
+    let out_len = ffi_out!(out_len, false);
 
     if let Some(conn_id) = iter.cids.get(iter.index) {
-        let id = conn_id.as_ref();
-        *out = id.as_ptr();
-        *out_len = id.len();
+        write_borrowed_bytes(out, out_len, Some(conn_id.as_ref()));
         iter.index += 1;
         return true;
     }
@@ -1590,13 +1625,9 @@ pub extern "C" fn quiche_conn_source_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    let conn_id = conn.source_id();
-    let id = conn_id.as_ref();
-    *out = id.as_ptr();
-    *out_len = id.len();
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, Some(conn.source_id().as_ref()));
 }
 
 #[no_mangle]
@@ -1604,14 +1635,9 @@ pub extern "C" fn quiche_conn_destination_id(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    let conn_id = conn.destination_id();
-    let id = conn_id.as_ref();
-
-    *out = id.as_ptr();
-    *out_len = id.len();
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, Some(conn.destination_id().as_ref()));
 }
 
 #[no_mangle]
@@ -1619,13 +1645,9 @@ pub extern "C" fn quiche_conn_application_proto(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    let proto = conn.application_proto();
-
-    *out = proto.as_ptr();
-    *out_len = proto.len();
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, Some(conn.application_proto()));
 }
 
 #[no_mangle]
@@ -1633,17 +1655,9 @@ pub extern "C" fn quiche_conn_peer_cert(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    match conn.peer_cert() {
-        Some(peer_cert) => {
-            *out = peer_cert.as_ptr();
-            *out_len = peer_cert.len();
-        },
-
-        None => *out_len = 0,
-    }
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, conn.peer_cert());
 }
 
 #[no_mangle]
@@ -1651,17 +1665,9 @@ pub extern "C" fn quiche_conn_session(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    match conn.session() {
-        Some(session) => {
-            *out = session.as_ptr();
-            *out_len = session.len();
-        },
-
-        None => *out_len = 0,
-    }
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, conn.session());
 }
 
 #[no_mangle]
@@ -1669,17 +1675,9 @@ pub extern "C" fn quiche_conn_server_name(
     conn: *const Connection, out: *mut *const u8, out_len: *mut size_t,
 ) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out);
-    let out_len = ffi_mut!(out_len);
-
-    match conn.server_name() {
-        Some(server_name) => {
-            *out = server_name.as_ptr();
-            *out_len = server_name.len();
-        },
-
-        None => *out_len = 0,
-    }
+    let out = ffi_out!(out);
+    let out_len = ffi_out!(out_len);
+    write_borrowed_bytes(out, out_len, conn.server_name().map(str::as_bytes));
 }
 
 #[no_mangle]
@@ -1724,29 +1722,36 @@ pub extern "C" fn quiche_conn_is_timed_out(conn: *const Connection) -> bool {
     conn.is_timed_out()
 }
 
+fn write_connection_error(
+    error: Option<&ConnectionError>, is_app: *mut bool, error_code: *mut u64,
+    reason: *mut *const u8, reason_len: *mut size_t,
+) -> bool {
+    let Some(error) = error else {
+        return false;
+    };
+    let is_app = ffi_out!(is_app, false);
+    let error_code = ffi_out!(error_code, false);
+    let reason = ffi_out!(reason, false);
+    let reason_len = ffi_out!(reason_len, false);
+    is_app.write(error.is_app);
+    error_code.write(error.error_code);
+    write_borrowed_bytes(reason, reason_len, Some(&error.reason));
+    true
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_conn_peer_error(
     conn: *const Connection, is_app: *mut bool, error_code: *mut u64,
     reason: *mut *const u8, reason_len: *mut size_t,
 ) -> bool {
     let conn = ffi_ref!(conn, false);
-    let is_app = ffi_mut!(is_app, false);
-    let error_code = ffi_mut!(error_code, false);
-    let reason = ffi_mut!(reason, false);
-    let reason_len = ffi_mut!(reason_len, false);
-
-    match &conn.peer_error {
-        Some(conn_err) => {
-            *is_app = conn_err.is_app;
-            *error_code = conn_err.error_code;
-            *reason = conn_err.reason.as_ptr();
-            *reason_len = conn_err.reason.len();
-
-            true
-        },
-
-        None => false,
-    }
+    write_connection_error(
+        conn.peer_error.as_ref(),
+        is_app,
+        error_code,
+        reason,
+        reason_len,
+    )
 }
 
 #[no_mangle]
@@ -1755,23 +1760,13 @@ pub extern "C" fn quiche_conn_local_error(
     reason: *mut *const u8, reason_len: *mut size_t,
 ) -> bool {
     let conn = ffi_ref!(conn, false);
-    let is_app = ffi_mut!(is_app, false);
-    let error_code = ffi_mut!(error_code, false);
-    let reason = ffi_mut!(reason, false);
-    let reason_len = ffi_mut!(reason_len, false);
-
-    match &conn.local_error {
-        Some(conn_err) => {
-            *is_app = conn_err.is_app;
-            *error_code = conn_err.error_code;
-            *reason = conn_err.reason.as_ptr();
-            *reason_len = conn_err.reason.len();
-
-            true
-        },
-
-        None => false,
-    }
+    write_connection_error(
+        conn.local_error.as_ref(),
+        is_app,
+        error_code,
+        reason,
+        reason_len,
+    )
 }
 
 #[no_mangle]
@@ -1779,10 +1774,10 @@ pub extern "C" fn quiche_stream_iter_next(
     iter: *mut StreamIter, stream_id: *mut u64,
 ) -> bool {
     let iter = ffi_mut!(iter, false);
-    let stream_id = ffi_mut!(stream_id, false);
+    let stream_id = ffi_out!(stream_id, false);
 
     if let Some(v) = iter.next() {
-        *stream_id = v;
+        stream_id.write(v);
         return true;
     }
 
@@ -1846,7 +1841,7 @@ pub struct TransportParams {
 #[no_mangle]
 pub extern "C" fn quiche_conn_stats(conn: *const Connection, out: *mut Stats) {
     let conn = ffi_ref!(conn);
-    let out = ffi_mut!(out.cast::<MaybeUninit<Stats>>());
+    let out = ffi_out!(out);
 
     let stats = conn.stats();
 
@@ -1889,7 +1884,7 @@ pub extern "C" fn quiche_conn_peer_transport_params(
     conn: *const Connection, out: *mut TransportParams,
 ) -> bool {
     let conn = ffi_ref!(conn, false);
-    let out = ffi_mut!(out.cast::<MaybeUninit<TransportParams>>(), false);
+    let out = ffi_out!(out, false);
 
     let Some(tps) = conn.peer_transport_params() else {
         return false;
@@ -1961,10 +1956,7 @@ pub extern "C" fn quiche_conn_path_stats(
     conn: *const Connection, idx: usize, out: *mut PathStats,
 ) -> c_int {
     let conn = ffi_ref!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let out = ffi_mut!(
-        out.cast::<MaybeUninit<PathStats>>(),
-        c_int::from(FFI_ERR_INVALID_ARGUMENT)
-    );
+    let out = ffi_out!(out, c_int::from(FFI_ERR_INVALID_ARGUMENT));
 
     let stats = match conn.path_stats().nth(idx) {
         Some(p) => p,
@@ -2239,22 +2231,21 @@ pub extern "C" fn quiche_conn_new_scid(
     reset_token: *const u8, retire_if_needed: bool, scid_seq: *mut u64,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let scid_seq = ffi_mut!(scid_seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let scid_seq = ffi_out!(scid_seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
 
     let scid = ffi_slice!(scid, scid_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let scid = ConnectionId::from_ref(scid);
 
     let reset_token =
         ffi_slice!(reset_token, 16, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let reset_token = match reset_token.try_into() {
-        Ok(rt) => rt,
-        Err(_) => unreachable!(),
+    let Ok(reset_token) = reset_token.try_into() else {
+        return c_int::from(FFI_ERR_INVALID_ARGUMENT);
     };
     let reset_token = u128::from_be_bytes(reset_token);
 
     match conn.new_scid(&scid, reset_token, retire_if_needed) {
         Ok(c) => {
-            *scid_seq = c;
+            scid_seq.write(c);
             0
         },
         Err(e) => c_int::from(e.to_c()),
@@ -2661,12 +2652,14 @@ pub extern "C" fn quiche_put_varint(
 pub extern "C" fn quiche_get_varint(
     buf: *const u8, buf_len: size_t, val: *mut u64,
 ) -> ssize_t {
-    let val = ffi_mut!(val, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+    let val = ffi_out!(val, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let buf = ffi_slice!(buf, buf_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     let mut b = octets::Octets::with_slice(buf);
     match b.get_varint() {
-        Ok(v) => *val = v,
+        Ok(v) => {
+            val.write(v);
+        },
 
         Err(e) => {
             let err: Error = e.into();
@@ -3088,6 +3081,54 @@ mod tests {
         // SAFETY: the successful call initialized all fields.
         let path = unsafe { path.assume_init() };
         assert_eq!(path.pmtu, pipe.client.max_send_udp_payload_size());
+    }
+
+    #[test]
+    fn borrowed_optional_outputs_are_initialized_when_absent() {
+        let pipe = test_utils::Pipe::new("cubic").unwrap();
+        let mut data = MaybeUninit::<*const u8>::uninit();
+        let mut len = MaybeUninit::<size_t>::uninit();
+        quiche_conn_peer_cert(&pipe.client, data.as_mut_ptr(), len.as_mut_ptr());
+        // SAFETY: the getter writes both outputs even for absence.
+        assert!(unsafe { data.assume_init() }.is_null());
+        assert_eq!(unsafe { len.assume_init() }, 0);
+        quiche_conn_trace_id(&pipe.client, data.as_mut_ptr(), len.as_mut_ptr());
+        // SAFETY: the getter writes both outputs with a live borrowed view.
+        let (data, len) = unsafe { (data.assume_init(), len.assume_init()) };
+        assert_eq!(
+            unsafe { slice::from_raw_parts(data, len) },
+            pipe.client.trace_id().as_bytes()
+        );
+    }
+
+    #[test]
+    fn connection_error_outputs_accept_uninitialized_storage() {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        pipe.handshake().unwrap();
+        pipe.client.close(true, 42, b"reason").unwrap();
+        let mut app = MaybeUninit::<bool>::uninit();
+        let mut code = MaybeUninit::<u64>::uninit();
+        let mut reason = MaybeUninit::<*const u8>::uninit();
+        let mut len = MaybeUninit::<size_t>::uninit();
+        assert!(quiche_conn_local_error(
+            &pipe.client,
+            app.as_mut_ptr(),
+            code.as_mut_ptr(),
+            reason.as_mut_ptr(),
+            len.as_mut_ptr()
+        ));
+        // SAFETY: true indicates the error output was completely written.
+        let (app, code, reason, len) = unsafe {
+            (
+                app.assume_init(),
+                code.assume_init(),
+                reason.assume_init(),
+                len.assume_init(),
+            )
+        };
+        assert!(app);
+        assert_eq!(code, 42);
+        assert_eq!(unsafe { slice::from_raw_parts(reason, len) }, b"reason");
     }
 
     #[test]
