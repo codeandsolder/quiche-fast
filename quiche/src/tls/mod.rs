@@ -42,7 +42,6 @@ use libc::c_void;
 use crate::Error;
 use crate::Result;
 
-use crate::Connection;
 use crate::ConnectionError;
 
 use crate::crypto;
@@ -157,8 +156,19 @@ enum ssl_private_key_result_t {
 }
 
 /// `BoringSSL` `ex_data` index for quiche connections.
-pub static QUICHE_EX_DATA_INDEX: LazyLock<c_int> = LazyLock::new(|| unsafe {
-    SSL_get_ex_new_index(0, ptr::null(), ptr::null(), ptr::null(), ptr::null())
+static QUICHE_EX_DATA_INDEX: LazyLock<Option<c_int>> = LazyLock::new(|| {
+    // SAFETY: Allocate one process-wide SSL ex_data index. There are no
+    // allocation, duplication or destruction callbacks for this borrowed slot.
+    let index = unsafe {
+        SSL_get_ex_new_index(
+            0,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+        )
+    };
+    (index >= 0).then_some(index)
 });
 
 pub struct Context(NonNull<SSL_CTX>);
@@ -407,6 +417,11 @@ impl Drop for Context {
     }
 }
 
+enum HandshakeOperation {
+    Handshake,
+    PostHandshake,
+}
+
 pub struct Handshake {
     ptr: NonNull<SSL>,
     /// `SSL_process_quic_post_handshake` should be called when whenever
@@ -474,13 +489,6 @@ impl Handshake {
         }
     }
 
-    pub fn set_ex_data<T>(&mut self, idx: c_int, data: *const T) -> Result<()> {
-        map_result(unsafe {
-            let ptr = data as *mut c_void;
-            SSL_set_ex_data(self.as_mut_ptr(), idx, ptr)
-        })
-    }
-
     pub fn set_quic_method(&mut self) -> Result<()> {
         map_result(unsafe {
             SSL_set_quic_method(self.as_mut_ptr(), &QUICHE_STREAM_METHOD)
@@ -509,8 +517,14 @@ impl Handshake {
             unsafe { SSL_set_tlsext_host_name(self.as_mut_ptr(), cstr.as_ptr()) };
         self.map_result_ssl(rc)?;
 
+        // SAFETY: the SSL object is live and exclusively borrowed.
         let param = unsafe { SSL_get0_param(self.as_mut_ptr()) };
+        if param.is_null() {
+            return Err(Error::TlsFail);
+        }
 
+        // SAFETY: param is borrowed from self, and cstr is valid for the
+        // specified length and the duration of the call.
         map_result(unsafe {
             X509_VERIFY_PARAM_set1_host(param, cstr.as_ptr(), name.len())
         })
@@ -542,10 +556,11 @@ impl Handshake {
             SSL_get_peer_quic_transport_params(self.as_ptr(), &mut ptr, &mut len);
         }
 
-        if len == 0 {
-            return &mut [];
+        if ptr.is_null() || len == 0 || len > isize::MAX as usize {
+            return &[];
         }
 
+        // SAFETY: BoringSSL supplies len bytes valid for the SSL lifetime.
         unsafe { slice::from_raw_parts(ptr, len) }
     }
 
@@ -557,11 +572,14 @@ impl Handshake {
             SSL_get0_alpn_selected(self.as_ptr(), &mut ptr, &mut len);
         }
 
-        if len == 0 {
-            return &mut [];
+        let len = len as usize;
+        if ptr.is_null() || len == 0 || len > isize::MAX as usize {
+            return &[];
         }
 
-        unsafe { slice::from_raw_parts(ptr, len as usize) }
+        // SAFETY: The selected ALPN name belongs to the SSL object, which
+        // cannot be changed during this shared borrow.
+        unsafe { slice::from_raw_parts(ptr, len) }
     }
 
     pub fn server_name(&self) -> Option<&str> {
@@ -597,25 +615,55 @@ impl Handshake {
     }
 
     pub fn do_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
-        self.set_ex_data(*QUICHE_EX_DATA_INDEX, ex_data)?;
-        let rc = unsafe { SSL_do_handshake(self.as_mut_ptr()) };
-        self.set_ex_data::<Connection>(*QUICHE_EX_DATA_INDEX, ptr::null())?;
-
-        self.set_transport_error(ex_data, rc);
-        self.map_result_ssl(rc)
+        self.run_with_ex_data(ex_data, HandshakeOperation::Handshake)
     }
 
     pub fn process_post_handshake(&mut self, ex_data: &mut ExData) -> Result<()> {
-        // If SSL_provide_quic_data hasn't been called since we last called
-        // SSL_process_quic_post_handshake, then there's nothing to do.
         if !self.provided_data_outstanding {
             return Ok(());
         }
         self.provided_data_outstanding = false;
+        self.run_with_ex_data(ex_data, HandshakeOperation::PostHandshake)
+    }
 
-        self.set_ex_data(*QUICHE_EX_DATA_INDEX, ex_data)?;
-        let rc = unsafe { SSL_process_quic_post_handshake(self.as_mut_ptr()) };
-        self.set_ex_data::<Connection>(*QUICHE_EX_DATA_INDEX, ptr::null())?;
+    fn run_with_ex_data(
+        &mut self, ex_data: &mut ExData, operation: HandshakeOperation,
+    ) -> Result<()> {
+        let index = (*QUICHE_EX_DATA_INDEX).ok_or(Error::TlsFail)?;
+
+        // SAFETY: self owns a live SSL object. The reserved index may only
+        // contain a pointer installed by this method while a TLS operation
+        // is in progress. Reject recursive installation.
+        if !unsafe { SSL_get_ex_data(self.as_ptr(), index) }.is_null() {
+            return Err(Error::TlsFail);
+        }
+
+        let data = ptr::from_mut(ex_data).cast::<c_void>();
+        // SAFETY: ex_data remains exclusively borrowed until the synchronous
+        // TLS call finishes. The slot has no C destructor and is cleared
+        // before ex_data is used again or this method returns.
+        map_result(unsafe { SSL_set_ex_data(self.as_mut_ptr(), index, data) })?;
+
+        // SAFETY: The live SSL is exclusively borrowed. Both operations
+        // synchronously invoke callbacks with the installed ExData pointer.
+        let rc = unsafe {
+            match operation {
+                HandshakeOperation::Handshake =>
+                    SSL_do_handshake(self.as_mut_ptr()),
+                HandshakeOperation::PostHandshake =>
+                    SSL_process_quic_post_handshake(self.as_mut_ptr()),
+            }
+        };
+
+        // SAFETY: The slot already exists, so BoringSSL replaces its value
+        // without allocating. It must not retain the borrowed pointer after
+        // the operation ends. If this invariant ever fails, abort rather
+        // than return with a dangling pointer in the SSL object.
+        if unsafe { SSL_set_ex_data(self.as_mut_ptr(), index, ptr::null_mut()) } !=
+            1
+        {
+            std::process::abort();
+        }
 
         self.set_transport_error(ex_data, rc);
         self.map_result_ssl(rc)
@@ -626,10 +674,12 @@ impl Handshake {
     }
 
     pub fn cipher(&self) -> Option<crypto::Algorithm> {
-        let cipher =
-            map_result_ptr(unsafe { SSL_get_current_cipher(self.as_ptr()) });
-
-        get_cipher_from_ptr(cipher.ok()?).ok()
+        // SAFETY: self owns a live SSL object. The returned cipher is a
+        // static descriptor (or null if one has not been selected).
+        let cipher = unsafe { SSL_get_current_cipher(self.as_ptr()) };
+        // SAFETY: the pointer came from SSL_get_current_cipher; null is
+        // checked by get_cipher_from_ptr.
+        unsafe { get_cipher_from_ptr(cipher) }.ok()
     }
 
     #[cfg(test)]
@@ -782,31 +832,46 @@ pub struct ExData<'a> {
 }
 
 impl<'a> ExData<'a> {
-    fn from_ssl_ptr(ptr: *const SSL) -> Option<&'a mut Self> {
-        get_ex_data_from_ptr::<ExData>(ptr, *QUICHE_EX_DATA_INDEX)
+    /// # Safety
+    /// A non-null SSL pointer must be live. The returned mutable borrow is
+    /// valid only for the current synchronous TLS callback, and no other
+    /// callback or Rust code may access the installed ExData concurrently.
+    unsafe fn from_ssl_ptr<'callback>(
+        ptr: *const SSL,
+    ) -> Option<&'callback mut Self> {
+        let index = (*QUICHE_EX_DATA_INDEX)?;
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: The caller guarantees a live SSL and exclusive callback
+        // access. run_with_ex_data installs only ExData at this index, and
+        // clears the slot before the borrowed value goes out of scope.
+        unsafe { SSL_get_ex_data(ptr, index).cast::<Self>().as_mut() }
     }
 
     #[cfg(feature = "boringssl-boring-crate")]
     pub fn from_ssl_ref(ssl: &mut boring::ssl::SslRef) -> Option<&mut Self> {
         use boring::ex_data::Index;
 
-        // SAFETY: the QUICHE_EX_DATA_INDEX index is guaranteed to be created,
-        // and the associated data is always `ExData`.
+        let index = (*QUICHE_EX_DATA_INDEX)?;
+        // SAFETY: The reserved index is private to this module and only
+        // run_with_ex_data installs a value, always of type ExData.
         let idx: Index<boring::ssl::Ssl, ExData> =
-            unsafe { Index::from_raw(*QUICHE_EX_DATA_INDEX) };
+            unsafe { Index::from_raw(index) };
 
         ssl.ex_data_mut(idx)
     }
 }
 
-fn get_ex_data_from_ptr<'a, T>(ptr: *const SSL, idx: c_int) -> Option<&'a mut T> {
-    unsafe {
-        let data = SSL_get_ex_data(ptr, idx) as *mut T;
-        data.as_mut()
+/// # Safety
+/// A non-null cipher must point to a live BoringSSL cipher descriptor.
+unsafe fn get_cipher_from_ptr(
+    cipher: *const SSL_CIPHER,
+) -> Result<crypto::Algorithm> {
+    if cipher.is_null() {
+        return Err(Error::TlsFail);
     }
-}
-
-fn get_cipher_from_ptr(cipher: *const SSL_CIPHER) -> Result<crypto::Algorithm> {
+    // SAFETY: The caller guarantees the validity of the non-null pointer.
     let cipher_id = unsafe { SSL_CIPHER_get_id(cipher) };
 
     let alg = match cipher_id {
@@ -819,103 +884,87 @@ fn get_cipher_from_ptr(cipher: *const SSL_CIPHER) -> Result<crypto::Algorithm> {
     Ok(alg)
 }
 
-extern "C" fn set_read_secret(
+unsafe extern "C" fn set_read_secret(
     ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
     secret: *const u8, secret_len: usize,
 ) -> c_int {
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
-        Some(v) => v,
-
-        None => return 0,
-    };
-
-    trace!("{} set read secret lvl={:?}", ex_data.trace_id, level);
-
-    let space = match level {
-        crypto::Level::Initial => &mut ex_data.crypto_ctx[packet::Epoch::Initial],
-        crypto::Level::ZeroRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-        crypto::Level::Handshake =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
-        crypto::Level::OneRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-    };
-
-    let aead = match get_cipher_from_ptr(cipher) {
-        Ok(v) => v,
-
-        Err(_) => return 0,
-    };
-
-    // 0-RTT read secrets are present only on the server.
-    if level != crypto::Level::ZeroRTT || ex_data.is_server {
-        let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-
-        let open = match crypto::Open::from_secret(aead, secret) {
-            Ok(v) => v,
-
-            Err(_) => return 0,
-        };
-
-        if level == crypto::Level::ZeroRTT {
-            space.crypto_0rtt_open = Some(open);
-            return 1;
-        }
-
-        space.crypto_open = Some(open);
-    }
-
-    1
+    // SAFETY: BoringSSL supplies live callback arguments.
+    unsafe { install_secret::<true>(ssl, level, cipher, secret, secret_len) }
 }
 
-extern "C" fn set_write_secret(
+unsafe extern "C" fn set_write_secret(
     ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
     secret: *const u8, secret_len: usize,
 ) -> c_int {
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
-        Some(v) => v,
+    // SAFETY: BoringSSL supplies live callback arguments.
+    unsafe { install_secret::<false>(ssl, level, cipher, secret, secret_len) }
+}
 
-        None => return 0,
+/// # Safety
+/// Called synchronously by BoringSSL with a live SSL, valid cipher descriptor
+/// and a secret buffer readable for secret_len bytes.
+unsafe fn install_secret<const READ: bool>(
+    ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
+    secret: *const u8, secret_len: usize,
+) -> c_int {
+    // SAFETY: the caller guarantees exclusive synchronous callback access.
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return 0;
     };
 
-    trace!("{} set write secret lvl={:?}", ex_data.trace_id, level);
-
-    let space = match level {
-        crypto::Level::Initial => &mut ex_data.crypto_ctx[packet::Epoch::Initial],
-        crypto::Level::ZeroRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
-        crypto::Level::Handshake =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Handshake],
-        crypto::Level::OneRTT =>
-            &mut ex_data.crypto_ctx[packet::Epoch::Application],
+    trace!(
+        "{} set {} secret lvl={:?}",
+        ex_data.trace_id,
+        if READ { "read" } else { "write" },
+        level
+    );
+    // SAFETY: the cipher descriptor is supplied by BoringSSL.
+    let Ok(aead) = (unsafe { get_cipher_from_ptr(cipher) }) else {
+        return 0;
     };
 
-    let aead = match get_cipher_from_ptr(cipher) {
-        Ok(v) => v,
-
-        Err(_) => return 0,
-    };
-
-    // 0-RTT write secrets are present only on the client.
-    if level != crypto::Level::ZeroRTT || !ex_data.is_server {
-        let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-
-        let seal = match crypto::Seal::from_secret(aead, secret) {
-            Ok(v) => v,
-
-            Err(_) => return 0,
-        };
-
-        space.crypto_seal = Some(seal);
+    // Early data is read by the server and written by the client.
+    if level == crypto::Level::ZeroRTT && READ != ex_data.is_server {
+        return 1;
     }
 
+    if secret.is_null() || secret_len == 0 || secret_len > isize::MAX as usize {
+        return 0;
+    }
+    // SAFETY: the callback borrows this buffer for its duration.
+    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
+    let epoch = match level {
+        crypto::Level::Initial => packet::Epoch::Initial,
+        crypto::Level::Handshake => packet::Epoch::Handshake,
+        crypto::Level::ZeroRTT | crypto::Level::OneRTT =>
+            packet::Epoch::Application,
+    };
+    let space = &mut ex_data.crypto_ctx[epoch];
+
+    if READ {
+        let Ok(open) = crypto::Open::from_secret(aead, secret) else {
+            return 0;
+        };
+        if level == crypto::Level::ZeroRTT {
+            space.crypto_0rtt_open = Some(open);
+        } else {
+            space.crypto_open = Some(open);
+        }
+    } else {
+        let Ok(seal) = crypto::Seal::from_secret(aead, secret) else {
+            return 0;
+        };
+        space.crypto_seal = Some(seal);
+    }
     1
 }
 
 extern "C" fn add_handshake_data(
     ssl: *mut SSL, level: crypto::Level, data: *const u8, len: usize,
 ) -> c_int {
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
+    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
+    // object; the installed callback state is exclusively borrowed here.
+    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
         Some(v) => v,
 
         None => return 0,
@@ -956,7 +1005,9 @@ const extern "C" fn flush_flight(_ssl: *mut SSL) -> c_int {
 extern "C" fn send_alert(
     ssl: *mut SSL, level: crypto::Level, alert: u8,
 ) -> c_int {
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
+    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
+    // object; the installed callback state is exclusively borrowed here.
+    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
         Some(v) => v,
 
         None => return 0,
@@ -980,7 +1031,9 @@ extern "C" fn send_alert(
 }
 
 extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
+    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
+    // object; the installed callback state is exclusively borrowed here.
+    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
         Some(v) => v,
 
         None => return,
@@ -1010,7 +1063,9 @@ extern "C" fn select_alpn(
     // Boringssl internally overwrite the return value from this callback, if
     // the returned value is SSL_TLSEXT_ERR_NOACK and is quic, then the value
     // gets overwritten to SSL_TLSEXT_ERR_ALERT_FATAL.
-    let ex_data = match ExData::from_ssl_ptr(ssl) {
+    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
+    // object; the installed callback state is exclusively borrowed here.
+    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
         Some(v) => v,
 
         None => return TLS_ERROR,
@@ -1061,7 +1116,9 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
         None => return 0,
     };
 
-    let ex_data = match ExData::from_ssl_ptr(ssl.as_ptr()) {
+    // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
+    // object; the installed callback state is exclusively borrowed here.
+    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl.as_ptr()) } {
         Some(v) => v,
 
         None => return 0,
@@ -1073,7 +1130,11 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
     let peer_params = handshake.quic_transport_params();
 
     // Serialize session object into buffer.
-    let session_bytes = match get_session_bytes(session) {
+    let Some(session) = NonNull::new(session) else {
+        return 0;
+    };
+    // SAFETY: BoringSSL supplies a live, borrowed session to this callback.
+    let session_bytes = match unsafe { get_session_bytes(session) } {
         Ok(v) => v,
         Err(_) => return 0,
     };
@@ -1117,13 +1178,6 @@ pub const fn map_result_zero_is_success(bssl_result: c_int) -> Result<()> {
     match bssl_result {
         0 => Ok(()),
         _ => Err(Error::TlsFail),
-    }
-}
-
-pub const fn map_result_ptr<'a, T>(bssl_result: *const T) -> Result<&'a T> {
-    match unsafe { bssl_result.as_ref() } {
-        Some(v) => Ok(v),
-        None => Err(Error::TlsFail),
     }
 }
 

@@ -6340,7 +6340,11 @@ fn config_set_cc_algorithm_name() {
 #[rstest]
 fn peer_cert(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert!(pipe.client.peer_cert().is_none());
+    assert!(pipe.client.peer_cert_chain().is_none());
     assert_eq!(pipe.handshake(), Ok(()));
+    assert!(pipe.server.peer_cert().is_none());
+    assert!(pipe.server.peer_cert_chain().is_none());
 
     match pipe.client.peer_cert() {
         Some(c) => assert_eq!(c.len(), 753),
@@ -6369,7 +6373,10 @@ fn peer_cert_chain(
     assert_eq!(pipe.handshake(), Ok(()));
 
     match pipe.client.peer_cert_chain() {
-        Some(c) => assert_eq!(c.len(), 5),
+        Some(c) => {
+            assert_eq!(c.len(), 5);
+            assert_eq!(pipe.client.peer_cert(), c.first().copied());
+        },
 
         None => panic!("missing server certificate chain"),
     }
@@ -10532,6 +10539,27 @@ fn user_provided_boring_ctx(
     assert_eq!(pipe.handshake(), Ok(()));
 
     Ok(())
+}
+
+#[cfg(feature = "boringssl-boring-crate")]
+#[rstest]
+fn handshake_callback_state_is_not_retained(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    for conn in [&mut pipe.client, &mut pipe.server] {
+        assert_eq!(
+            <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
+            Err(Error::TlsFail),
+        );
+    }
+    pipe.handshake().unwrap();
+    for conn in [&mut pipe.client, &mut pipe.server] {
+        assert_eq!(
+            <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
+            Err(Error::TlsFail),
+        );
+    }
 }
 
 #[cfg(feature = "boringssl-boring-crate")]

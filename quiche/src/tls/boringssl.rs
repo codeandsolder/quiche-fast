@@ -142,6 +142,8 @@ impl Handshake {
     }
 
     pub fn curve(&self) -> Option<String> {
+        // SAFETY: SSL is live. BoringSSL's non-null curve names are
+        // static NUL-terminated strings.
         let curve = unsafe {
             let curve_id = SSL_get_curve_id(self.as_ptr());
             if curve_id == 0 {
@@ -149,6 +151,9 @@ impl Handshake {
             }
 
             let curve_name = SSL_get_curve_name(curve_id);
+            if curve_name.is_null() {
+                return None;
+            }
             match ffi::CStr::from_ptr(curve_name).to_str() {
                 Ok(v) => v,
 
@@ -160,6 +165,8 @@ impl Handshake {
     }
 
     pub fn sigalg(&self) -> Option<String> {
+        // SAFETY: SSL is live. BoringSSL's non-null algorithm names are
+        // static NUL-terminated strings.
         let sigalg = unsafe {
             let sigalg_id = SSL_get_peer_signature_algorithm(self.as_ptr());
             if sigalg_id == 0 {
@@ -167,6 +174,9 @@ impl Handshake {
             }
 
             let sigalg_name = SSL_get_signature_algorithm_name(sigalg_id, 1);
+            if sigalg_name.is_null() {
+                return None;
+            }
             match ffi::CStr::from_ptr(sigalg_name).to_str() {
                 Ok(v) => v,
 
@@ -178,60 +188,29 @@ impl Handshake {
     }
 
     pub fn peer_cert_chain(&self) -> Option<Vec<&[u8]>> {
-        let cert_chain = unsafe {
-            let chain =
-                map_result_ptr(SSL_get0_peer_certificates(self.as_ptr())).ok()?;
-
-            let num = sk_num(chain);
-            if num == 0 {
-                return None;
-            }
-
-            let mut cert_chain = vec![];
-            for i in 0..num {
-                let buffer =
-                    map_result_ptr(sk_value(chain, i) as *const CRYPTO_BUFFER)
-                        .ok()?;
-
-                let out_len = CRYPTO_BUFFER_len(buffer);
-                if out_len == 0 {
-                    return None;
-                }
-
-                let out = CRYPTO_BUFFER_data(buffer);
-                let slice = slice::from_raw_parts(out, out_len);
-
-                cert_chain.push(slice);
-            }
-
-            cert_chain
-        };
-
-        Some(cert_chain)
+        let chain = self.peer_certificates()?;
+        (0..chain.len).map(|i| chain.get(i)).collect()
     }
 
     pub fn peer_cert(&self) -> Option<&[u8]> {
-        let peer_cert = unsafe {
-            let chain =
-                map_result_ptr(SSL_get0_peer_certificates(self.as_ptr())).ok()?;
-            if sk_num(chain) == 0 {
-                return None;
-            }
+        self.peer_certificates()?.get(0)
+    }
 
-            let buffer =
-                map_result_ptr(sk_value(chain, 0) as *const CRYPTO_BUFFER)
-                    .ok()?;
-
-            let out_len = CRYPTO_BUFFER_len(buffer);
-            if out_len == 0 {
-                return None;
-            }
-
-            let out = CRYPTO_BUFFER_data(buffer);
-            slice::from_raw_parts(out, out_len)
-        };
-
-        Some(peer_cert)
+    fn peer_certificates(&self) -> Option<PeerCertificates<'_>> {
+        // SAFETY: self owns a live SSL object. The returned chain is
+        // borrowed from that object and remains valid under a shared borrow.
+        let chain = unsafe { SSL_get0_peer_certificates(self.as_ptr()) };
+        let chain = NonNull::new(chain.cast_mut())?;
+        // SAFETY: The non-null pointer identifies a live certificate stack.
+        let len = unsafe { sk_num(chain.as_ptr()) };
+        if len == 0 {
+            return None;
+        }
+        Some(PeerCertificates {
+            chain,
+            len,
+            _owner: self,
+        })
     }
 
     // Only used for testing handling of failure during key signing.
@@ -283,17 +262,64 @@ impl Handshake {
     }
 }
 
-pub(super) fn get_session_bytes(session: *mut SSL_SESSION) -> Result<Vec<u8>> {
+/// A non-owning view of the certificates of one live handshake.
+struct PeerCertificates<'a> {
+    chain: NonNull<STACK_OF>,
+    len: usize,
+    _owner: &'a Handshake,
+}
+
+impl<'a> PeerCertificates<'a> {
+    fn get(&self, index: usize) -> Option<&'a [u8]> {
+        if index >= self.len {
+            return None;
+        }
+        // SAFETY: The owner keeps the certificate stack alive and the index
+        // is bounded by its length. Certificate buffers belong to the stack.
+        let buffer = unsafe { sk_value(self.chain.as_ptr(), index) }
+            .cast::<CRYPTO_BUFFER>();
+        let buffer = NonNull::new(buffer)?;
+        // SAFETY: buffer is a live CRYPTO_BUFFER borrowed from the stack.
+        let (data, len) = unsafe {
+            (
+                CRYPTO_BUFFER_data(buffer.as_ptr()),
+                CRYPTO_BUFFER_len(buffer.as_ptr()),
+            )
+        };
+        if data.is_null() || len == 0 || len > isize::MAX as usize {
+            return None;
+        }
+        // SAFETY: BoringSSL provides len readable bytes, owned by the SSL
+        // session; the returned slice is bounded by the handshake borrow.
+        Some(unsafe { slice::from_raw_parts(data, len) })
+    }
+}
+
+/// Serialize a borrowed session into Rust-owned storage.
+///
+/// # Safety
+/// session must point to a live SSL_SESSION for the duration of the call.
+pub(super) unsafe fn get_session_bytes(
+    session: NonNull<SSL_SESSION>,
+) -> Result<Vec<u8>> {
+    // SAFETY: The caller guarantees a live session. BoringSSL allocates the
+    // returned buffer and transfers ownership on success.
     let session_bytes = unsafe {
         let mut out: *mut u8 = ptr::null_mut();
         let mut out_len: usize = 0;
 
-        if SSL_SESSION_to_bytes(session, &mut out, &mut out_len) == 0 {
+        if SSL_SESSION_to_bytes(session.as_ptr(), &mut out, &mut out_len) == 0 {
             return Err(Error::TlsFail);
         }
-        let session_bytes = slice::from_raw_parts(out, out_len).to_vec();
-        OPENSSL_free(out as *mut c_void);
-        session_bytes
+        let encoded = if out_len == 0 {
+            Ok(Vec::new())
+        } else if out.is_null() || out_len > isize::MAX as usize {
+            Err(Error::TlsFail)
+        } else {
+            Ok(slice::from_raw_parts(out, out_len).to_vec())
+        };
+        OPENSSL_free(out.cast());
+        encoded?
     };
 
     Ok(session_bytes)
