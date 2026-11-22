@@ -86,13 +86,7 @@ const ALPHA_AIMD: f64 = 3.0 * (1.0 - BETA_CUBIC) / (1.0 + BETA_CUBIC);
 /// k, `w_max`, `w_est` are described in the RFC.
 #[derive(Debug, Default)]
 pub struct State {
-    k: f64,
-
-    w_max: f64,
-
-    w_est: f64,
-
-    alpha_aimd: f64,
+    curve: CurveState,
 
     // Used in CUBIC fix (see on_packet_sent())
     last_sent_time: Option<Instant>,
@@ -103,28 +97,29 @@ pub struct State {
     // since the last send (which inflates the delta by a full RTT).
     last_ack_time: Option<Instant>,
 
-    // Store cwnd increment during congestion avoidance.
-    cwnd_inc: usize,
-
     // CUBIC state checkpoint preceding the last congestion event.
-    prior: PriorState,
+    prior: Option<PriorState>,
+}
+
+/// Congestion-avoidance variables that must be restored together after
+/// a spurious congestion event. Send and ACK timestamps are not rolled back.
+#[derive(Clone, Copy, Debug, Default)]
+struct CurveState {
+    k: f64,
+    w_max: f64,
+    w_est: f64,
+    alpha_aimd: f64,
+    cwnd_inc: usize,
 }
 
 /// Stores the CUBIC state from before the last congestion event.
-///
 /// <https://tools.ietf.org/id/draft-ietf-tcpm-rfc8312bis-00.html#section-4.9>
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct PriorState {
     congestion_window: usize,
-
     ssthresh: usize,
-
-    w_max: f64,
-
-    k: f64,
-
+    curve: CurveState,
     epoch_start: Option<Instant>,
-
     lost_count: usize,
 }
 
@@ -133,7 +128,7 @@ struct PriorState {
 /// Note that these calculations are based on a count of cwnd as bytes,
 /// not packets.
 /// Unit of t (duration) and RTT are based on seconds (f64).
-impl State {
+impl CurveState {
     // K = cubic_root ((w_max - cwnd) / C) (Eq. 2)
     fn cubic_k(&self, cwnd: usize, max_datagram_size: usize) -> f64 {
         let w_max = self.w_max / max_datagram_size as f64;
@@ -241,9 +236,8 @@ fn on_packet_acked(
     // If recovery ends after fewer than
     // `cwnd / mss * ROLLBACK_THRESHOLD_PERCENT` packets, treat the congestion
     // event as spurious and restore the previous state.
-    if r.congestion_recovery_start_time.is_some() {
-        let new_lost =
-            r.lost_count.saturating_sub(r.cubic_state.prior.lost_count);
+    if let Some(prior) = &r.cubic_state.prior {
+        let new_lost = r.lost_count.saturating_sub(prior.lost_count);
 
         let rollback_threshold = crate::scale::scale_ratio_usize(
             r.congestion_window / r.max_datagram_size,
@@ -254,7 +248,9 @@ fn on_packet_acked(
 
         let rollback_threshold = rollback_threshold.max(MIN_ROLLBACK_THRESHOLD);
 
-        if new_lost < rollback_threshold {
+        if r.congestion_recovery_start_time.is_some() &&
+            new_lost < rollback_threshold
+        {
             let did_rollback = rollback(r);
             if did_rollback {
                 return;
@@ -306,12 +302,12 @@ fn congestion_avoidance_ack(
         ca_start_time = start;
 
         // Reset w_max and k when CSS started.
-        if r.cubic_state.w_max == 0.0 {
-            r.cubic_state.w_max = r.congestion_window as f64;
-            r.cubic_state.k = 0.0;
+        if r.cubic_state.curve.w_max == 0.0 {
+            r.cubic_state.curve.w_max = r.congestion_window as f64;
+            r.cubic_state.curve.k = 0.0;
 
-            r.cubic_state.w_est = r.congestion_window as f64;
-            r.cubic_state.alpha_aimd = ALPHA_AIMD;
+            r.cubic_state.curve.w_est = r.congestion_window as f64;
+            r.cubic_state.curve.alpha_aimd = ALPHA_AIMD;
         }
     } else if let Some(t) = r.congestion_recovery_start_time {
         ca_start_time = t;
@@ -321,11 +317,11 @@ fn congestion_avoidance_ack(
         ca_start_time = now;
         r.congestion_recovery_start_time = Some(now);
 
-        r.cubic_state.w_max = r.congestion_window as f64;
-        r.cubic_state.k = 0.0;
+        r.cubic_state.curve.w_max = r.congestion_window as f64;
+        r.cubic_state.curve.k = 0.0;
 
-        r.cubic_state.w_est = r.congestion_window as f64;
-        r.cubic_state.alpha_aimd = ALPHA_AIMD;
+        r.cubic_state.curve.w_est = r.congestion_window as f64;
+        r.cubic_state.curve.alpha_aimd = ALPHA_AIMD;
     }
 
     let t = now.saturating_duration_since(ca_start_time);
@@ -333,6 +329,7 @@ fn congestion_avoidance_ack(
     // target = w_cubic(t + rtt)
     let target = r
         .cubic_state
+        .curve
         .w_cubic(t + *rtt_stats.min_rtt, r.max_datagram_size);
 
     // Clipping target to [cwnd, 1.5 x cwnd]
@@ -340,22 +337,24 @@ fn congestion_avoidance_ack(
     let target = f64::min(target, r.congestion_window as f64 * 1.5);
 
     // Update w_est.
-    let w_est_inc = r.cubic_state.w_est_inc(
+    let w_est_inc = r.cubic_state.curve.w_est_inc(
         packet.size,
         r.congestion_window,
         r.max_datagram_size,
     );
-    r.cubic_state.w_est += w_est_inc;
+    r.cubic_state.curve.w_est += w_est_inc;
 
-    if r.cubic_state.w_est >= r.cubic_state.w_max {
-        r.cubic_state.alpha_aimd = 1.0;
+    if r.cubic_state.curve.w_est >= r.cubic_state.curve.w_max {
+        r.cubic_state.curve.alpha_aimd = 1.0;
     }
 
     let mut cubic_cwnd = r.congestion_window;
 
-    if r.cubic_state.w_cubic(t, r.max_datagram_size) < r.cubic_state.w_est {
+    if r.cubic_state.curve.w_cubic(t, r.max_datagram_size) <
+        r.cubic_state.curve.w_est
+    {
         // AIMD friendly region (W_cubic(t) < W_est)
-        cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.w_est as usize);
+        cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.curve.w_est as usize);
     } else {
         // Concave region or convex region use same increment.
         let delta = (target as usize).saturating_sub(cubic_cwnd);
@@ -376,7 +375,7 @@ fn congestion_avoidance_ack(
     }
 
     // Update the increment and increase cwnd by MSS.
-    let increment = r.cubic_state.cwnd_inc as u128 +
+    let increment = r.cubic_state.curve.cwnd_inc as u128 +
         (cubic_cwnd - r.congestion_window) as u128;
     let remainder = if increment >= r.max_datagram_size as u128 {
         r.congestion_window =
@@ -385,7 +384,8 @@ fn congestion_avoidance_ack(
     } else {
         increment
     };
-    r.cubic_state.cwnd_inc = usize::try_from(remainder).unwrap_or(usize::MAX);
+    r.cubic_state.curve.cwnd_inc =
+        usize::try_from(remainder).unwrap_or(usize::MAX);
 }
 
 fn congestion_event(
@@ -401,11 +401,11 @@ fn congestion_event(
         r.congestion_recovery_start_time = Some(now);
 
         // Fast convergence
-        if (r.congestion_window as f64) < r.cubic_state.w_max {
-            r.cubic_state.w_max =
+        if (r.congestion_window as f64) < r.cubic_state.curve.w_max {
+            r.cubic_state.curve.w_max =
                 r.congestion_window as f64 * (1.0 + BETA_CUBIC) / 2.0;
         } else {
-            r.cubic_state.w_max = r.congestion_window as f64;
+            r.cubic_state.curve.w_max = r.congestion_window as f64;
         }
 
         let ssthresh = beta_reduce(r.congestion_window);
@@ -416,17 +416,19 @@ fn congestion_event(
         r.ssthresh.update(ssthresh, r.hystart.in_css());
         r.congestion_window = ssthresh;
 
-        r.cubic_state.k = if r.cubic_state.w_max < r.congestion_window as f64 {
-            0.0
-        } else {
-            r.cubic_state
-                .cubic_k(r.congestion_window, r.max_datagram_size)
-        };
+        r.cubic_state.curve.k =
+            if r.cubic_state.curve.w_max < r.congestion_window as f64 {
+                0.0
+            } else {
+                r.cubic_state
+                    .curve
+                    .cubic_k(r.congestion_window, r.max_datagram_size)
+            };
 
-        r.cubic_state.cwnd_inc = beta_reduce(r.cubic_state.cwnd_inc);
+        r.cubic_state.curve.cwnd_inc = beta_reduce(r.cubic_state.curve.cwnd_inc);
 
-        r.cubic_state.w_est = r.congestion_window as f64;
-        r.cubic_state.alpha_aimd = ALPHA_AIMD;
+        r.cubic_state.curve.w_est = r.congestion_window as f64;
+        r.cubic_state.curve.alpha_aimd = ALPHA_AIMD;
 
         if r.hystart.in_css() {
             r.hystart.congestion_event();
@@ -437,29 +439,32 @@ fn congestion_event(
 }
 
 const fn checkpoint(r: &mut Congestion) {
-    r.cubic_state.prior.congestion_window = r.congestion_window;
-    r.cubic_state.prior.ssthresh = r.ssthresh.get();
-    r.cubic_state.prior.w_max = r.cubic_state.w_max;
-    r.cubic_state.prior.k = r.cubic_state.k;
-    r.cubic_state.prior.epoch_start = r.congestion_recovery_start_time;
-    r.cubic_state.prior.lost_count = r.lost_count;
+    r.cubic_state.prior = Some(PriorState {
+        congestion_window: r.congestion_window,
+        ssthresh: r.ssthresh.get(),
+        curve: r.cubic_state.curve,
+        epoch_start: r.congestion_recovery_start_time,
+        lost_count: r.lost_count,
+    });
 }
 
 fn rollback(r: &mut Congestion) -> bool {
-    // Don't go back to slow start.
-    if r.cubic_state.prior.congestion_window < r.cubic_state.prior.ssthresh {
+    let Some(prior) = &r.cubic_state.prior else {
+        return false;
+    };
+
+    // Don't go back to slow start or decrease the window.
+    if prior.congestion_window < prior.ssthresh ||
+        r.congestion_window >= prior.congestion_window
+    {
         return false;
     }
 
-    if r.congestion_window >= r.cubic_state.prior.congestion_window {
-        return false;
-    }
-
-    r.congestion_window = r.cubic_state.prior.congestion_window;
-    r.ssthresh.update(r.cubic_state.prior.ssthresh, false);
-    r.cubic_state.w_max = r.cubic_state.prior.w_max;
-    r.cubic_state.k = r.cubic_state.prior.k;
-    r.congestion_recovery_start_time = r.cubic_state.prior.epoch_start;
+    r.congestion_window = prior.congestion_window;
+    r.ssthresh.update(prior.ssthresh, false);
+    r.cubic_state.curve = prior.curve;
+    r.congestion_recovery_start_time = prior.epoch_start;
+    r.cubic_state.prior = None;
 
     true
 }
@@ -473,7 +478,7 @@ fn debug_fmt(r: &Congestion, f: &mut std::fmt::Formatter) -> std::fmt::Result {
     write!(
         f,
         "cubic={{ k={} w_max={} }} ",
-        r.cubic_state.k, r.cubic_state.w_max
+        r.cubic_state.curve.k, r.cubic_state.curve.w_max
     )
 }
 
@@ -504,11 +509,14 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         sender.congestion_window = usize::MAX;
-        sender.cubic_state.cwnd_inc = usize::MAX - 1;
+        sender.cubic_state.curve.cwnd_inc = usize::MAX - 1;
         sender.send_packet(size);
         sender.lose_n_packets(1, size, None);
         assert_eq!(sender.congestion_window, beta_reduce(usize::MAX));
-        assert_eq!(sender.cubic_state.cwnd_inc, beta_reduce(usize::MAX - 1));
+        assert_eq!(
+            sender.cubic_state.curve.cwnd_inc,
+            beta_reduce(usize::MAX - 1)
+        );
     }
 
     #[test]
@@ -518,10 +526,10 @@ mod tests {
         let cwnd = 8 * 1024 * 1024;
         sender.congestion_window = cwnd;
         sender.ssthresh.update(cwnd, false);
-        sender.cubic_state.w_max = cwnd as f64;
-        sender.cubic_state.w_est = cwnd as f64;
-        sender.cubic_state.k = 0.0;
-        sender.cubic_state.alpha_aimd = 1.0;
+        sender.cubic_state.curve.w_max = cwnd as f64;
+        sender.cubic_state.curve.w_est = cwnd as f64;
+        sender.cubic_state.curve.k = 0.0;
+        sender.cubic_state.curve.alpha_aimd = 1.0;
         sender.congestion_recovery_start_time =
             Some(sender.time - Duration::from_secs(100));
         sender.send_packet(mss);
@@ -531,7 +539,7 @@ mod tests {
         sender.ack_n_packets(1, mss);
         // The target is clipped at 1.5*cwnd; the exact increment
         // is half an MSS despite the intermediate product exceeding u32.
-        assert_eq!(sender.cubic_state.cwnd_inc, mss / 2);
+        assert_eq!(sender.cubic_state.curve.cwnd_inc, mss / 2);
         assert_eq!(sender.congestion_window, cwnd);
         sender.ack_n_packets(1, mss);
         assert_eq!(sender.congestion_window, cwnd + mss);
@@ -879,6 +887,55 @@ mod tests {
     }
 
     #[test]
+    fn cubic_rollback_restores_full_curve_once() {
+        let mut sender = test_sender();
+        let size = sender.max_datagram_size;
+        let cwnd = 20 * size;
+        sender.congestion_window = cwnd;
+        sender.ssthresh.update(cwnd, false);
+        sender.cubic_state.curve = CurveState {
+            k: 1.5,
+            w_max: 100_000.0,
+            w_est: 50_000.0,
+            alpha_aimd: 1.0,
+            cwnd_inc: size / 2,
+        };
+        let prior = sender.cubic_state.curve;
+        let epoch = sender.time;
+        sender.congestion_recovery_start_time = Some(epoch);
+        checkpoint(&mut sender);
+        sender.congestion_window = beta_reduce(cwnd);
+        sender.ssthresh.update(beta_reduce(cwnd), false);
+        sender.cubic_state.curve = CurveState::default();
+        sender.congestion_recovery_start_time =
+            Some(epoch + Duration::from_secs(1));
+        let last_ack = epoch + Duration::from_secs(2);
+        sender.cubic_state.last_ack_time = Some(last_ack);
+
+        assert!(rollback(&mut sender));
+        assert_eq!(sender.congestion_window, cwnd);
+        assert_eq!(sender.ssthresh.get(), cwnd);
+        assert_eq!(sender.congestion_recovery_start_time, Some(epoch));
+        assert_eq!(sender.cubic_state.curve.k.to_bits(), prior.k.to_bits());
+        assert_eq!(
+            sender.cubic_state.curve.w_max.to_bits(),
+            prior.w_max.to_bits()
+        );
+        assert_eq!(
+            sender.cubic_state.curve.w_est.to_bits(),
+            prior.w_est.to_bits()
+        );
+        assert_eq!(
+            sender.cubic_state.curve.alpha_aimd.to_bits(),
+            prior.alpha_aimd.to_bits()
+        );
+        assert_eq!(sender.cubic_state.curve.cwnd_inc, prior.cwnd_inc);
+        assert_eq!(sender.cubic_state.last_ack_time, Some(last_ack));
+        sender.congestion_window = beta_reduce(cwnd);
+        assert!(!rollback(&mut sender));
+    }
+
+    #[test]
     fn cubic_fast_convergence() {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -935,7 +992,7 @@ mod tests {
 
         // w_max will be further reduced, not prev_cwnd
         assert_eq!(
-            sender.cubic_state.w_max,
+            sender.cubic_state.curve.w_max,
             prev_cwnd as f64 * (1.0 + BETA_CUBIC) / 2.0
         );
     }
