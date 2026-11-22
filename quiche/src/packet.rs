@@ -972,6 +972,7 @@ impl CryptoContext {
             true,
             stream::MAX_STREAM_WINDOW,
             stream::MAX_STREAM_WINDOW,
+            None,
         );
     }
 
