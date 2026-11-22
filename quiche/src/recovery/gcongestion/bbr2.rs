@@ -28,7 +28,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-mod drain;
 mod mode;
 mod network_model;
 mod probe_bw;
@@ -45,7 +44,6 @@ use crate::recovery::gcongestion::Bandwidth;
 use crate::recovery::RecoveryStats;
 
 use self::mode::Mode;
-use self::mode::ModeImpl;
 
 use super::bbr::SendTimeState;
 use super::Acked;
@@ -562,11 +560,7 @@ impl BBRv2 {
 
     fn on_exit_quiescence(&mut self, now: Instant) {
         if let Some(last_quiescence_start) = self.last_quiescence_start.take() {
-            self.mode.do_on_exit_quiescence(
-                now,
-                last_quiescence_start,
-                &self.params,
-            );
+            self.mode.do_on_exit_quiescence(now, last_quiescence_start);
         }
     }
 
@@ -739,15 +733,10 @@ impl CongestionControl for BBRv2 {
         let mut mode_changes_allowed = MAX_MODE_CHANGES_PER_CONGESTION_EVENT;
         while mode_changes_allowed > 0 &&
             self.mode.do_on_congestion_event(
-                prior_in_flight,
-                event_time,
-                acked_packets,
-                lost_packets,
                 &mut congestion_event,
                 self.target_bytes_inflight(),
                 &self.params,
                 recovery_stats,
-                self.get_congestion_window(),
             )
         {
             mode_changes_allowed -= 1;

@@ -33,14 +33,10 @@ use std::time::Duration;
 use std::time::Instant;
 
 use crate::recovery::gcongestion::bbr2::Params;
-use crate::recovery::gcongestion::Acked;
-use crate::recovery::gcongestion::Lost;
-use crate::recovery::RecoveryStats;
 
 use super::mode::Cycle;
 use super::mode::CyclePhase;
-use super::mode::Mode;
-use super::mode::ModeImpl;
+use super::mode::ProbeOutcome;
 use super::network_model::BBRv2NetworkModel;
 #[cfg(test)]
 use super::network_model::DEFAULT_MSS;
@@ -49,12 +45,12 @@ use super::BwLoMode;
 use super::Limits;
 
 #[derive(Debug)]
-pub(super) struct ProbeBW {
-    pub(super) model: BBRv2NetworkModel,
-    pub(super) cycle: Cycle,
+pub(super) struct ProbeBW<'a> {
+    pub(super) model: &'a mut BBRv2NetworkModel,
+    pub(super) cycle: &'a mut Cycle,
 }
 
-#[derive(PartialEq, PartialOrd)]
+#[derive(PartialEq, Eq)]
 enum AdaptUpperBoundsResult {
     AdaptedOk,
     AdaptedProbedTooHigh,
@@ -62,29 +58,11 @@ enum AdaptUpperBoundsResult {
     NotAdaptedInvalidSample,
 }
 
-impl ModeImpl for ProbeBW {
-    #[cfg(feature = "qlog")]
-    fn state_str(&self) -> &'static str {
-        match self.cycle.phase {
-            CyclePhase::NotStarted => unreachable!(),
-            CyclePhase::Up => "bbr_probe_bw_up",
-            CyclePhase::Down => "bbr_probe_bw_down",
-            CyclePhase::Cruise => "bbr_probe_bw_cruise",
-            CyclePhase::Refill => "bbr_probe_bw_refill",
-        }
-    }
-
-    fn enter(
-        &mut self, now: Instant,
-        _congestion_event: Option<&BBRv2CongestionEvent>, params: &Params,
-    ) {
+impl ProbeBW<'_> {
+    /// Resume the same probing cycle after a min-RTT measurement.
+    pub(super) fn resume(&mut self, now: Instant) {
         self.cycle.start_time = now;
-
         match self.cycle.phase {
-            CyclePhase::NotStarted => {
-                // First time entering PROBE_BW. Start a new probing cycle.
-                self.enter_probe_down(false, false, now, params);
-            },
             CyclePhase::Cruise => self.enter_probe_cruise(now),
             CyclePhase::Refill =>
                 self.enter_probe_refill(self.cycle.probe_up_rounds, now),
@@ -92,12 +70,12 @@ impl ModeImpl for ProbeBW {
         }
     }
 
-    fn on_congestion_event(
-        mut self, prior_in_flight: usize, event_time: Instant, _: &[Acked],
-        _: &[Lost], congestion_event: &mut BBRv2CongestionEvent,
+    /// Returns true when the cycle enters PROBE_RTT.
+    pub(super) fn on_congestion_event(
+        &mut self, congestion_event: &BBRv2CongestionEvent,
         target_bytes_inflight: usize, params: &Params,
-        _recovery_stats: &mut RecoveryStats, _cwnd: usize,
-    ) -> Mode {
+    ) -> bool {
+        let event_time = congestion_event.event_time;
         if congestion_event.end_of_round_trip {
             if self.cycle.start_time != event_time {
                 self.cycle.rounds_since_probe += 1;
@@ -111,9 +89,8 @@ impl ModeImpl for ProbeBW {
         let mut switch_to_probe_rtt = false;
 
         match self.cycle.phase {
-            CyclePhase::NotStarted => unreachable!(),
             CyclePhase::Up => self.update_probe_up(
-                prior_in_flight,
+                congestion_event.prior_bytes_in_flight,
                 target_bytes_inflight,
                 congestion_event,
                 params,
@@ -142,70 +119,35 @@ impl ModeImpl for ProbeBW {
             ),
         }
 
-        // Do not need to set the gains if switching to PROBE_RTT, they will be
-        // set when `ProbeRTT::enter` is called.
+        // The mode transition will set the PROBE_RTT gains.
         if !switch_to_probe_rtt {
             self.model
                 .set_pacing_gain(self.cycle.phase.pacing_gain(params));
             self.model.set_cwnd_gain(self.cycle.phase.cwnd_gain(params));
         }
 
-        if switch_to_probe_rtt {
-            self.into_probe_rtt(event_time, Some(congestion_event), params)
-        } else {
-            Mode::ProbeBW(self)
-        }
+        switch_to_probe_rtt
     }
 
-    fn get_cwnd_limits(&self, params: &Params) -> Limits<usize> {
-        if self.cycle.phase == CyclePhase::Cruise {
-            let limit = self
-                .model
+    pub(super) fn cwnd_limits(
+        cycle: &Cycle, model: &BBRv2NetworkModel, params: &Params,
+    ) -> Limits<usize> {
+        let limit = match cycle.phase {
+            CyclePhase::Cruise => model
                 .inflight_lo()
-                .min(self.model.inflight_hi_with_headroom(params));
-            return Limits::no_greater_than(limit);
-        }
-
-        if self.cycle.phase == CyclePhase::Up &&
-            params.probe_up_ignore_inflight_hi
-        {
-            // Similar to STARTUP.
-            return Limits::no_greater_than(self.model.inflight_lo());
-        }
-
-        Limits::no_greater_than(
-            self.model.inflight_lo().min(self.model.inflight_hi()),
-        )
+                .min(model.inflight_hi_with_headroom(params)),
+            CyclePhase::Up if params.probe_up_ignore_inflight_hi =>
+                model.inflight_lo(),
+            _ => model.inflight_lo().min(model.inflight_hi()),
+        };
+        Limits::no_greater_than(limit)
     }
 
-    fn is_probing_for_bandwidth(&self) -> bool {
-        self.cycle.phase == CyclePhase::Refill ||
-            self.cycle.phase == CyclePhase::Up
-    }
-
-    fn on_exit_quiescence(
-        mut self, now: Instant, quiescence_start_time: Instant, _params: &Params,
-    ) -> Mode {
-        self.model
-            .postpone_min_rtt_timestamp(now - quiescence_start_time);
-        Mode::ProbeBW(self)
-    }
-
-    fn leave(
-        &mut self, _now: Instant,
-        _congestion_event: Option<&BBRv2CongestionEvent>,
+    pub(super) fn enter_probe_down(
+        &mut self, outcome: ProbeOutcome, now: Instant, params: &Params,
     ) {
-    }
-}
-
-impl ProbeBW {
-    fn enter_probe_down(
-        &mut self, probed_too_high: bool, stopped_risky_probe: bool,
-        now: Instant, params: &Params,
-    ) {
-        let cycle = &mut self.cycle;
-        cycle.last_cycle_probed_too_high = probed_too_high;
-        cycle.last_cycle_stopped_risky_probe = stopped_risky_probe;
+        let cycle = &mut *self.cycle;
+        cycle.outcome = outcome;
 
         cycle.phase = CyclePhase::Down;
         cycle.start_time = now;
@@ -226,7 +168,6 @@ impl ProbeBW {
         );
 
         cycle.probe_up_bytes = None;
-        cycle.probe_up_app_limited_since_inflight_hi_limited = false;
         cycle.has_advanced_max_bw = false;
         self.model.restart_round_early();
     }
@@ -236,7 +177,7 @@ impl ProbeBW {
             self.exit_probe_down();
         }
 
-        let cycle = &mut self.cycle;
+        let cycle = &mut *self.cycle;
 
         self.model.cap_inflight_lo(self.model.inflight_hi());
         cycle.phase = CyclePhase::Cruise;
@@ -250,14 +191,16 @@ impl ProbeBW {
             self.exit_probe_down();
         }
 
-        let cycle = &mut self.cycle;
+        let cycle = &mut *self.cycle;
 
         cycle.phase = CyclePhase::Refill;
         cycle.phase_start_time = now;
         cycle.rounds_in_phase = 0;
 
         cycle.is_sample_from_probing = false;
-        cycle.last_cycle_stopped_risky_probe = false;
+        if cycle.outcome == ProbeOutcome::Risky {
+            cycle.outcome = ProbeOutcome::Normal;
+        }
 
         self.model.clear_bandwidth_lo();
         self.model.clear_inflight_lo();
@@ -267,7 +210,7 @@ impl ProbeBW {
     }
 
     fn enter_probe_up(&mut self, now: Instant, cwnd: usize, mss: usize) {
-        let cycle = &mut self.cycle;
+        let cycle = &mut *self.cycle;
 
         cycle.phase = CyclePhase::Up;
         cycle.phase_start_time = now;
@@ -296,9 +239,7 @@ impl ProbeBW {
                 self.cycle.has_advanced_max_bw = true;
             }
 
-            if self.cycle.last_cycle_stopped_risky_probe &&
-                !self.cycle.last_cycle_probed_too_high
-            {
+            if self.cycle.outcome == ProbeOutcome::Risky {
                 self.enter_probe_refill(0, congestion_event.event_time);
                 return;
             }
@@ -392,8 +333,7 @@ impl ProbeBW {
         ) == AdaptUpperBoundsResult::AdaptedProbedTooHigh
         {
             self.enter_probe_down(
-                true,
-                false,
+                ProbeOutcome::TooHigh,
                 congestion_event.event_time,
                 params,
             );
@@ -404,7 +344,7 @@ impl ProbeBW {
 
         let mut is_risky = false;
         let mut is_queuing = false;
-        if self.cycle.last_cycle_probed_too_high &&
+        if self.cycle.outcome == ProbeOutcome::TooHigh &&
             prior_in_flight >= self.model.inflight_hi()
         {
             is_risky = true;
@@ -443,8 +383,11 @@ impl ProbeBW {
 
         if is_risky || is_queuing {
             self.enter_probe_down(
-                false,
-                is_risky,
+                if is_risky {
+                    ProbeOutcome::Risky
+                } else {
+                    ProbeOutcome::Normal
+                },
                 congestion_event.event_time,
                 params,
             );
@@ -460,7 +403,6 @@ impl ProbeBW {
             .is_some_and(|wait| self.has_cycle_lasted(wait, congestion_event)) ||
             self.is_time_to_probe_for_reno_coexistence(
                 target_bytes_inflight,
-                1.0,
                 congestion_event,
                 params,
             )
@@ -533,17 +475,23 @@ impl ProbeBW {
     fn has_cycle_lasted(
         &self, duration: Duration, congestion_event: &BBRv2CongestionEvent,
     ) -> bool {
-        (congestion_event.event_time - self.cycle.start_time) > duration
+        congestion_event
+            .event_time
+            .saturating_duration_since(self.cycle.start_time) >
+            duration
     }
 
     fn has_phase_lasted(
         &self, duration: Duration, congestion_event: &BBRv2CongestionEvent,
     ) -> bool {
-        (congestion_event.event_time - self.cycle.phase_start_time) > duration
+        congestion_event
+            .event_time
+            .saturating_duration_since(self.cycle.phase_start_time) >
+            duration
     }
 
     fn is_time_to_probe_for_reno_coexistence(
-        &self, target_bytes_inflight: usize, probe_wait_fraction: f64,
+        &self, target_bytes_inflight: usize,
         congestion_event: &BBRv2CongestionEvent, params: &Params,
     ) -> bool {
         if !params.enable_reno_coexistence {
@@ -561,12 +509,7 @@ impl ProbeBW {
             rounds = reno_rounds.min(rounds);
         }
 
-        self.cycle.rounds_since_probe >=
-            crate::scale::scale_usize(
-                rounds,
-                probe_wait_fraction,
-                crate::scale::Rounding::Down,
-            )
+        self.cycle.rounds_since_probe >= rounds
     }
 
     // Used to prevent a BBR2 flow from staying in PROBE_DOWN for too
@@ -665,16 +608,6 @@ impl ProbeBW {
             );
         }
     }
-
-    fn into_probe_rtt(
-        mut self, now: Instant, congestion_event: Option<&BBRv2CongestionEvent>,
-        params: &Params,
-    ) -> Mode {
-        self.leave(now, congestion_event);
-        let mut next_mode = Mode::probe_rtt(self.model, self.cycle);
-        next_mode.enter(now, congestion_event, params);
-        next_mode
-    }
 }
 
 #[cfg(test)]
@@ -686,26 +619,66 @@ mod tests {
     use crate::recovery::gcongestion::bbr2::DEFAULT_PARAMS;
 
     #[rstest]
-    fn probe_upward(#[values(100, 10_000, 65_536, 300_000)] step: usize) {
-        let test_event =
-            |probe_bw: &ProbeBW, bytes_acked: usize, end_of_round_trip: bool| {
-                BBRv2CongestionEvent {
-                    max_datagram_size: DEFAULT_MSS,
-                    event_time: probe_bw.cycle.start_time,
-                    prior_cwnd: probe_bw.model.inflight_hi(),
-                    prior_bytes_in_flight: probe_bw.model.inflight_hi(),
-                    bytes_in_flight: 0,
-                    bytes_acked,
-                    bytes_lost: 0,
-                    end_of_round_trip,
-                    is_probing_for_bandwidth: true,
-                    sample_max_bandwidth: None,
-                    sample_min_rtt: None,
-                    last_packet_send_state: SendTimeState::default(),
-                }
-            };
+    fn only_risky_probe_restarts_immediately(
+        #[values(
+            ProbeOutcome::Normal,
+            ProbeOutcome::TooHigh,
+            ProbeOutcome::Risky
+        )]
+        outcome: ProbeOutcome,
+    ) {
+        let mut params = DEFAULT_PARAMS;
+        params.enable_reno_coexistence = false;
+        let now = Instant::now();
+        let mut probe = ProbeBW {
+            model: &mut BBRv2NetworkModel::new(
+                &params,
+                Duration::from_millis(100),
+            ),
+            cycle: &mut Cycle::new(now),
+        };
+        probe.enter_probe_down(outcome, now, &params);
+        let mut event = BBRv2CongestionEvent::new(
+            now + Duration::from_millis(1),
+            13_000,
+            1000,
+            false,
+            1300,
+        );
+        event.bytes_in_flight = 1000;
+        event.end_of_round_trip = true;
+        assert!(!probe.on_congestion_event(&event, 13_000, &params));
+        if outcome == ProbeOutcome::Risky {
+            assert_eq!(probe.cycle.phase, CyclePhase::Refill);
+            assert_eq!(probe.cycle.outcome, ProbeOutcome::Normal);
+        } else {
+            assert_eq!(probe.cycle.phase, CyclePhase::Down);
+            assert_eq!(probe.cycle.outcome, outcome);
+        }
+    }
 
-        let do_probe_up = |probe_bw: &mut ProbeBW,
+    #[rstest]
+    fn probe_upward(#[values(100, 10_000, 65_536, 300_000)] step: usize) {
+        let test_event = |probe_bw: &ProbeBW<'_>,
+                          bytes_acked: usize,
+                          end_of_round_trip: bool| {
+            BBRv2CongestionEvent {
+                max_datagram_size: DEFAULT_MSS,
+                event_time: probe_bw.cycle.start_time,
+                prior_cwnd: probe_bw.model.inflight_hi(),
+                prior_bytes_in_flight: probe_bw.model.inflight_hi(),
+                bytes_in_flight: 0,
+                bytes_acked,
+                bytes_lost: 0,
+                end_of_round_trip,
+                is_probing_for_bandwidth: true,
+                sample_max_bandwidth: None,
+                sample_min_rtt: None,
+                last_packet_send_state: SendTimeState::default(),
+            }
+        };
+
+        let do_probe_up = |probe_bw: &mut ProbeBW<'_>,
                            params: &Params,
                            total_bytes: usize| {
             let mut remaining = total_bytes;
@@ -724,9 +697,13 @@ mod tests {
         };
 
         let params = &DEFAULT_PARAMS;
-        let model = BBRv2NetworkModel::new(params, Duration::from_millis(333));
-        let cycle = Cycle::default();
-        let mut probe_bw = ProbeBW { model, cycle };
+        let mut model =
+            BBRv2NetworkModel::new(params, Duration::from_millis(333));
+        let mut cycle = Cycle::new(Instant::now());
+        let mut probe_bw = ProbeBW {
+            model: &mut model,
+            cycle: &mut cycle,
+        };
         probe_bw.model.set_inflight_hi(100_000);
         probe_bw.raise_inflight_high_slope(100_000, DEFAULT_MSS);
         assert_eq!(probe_bw.cycle.probe_up_rounds, 1);
@@ -779,14 +756,14 @@ mod datagram_cwnd_tests {
             cwnd - unused
         };
         let mut probe = ProbeBW {
-            model: BBRv2NetworkModel::new(
+            model: &mut BBRv2NetworkModel::new(
                 &DEFAULT_PARAMS,
                 Duration::from_millis(60),
             ),
-            cycle: Cycle {
+            cycle: &mut Cycle {
                 phase: CyclePhase::Up,
                 probe_up_bytes: Some(cwnd),
-                ..Cycle::default()
+                ..Cycle::new(Instant::now())
             },
         };
         probe.model.set_inflight_hi(initial_hi);
@@ -812,11 +789,14 @@ mod datagram_cwnd_tests {
         params.probe_bw_probe_max_rounds = 100;
         let now = Instant::now();
         let mut probe = ProbeBW {
-            model: BBRv2NetworkModel::new(&params, Duration::from_millis(60)),
-            cycle: Cycle {
+            model: &mut BBRv2NetworkModel::new(
+                &params,
+                Duration::from_millis(60),
+            ),
+            cycle: &mut Cycle {
                 rounds_since_probe: 10,
                 probe_up_rounds: 30,
-                ..Cycle::default()
+                ..Cycle::new(Instant::now())
             },
         };
         for mss in [1200, 1400, 9000] {
@@ -824,13 +804,11 @@ mod datagram_cwnd_tests {
             let event = BBRv2CongestionEvent::new(now, cwnd, cwnd, true, mss);
             probe.raise_inflight_high_slope(cwnd, mss);
             assert_eq!(probe.cycle.probe_up_bytes, Some(mss));
-            assert!(probe.is_time_to_probe_for_reno_coexistence(
-                cwnd, 1.0, &event, &params
-            ));
+            assert!(probe
+                .is_time_to_probe_for_reno_coexistence(cwnd, &event, &params));
             probe.cycle.rounds_since_probe = 9;
-            assert!(!probe.is_time_to_probe_for_reno_coexistence(
-                cwnd, 1.0, &event, &params
-            ));
+            assert!(!probe
+                .is_time_to_probe_for_reno_coexistence(cwnd, &event, &params));
             probe.cycle.rounds_since_probe = 10;
         }
     }
@@ -838,15 +816,15 @@ mod datagram_cwnd_tests {
     #[test]
     fn probe_up_preserves_ack_remainder_at_width_limit() {
         let mut probe = ProbeBW {
-            model: BBRv2NetworkModel::new(
+            model: &mut BBRv2NetworkModel::new(
                 &DEFAULT_PARAMS,
                 Duration::from_millis(60),
             ),
-            cycle: Cycle {
+            cycle: &mut Cycle {
                 phase: CyclePhase::Up,
                 probe_up_bytes: Some(usize::MAX - 1),
                 probe_up_acked: usize::MAX - 2,
-                ..Cycle::default()
+                ..Cycle::new(Instant::now())
             },
         };
         let cwnd = usize::MAX - 10;

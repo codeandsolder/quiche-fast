@@ -28,27 +28,21 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::fmt::Debug;
 use std::time::Duration;
 use std::time::Instant;
 
 use crate::recovery::gcongestion::bbr2::Params;
-use crate::recovery::gcongestion::Lost;
 use crate::recovery::RecoveryStats;
 
-use super::drain::Drain;
 use super::network_model::BBRv2NetworkModel;
 use super::probe_bw::ProbeBW;
 use super::probe_rtt::ProbeRTT;
-use super::startup::Startup;
-use super::Acked;
+use super::startup;
 use super::BBRv2CongestionEvent;
 use super::Limits;
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum CyclePhase {
-    #[default]
-    NotStarted,
     Up,
     Down,
     Cruise,
@@ -56,7 +50,7 @@ pub(super) enum CyclePhase {
 }
 
 impl CyclePhase {
-    pub(super) const fn pacing_gain(&self, params: &Params) -> f32 {
+    pub(super) const fn pacing_gain(self, params: &Params) -> f32 {
         match self {
             Self::Up => params.probe_bw_probe_up_pacing_gain,
             Self::Down => params.probe_bw_probe_down_pacing_gain,
@@ -64,7 +58,7 @@ impl CyclePhase {
         }
     }
 
-    pub(super) const fn cwnd_gain(&self, params: &Params) -> f32 {
+    pub(super) const fn cwnd_gain(self, params: &Params) -> f32 {
         match self {
             Self::Up => params.probe_bw_up_cwnd_gain,
             _ => params.probe_bw_cwnd_gain,
@@ -72,7 +66,16 @@ impl CyclePhase {
     }
 }
 
-#[derive(Debug)]
+/// Why the last upward probe ended. Loss and a preemptively stopped
+/// risky probe are mutually exclusive outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ProbeOutcome {
+    Normal,
+    TooHigh,
+    Risky,
+}
+
+#[derive(Clone, Copy, Debug)]
 pub(super) struct Cycle {
     pub(super) start_time: Instant,
     pub(super) phase: CyclePhase,
@@ -83,213 +86,197 @@ pub(super) struct Cycle {
     pub(super) probe_up_rounds: usize,
     pub(super) probe_up_bytes: Option<usize>,
     pub(super) probe_up_acked: usize,
-    pub(super) probe_up_app_limited_since_inflight_hi_limited: bool,
     // Whether max bandwidth filter window has advanced in this cycle. It is
     // advanced once per cycle.
     pub(super) has_advanced_max_bw: bool,
     pub(super) is_sample_from_probing: bool,
 
-    pub(super) last_cycle_probed_too_high: bool,
-    pub(super) last_cycle_stopped_risky_probe: bool,
+    pub(super) outcome: ProbeOutcome,
 }
 
-impl Default for Cycle {
-    fn default() -> Self {
-        let now = Instant::now();
-
+impl Cycle {
+    pub(super) const fn new(now: Instant) -> Self {
         Self {
             start_time: now,
             phase_start_time: now,
 
-            phase: CyclePhase::NotStarted,
+            phase: CyclePhase::Down,
             rounds_in_phase: 0,
             rounds_since_probe: 0,
             probe_wait_time: None,
             probe_up_rounds: 0,
             probe_up_bytes: None,
             probe_up_acked: 0,
-            probe_up_app_limited_since_inflight_hi_limited: false,
             has_advanced_max_bw: false,
             is_sample_from_probing: false,
-            last_cycle_probed_too_high: false,
-            last_cycle_stopped_risky_probe: false,
+            outcome: ProbeOutcome::Normal,
         }
     }
 }
 
-#[enum_dispatch::enum_dispatch]
-pub(super) trait ModeImpl: Debug {
-    #[cfg(feature = "qlog")]
-    fn state_str(&self) -> &'static str;
-
-    fn enter(
-        &mut self, now: Instant, congestion_event: Option<&BBRv2CongestionEvent>,
-        params: &Params,
-    );
-
-    fn leave(
-        &mut self, now: Instant, congestion_event: Option<&BBRv2CongestionEvent>,
-    );
-
-    fn is_probing_for_bandwidth(&self) -> bool;
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The signature mirrors protocol state and grouping would obscure call sites"
-    )]
-    fn on_congestion_event(
-        self, prior_in_flight: usize, event_time: Instant,
-        acked_packets: &[Acked], lost_packets: &[Lost],
-        congestion_event: &mut BBRv2CongestionEvent,
-        target_bytes_inflight: usize, params: &Params,
-        recovery_stats: &mut RecoveryStats, cwnd: usize,
-    ) -> Mode;
-
-    fn get_cwnd_limits(&self, params: &Params) -> Limits<usize>;
-
-    fn on_exit_quiescence(
-        self, now: Instant, quiescence_start_time: Instant, params: &Params,
-    ) -> Mode;
-}
-
-#[enum_dispatch::enum_dispatch(ModeImpl)]
+/// Phase-local state only. The network model belongs to Mode and stays
+/// in the same allocation through every phase transition.
 #[derive(Debug)]
-pub(super) enum Mode {
-    Startup(Startup),
-    Drain(Drain),
-    ProbeBW(ProbeBW),
-    ProbeRTT(ProbeRTT),
-    Placheolder(Placeholder),
+enum Phase {
+    Startup,
+    Drain,
+    ProbeBw(Cycle),
+    ProbeRtt(ProbeRTT),
 }
 
-impl Default for Mode {
-    fn default() -> Self {
-        Self::Placheolder(Placeholder {})
-    }
+#[derive(Debug)]
+pub(super) struct Mode {
+    model: BBRv2NetworkModel,
+    phase: Phase,
 }
 
 impl Mode {
     pub(super) const fn startup(model: BBRv2NetworkModel) -> Self {
-        Self::Startup(Startup { model })
-    }
-
-    pub(super) fn drain(model: BBRv2NetworkModel) -> Self {
-        Self::Drain(Drain {
+        Self {
             model,
-            cycle: Cycle::default(),
-        })
+            phase: Phase::Startup,
+        }
     }
 
-    pub(super) const fn probe_bw(model: BBRv2NetworkModel, cycle: Cycle) -> Self {
-        Self::ProbeBW(ProbeBW { model, cycle })
-    }
-
-    pub(super) const fn probe_rtt(
-        model: BBRv2NetworkModel, cycle: Cycle,
-    ) -> Self {
-        Self::ProbeRTT(ProbeRTT::new(model, cycle))
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The signature mirrors protocol state and grouping would obscure call sites"
-    )]
+    /// Process one phase. Return whether the event entered a different
+    /// mode, so the caller can reprocess it under the new mode's rules.
     pub(super) fn do_on_congestion_event(
-        &mut self, prior_in_flight: usize, event_time: Instant,
-        acked_packets: &[Acked], lost_packets: &[Lost],
-        congestion_event: &mut BBRv2CongestionEvent,
+        &mut self, event: &mut BBRv2CongestionEvent,
         target_bytes_inflight: usize, params: &Params,
-        recovery_stats: &mut RecoveryStats, cwnd: usize,
+        recovery_stats: &mut RecoveryStats,
     ) -> bool {
-        let mode_before = std::mem::discriminant(self);
-
-        *self = std::mem::take(self).on_congestion_event(
-            prior_in_flight,
-            event_time,
-            acked_packets,
-            lost_packets,
-            congestion_event,
-            target_bytes_inflight,
-            params,
-            recovery_stats,
-            cwnd,
-        );
-
-        let mode_after = std::mem::discriminant(self);
-
-        mode_before != mode_after
+        let now = event.event_time;
+        let next =
+            match &mut self.phase {
+                Phase::Startup => {
+                    if startup::on_congestion_event(
+                        &mut self.model,
+                        event,
+                        params,
+                        recovery_stats,
+                    ) {
+                        self.model.clear_bandwidth_lo();
+                        Some(Phase::Drain)
+                    } else {
+                        None
+                    }
+                },
+                Phase::Drain => {
+                    self.model.set_pacing_gain(params.drain_pacing_gain);
+                    self.model.set_cwnd_gain(params.drain_cwnd_gain);
+                    if event.bytes_in_flight <= self.model.bdp0() {
+                        let mut cycle = Cycle::new(now);
+                        ProbeBW {
+                            model: &mut self.model,
+                            cycle: &mut cycle,
+                        }
+                        .enter_probe_down(
+                            ProbeOutcome::Normal,
+                            now,
+                            params,
+                        );
+                        Some(Phase::ProbeBw(cycle))
+                    } else {
+                        None
+                    }
+                },
+                Phase::ProbeBw(cycle) => {
+                    let switch_to_rtt = ProbeBW {
+                        model: &mut self.model,
+                        cycle,
+                    }
+                    .on_congestion_event(event, target_bytes_inflight, params);
+                    if switch_to_rtt {
+                        self.model.set_pacing_gain(params.probe_rtt_pacing_gain);
+                        self.model.set_cwnd_gain(params.probe_rtt_cwnd_gain);
+                        Some(Phase::ProbeRtt(ProbeRTT::new(*cycle)))
+                    } else {
+                        None
+                    }
+                },
+                Phase::ProbeRtt(probe) => {
+                    if probe.on_congestion_event(&self.model, event, params) {
+                        let mut cycle = probe.cycle;
+                        ProbeBW {
+                            model: &mut self.model,
+                            cycle: &mut cycle,
+                        }
+                        .resume(now);
+                        Some(Phase::ProbeBw(cycle))
+                    } else {
+                        None
+                    }
+                },
+            };
+        if let Some(next) = next {
+            self.phase = next;
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn do_on_exit_quiescence(
-        &mut self, now: Instant, quiescence_start_time: Instant, params: &Params,
+        &mut self, now: Instant, quiescence_start_time: Instant,
     ) {
-        *self = std::mem::take(self).on_exit_quiescence(
-            now,
-            quiescence_start_time,
-            params,
-        );
-    }
-
-    pub fn network_model(&self) -> &BBRv2NetworkModel {
-        match self {
-            Self::Startup(Startup { model }) => model,
-            Self::Drain(Drain { model, .. }) => model,
-            Self::ProbeBW(ProbeBW { model, .. }) => model,
-            Self::ProbeRTT(ProbeRTT { model, .. }) => model,
-            Self::Placheolder(_) => unreachable!(),
+        match &mut self.phase {
+            Phase::Startup | Phase::Drain => {},
+            Phase::ProbeBw(_) => self.model.postpone_min_rtt_timestamp(
+                now.saturating_duration_since(quiescence_start_time),
+            ),
+            Phase::ProbeRtt(probe) =>
+                if probe.ready_to_leave_quiescence(now) {
+                    let mut cycle = probe.cycle;
+                    ProbeBW {
+                        model: &mut self.model,
+                        cycle: &mut cycle,
+                    }
+                    .resume(now);
+                    self.phase = Phase::ProbeBw(cycle);
+                },
         }
     }
 
-    pub fn network_model_mut(&mut self) -> &mut BBRv2NetworkModel {
-        match self {
-            Self::Startup(Startup { model }) => model,
-            Self::Drain(Drain { model, .. }) => model,
-            Self::ProbeBW(ProbeBW { model, .. }) => model,
-            Self::ProbeRTT(ProbeRTT { model, .. }) => model,
-            Self::Placheolder(_) => unreachable!(),
+    pub(super) fn get_cwnd_limits(&self, params: &Params) -> Limits<usize> {
+        match &self.phase {
+            Phase::Startup | Phase::Drain =>
+                Limits::no_greater_than(self.model.inflight_lo()),
+            Phase::ProbeBw(cycle) =>
+                ProbeBW::cwnd_limits(cycle, &self.model, params),
+            Phase::ProbeRtt(_) => ProbeRTT::cwnd_limits(&self.model, params),
         }
     }
-}
 
-#[derive(Debug, Default)]
-pub(super) struct Placeholder {}
+    pub(super) const fn is_probing_for_bandwidth(&self) -> bool {
+        match &self.phase {
+            Phase::Startup => true,
+            Phase::ProbeBw(cycle) =>
+                matches!(cycle.phase, CyclePhase::Refill | CyclePhase::Up),
+            Phase::Drain | Phase::ProbeRtt(_) => false,
+        }
+    }
 
-impl ModeImpl for Placeholder {
     #[cfg(feature = "qlog")]
-    fn state_str(&self) -> &'static str {
-        unreachable!()
+    pub(super) const fn state_str(&self) -> &'static str {
+        match &self.phase {
+            Phase::Startup => "bbr_startup",
+            Phase::Drain => "bbr_drain",
+            Phase::ProbeBw(cycle) => match cycle.phase {
+                CyclePhase::Up => "bbr_probe_bw_up",
+                CyclePhase::Down => "bbr_probe_bw_down",
+                CyclePhase::Cruise => "bbr_probe_bw_cruise",
+                CyclePhase::Refill => "bbr_probe_bw_refill",
+            },
+            Phase::ProbeRtt(_) => "bbr_probe_rtt",
+        }
     }
 
-    fn enter(
-        &mut self, _: Instant, _: Option<&BBRv2CongestionEvent>, _params: &Params,
-    ) {
-        unreachable!()
+    pub const fn network_model(&self) -> &BBRv2NetworkModel {
+        &self.model
     }
 
-    fn leave(&mut self, _: Instant, _: Option<&BBRv2CongestionEvent>) {
-        unreachable!()
-    }
-
-    fn is_probing_for_bandwidth(&self) -> bool {
-        unreachable!()
-    }
-
-    fn on_congestion_event(
-        self, _: usize, _: Instant, _: &[Acked], _: &[Lost],
-        _: &mut BBRv2CongestionEvent, _: usize, _params: &Params,
-        _recovery_stats: &mut RecoveryStats, _cwnd: usize,
-    ) -> Mode {
-        unreachable!()
-    }
-
-    fn get_cwnd_limits(&self, _params: &Params) -> Limits<usize> {
-        unreachable!()
-    }
-
-    fn on_exit_quiescence(
-        self, _: Instant, _: Instant, _params: &Params,
-    ) -> Mode {
-        unreachable!()
+    pub const fn network_model_mut(&mut self) -> &mut BBRv2NetworkModel {
+        &mut self.model
     }
 }
 
@@ -298,6 +285,72 @@ mod tests {
     use super::*;
     use crate::recovery::gcongestion::bbr2::DEFAULT_PARAMS;
     use crate::BbrParams;
+
+    #[rstest::rstest]
+    fn phase_transitions_keep_model_and_probe_history(
+        #[values(false, true)] resume_from_quiescence: bool,
+    ) {
+        let custom_bbr_settings = BbrParams {
+            probe_rtt_pacing_gain: Some(0.8),
+            probe_rtt_cwnd_gain: Some(0.5),
+            ..Default::default()
+        };
+        let params = &DEFAULT_PARAMS.with_overrides(&custom_bbr_settings);
+        let mut mode = Mode::startup(BBRv2NetworkModel::new(
+            params,
+            Duration::from_millis(100),
+        ));
+        let model_address = std::ptr::from_ref(mode.network_model());
+        mode.model.set_full_bandwidth_reached();
+        mode.model.set_inflight_hi(46_000);
+        let now = mode.model.min_rtt_timestamp();
+        let mut event = BBRv2CongestionEvent::new(now, 13_000, 0, true, 1300);
+        let mut stats = RecoveryStats::default();
+
+        assert!(mode.is_probing_for_bandwidth());
+        assert!(
+            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
+        );
+        assert!(matches!(mode.phase, Phase::Drain));
+        assert!(
+            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
+        );
+        let Phase::ProbeBw(cycle) = &mut mode.phase else {
+            panic!("DRAIN must enter PROBE_BW");
+        };
+        assert_eq!(cycle.phase, CyclePhase::Down);
+        cycle.outcome = ProbeOutcome::TooHigh;
+
+        event.event_time += params.probe_rtt_period + Duration::from_millis(1);
+        event.sample_min_rtt = Some(Duration::from_millis(80));
+        assert!(
+            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
+        );
+        assert!(matches!(mode.phase, Phase::ProbeRtt(_)));
+        assert_eq!(mode.model.pacing_gain(), 0.8);
+        assert_eq!(mode.model.cwnd_gain(), 0.5);
+
+        if resume_from_quiescence {
+            mode.do_on_exit_quiescence(event.event_time, now);
+        } else {
+            assert!(!mode
+                .do_on_congestion_event(&mut event, 13_000, params, &mut stats));
+            event.event_time +=
+                params.probe_rtt_duration + Duration::from_millis(1);
+            assert!(mode
+                .do_on_congestion_event(&mut event, 13_000, params, &mut stats));
+        }
+
+        let Phase::ProbeBw(cycle) = &mode.phase else {
+            panic!("PROBE_RTT must resume PROBE_BW");
+        };
+        assert_eq!(cycle.phase, CyclePhase::Refill);
+        assert_eq!(cycle.outcome, ProbeOutcome::TooHigh);
+        assert!(mode.is_probing_for_bandwidth());
+        assert_eq!(std::ptr::from_ref(mode.network_model()), model_address);
+        assert_eq!(mode.model.inflight_hi(), 46_000);
+        assert_eq!(mode.model.min_rtt(), Duration::from_millis(80));
+    }
 
     #[test]
     fn cycle_params() {
@@ -313,9 +366,6 @@ mod tests {
 
         assert_eq!(CyclePhase::Down.pacing_gain(params), 0.9);
         assert_eq!(CyclePhase::Down.cwnd_gain(params), 2.0);
-
-        assert_eq!(CyclePhase::NotStarted.pacing_gain(params), 1.0);
-        assert_eq!(CyclePhase::NotStarted.cwnd_gain(params), 2.0);
 
         assert_eq!(CyclePhase::Cruise.pacing_gain(params), 1.0);
         assert_eq!(CyclePhase::Cruise.cwnd_gain(params), 2.0);
