@@ -20,20 +20,22 @@ use crate::frame;
 
 use crate::recovery::bytes_in_flight::BytesInFlight;
 use crate::recovery::gcongestion::Bandwidth;
+use crate::recovery::recovery_deadline;
 use crate::recovery::rtt::RttStats;
 use crate::recovery::validate_ack_ranges;
 use crate::recovery::CongestionControlAlgorithm;
+use crate::recovery::EpochTiming;
 use crate::recovery::HandshakeStatus;
 use crate::recovery::LossDetectionTimer;
 use crate::recovery::OnAckReceivedOutcome;
 use crate::recovery::RangeSet;
 use crate::recovery::RecoveryConfig;
+use crate::recovery::RecoveryDeadline;
 use crate::recovery::RecoveryOps;
 use crate::recovery::RecoveryStats;
 use crate::recovery::ReleaseDecision;
 use crate::recovery::Sent;
 use crate::recovery::StartupExit;
-use crate::recovery::GRANULARITY;
 use crate::recovery::INITIAL_PACKET_THRESHOLD;
 use crate::recovery::INITIAL_TIME_THRESHOLD;
 use crate::recovery::MAX_OUTSTANDING_NON_ACK_ELICITING;
@@ -290,7 +292,7 @@ impl RecoveryEpoch {
         let mut lost_bytes = 0;
         self.loss_time = None;
 
-        let lost_send_time = now.checked_sub(loss_delay).unwrap();
+        let lost_send_time = now.checked_sub(loss_delay);
         let largest_acked = self.largest_acked_packet.unwrap_or(0);
         let mut pmtud_lost_bytes = 0;
         let mut pmtud_lost_packets = SmallVec::new();
@@ -303,7 +305,8 @@ impl RecoveryEpoch {
             }
 
             if let SentStatus::Sent { time_sent, .. } = status {
-                let loss_by_time = *time_sent <= lost_send_time;
+                let loss_by_time =
+                    lost_send_time.is_some_and(|time| *time_sent <= time);
                 let skipped_between = skipped_packet_numbers
                     .iter()
                     .filter(|&&pn| pn > *pkt_num && pn <= largest_acked)
@@ -344,7 +347,7 @@ impl RecoveryEpoch {
                         });
                     }
                 } else {
-                    self.loss_time = Some(*time_sent + loss_delay);
+                    self.loss_time = time_sent.checked_add(loss_delay);
                     break;
                 }
             }
@@ -614,94 +617,30 @@ impl GRecovery {
         (lost_bytes, lost_packets)
     }
 
-    fn loss_time_and_space(&self) -> (Option<Instant>, packet::Epoch) {
-        let mut epoch = packet::Epoch::Initial;
-        let mut time = self.epochs[epoch].loss_time;
-
-        // Iterate over all packet number spaces starting from Handshake.
-        for e in [packet::Epoch::Handshake, packet::Epoch::Application] {
-            let new_time = self.epochs[e].loss_time;
-            if time.is_none() || new_time < time {
-                time = new_time;
-                epoch = e;
-            }
-        }
-
-        (time, epoch)
-    }
-
-    fn pto_time_and_space(
+    fn deadline(
         &self, handshake_status: HandshakeStatus, now: Instant,
-    ) -> (Option<Instant>, packet::Epoch) {
-        let mut duration = self.pto() * 2_u32.saturating_pow(self.pto_count);
-
-        // Arm PTO from now when there are no inflight packets.
-        if self.bytes_in_flight.is_zero() {
-            if handshake_status.has_handshake_keys {
-                return (Some(now + duration), packet::Epoch::Handshake);
-            } else {
-                return (Some(now + duration), packet::Epoch::Initial);
-            }
-        }
-
-        let mut pto_timeout = None;
-        let mut pto_space = packet::Epoch::Initial;
-
-        // Iterate over all packet number spaces.
-        for &e in packet::Epoch::epochs(
-            packet::Epoch::Initial..=packet::Epoch::Application,
-        ) {
-            if self.epochs[e].pkts_in_flight == 0 {
-                continue;
-            }
-
-            if e == packet::Epoch::Application {
-                // Skip Application Data until handshake completes.
-                if !handshake_status.completed {
-                    return (pto_timeout, pto_space);
+    ) -> Option<RecoveryDeadline> {
+        recovery_deadline(
+            handshake_status,
+            now,
+            self.bytes_in_flight.is_zero(),
+            &self.rtt_stats,
+            self.pto_count,
+            |epoch| {
+                let space = &self.epochs[epoch];
+                EpochTiming {
+                    loss: space.loss_time,
+                    last_ack_eliciting: space.time_of_last_ack_eliciting_packet,
+                    has_in_flight: space.pkts_in_flight != 0,
                 }
-
-                // Include max_ack_delay and backoff for Application Data.
-                duration += self.rtt_stats.max_ack_delay *
-                    2_u32.saturating_pow(self.pto_count);
-            }
-
-            let new_time = self.epochs[e]
-                .time_of_last_ack_eliciting_packet
-                .map(|t| t + duration);
-
-            if pto_timeout.is_none() || new_time < pto_timeout {
-                pto_timeout = new_time;
-                pto_space = e;
-            }
-        }
-
-        (pto_timeout, pto_space)
+            },
+        )
     }
 
     fn set_loss_detection_timer(
         &mut self, handshake_status: HandshakeStatus, now: Instant,
     ) {
-        if let (Some(earliest_loss_time), _) = self.loss_time_and_space() {
-            // Time threshold loss detection.
-            self.loss_timer.update(earliest_loss_time);
-            return;
-        }
-
-        if self.bytes_in_flight.is_zero() &&
-            handshake_status.peer_verified_address
-        {
-            self.loss_timer.clear();
-            return;
-        }
-
-        // PTO timer.
-        if let (Some(timeout), _) = self.pto_time_and_space(handshake_status, now)
-        {
-            self.loss_timer.update(timeout);
-        } else {
-            self.loss_timer.clear();
-        }
+        self.loss_timer.update(self.deadline(handshake_status, now));
     }
 }
 
@@ -918,9 +857,9 @@ impl RecoveryOps for GRecovery {
         &mut self, handshake_status: HandshakeStatus, now: Instant,
         trace_id: &str,
     ) -> OnLossDetectionTimeoutOutcome {
-        let (earliest_loss_time, epoch) = self.loss_time_and_space();
+        let deadline = self.deadline(handshake_status, now);
 
-        if earliest_loss_time.is_some() {
+        if let Some(RecoveryDeadline::Loss(_, epoch)) = deadline {
             let prior_in_flight = self.bytes_in_flight.get();
 
             let (lost_bytes, lost_packets) =
@@ -949,24 +888,12 @@ impl RecoveryOps for GRecovery {
             };
         }
 
-        let epoch = if self.bytes_in_flight.get() > 0 {
-            // Send new data if available, else retransmit old data. If neither
-            // is available, send a single PING frame.
-            let (_, e) = self.pto_time_and_space(handshake_status, now);
-
-            e
-        } else {
-            // Client sends an anti-deadlock packet: Initial is padded to earn
-            // more anti-amplification credit, a Handshake packet proves address
-            // ownership.
-            if handshake_status.has_handshake_keys {
-                packet::Epoch::Handshake
-            } else {
-                packet::Epoch::Initial
-            }
+        let Some(RecoveryDeadline::Probe(_, epoch)) = deadline else {
+            self.loss_timer.update(None);
+            return OnLossDetectionTimeoutOutcome::default();
         };
 
-        self.pto_count += 1;
+        self.pto_count = self.pto_count.saturating_add(1);
 
         let probe_count = MAX_PTO_PROBES_COUNT.min(self.pto_count as usize);
 
@@ -981,8 +908,8 @@ impl RecoveryOps for GRecovery {
                 continue;
             }
 
-            // Match pto_time_and_space(): Application data is not an eligible
-            // PTO space until the handshake is complete.
+            // Match the PTO deadline selector: Application data is not an
+            // eligible PTO space until the handshake is complete.
             if other == packet::Epoch::Application && !handshake_status.completed
             {
                 continue;
@@ -1096,8 +1023,7 @@ impl RecoveryOps for GRecovery {
     }
 
     fn pto(&self) -> Duration {
-        let r = &self.rtt_stats;
-        r.rtt() + (r.rttvar() * 4).max(GRANULARITY)
+        self.rtt_stats.probe_timeout()
     }
 
     /// The most recent data delivery rate estimate.
@@ -1416,10 +1342,10 @@ mod tests {
         let handshake_status = HandshakeStatus {
             completed: true,
             has_handshake_keys: true,
-            peer_verified_address: true,
+            peer_verified_address: false,
         };
         let now = Instant::now();
 
-        let _ = r.pto_time_and_space(handshake_status, now);
+        let _ = r.deadline(handshake_status, now);
     }
 }
