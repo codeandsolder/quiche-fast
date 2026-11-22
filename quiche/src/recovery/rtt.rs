@@ -147,6 +147,11 @@ impl RttStats {
         }
     }
 
+    pub(super) fn probe_timeout(&self) -> Duration {
+        self.smoothed_rtt
+            .saturating_add(self.rttvar.saturating_mul(4).max(GRANULARITY))
+    }
+
     pub(crate) fn loss_delay(&self, time_thresh: f64) -> Duration {
         self.latest_rtt
             .max(self.smoothed_rtt)

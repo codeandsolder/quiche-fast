@@ -100,18 +100,95 @@ const LOSS_REDUCTION_FACTOR: f64 = 0.5;
 // an ACK.
 pub(super) const MAX_OUTSTANDING_NON_ACK_ELICITING: usize = 24;
 
+/// A deadline always identifies a concrete packet number space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RecoveryDeadline {
+    Loss(Instant, packet::Epoch),
+    Probe(Instant, packet::Epoch),
+}
+
+impl RecoveryDeadline {
+    const fn time(self) -> Instant {
+        match self {
+            Self::Loss(time, _) | Self::Probe(time, _) => time,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct EpochTiming {
+    /// Earliest time at which a packet can be declared lost.
+    loss: Option<Instant>,
+    /// Most recent ack-eliciting send time.
+    last_ack_eliciting: Option<Instant>,
+    in_flight_count: usize,
+}
+
+/// RFC 9002: loss-time deadlines take priority over PTO, and a missing
+/// deadline must never compete with a real deadline.
+fn recovery_deadline(
+    handshake: HandshakeStatus, now: Instant, no_in_flight: bool,
+    rtt: &rtt::RttStats, pto_count: u32,
+    timing: impl Fn(packet::Epoch) -> EpochTiming,
+) -> Option<RecoveryDeadline> {
+    let epochs = [
+        packet::Epoch::Initial,
+        packet::Epoch::Handshake,
+        packet::Epoch::Application,
+    ];
+    if let Some((time, epoch)) = epochs
+        .into_iter()
+        .filter_map(|epoch| timing(epoch).loss.map(|time| (time, epoch)))
+        .min_by_key(|&(time, _)| time)
+    {
+        return Some(RecoveryDeadline::Loss(time, epoch));
+    }
+
+    let backoff = 2_u32.saturating_pow(pto_count);
+    let duration = rtt.probe_timeout().saturating_mul(backoff);
+
+    if no_in_flight {
+        if handshake.peer_verified_address {
+            return None;
+        }
+        let epoch = if handshake.has_handshake_keys {
+            packet::Epoch::Handshake
+        } else {
+            packet::Epoch::Initial
+        };
+        return now
+            .checked_add(duration)
+            .map(|time| RecoveryDeadline::Probe(time, epoch));
+    }
+
+    epochs
+        .into_iter()
+        .filter_map(|epoch| {
+            let space = timing(epoch);
+            if space.in_flight_count == 0 ||
+                (epoch == packet::Epoch::Application && !handshake.completed)
+            {
+                return None;
+            }
+            let duration = if epoch == packet::Epoch::Application {
+                duration.saturating_add(rtt.max_ack_delay.saturating_mul(backoff))
+            } else {
+                duration
+            };
+            let time = space.last_ack_eliciting?.checked_add(duration)?;
+            Some(RecoveryDeadline::Probe(time, epoch))
+        })
+        .min_by_key(|deadline| deadline.time())
+}
+
 #[derive(Default)]
 struct LossDetectionTimer {
     time: Option<Instant>,
 }
 
 impl LossDetectionTimer {
-    const fn update(&mut self, timeout: Instant) {
-        self.time = Some(timeout);
-    }
-
-    const fn clear(&mut self) {
-        self.time = None;
+    fn update(&mut self, deadline: Option<RecoveryDeadline>) {
+        self.time = deadline.map(RecoveryDeadline::time);
     }
 }
 
@@ -1354,6 +1431,56 @@ mod tests {
         } else {
             assert_eq!(r.startup_exit(), None);
         }
+    }
+
+    #[rstest]
+    fn loss_deadline_survives_empty_packet_number_spaces(
+        #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+        #[values(
+            packet::Epoch::Initial,
+            packet::Epoch::Handshake,
+            packet::Epoch::Application
+        )]
+        epoch: packet::Epoch,
+    ) {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        cfg.set_cc_algorithm_name(cc_algorithm_name).unwrap();
+        let mut r = Recovery::new(&cfg);
+        let sent = Instant::now();
+        let hs = HandshakeStatus {
+            completed: epoch == packet::Epoch::Application,
+            ..HandshakeStatus::default()
+        };
+        for pn in 0..2 {
+            r.on_packet_sent(
+                test_utils::helper_packet_sent(pn, sent, 1000),
+                epoch,
+                hs,
+                sent,
+                "",
+            );
+        }
+
+        let mut acked = RangeSet::default();
+        acked.insert(1..2);
+        let ack_time = sent + Duration::from_millis(20);
+        let outcome = r
+            .on_ack_received(&acked, 0, epoch, hs, ack_time, None, "")
+            .unwrap();
+        assert_eq!(outcome.lost_packets, 0);
+        assert_eq!(
+            r.loss_detection_timer(),
+            Some(sent + Duration::from_micros(22_500))
+        );
+
+        let outcome = r.on_loss_detection_timeout(
+            hs,
+            sent + Duration::from_micros(22_500),
+            "",
+        );
+        assert_eq!(outcome.lost_packets, 1);
+        assert_eq!(r.loss_probes(epoch), 0);
+        assert_eq!(r.bytes_in_flight(), 0);
     }
 
     #[rstest]

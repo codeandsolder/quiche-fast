@@ -55,9 +55,12 @@ use qlog::events::EventData;
 
 use super::Congestion;
 use crate::recovery::bytes_in_flight::BytesInFlight;
+use crate::recovery::recovery_deadline;
 use crate::recovery::rtt::RttStats;
+use crate::recovery::EpochTiming;
 use crate::recovery::LossDetectionTimer;
 use crate::recovery::OnAckReceivedOutcome;
+use crate::recovery::RecoveryDeadline;
 use crate::recovery::ReleaseDecision;
 use crate::recovery::ReleaseTime;
 use crate::recovery::GRANULARITY;
@@ -72,16 +75,11 @@ use crate::recovery::PERSISTENT_CONGESTION_THRESHOLD;
 
 #[derive(Default)]
 struct RecoveryEpoch {
-    /// The time the most recent ack-eliciting packet was sent.
-    time_of_last_ack_eliciting_packet: Option<Instant>,
+    timing: EpochTiming,
 
     /// The largest packet number acknowledged in the packet number space so
     /// far.
     largest_acked_packet: Option<u64>,
-
-    /// The time at which the next packet in that packet number space can be
-    /// considered lost based on exceeding the reordering window in time.
-    loss_time: Option<Instant>,
 
     /// An association of packet numbers in a packet number space to information
     /// about them.
@@ -91,7 +89,6 @@ struct RecoveryEpoch {
     skipped_packet_numbers: Vec<u64>,
 
     loss_probes: usize,
-    in_flight_count: usize,
 
     acked_frames: Vec<frame::Frame>,
 
@@ -201,7 +198,7 @@ impl RecoveryEpoch {
                     }
                 } else {
                     if unacked.in_flight {
-                        self.in_flight_count -= 1;
+                        self.timing.in_flight_count -= 1;
                         acked_bytes += unacked.size;
                     }
 
@@ -234,7 +231,7 @@ impl RecoveryEpoch {
             largest_ack_received < pn.saturating_add(MAX_PACKET_THRESHOLD)
         });
 
-        self.drain_acked_and_lost_packets(now - rtt_stats.rtt());
+        self.drain_acked_and_lost_packets(now.checked_sub(rtt_stats.rtt()));
 
         AckedDetectionResult {
             acked_bytes,
@@ -249,14 +246,14 @@ impl RecoveryEpoch {
         &mut self, loss_delay: Duration, pkt_thresh: u64, now: Instant,
         trace_id: &str, epoch: Epoch, first_rtt_sample_time: Option<Instant>,
     ) -> LossDetectionResult {
-        self.loss_time = None;
+        self.timing.loss = None;
 
         // Minimum time of kGranularity before packets are deemed lost.
         let loss_delay = cmp::max(loss_delay, GRANULARITY);
         let largest_acked = self.largest_acked_packet.unwrap_or(0);
 
         // Packets sent before this time are deemed lost.
-        let lost_send_time = now.checked_sub(loss_delay).unwrap();
+        let lost_send_time = now.checked_sub(loss_delay);
 
         let mut lost_packets = 0;
         let mut lost_bytes = 0;
@@ -285,7 +282,7 @@ impl RecoveryEpoch {
                 .saturating_sub(unacked.pkt_num)
                 .saturating_sub(skipped_between);
 
-            if unacked.time_sent <= lost_send_time ||
+            if lost_send_time.is_some_and(|time| unacked.time_sent <= time) ||
                 packet_distance >= pkt_thresh
             {
                 self.lost_frames_ack.extend(unacked.frames.drain(..));
@@ -294,7 +291,7 @@ impl RecoveryEpoch {
 
                 if unacked.is_pmtud_probe {
                     pmtud_lost_bytes += unacked.size;
-                    self.in_flight_count -= 1;
+                    self.timing.in_flight_count -= 1;
 
                     // Do not track PMTUD probes losses.
                     continue;
@@ -319,7 +316,7 @@ impl RecoveryEpoch {
                     // cloning the whole packet should be relatively cheap.
                     largest_lost_pkt = Some(unacked.clone());
 
-                    self.in_flight_count -= 1;
+                    self.timing.in_flight_count -= 1;
 
                     trace!(
                         "{} packet {} lost on epoch {}",
@@ -331,14 +328,7 @@ impl RecoveryEpoch {
 
                 lost_packets += 1;
             } else {
-                let loss_time = match self.loss_time {
-                    None => unacked.time_sent + loss_delay,
-
-                    Some(loss_time) =>
-                        cmp::min(loss_time, unacked.time_sent + loss_delay),
-                };
-
-                self.loss_time = Some(loss_time);
+                self.timing.loss = unacked.time_sent.checked_add(loss_delay);
                 break;
             }
         }
@@ -354,7 +344,7 @@ impl RecoveryEpoch {
         }
     }
 
-    fn drain_acked_and_lost_packets(&mut self, loss_thresh: Instant) {
+    fn drain_acked_and_lost_packets(&mut self, loss_thresh: Option<Instant>) {
         // In order to avoid removing elements from the middle of the list
         // (which would require copying other elements to compact the list),
         // we only remove a contiguous range of elements from the start of the
@@ -365,7 +355,7 @@ impl RecoveryEpoch {
         // time, once the gaps have been filled.
         while let Some(pkt) = self.sent_packets.front() {
             if let Some(time_lost) = pkt.time_lost {
-                if time_lost > loss_thresh {
+                if loss_thresh.is_none_or(|threshold| time_lost > threshold) {
                     break;
                 }
             }
@@ -490,95 +480,23 @@ impl LegacyRecovery {
         Self::new_with_config(&RecoveryConfig::from_config(config))
     }
 
-    fn loss_time_and_space(&self) -> (Option<Instant>, Epoch) {
-        let mut epoch = Epoch::Initial;
-        let mut time = self.epochs[epoch].loss_time;
-
-        // Iterate over all packet number spaces starting from Handshake.
-        for e in [Epoch::Handshake, Epoch::Application] {
-            let new_time = self.epochs[e].loss_time;
-            if time.is_none() || new_time < time {
-                time = new_time;
-                epoch = e;
-            }
-        }
-
-        (time, epoch)
-    }
-
-    fn pto_time_and_space(
+    fn deadline(
         &self, handshake_status: HandshakeStatus, now: Instant,
-    ) -> (Option<Instant>, Epoch) {
-        let mut duration = self.pto() * 2_u32.saturating_pow(self.pto_count);
-
-        // Arm PTO from now when there are no inflight packets.
-        if self.bytes_in_flight.is_zero() {
-            if handshake_status.has_handshake_keys {
-                return (Some(now + duration), Epoch::Handshake);
-            } else {
-                return (Some(now + duration), Epoch::Initial);
-            }
-        }
-
-        let mut pto_timeout = None;
-        let mut pto_space = Epoch::Initial;
-
-        // Iterate over all packet number spaces.
-        for e in [Epoch::Initial, Epoch::Handshake, Epoch::Application] {
-            let epoch = &self.epochs[e];
-            if epoch.in_flight_count == 0 {
-                continue;
-            }
-
-            if e == Epoch::Application {
-                // Skip Application Data until handshake completes.
-                if !handshake_status.completed {
-                    return (pto_timeout, pto_space);
-                }
-
-                // Include max_ack_delay and backoff for Application Data.
-                duration += self.rtt_stats.max_ack_delay *
-                    2_u32.saturating_pow(self.pto_count);
-            }
-
-            let new_time = epoch
-                .time_of_last_ack_eliciting_packet
-                .map(|t| t + duration);
-
-            if pto_timeout.is_none() || new_time < pto_timeout {
-                pto_timeout = new_time;
-                pto_space = e;
-            }
-        }
-
-        (pto_timeout, pto_space)
+    ) -> Option<RecoveryDeadline> {
+        recovery_deadline(
+            handshake_status,
+            now,
+            self.bytes_in_flight.is_zero(),
+            &self.rtt_stats,
+            self.pto_count,
+            |epoch| self.epochs[epoch].timing,
+        )
     }
 
     fn set_loss_detection_timer(
         &mut self, handshake_status: HandshakeStatus, now: Instant,
     ) {
-        let (earliest_loss_time, _) = self.loss_time_and_space();
-
-        if let Some(to) = earliest_loss_time {
-            // Time threshold loss detection.
-            self.loss_timer.update(to);
-            return;
-        }
-
-        if self.bytes_in_flight.is_zero() &&
-            handshake_status.peer_verified_address
-        {
-            self.loss_timer.clear();
-            return;
-        }
-
-        // PTO timer.
-        if let (Some(timeout), _) = self.pto_time_and_space(handshake_status, now)
-        {
-            self.loss_timer.update(timeout);
-        } else {
-            self.loss_timer.clear();
-        }
+        self.loss_timer.update(self.deadline(handshake_status, now));
     }
 
     // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.2
@@ -691,7 +609,7 @@ impl LegacyRecovery {
             .saturating_subtract(loss.pmtud_lost_bytes, now);
 
         self.epochs[epoch]
-            .drain_acked_and_lost_packets(now - self.rtt_stats.rtt());
+            .drain_acked_and_lost_packets(now.checked_sub(self.rtt_stats.rtt()));
 
         self.congestion.lost_count += loss.lost_packets;
 
@@ -758,7 +676,7 @@ impl RecoveryOps for LegacyRecovery {
         }
 
         if in_flight && ack_eliciting {
-            self.epochs[epoch].time_of_last_ack_eliciting_packet = Some(now);
+            self.epochs[epoch].timing.last_ack_eliciting = Some(now);
         }
 
         self.congestion.on_packet_sent(
@@ -771,7 +689,7 @@ impl RecoveryOps for LegacyRecovery {
         );
 
         if in_flight {
-            self.epochs[epoch].in_flight_count += 1;
+            self.epochs[epoch].timing.in_flight_count += 1;
             self.bytes_in_flight.add(sent_bytes, now);
 
             self.set_loss_detection_timer(handshake_status, now);
@@ -875,7 +793,7 @@ impl RecoveryOps for LegacyRecovery {
 
         self.set_loss_detection_timer(handshake_status, now);
         self.epochs[epoch]
-            .drain_acked_and_lost_packets(now - self.rtt_stats.rtt());
+            .drain_acked_and_lost_packets(now.checked_sub(self.rtt_stats.rtt()));
         self.prune_acked_packet_send_times();
 
         Ok(OnAckReceivedOutcome {
@@ -890,9 +808,9 @@ impl RecoveryOps for LegacyRecovery {
         &mut self, handshake_status: HandshakeStatus, now: Instant,
         trace_id: &str,
     ) -> OnLossDetectionTimeoutOutcome {
-        let (earliest_loss_time, epoch) = self.loss_time_and_space();
+        let deadline = self.deadline(handshake_status, now);
 
-        if earliest_loss_time.is_some() {
+        if let Some(RecoveryDeadline::Loss(_, epoch)) = deadline {
             // Time threshold loss detection.
             let (lost_packets, lost_bytes) =
                 self.detect_lost_packets(epoch, now, trace_id);
@@ -906,36 +824,24 @@ impl RecoveryOps for LegacyRecovery {
             };
         }
 
-        let epoch = if self.bytes_in_flight.get() > 0 {
-            // Send new data if available, else retransmit old data. If neither
-            // is available, send a single PING frame.
-            let (_, e) = self.pto_time_and_space(handshake_status, now);
-
-            e
-        } else {
-            // Client sends an anti-deadlock packet: Initial is padded to earn
-            // more anti-amplification credit, a Handshake packet proves address
-            // ownership.
-            if handshake_status.has_handshake_keys {
-                Epoch::Handshake
-            } else {
-                Epoch::Initial
-            }
+        let Some(RecoveryDeadline::Probe(_, epoch)) = deadline else {
+            self.loss_timer.update(None);
+            return OnLossDetectionTimeoutOutcome::default();
         };
 
-        self.pto_count += 1;
+        self.pto_count = self.pto_count.saturating_add(1);
 
         let probe_count = cmp::min(self.pto_count as usize, MAX_PTO_PROBES_COUNT);
 
         // RFC 9002 Section 6.2.4 recommends probing every other eligible
         // packet-number space that still has data in flight as well.
         for other in [Epoch::Initial, Epoch::Handshake, Epoch::Application] {
-            if other == epoch || self.epochs[other].in_flight_count == 0 {
+            if other == epoch || self.epochs[other].timing.in_flight_count == 0 {
                 continue;
             }
 
-            // Match pto_time_and_space(): Application data is not an eligible
-            // PTO space until the handshake is complete.
+            // Match the PTO deadline selector: Application data is not an
+            // eligible PTO space until the handshake is complete.
             if other == Epoch::Application && !handshake_status.completed {
                 continue;
             }
@@ -1009,10 +915,8 @@ impl RecoveryOps for LegacyRecovery {
         epoch.clear_lost_frames();
         epoch.acked_frames.clear();
 
-        epoch.time_of_last_ack_eliciting_packet = None;
-        epoch.loss_time = None;
+        epoch.timing = EpochTiming::default();
         epoch.loss_probes = 0;
-        epoch.in_flight_count = 0;
 
         self.set_loss_detection_timer(handshake_status, now);
     }
@@ -1055,7 +959,7 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn pto(&self) -> Duration {
-        self.rtt() + cmp::max(self.rtt_stats.rttvar * 4, GRANULARITY)
+        self.rtt_stats.probe_timeout()
     }
 
     /// The most recent data delivery rate estimate.
@@ -1117,7 +1021,7 @@ impl RecoveryOps for LegacyRecovery {
 
     #[cfg(test)]
     fn in_flight_count(&self, epoch: Epoch) -> usize {
-        self.epochs[epoch].in_flight_count
+        self.epochs[epoch].timing.in_flight_count
     }
 
     fn bytes_in_flight(&self) -> usize {
@@ -1321,10 +1225,10 @@ mod tests {
         let handshake_status = HandshakeStatus {
             completed: true,
             has_handshake_keys: true,
-            peer_verified_address: true,
+            peer_verified_address: false,
         };
         let now = Instant::now();
 
-        let _ = r.pto_time_and_space(handshake_status, now);
+        let _ = r.deadline(handshake_status, now);
     }
 }
