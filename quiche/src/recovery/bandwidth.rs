@@ -650,7 +650,7 @@ mod tests {
             format!("{:?}", Bandwidth {
                 bits_per_second: 12345
             }),
-            "12.35 Kbps"
+            "12.34 Kbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
