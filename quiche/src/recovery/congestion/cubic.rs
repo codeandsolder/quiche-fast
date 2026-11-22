@@ -238,9 +238,10 @@ fn on_packet_acked(
     if r.congestion_recovery_start_time.is_some() {
         let new_lost = r.lost_count - r.cubic_state.prior.lost_count;
 
-        let rollback_threshold = (r.congestion_window / r.max_datagram_size) *
-            ROLLBACK_THRESHOLD_PERCENT /
-            100;
+        let rollback_threshold = ((r.congestion_window / r.max_datagram_size)
+            as u128 *
+            ROLLBACK_THRESHOLD_PERCENT as u128 /
+            100) as usize;
 
         let rollback_threshold = rollback_threshold.max(MIN_ROLLBACK_THRESHOLD);
 
@@ -255,18 +256,20 @@ fn on_packet_acked(
     if r.congestion_window < r.ssthresh.get() {
         // In Slow start, bytes_acked_sl is used for counting
         // acknowledged bytes.
-        r.bytes_acked_sl += packet.size;
-
-        if r.bytes_acked_sl >= r.max_datagram_size {
-            if r.hystart.in_css() {
-                r.congestion_window +=
-                    r.hystart.css_cwnd_inc(r.max_datagram_size);
+        let acked = r.bytes_acked_sl as u128 + packet.size as u128;
+        let remainder = if acked >= r.max_datagram_size as u128 {
+            let increase = if r.hystart.in_css() {
+                r.hystart.css_cwnd_inc(r.max_datagram_size)
             } else {
-                r.congestion_window += r.max_datagram_size;
-            }
+                r.max_datagram_size
+            };
+            r.congestion_window = r.congestion_window.saturating_add(increase);
 
-            r.bytes_acked_sl -= r.max_datagram_size;
-        }
+            acked - r.max_datagram_size as u128
+        } else {
+            acked
+        };
+        r.bytes_acked_sl = usize::try_from(remainder).unwrap_or(usize::MAX);
 
         if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
             // Exit to congestion avoidance if CSS ends.
@@ -336,19 +339,35 @@ fn on_packet_acked(
             cubic_cwnd = cmp::max(cubic_cwnd, r.cubic_state.w_est as usize);
         } else {
             // Concave region or convex region use same increment.
-            let cubic_inc =
-                r.max_datagram_size * (target as usize - cubic_cwnd) / cubic_cwnd;
+            let delta = (target as usize).saturating_sub(cubic_cwnd);
+            // The product may exceed the address width before division,
+            // especially for multi-megabyte congestion windows on 32-bit.
+            let cubic_inc = if cubic_cwnd == 0 {
+                0
+            } else if let Some(product) = r.max_datagram_size.checked_mul(delta) {
+                product / cubic_cwnd
+            } else {
+                usize::try_from(
+                    r.max_datagram_size as u128 * delta as u128 /
+                        cubic_cwnd as u128,
+                )
+                .unwrap_or(usize::MAX)
+            };
 
-            cubic_cwnd += cubic_inc;
+            cubic_cwnd = cubic_cwnd.saturating_add(cubic_inc);
         }
 
         // Update the increment and increase cwnd by MSS.
-        r.cubic_state.cwnd_inc += cubic_cwnd - r.congestion_window;
-
-        if r.cubic_state.cwnd_inc >= r.max_datagram_size {
-            r.congestion_window += r.max_datagram_size;
-            r.cubic_state.cwnd_inc -= r.max_datagram_size;
-        }
+        let increment = r.cubic_state.cwnd_inc as u128 +
+            (cubic_cwnd - r.congestion_window) as u128;
+        let remainder = if increment >= r.max_datagram_size as u128 {
+            r.congestion_window =
+                r.congestion_window.saturating_add(r.max_datagram_size);
+            increment - r.max_datagram_size as u128
+        } else {
+            increment
+        };
+        r.cubic_state.cwnd_inc = usize::try_from(remainder).unwrap_or(usize::MAX);
     }
 }
 
@@ -373,8 +392,10 @@ fn congestion_event(
         }
 
         let ssthresh = (r.congestion_window as f64 * BETA_CUBIC) as usize;
-        let ssthresh =
-            cmp::max(ssthresh, r.max_datagram_size * MINIMUM_WINDOW_PACKETS);
+        let ssthresh = cmp::max(
+            ssthresh,
+            r.max_datagram_size.saturating_mul(MINIMUM_WINDOW_PACKETS),
+        );
         r.ssthresh.update(ssthresh, r.hystart.in_css());
         r.congestion_window = ssthresh;
 
@@ -457,6 +478,32 @@ mod tests {
 
     fn hystart_test_sender() -> TestSender {
         TestSender::new(CongestionControlAlgorithm::CUBIC, true)
+    }
+
+    #[test]
+    fn cubic_congestion_avoidance_large_window() {
+        let mut sender = test_sender();
+        let mss = sender.max_datagram_size;
+        let cwnd = 8 * 1024 * 1024;
+        sender.congestion_window = cwnd;
+        sender.ssthresh.update(cwnd, false);
+        sender.cubic_state.w_max = cwnd as f64;
+        sender.cubic_state.w_est = cwnd as f64;
+        sender.cubic_state.k = 0.0;
+        sender.cubic_state.alpha_aimd = 1.0;
+        sender.congestion_recovery_start_time =
+            Some(sender.time - Duration::from_secs(100));
+        sender.send_packet(mss);
+        sender.send_packet(mss);
+        sender.update_app_limited(false);
+        sender.advance_time(Duration::from_millis(100));
+        sender.ack_n_packets(1, mss);
+        // The target is clipped at 1.5*cwnd; the exact increment
+        // is half an MSS despite the intermediate product exceeding u32.
+        assert_eq!(sender.cubic_state.cwnd_inc, mss / 2);
+        assert_eq!(sender.congestion_window, cwnd);
+        sender.ack_n_packets(1, mss);
+        assert_eq!(sender.congestion_window, cwnd + mss);
     }
 
     #[test]

@@ -85,16 +85,14 @@ fn on_packet_acked(
     }
 
     if r.congestion_window < r.ssthresh.get() {
-        // In Slow slart, bytes_acked_sl is used for counting
-        // acknowledged bytes.
-        r.bytes_acked_sl += packet.size;
-
         if r.hystart.in_css() {
-            r.congestion_window += r.hystart.css_cwnd_inc(r.max_datagram_size);
+            r.congestion_window = r
+                .congestion_window
+                .saturating_add(r.hystart.css_cwnd_inc(r.max_datagram_size));
         } else {
             // RFC 9002, Section 7.3.1: while a sender is in slow start, the
             // congestion window increases by the number of bytes acknowledged.
-            r.congestion_window += packet.size;
+            r.congestion_window = r.congestion_window.saturating_add(packet.size);
         }
 
         if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
@@ -103,12 +101,16 @@ fn on_packet_acked(
         }
     } else {
         // Congestion avoidance.
-        r.bytes_acked_ca += packet.size;
-
-        if r.bytes_acked_ca >= r.congestion_window {
-            r.bytes_acked_ca -= r.congestion_window;
-            r.congestion_window += r.max_datagram_size;
-        }
+        let acked = r.bytes_acked_ca as u128 + packet.size as u128;
+        let remainder = if acked >= r.congestion_window as u128 {
+            let remainder = acked - r.congestion_window as u128;
+            r.congestion_window =
+                r.congestion_window.saturating_add(r.max_datagram_size);
+            remainder
+        } else {
+            acked
+        };
+        r.bytes_acked_ca = usize::try_from(remainder).unwrap_or(usize::MAX);
     }
 }
 
@@ -128,7 +130,7 @@ fn congestion_event(
 
         r.congestion_window = cmp::max(
             r.congestion_window,
-            r.max_datagram_size * MINIMUM_WINDOW_PACKETS,
+            r.max_datagram_size.saturating_mul(MINIMUM_WINDOW_PACKETS),
         );
 
         r.bytes_acked_ca =
@@ -179,6 +181,22 @@ mod tests {
 
     fn test_sender() -> TestSender {
         TestSender::new(CongestionControlAlgorithm::Reno, false)
+    }
+
+    #[test]
+    fn reno_congestion_avoidance_preserves_credit_at_width_limit() {
+        let mut sender = test_sender();
+        let mss = sender.max_datagram_size;
+        let cwnd = usize::MAX - mss / 2;
+        sender.congestion_window = cwnd;
+        sender.ssthresh.update(cwnd, false);
+        sender.bytes_acked_ca = cwnd - 1;
+        sender.send_packet(mss);
+        sender.update_app_limited(false);
+        sender.advance_time(Duration::from_millis(100));
+        sender.ack_n_packets(1, mss);
+        assert_eq!(sender.congestion_window, usize::MAX);
+        assert_eq!(sender.bytes_acked_ca, mss - 1);
     }
 
     #[test]

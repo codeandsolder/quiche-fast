@@ -199,7 +199,8 @@ impl Congestion {
     ) {
         if in_flight {
             self.update_app_limited(
-                (bytes_in_flight + sent_bytes) < self.congestion_window,
+                bytes_in_flight.saturating_add(sent_bytes) <
+                    self.congestion_window,
             );
 
             (self.cc_ops.on_packet_sent)(self, sent_bytes, bytes_in_flight, now);
