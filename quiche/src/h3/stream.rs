@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::mem::MaybeUninit;
+use bytes::BufMut as _;
 
 use crate::buffers::BufFactory;
 
@@ -530,48 +530,16 @@ impl Stream {
         Ok(())
     }
 
-    /// Returns a mutable slice over the state buffer's spare capacity,
-    /// reserving additional space if needed.
-    ///
-    /// Callers must initialize the returned bytes and call
-    /// [`commit_state_buf_read()`] with the number of bytes written.
-    fn spare_state_buf(&mut self) -> &mut [u8] {
+    /// Ensure bounded incremental growth and return the number of bytes that
+    /// may be appended without allocating additional capacity. The transport
+    /// writes through BufMut, which advances the initialized length itself.
+    fn state_buf_read_limit(&mut self) -> usize {
+        debug_assert_eq!(self.state_off, self.state_buf.len());
         let need = self.state_len - self.state_off;
-        let spare = self
-            .state_buf
-            .capacity()
-            .saturating_sub(self.state_buf.len());
-
-        if spare == 0 {
-            let additional = std::cmp::min(MAX_STATE_BUF_ALLOC_SIZE, need);
-            self.state_buf.reserve(additional);
+        if self.state_buf.len() == self.state_buf.capacity() {
+            self.state_buf.reserve(MAX_STATE_BUF_ALLOC_SIZE.min(need));
         }
-
-        let buf = self.state_buf.spare_capacity_mut();
-        let usable = std::cmp::min(need, buf.len());
-
-        // SAFETY: MaybeUninit<u8> has the same layout as u8. The caller
-        // contract requires initializing all returned bytes before calling
-        // commit_state_buf_read(), so no uninitialized memory is read.
-        unsafe {
-            std::mem::transmute::<&mut [MaybeUninit<u8>], &mut [u8]>(
-                &mut buf[..usable],
-            )
-        }
-    }
-
-    /// Advances the state buffer's initialized length and offset by `read`
-    /// bytes. The caller must have written `read` bytes into the slice
-    /// previously returned by [`spare_state_buf()`].
-    fn commit_state_buf_read(&mut self, read: usize) {
-        let buf_len = self.state_buf.len();
-        debug_assert!(buf_len + read <= self.state_buf.capacity());
-        // SAFETY: `read` bytes were written to spare capacity by the I/O
-        // layer. read <= spare_buf.len() <= spare_capacity, so
-        // buf_len + read <= capacity.
-        unsafe { self.state_buf.set_len(buf_len + read) };
-
-        self.state_off += read;
+        need.min(self.state_buf.capacity() - self.state_buf.len())
     }
 
     /// Tries to fill the state buffer by reading data from the corresponding
@@ -590,12 +558,13 @@ impl Stream {
         loop {
             let stream_id = self.id;
 
-            let spare_buf = self.spare_state_buf();
-            let spare_len = spare_buf.len();
-
-            match conn.stream_recv(stream_id, spare_buf) {
+            let spare_len = self.state_buf_read_limit();
+            match conn.stream_recv_buf(
+                stream_id,
+                (&mut self.state_buf).limit(spare_len),
+            ) {
                 Ok((read, fin)) => {
-                    self.commit_state_buf_read(read);
+                    self.state_off = self.state_buf.len();
 
                     if self.critical_stream_closed(fin) {
                         super::close_conn_critical_stream(conn)?;
@@ -758,23 +727,14 @@ impl Stream {
         }
 
         loop {
-            let spare_buf = self.spare_state_buf();
-            let spare_len = spare_buf.len();
-
-            let read = match std::io::Read::read(stream, spare_buf) {
-                Ok(0) => {
-                    // end of stream, stop
-                    break;
-                },
-
-                Ok(v) => v,
-
-                Err(_) => {
-                    panic!("Test buffer reading should never fail");
-                },
-            };
-
-            self.commit_state_buf_read(read);
+            use std::io::BufRead as _;
+            let spare_len = self.state_buf_read_limit();
+            let available =
+                stream.fill_buf().map_err(|_| Error::InternalError)?;
+            let read = available.len().min(spare_len);
+            self.state_buf.extend_from_slice(&available[..read]);
+            stream.consume(read);
+            self.state_off = self.state_buf.len();
 
             if read < spare_len {
                 break;
@@ -814,20 +774,19 @@ impl Stream {
     ///
     /// If successful, returns the `frame::Frame` and the payload length.
     pub fn try_consume_frame(&mut self) -> Result<(frame::Frame, u64)> {
-        debug_assert_eq!(self.state, State::FramePayload);
-        // Processing a frame other than DATA, so re-arm the Data event.
-        self.reset_data_event();
-
+        if self.state != State::FramePayload {
+            return Err(Error::InternalError);
+        }
+        if !self.state_buffer_complete() {
+            return Err(Error::Done);
+        }
         let payload_len = self.state_len as u64;
-
-        // TODO: properly propagate frame parsing errors.
-        let frame = frame::Frame::from_bytes(
-            self.frame_type.unwrap(),
-            payload_len,
-            &self.state_buf,
-        )?;
+        let ty = self.frame_type.ok_or(Error::InternalError)?;
+        let frame = frame::Frame::from_bytes(ty, payload_len, &self.state_buf)?;
 
         self.state_transition(State::FrameType, 1, true)?;
+        // Processing a frame other than DATA, so re-arm the Data event.
+        self.reset_data_event();
 
         Ok((frame, payload_len))
     }
@@ -961,18 +920,16 @@ impl Stream {
     fn state_transition(
         &mut self, new_state: State, expected_len: usize, resize: bool,
     ) -> Result<()> {
+        // A peer can influence the size of the state buffer. Validate the
+        // limit before discarding any buffered state.
+        if resize && expected_len > MAX_STATE_BUF_SIZE {
+            return Err(Error::ExcessiveLoad);
+        }
+
         self.state_buf.clear();
 
-        // Some states don't need the state buffer, so don't resize it if not
-        // necessary.
+        // Some states stream/discard payloads without buffering them.
         if resize {
-            // A peer can influence the size of the state buffer (e.g. with the
-            // payload size of a GREASE frame), so we need to limit the maximum
-            // size to avoid DoS.
-            if expected_len > MAX_STATE_BUF_SIZE {
-                return Err(Error::ExcessiveLoad);
-            }
-
             let reserve_len =
                 std::cmp::min(expected_len, MAX_STATE_BUF_ALLOC_SIZE);
             self.state_buf.reserve(reserve_len);
@@ -2119,6 +2076,47 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_buffered_frame_remains_readable() {
+        let mut stream = Stream::new(
+            0,
+            false,
+            SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT,
+            PRIORITY_UPDATE_FRAME_PAYLOAD_MAX_SIZE_DEFAULT,
+        );
+        stream.set_frame_type(HEADERS_FRAME_TYPE_ID).unwrap();
+        stream.set_frame_payload_len(4).unwrap();
+        let mut first = std::io::Cursor::new(vec![1, 2]);
+        assert_eq!(
+            stream.try_fill_buffer_for_tests(&mut first),
+            Err(Error::Done)
+        );
+        assert_eq!(stream.try_consume_frame(), Err(Error::Done));
+        assert_eq!(stream.state_buf, [1, 2]);
+        assert_eq!(
+            stream.state_transition(
+                State::FramePayload,
+                MAX_STATE_BUF_SIZE + 1,
+                true
+            ),
+            Err(Error::ExcessiveLoad),
+        );
+        assert_eq!(stream.state_buf, [1, 2]);
+        assert_eq!(stream.state_off, 2);
+        let mut last = std::io::Cursor::new(vec![3, 4, 5, 6]);
+        assert_eq!(stream.try_fill_buffer_for_tests(&mut last), Ok(()));
+        assert_eq!(last.position(), 2);
+        assert_eq!(
+            stream.try_consume_frame(),
+            Ok((
+                Frame::Headers {
+                    header_block: vec![1, 2, 3, 4],
+                },
+                4
+            ))
+        );
+    }
+
+    #[test]
     /// Drip feed data in chunks that exactly match spare capacity, forcing
     /// spare to hit 0 on every re-entry to try_fill_buffer_for_tests.
     fn large_state_buf_exact_spare_drip_feed() {
@@ -2170,7 +2168,7 @@ mod tests {
 
         // Drip feed in chunks that exactly match MAX_STATE_BUF_ALLOC_SIZE.
         // Each chunk fully consumes spare, so on re-entry spare is exactly 0
-        // and spare_state_buf must reserve.
+        // and state_buf_read_limit must reserve.
         let mut fed = 0;
         while fed + MAX_STATE_BUF_ALLOC_SIZE <= LARGE_HEADER_LEN {
             let chunk = &payload_data[fed..fed + MAX_STATE_BUF_ALLOC_SIZE];
@@ -2183,7 +2181,7 @@ mod tests {
             if fed < LARGE_HEADER_LEN {
                 assert_eq!(result, Err(Error::Done));
                 assert_eq!(stream.state_off, fed);
-                // spare_state_buf should have reserved on each re-entry
+                // state_buf_read_limit should have reserved on each re-entry
                 // since previous chunk consumed all spare.
                 assert!(stream.state_buf.capacity() >= fed);
             } else {
