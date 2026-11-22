@@ -55,6 +55,28 @@ impl std::error::Error for BufferTooShortError {
     }
 }
 
+/// Errors while decoding a HPACK/QPACK Huffman string.
+#[cfg(feature = "huffman_hpack")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HuffmanDecodeError {
+    /// The encoded string contains an invalid code or padding.
+    InvalidEncoding,
+    /// The decoded string would exceed the requested output limit.
+    OutputLimitExceeded,
+    /// Storage for the decoded string could not be reserved.
+    AllocationFailed,
+}
+
+#[cfg(feature = "huffman_hpack")]
+impl std::fmt::Display for HuffmanDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+#[cfg(feature = "huffman_hpack")]
+impl std::error::Error for HuffmanDecodeError {}
+
 /// A byte sink for encoders in this crate.
 ///
 /// This lets callers use octets encoders with output targets other than a
@@ -341,9 +363,11 @@ impl<'a> Octets<'a> {
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
     /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
-    pub fn get_huffman_decoded(&mut self) -> Result<Vec<u8>> {
+    /// Returns [`HuffmanDecodeError`] for invalid encodings or if the decoded
+    /// output cannot be stored within the specified limit.
+    pub fn get_huffman_decoded(
+        &mut self,
+    ) -> std::result::Result<Vec<u8>, HuffmanDecodeError> {
         self.get_huffman_decoded_with_max_length(usize::MAX)
     }
 
@@ -353,35 +377,37 @@ impl<'a> Octets<'a> {
     /// The Huffman code implemented is the one defined for HPACK (RFC7541).
     #[cfg(feature = "huffman_hpack")]
     /// # Errors
-    /// Returns [`BufferTooShortError`] when the requested operation cannot be
-    /// completed within the available buffer or encoding width.
+    /// Returns [`HuffmanDecodeError`] for invalid encodings or if the decoded
+    /// output cannot be stored within the specified limit.
     pub fn get_huffman_decoded_with_max_length(
         &mut self, max_len: usize,
-    ) -> Result<Vec<u8>> {
+    ) -> std::result::Result<Vec<u8>, HuffmanDecodeError> {
         use self::huffman_table::DECODE_TABLE;
 
         const FLAG_END: u8 = 1;
         const FLAG_SYM: u8 = 2;
         const FLAG_ERR: u8 = 4;
 
-        // Max compression ratio is >= 0.5.
-        let initial_cap = std::cmp::min(self.cap() * 2, max_len);
-        let mut out = Vec::with_capacity(initial_cap);
+        // Each nibble emits at most one symbol. Reserve this upper bound,
+        // capped by the output limit, with no infallible allocation.
+        let initial_cap = self.cap().saturating_mul(2).min(max_len);
+        let mut out = Vec::new();
+        out.try_reserve_exact(initial_cap)
+            .map_err(|_| HuffmanDecodeError::AllocationFailed)?;
 
         let mut state = 0;
         let mut eos = false;
 
         while let Ok(byte) = self.get_u8() {
             for data in [byte >> 4, byte & 0xf] {
-                let (next, sym, flags) = DECODE_TABLE[state][(data) as usize];
+                let (next, sym, flags) = DECODE_TABLE[state][usize::from(data)];
 
                 if flags & FLAG_ERR == FLAG_ERR {
                     // Data followed the "end" marker.
-                    return Err(BufferTooShortError);
+                    return Err(HuffmanDecodeError::InvalidEncoding);
                 } else if flags & FLAG_SYM == FLAG_SYM {
-                    // Error if pushing sym (1 byte) would overflow.
-                    if out.len() + 1 > max_len {
-                        return Err(BufferTooShortError);
+                    if out.len() >= max_len {
+                        return Err(HuffmanDecodeError::OutputLimitExceeded);
                     }
                     out.push(sym);
                 }
@@ -395,7 +421,7 @@ impl<'a> Octets<'a> {
         }
 
         if state != 0 && !eos {
-            return Err(BufferTooShortError);
+            return Err(HuffmanDecodeError::InvalidEncoding);
         }
 
         Ok(out)
