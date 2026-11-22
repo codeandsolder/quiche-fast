@@ -60,7 +60,7 @@ pub enum PacketType {
 impl PacketType {
     /// Classify a typed qlog packet, mapping unknown and stateless-reset
     /// packets to the generic bucket used by the plots.
-    #[must_use]
+    #[must_use = "the returned value identifies the converted packet type"]
     pub const fn from_qlog_packet_type(
         ty: &qlog::events::quic::PacketType,
     ) -> Self {
@@ -79,7 +79,7 @@ impl PacketType {
     }
 
     /// Classify a packet from Chrome netlog header metadata.
-    #[must_use]
+    #[must_use = "the returned value identifies the decoded packet type"]
     pub fn from_netlog_packet_header(
         header_format: &str, long_header_type: Option<&str>,
     ) -> Self {
@@ -95,7 +95,7 @@ impl PacketType {
     }
 
     /// Classify a packet from Chrome netlog's encryption level.
-    #[must_use]
+    #[must_use = "the returned value identifies the packet encryption level"]
     pub fn from_netlog_encryption_level(encryption_level: &str) -> Self {
         match encryption_level {
             "ENCRYPTION_INITIAL" => Self::Initial,
@@ -116,7 +116,7 @@ pub enum SerializationFormat {
 }
 
 impl SerializationFormat {
-    #[must_use]
+    #[must_use = "the returned format determines how to parse the input file"]
     pub fn from_file_extension(extension: &str) -> Self {
         match extension {
             ext if ext.eq_ignore_ascii_case("qlog") => Self::QlogJson,
@@ -129,7 +129,7 @@ impl SerializationFormat {
         }
     }
 
-    #[must_use]
+    #[must_use = "the returned format determines how to parse the input file"]
     pub fn from_filename(filename: &str) -> Self {
         // Path handles the final suffix of compound extensions like .sqlog.gz.
         std::path::Path::new(filename)
@@ -149,7 +149,7 @@ pub struct QlogTraceIdentity {
 }
 
 impl QlogTraceIdentity {
-    #[must_use]
+    #[must_use = "the returned string contains the trace label"]
     pub fn label(&self) -> String {
         let prefix = format!("trace {}", self.index + 1);
         self.title
@@ -410,7 +410,7 @@ fn create_file_recursive(filename: &str) -> std::io::Result<File> {
 
 /// Split the category at the first separator, preserving arbitrary colons
 /// within custom event names.
-#[must_use]
+#[must_use = "the returned pair contains the event category and type"]
 pub fn category_and_type_from_name(name: &str) -> (String, String) {
     match name.split_once(':') {
         Some((category, event_name)) =>

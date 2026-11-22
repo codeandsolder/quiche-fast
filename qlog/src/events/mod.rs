@@ -124,13 +124,13 @@ impl From<EventWire> for Event {
 
 impl Event {
     /// Returns a new `Event` object with the provided time and data.
-    #[must_use]
+    #[must_use = "the returned event contains the supplied timestamp and data"]
     pub fn with_time(time: f64, data: EventData) -> Self {
         Self::with_time_ex(time, data, ExData::new())
     }
 
     /// Returns a new `Event` object with the provided time, data and `ex_data`.
-    #[must_use]
+    #[must_use = "the returned event contains the supplied timestamp, data and extensions"]
     pub fn with_time_ex(time: f64, data: EventData, ex_data: ExData) -> Self {
         let ty = EventType::from(&data);
 
@@ -204,7 +204,7 @@ impl EventImportance {
             reason = "Preserve the established public method signature; the one-byte enum comparison is inlined"
         )
     )]
-    #[must_use]
+    #[must_use = "the result determines whether the event importance passes the filter"]
     pub const fn is_contained_in(&self, other: &Self) -> bool {
         matches!(
             (*other, *self),
@@ -610,7 +610,7 @@ pub enum EventData {
 
 impl EventData {
     /// Returns size of `EventData` array of `QuicFrame`s if it exists.
-    #[must_use]
+    #[must_use = "the result describes the number of QUIC frames if present"]
     pub fn contains_quic_frames(&self) -> Option<usize> {
         // For some EventData variants, the frame array is optional
         // but for others it is mandatory.

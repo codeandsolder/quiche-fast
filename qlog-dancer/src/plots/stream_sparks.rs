@@ -104,7 +104,7 @@ pub struct SparkOutputs<T> {
 
 impl<T: Clone> SparkOutputs<T> {
     /// Use one output type (typically a PNG directory) for all four charts.
-    #[must_use]
+    #[must_use = "the returned configuration applies the output to each plot"]
     pub fn all(output: T) -> Self {
         Self {
             download: SparkPair {
@@ -616,7 +616,7 @@ impl SparkCaption {
 /// Download panes show buffered data and request timing markers; upload
 /// panes show STREAM frames, a stream limit and possibly HTTP/2 send credit.
 /// The fixed-size array avoids a heap allocation even with optional entries.
-#[must_use]
+#[must_use = "the returned entries describe the available plot series"]
 const fn spark_legend_entries(
     transmission_type: TransmissionType, vantage: VantagePoint,
     proto: ApplicationProto,

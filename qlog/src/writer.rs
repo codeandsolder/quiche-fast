@@ -105,7 +105,7 @@ impl foundations::settings::Settings for QlogCompression {}
 /// Return the qlog filename (not including the directory) for a
 /// stream whose identifier is `id`, with the suffix matching
 /// `compression`: `<id>.sqlog`, `<id>.sqlog.gz`, or `<id>.sqlog.zst`.
-#[must_use]
+#[must_use = "the returned filename selects the requested compression format"]
 pub fn qlog_file_name(id: &str, compression: QlogCompression) -> String {
     match compression {
         QlogCompression::None => format!("{id}{SQLOG_EXT}"),

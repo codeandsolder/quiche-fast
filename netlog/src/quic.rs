@@ -337,7 +337,7 @@ pub struct QuicSessionClosedEvent {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
-#[must_use]
+#[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 #[expect(
     clippy::too_many_lines,
     reason = "Explicit wire-event dispatch is easier to audit than splitting the protocol mapping across helpers"

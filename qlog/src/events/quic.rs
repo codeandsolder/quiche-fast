@@ -64,12 +64,12 @@ pub struct AckRange {
 
 impl AckRange {
     /// Creates a new `AckRange` spanning `[start, end]` (both inclusive).
-    #[must_use]
+    #[must_use = "the returned acknowledgment range contains the supplied endpoints"]
     pub const fn new(start: u64, end: u64) -> Self {
         Self { start, end }
     }
 
-    #[must_use]
+    #[must_use = "the returned range represents the inclusive acknowledged packet interval"]
     pub const fn as_range_inclusive(&self) -> RangeInclusive<u64> {
         self.start..=self.end
     }
@@ -150,7 +150,7 @@ pub struct PacketHeader {
 
 impl PacketHeader {
     /// Creates a new `PacketHeader`.
-    #[must_use]
+    #[must_use = "the returned packet header contains the supplied fields"]
     pub fn new(
         packet_type: PacketType, packet_number: Option<u64>,
         token: Option<Box<Token>>, length: Option<u16>, version: Option<u32>,
@@ -192,7 +192,7 @@ impl PacketHeader {
     /// Once a QUIC connection has formed, version, dcid and scid are stable, so
     /// there are space benefits to not logging them in every packet, especially
     /// `PacketType::OneRtt`.
-    #[must_use]
+    #[must_use = "the returned header identifies the QUIC packet"]
     pub fn with_type(
         ty: PacketType, packet_number: Option<u64>, version: Option<u32>,
         scid: Option<&[u8]>, dcid: Option<&[u8]>,

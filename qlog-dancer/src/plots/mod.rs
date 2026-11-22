@@ -190,17 +190,17 @@ impl ChartConfig {
     }
 }
 
-#[must_use]
+#[must_use = "the returned style configures the chart title"]
 pub fn chart_title_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 40).into_font()).color(color)
 }
 
-#[must_use]
+#[must_use = "the returned style configures the chart subtitle"]
 pub fn chart_subtitle_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 20).into_font()).color(color)
 }
 
-#[must_use]
+#[must_use = "the returned style configures the chart labels"]
 pub fn chart_label_style(color: &RGBColor) -> TextStyle<'_> {
     TextStyle::from(("sans-serif", 15).into_font()).color(color)
 }

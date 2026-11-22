@@ -108,7 +108,7 @@ pub struct Http2SessionSendSettingsEvent {
 ///
 /// Unknown but syntactically valid setting names are accepted; interpretation
 /// of the numeric identifier belongs to `Http2Settings::set_from_wire`.
-#[must_use]
+#[must_use = "the result identifies the setting or reports an unrecognized value"]
 pub fn parse_recv_setting_id(value: &str) -> Option<u16> {
     let (id, description) = value.split_once(" (")?;
     let name = description.strip_suffix(')')?;
@@ -450,7 +450,7 @@ impl TryFrom<&[String]> for Http2Settings {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
-#[must_use]
+#[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 #[expect(
     clippy::too_many_lines,
     reason = "Explicit wire-event dispatch is easier to audit than splitting the protocol mapping across helpers"

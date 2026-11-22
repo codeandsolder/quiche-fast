@@ -206,7 +206,7 @@ impl<'a> Octets<'a> {
     ///
     /// Since the `Octets` is immutable, the input slice needs to be
     /// immutable.
-    #[must_use]
+    #[must_use = "the returned cursor borrows the input bytes"]
     pub const fn with_slice(buf: &'a [u8]) -> Self {
         Octets { buf, off: 0 }
     }
@@ -504,37 +504,37 @@ impl<'a> Octets<'a> {
     }
 
     /// Returns the remaining capacity in the buffer.
-    #[must_use]
+    #[must_use = "the result bounds reads or writes at the current cursor"]
     pub const fn cap(&self) -> usize {
         self.buf.len() - self.off
     }
 
     /// Returns the total length of the buffer.
-    #[must_use]
+    #[must_use = "the returned length describes the buffer bounds"]
     pub const fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Returns `true` if the buffer is empty.
-    #[must_use]
+    #[must_use = "the result indicates whether the buffer contains any bytes"]
     pub const fn is_empty(&self) -> bool {
         self.buf.len() == 0
     }
 
     /// Returns the current offset of the buffer.
-    #[must_use]
+    #[must_use = "the result identifies the current cursor position"]
     pub const fn off(&self) -> usize {
         self.off
     }
 
     /// Returns a reference to the internal buffer.
-    #[must_use]
+    #[must_use = "the returned slice exposes the underlying buffer"]
     pub const fn buf(&self) -> &'a [u8] {
         self.buf
     }
 
     /// Copies the buffer from the current offset into a new `Vec<u8>`.
-    #[must_use]
+    #[must_use = "the returned vector contains a copy of the remaining bytes"]
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_ref().to_vec()
     }
@@ -995,37 +995,37 @@ impl<'a> OctetsMut<'a> {
     }
 
     /// Returns the remaining capacity in the buffer.
-    #[must_use]
+    #[must_use = "the result bounds reads or writes at the current cursor"]
     pub const fn cap(&self) -> usize {
         self.buf.len() - self.off
     }
 
     /// Returns the total length of the buffer.
-    #[must_use]
+    #[must_use = "the returned length describes the buffer bounds"]
     pub const fn len(&self) -> usize {
         self.buf.len()
     }
 
     /// Returns `true` if the buffer is empty.
-    #[must_use]
+    #[must_use = "the result indicates whether the buffer contains any bytes"]
     pub const fn is_empty(&self) -> bool {
         self.buf.len() == 0
     }
 
     /// Returns the current offset of the buffer.
-    #[must_use]
+    #[must_use = "the result identifies the current cursor position"]
     pub const fn off(&self) -> usize {
         self.off
     }
 
     /// Returns a reference to the internal buffer.
-    #[must_use]
+    #[must_use = "the returned slice exposes the underlying buffer"]
     pub const fn buf(&self) -> &[u8] {
         self.buf
     }
 
     /// Copies the buffer from the current offset into a new `Vec<u8>`.
-    #[must_use]
+    #[must_use = "the returned vector contains a copy of the remaining bytes"]
     pub fn to_vec(&self) -> Vec<u8> {
         self.as_ref().to_vec()
     }
@@ -1065,7 +1065,7 @@ impl OctetsWriter for Vec<u8> {
 ///
 /// Values above [`MAX_VAR_INT`] also map to 8 bytes; encoding APIs reject
 /// those values rather than panicking.
-#[must_use]
+#[must_use = "the result determines the required wire encoding width"]
 pub const fn varint_len(v: u64) -> usize {
     if v <= 63 {
         1
@@ -1079,7 +1079,7 @@ pub const fn varint_len(v: u64) -> usize {
 }
 
 /// Returns how long the variable-length integer is, given its first byte.
-#[must_use]
+#[must_use = "the result determines the encoded width from the leading byte"]
 pub const fn varint_parse_len(first: u8) -> usize {
     match first >> 6 {
         0 => 1,

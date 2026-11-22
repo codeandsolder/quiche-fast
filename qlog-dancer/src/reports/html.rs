@@ -465,7 +465,7 @@ fn escaped_html_table(table: tabled::builder::Builder) -> HtmlTable {
 }
 
 /// Render the escaped event-list table for CLI and browser use.
-#[must_use]
+#[must_use = "the returned HTML contains the rendered event table"]
 pub fn event_list_html_from_table(table: tabled::builder::Builder) -> String {
     let table = escaped_html_table(table);
     inject_table_id_class(

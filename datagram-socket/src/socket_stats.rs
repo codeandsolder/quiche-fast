@@ -136,7 +136,7 @@ pub struct QuicAuditStats {
 
 impl QuicAuditStats {
     #[inline]
-    #[must_use]
+    #[must_use = "the returned statistics object holds the per-connection counters"]
     pub fn new(quic_connection_id: Vec<u8>) -> Self {
         Self {
             recvd_conn_close_transport_error_code: AtomicI64::new(-1),

@@ -119,7 +119,7 @@ pub struct HttpStreamRequestBoundToQuicSessionParams {
     pub source_dependency: SourceDependency,
 }
 
-#[must_use]
+#[must_use = "the returned map contains the converted headers"]
 pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
     let mut ret = BTreeMap::new();
 
@@ -134,7 +134,7 @@ pub fn headers_to_map(hdrs: &[String]) -> BTreeMap<String, String> {
 }
 
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
-#[must_use]
+#[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 pub fn parse_event(
     event_hdr: &EventHeader, event: &[u8],
 ) -> Option<super::Event> {

@@ -79,13 +79,13 @@ impl Drop for ConsumeBuffer {
 }
 
 impl ConsumeBuffer {
-    #[must_use]
+    #[must_use = "the returned buffer owns the input allocation"]
     pub fn from_vec(inner: Vec<u8>) -> Self {
         consume_buffer_total_bytes().inc_by(inner.capacity() as u64);
         Self { inner, head: 0 }
     }
 
-    #[must_use]
+    #[must_use = "the returned vector contains the consumed buffer data"]
     pub fn into_vec(mut self) -> Vec<u8> {
         // `ConsumeBuffer` implements Drop, so use `take` instead of moving the
         // vector out directly. Update metrics manually because this object no

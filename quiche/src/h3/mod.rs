@@ -594,7 +594,7 @@ impl Default for Config {
 
 impl Config {
     /// Creates a new configuration object with default settings.
-    #[must_use]
+    #[must_use = "the returned configuration contains the HTTP/3 defaults"]
     pub const fn new() -> Self {
         Self {
             max_field_section_size: Some(SETTINGS_MAX_FIELD_SECTION_SIZE_DEFAULT),
@@ -765,7 +765,7 @@ impl Header {
     /// Creates a new header.
     ///
     /// Both `name` and `value` will be cloned.
-    #[must_use]
+    #[must_use = "the returned header owns the copied name and value"]
     pub fn new(name: &[u8], value: &[u8]) -> Self {
         Self(name.to_vec(), value.to_vec())
     }
@@ -787,7 +787,7 @@ pub struct HeaderRef<'a>(&'a [u8], &'a [u8]);
 
 impl<'a> HeaderRef<'a> {
     /// Creates a new header.
-    #[must_use]
+    #[must_use = "the returned header borrows the supplied name and value"]
     pub const fn new(name: &'a [u8], value: &'a [u8]) -> Self {
         Self(name, value)
     }
@@ -880,7 +880,7 @@ impl Default for Priority {
 
 impl Priority {
     /// Creates a new Priority.
-    #[must_use]
+    #[must_use = "the returned priority contains the supplied urgency and incremental flag"]
     pub const fn new(urgency: u8, incremental: bool) -> Self {
         Self {
             urgency,
@@ -1846,7 +1846,7 @@ impl Connection {
     /// method.
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
-    #[must_use]
+    #[must_use = "the result determines whether the peer permits HTTP datagrams"]
     pub fn dgram_enabled_by_peer<F: BufFactory>(
         &self, conn: &super::Connection<F>,
     ) -> bool {
@@ -1861,7 +1861,7 @@ impl Connection {
     /// method.
     ///
     /// [`poll()`]: struct.Connection.html#method.poll
-    #[must_use]
+    #[must_use = "the result determines whether the peer permits extended CONNECT"]
     pub fn extended_connect_enabled_by_peer(&self) -> bool {
         self.peer_settings.connect_protocol_enabled == Some(1)
     }
@@ -2347,7 +2347,7 @@ impl Connection {
     /// Gets the raw settings from peer including unknown and reserved types.
     ///
     /// The order of settings is the same as received in the SETTINGS frame.
-    #[must_use]
+    #[must_use = "the returned settings describe the peer HTTP/3 capabilities"]
     pub fn peer_settings_raw(&self) -> Option<&[(u64, u64)]> {
         self.peer_settings.raw.as_deref()
     }
@@ -3387,7 +3387,7 @@ impl Connection {
 
     /// Collects and returns statistics about the connection.
     #[inline]
-    #[must_use]
+    #[must_use = "the returned snapshot contains connection statistics"]
     pub const fn stats(&self) -> Stats {
         Stats {
             qpack_encoder_stream_recv_bytes: self
@@ -3401,7 +3401,7 @@ impl Connection {
 }
 
 /// Generates an HTTP/3 GREASE variable length integer.
-#[must_use]
+#[must_use = "the returned value is the generated reserved HTTP/3 integer"]
 pub fn grease_value() -> u64 {
     let n = super::rand::rand_u64_uniform(148_764_065_110_560_899);
     31 * n + 33

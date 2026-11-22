@@ -33,7 +33,7 @@ use crate::TraceSeq;
 use crate::VantagePoint;
 use crate::VantagePointType;
 
-#[must_use]
+#[must_use = "the returned fixture contains the packet header"]
 pub fn make_pkt_hdr(packet_type: PacketType) -> PacketHeader {
     let scid = [0x7e, 0x37, 0xe4, 0xdc, 0xc6, 0x68, 0x2d, 0xa8];
     let dcid = [0x36, 0xce, 0x10, 0x4e, 0xee, 0x50, 0x10, 0x1c];
@@ -52,7 +52,7 @@ pub fn make_pkt_hdr(packet_type: PacketType) -> PacketHeader {
     )
 }
 
-#[must_use]
+#[must_use = "the returned fixture contains the trace"]
 pub fn make_trace() -> Trace {
     Trace::new(
         Some("Quiche qlog trace".to_string()),
@@ -67,7 +67,7 @@ pub fn make_trace() -> Trace {
     )
 }
 
-#[must_use]
+#[must_use = "the returned fixture contains the sequential trace metadata"]
 pub fn make_trace_seq() -> TraceSeq {
     TraceSeq::new(
         Some("Quiche qlog trace".to_string()),
