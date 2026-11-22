@@ -27,11 +27,11 @@
 use crate::fixtures::*;
 use h3i_fixtures::received_status_code_on_stream;
 
-use boring::ssl::BoxSelectCertFinish;
-use boring::ssl::ClientHello;
-use boring::ssl::SslContextBuilder;
-use boring::ssl::SslFiletype;
-use boring::ssl::SslMethod;
+use btls::ssl::BoxSelectCertFinish;
+use btls::ssl::ClientHello;
+use btls::ssl::SslContextBuilder;
+use btls::ssl::SslFiletype;
+use btls::ssl::SslMethod;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -117,7 +117,7 @@ async fn test_async_callbacks_fail_after_initial_send() {
                     yield_now().await;
                     yield_now().await;
                     yield_now().await;
-                    Err(boring::ssl::AsyncSelectCertError)
+                    Err(btls::ssl::AsyncSelectCertError)
                 }))
             });
 

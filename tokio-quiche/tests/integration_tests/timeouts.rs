@@ -30,11 +30,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use boring::ssl::BoxSelectCertFinish;
-use boring::ssl::ClientHello;
-use boring::ssl::SslContextBuilder;
-use boring::ssl::SslFiletype;
-use boring::ssl::SslMethod;
+use btls::ssl::BoxSelectCertFinish;
+use btls::ssl::ClientHello;
+use btls::ssl::SslContextBuilder;
+use btls::ssl::SslFiletype;
+use btls::ssl::SslMethod;
 use h3i::actions::h3::send_headers_frame;
 use h3i::actions::h3::Action;
 use h3i::actions::h3::WaitType;
@@ -156,7 +156,7 @@ async fn test_handshake_timeout_with_one_client_flight() {
     socket.connect(peer_addr).await.unwrap();
 
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    boring::rand::rand_bytes(&mut scid).unwrap();
+    btls::rand::rand_bytes(&mut scid).unwrap();
     let scid = quiche::ConnectionId::from_ref(&scid);
 
     let local_addr = socket.local_addr().unwrap();

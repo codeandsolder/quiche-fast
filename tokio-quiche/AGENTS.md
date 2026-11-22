@@ -69,7 +69,7 @@ src/
 
 ## NOTES
 
-- Hardcodes `quiche/boringssl-boring-crate` + `quiche/qlog` in Cargo.toml deps.
+- Hardcodes `quiche/boringssl-btls-crate` + `quiche/qlog` in Cargo.toml deps.
 - Features: `zero-copy` implies `gcongestion`. `rpk` enables raw public keys via `boring/rpk`.
 - `--cfg capture_keylogs` (build flag, not feature) enables SSLKEYLOGFILE support.
 - `perf-quic-listener-metrics` adds handshake timing instrumentation.

@@ -360,7 +360,7 @@ impl EarlyDataClient {
         config.enable_early_data();
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-        boring::rand::rand_bytes(&mut scid).unwrap();
+        btls::rand::rand_bytes(&mut scid).unwrap();
         let scid = quiche::ConnectionId::from_ref(&scid);
 
         let mut conn = quiche::connect(

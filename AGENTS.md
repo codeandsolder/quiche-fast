@@ -11,7 +11,7 @@ Cloudflare's QUIC and HTTP/3 implementation in Rust. Workspace of 11 crates: cor
 ## STRUCTURE
 
 ```
-quiche/                     # Core QUIC+H3 library (C FFI, BoringSSL via boring-sys)
+quiche/                     # Core QUIC+H3 library (C FFI, BoringSSL via btls-sys)
 tokio-quiche/               # Async tokio wrapper (server/client drivers)
 apps/                       # CLI binaries: quiche-client, quiche-server
 h3i/                        # HTTP/3 interactive testing/debugging tool
@@ -98,11 +98,11 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 ## FEATURE FLAGS
 
 ```
-quiche:        default=boringssl-boring-crate
+quiche:        default=boringssl-btls-crate
                qlog, gcongestion, internal, ffi, fuzzing, sfv, custom-client-dcid,
                pkg-config-meta
 tokio-quiche:  fuzzing, quiche_internal, gcongestion, zero-copy, rpk
-               (hardcodes: quiche/boringssl-boring-crate + quiche/qlog)
+               (hardcodes: quiche/boringssl-btls-crate + quiche/qlog)
 h3i:           async (enables tokio-quiche dependency)
 ```
 
@@ -110,7 +110,7 @@ h3i:           async (enables tokio-quiche dependency)
 
 ```bash
 # Dev
-cargo build                                           # build workspace (boring-sys builds BoringSSL)
+cargo build                                           # build workspace (btls-sys builds BoringSSL)
 cargo test --all-targets --features=async,ffi,qlog --workspace  # full test suite
 cargo test --doc --features=async,ffi,qlog --workspace          # doc tests (separate!)
 
@@ -127,10 +127,10 @@ make docker-build                                     # quiche-base + quiche-qns
 
 ## NOTES
 
-- **No git submodules**: BoringSSL is built by `boring-sys`; `cmake` must be available.
+- **No git submodules**: BoringSSL is built by `btls-sys`; `cmake` must be available.
 - **MSRV 1.88**: `rust-version` field in Cargo.toml.
 - **Doc tests are separate**: `cargo test --all-targets` does NOT run doc tests (cargo#6669).
-- **`BORING_BSSL_PATH`**: env var to point `boring-sys` at a custom BoringSSL source tree.
+- **`BORING_BSSL_PATH`**: env var to point `btls-sys` at a custom BoringSSL source tree.
 - **`RUSTFLAGS="-D warnings"`**: CI enforces; all warnings are errors.
 - **Cargo.lock is gitignored** (library project).
 - **Dual CI**: GitHub Actions (real) + GitLab CI (no-op stub).

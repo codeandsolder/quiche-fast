@@ -44,7 +44,7 @@ pub(crate) struct AddrValidationTokenManager {
 impl Default for AddrValidationTokenManager {
     fn default() -> Self {
         let mut key_bytes = [0; HMAC_KEY_LEN];
-        boring::rand::rand_bytes(&mut key_bytes).unwrap();
+        btls::rand::rand_bytes(&mut key_bytes).unwrap();
 
         AddrValidationTokenManager {
             sign_key: key_bytes,
@@ -68,7 +68,7 @@ impl AddrValidationTokenManager {
         token.write_all(&ip_bytes).unwrap();
         token.write_all(original_dcid).unwrap();
 
-        let tag = boring::hash::hmac_sha256(
+        let tag = btls::hash::hmac_sha256(
             &self.sign_key,
             &token.get_ref()[HMAC_TAG_LEN..],
         )
@@ -97,9 +97,9 @@ impl AddrValidationTokenManager {
         let (tag, payload) = token.split_at(HMAC_TAG_LEN);
 
         let expected_tag =
-            boring::hash::hmac_sha256(&self.sign_key, payload).unwrap();
+            btls::hash::hmac_sha256(&self.sign_key, payload).unwrap();
 
-        if !boring::memcmp::eq(&expected_tag, tag) {
+        if !btls::memcmp::eq(&expected_tag, tag) {
             return Err("signature verification failed").into_io();
         }
 

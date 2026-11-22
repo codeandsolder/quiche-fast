@@ -91,8 +91,7 @@
 //!
 //! Off by default:
 //!
-//! - `rpk`: Support for raw public keys (RPK) in QUIC handshakes (via
-//!   [boring]).
+//! - `rpk`: Support for raw public keys (RPK) in QUIC handshakes (via [btls]).
 //! - `gcongestion`: Replace quiche's original congestion control implementation
 //!   with one adapted from google/quiche.
 //! - `zero-copy`: Deprecated. Zero-copy sends are now always enabled. This

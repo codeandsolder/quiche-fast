@@ -32,29 +32,6 @@ use crate::Header;
 
 use rstest::rstest;
 
-/// Pick a numeric expectation based on the active `boring` major version.
-///
-/// `boring` 5.x ships BoringSSL with post-quantum (X25519MLKEM768) key
-/// shares enabled by default, which inflates the ClientHello and ripples
-/// through into byte counts and per-epoch packet numbers in several
-/// handshake-adjacent assertions below. `boring` 4.x doesn't, so each
-/// such assertion has two flavours. Wrap them in this macro so the
-/// per-version values stay side-by-side at the call site. The active
-/// version is detected by `build.rs` (see `cfg(boring_v5)`); 4.x is
-/// the assumed default.
-macro_rules! by_boring {
-    (b4: $b4:expr, b5: $b5:expr $(,)?) => {{
-        #[cfg(not(boring_v5))]
-        {
-            $b4
-        }
-        #[cfg(boring_v5)]
-        {
-            $b5
-        }
-    }};
-}
-
 #[test]
 fn transport_params() {
     // Server encodes, client decodes.
@@ -7129,7 +7106,7 @@ fn client_rst_stream_while_bytes_in_flight(
         if cc_algorithm_name == "cubic" {
             Ok(12000)
         } else {
-            Ok(by_boring!(b4: 13882, b5: 15035))
+            Ok(15035)
         }
     );
     let server_flight = test_utils::emit_flight(&mut pipe.server).unwrap();
@@ -7150,7 +7127,7 @@ fn client_rst_stream_while_bytes_in_flight(
     // tx_buffered goes down to 0 after the reset and acks are
     // processed.  A full cwnd's worth of packets can be sent.
     let expected_cwnd = match cc_algorithm_name {
-        "bbr2" | "bbr2_gcongestion" => by_boring!(b4: 27764, b5: 30070),
+        "bbr2" | "bbr2_gcongestion" => 30070,
         _ => 24000,
     };
 
@@ -7218,7 +7195,7 @@ fn client_rst_stream_while_bytes_in_flight_with_packet_loss(
         if cc_algorithm_name == "cubic" {
             Ok(12000)
         } else {
-            Ok(by_boring!(b4: 13882, b5: 15035))
+            Ok(15035)
         }
     );
     let mut server_flight = test_utils::emit_flight(&mut pipe.server).unwrap();
@@ -7238,7 +7215,7 @@ fn client_rst_stream_while_bytes_in_flight_with_packet_loss(
     // tx_buffered goes down to 0 after the reset and acks are
     // processed.  A full cwnd's worth of packets can be sent.
     let expected_cwnd = match cc_algorithm_name {
-        "bbr2" | "bbr2_gcongestion" => by_boring!(b4: 26564, b5: 28870),
+        "bbr2" | "bbr2_gcongestion" => 28870,
         _ => 8400,
     };
 
@@ -7494,19 +7471,15 @@ fn validate_peer_sent_ack_range(
 
     // Expected pkt counts below reflect the post-handshake state. When the
     // ClientHello spans multiple Initial packets (as with post-quantum
-    // keyshares, on boring 5) the handshake exchanges one extra packet
-    // per side compared to the classical (boring 4) case, which is why
-    // these counts are one higher under boring 5.
-    let expected_max_active_pkt_sent = by_boring!(b4: 3, b5: 4);
+    // keyshares), the handshake exchanges one extra packet
+    // per side compared to a classical-only handshake.
+    let expected_max_active_pkt_sent = 4;
     let recovery = &pipe.server.paths.get_active().unwrap().recovery;
     assert_eq!(
         recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
         expected_max_active_pkt_sent
     );
-    assert_eq!(
-        recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 3, b5: 4)
-    );
+    assert_eq!(recovery.get_largest_acked_on_epoch(epoch).unwrap(), 4);
     assert_eq!(recovery.sent_packets_len(epoch), 0);
     // Verify largest sent on the connection
     assert_eq!(
@@ -7525,14 +7498,8 @@ fn validate_peer_sent_ack_range(
     pipe.send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
     let recovery = &pipe.server.paths.get_active().unwrap().recovery;
-    assert_eq!(
-        recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
-        by_boring!(b4: 4, b5: 5)
-    );
-    assert_eq!(
-        recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 3, b5: 4)
-    );
+    assert_eq!(recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 5);
+    assert_eq!(recovery.get_largest_acked_on_epoch(epoch).unwrap(), 4);
     assert_eq!(recovery.sent_packets_len(epoch), 1);
 
     // Send an invalid ACK range to the server and expect server error
@@ -7591,34 +7558,28 @@ fn validate_peer_sent_ack_range_for_multi_path(
     let epoch = packet::Epoch::Application;
     let pkt_type = Type::Short;
 
-    // active path. Pkt counts are one higher under boring 5 because the
+    // active path. Packet counts include the extra Initial because the
     // ClientHello spans two Initial packets (post-quantum keyshares);
     // see `validate_peer_sent_ack_range` above for details.
-    let expected_max_active_pkt_sent = by_boring!(b4: 7, b5: 8);
+    let expected_max_active_pkt_sent = 8;
     let active_path = &pipe.server.paths.get_mut(0).unwrap();
     let p1_recovery = &active_path.recovery;
     assert_eq!(
         p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
         expected_max_active_pkt_sent
     );
-    assert_eq!(
-        p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 6, b5: 7)
-    );
+    assert_eq!(p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 7);
     assert_eq!(p1_recovery.sent_packets_len(epoch), 1);
 
     // non-active path
-    let expected_max_second_pkt_sent = by_boring!(b4: 5, b5: 6);
+    let expected_max_second_pkt_sent = 6;
     let second_path = &pipe.server.paths.get_mut(probed_pid).unwrap();
     let p2_recovery = &second_path.recovery;
     assert_eq!(
         p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
         expected_max_second_pkt_sent
     );
-    assert_eq!(
-        p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 6, b5: 7)
-    );
+    assert_eq!(p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 7);
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 
     // Verify largest sent on the connection is the max of the two paths
@@ -7646,27 +7607,15 @@ fn validate_peer_sent_ack_range_for_multi_path(
     let active_path = &pipe.server.paths.get_mut(0).unwrap();
     assert!(active_path.active());
     let p1_recovery = &active_path.recovery;
-    assert_eq!(
-        p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
-        by_boring!(b4: 7, b5: 8)
-    );
-    assert_eq!(
-        p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 7, b5: 8)
-    );
+    assert_eq!(p1_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 8);
+    assert_eq!(p1_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 8);
     assert_eq!(p1_recovery.sent_packets_len(epoch), 0);
 
     // non-active path
     let second_path = &pipe.server.paths.get_mut(probed_pid).unwrap();
     let p2_recovery = &second_path.recovery;
-    assert_eq!(
-        p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(),
-        by_boring!(b4: 5, b5: 6)
-    );
-    assert_eq!(
-        p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(),
-        by_boring!(b4: 7, b5: 8)
-    );
+    assert_eq!(p2_recovery.largest_sent_pkt_num_on_path(epoch).unwrap(), 6);
+    assert_eq!(p2_recovery.get_largest_acked_on_epoch(epoch).unwrap(), 8);
     assert_eq!(p2_recovery.sent_packets_len(epoch), 0);
 
     // Send a large invalid ACK range to the server. Range is not inclusive so
@@ -10333,7 +10282,7 @@ fn update_max_datagram_size(
         if cc_algorithm_name == "cubic" {
             12000
         } else {
-            by_boring!(b4: 13424, b5: 14577)
+            14577
         },
     );
 }
@@ -10408,7 +10357,7 @@ fn send_capacity(
         if cc_algorithm_name == "cubic" {
             12000
         } else {
-            by_boring!(b4: 13877, b5: 15030)
+            15030
         }
     );
 
@@ -10423,7 +10372,7 @@ fn send_capacity(
         if cc_algorithm_name == "cubic" {
             Ok(2000)
         } else {
-            Ok(by_boring!(b4: 3877, b5: 5030))
+            Ok(5030)
         }
     );
 
@@ -10437,23 +10386,22 @@ fn send_capacity(
     assert_eq!(pipe.advance(), Ok(()));
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 fn user_provided_boring_ctx(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) -> Result<()> {
     // Manually construct boring ssl ctx for server
     let mut server_tls_ctx_builder =
-        boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
-            .unwrap();
+        btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls()).unwrap();
     server_tls_ctx_builder
         .set_certificate_chain_file("examples/cert.crt")
         .unwrap();
     server_tls_ctx_builder
-        .set_private_key_file("examples/cert.key", boring::ssl::SslFiletype::PEM)
+        .set_private_key_file("examples/cert.key", btls::ssl::SslFiletype::PEM)
         .unwrap();
 
-    let mut server_config = Config::with_boring_ssl_ctx_builder(
+    let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
         server_tls_ctx_builder,
     )?;
@@ -10488,7 +10436,7 @@ fn user_provided_boring_ctx(
     Ok(())
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 fn handshake_callback_state_is_not_retained(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -10509,7 +10457,7 @@ fn handshake_callback_state_is_not_retained(
     }
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 fn in_handshake_config(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -10531,13 +10479,12 @@ fn in_handshake_config(
     // Manually construct `SslContextBuilder` for the server so we can modify
     // CWND during the handshake.
     let mut server_tls_ctx_builder =
-        boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
-            .unwrap();
+        btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls()).unwrap();
     server_tls_ctx_builder
         .set_certificate_chain_file("examples/cert.crt")
         .unwrap();
     server_tls_ctx_builder
-        .set_private_key_file("examples/cert.key", boring::ssl::SslFiletype::PEM)
+        .set_private_key_file("examples/cert.key", btls::ssl::SslFiletype::PEM)
         .unwrap();
     server_tls_ctx_builder.set_select_certificate_callback(move |mut hello| {
         <Connection>::set_cc_algorithm_in_handshake(
@@ -10573,7 +10520,7 @@ fn in_handshake_config(
         Ok(())
     });
 
-    let mut server_config = Config::with_boring_ssl_ctx_builder(
+    let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
         server_tls_ctx_builder,
     )?;
@@ -10677,7 +10624,7 @@ fn in_handshake_config(
     Ok(())
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 /// Tests that the MAX_STREAMS threshold is recalculated after a handshake
 /// callback changes `initial_max_streams_bidi`.
@@ -10705,7 +10652,7 @@ fn max_streams_threshold_after_handshake_callback_update(
         Ok(())
     });
 
-    let mut server_config = Config::with_boring_ssl_ctx_builder(
+    let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
         server_tls_ctx_builder,
     )
@@ -10909,10 +10856,9 @@ fn initial_cwnd(
         // tolerance, well below a packet so any meaningful regression
         // would still trip the assertion.
         // Handshake size (and hence the extra acked bytes on top of
-        // `initial_cwnd`) is larger under boring 5 because the
+        // `initial_cwnd`) includes an extra packet because the
         // ClientHello carries a post-quantum key share by default.
-        let expected = CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200 +
-            by_boring!(b4: 1449, b5: 2600);
+        let expected = CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS * 1200 + 2600;
         const TOLERANCE: usize = 4;
 
         assert!(
@@ -12561,7 +12507,7 @@ fn resilience_against_migration_attack(
     let mut recv_buf = [0; DATA_BYTES];
     let send1_bytes = pipe.server.stream_send(1, &buf, true).unwrap();
     assert_eq!(send1_bytes, match cc_algorithm_name {
-        "bbr2" | "bbr2_gcongestion" => by_boring!(b4: 13884, b5: 15037),
+        "bbr2" | "bbr2_gcongestion" => 15037,
         _ => 12000,
     });
     assert_eq!(
@@ -13727,7 +13673,7 @@ fn pmtud_probe_retry_after_loss(
     assert_eq!(pmtus.last(), Some(&current_mtu));
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 fn enable_pmtud_mid_handshake(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -13735,13 +13681,12 @@ fn enable_pmtud_mid_handshake(
     // Manually construct `SslContextBuilder` for the server so we can enable
     // PMTUD during the handshake.
     let mut server_tls_ctx_builder =
-        boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
-            .unwrap();
+        btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls()).unwrap();
     server_tls_ctx_builder
         .set_certificate_chain_file("examples/cert.crt")
         .unwrap();
     server_tls_ctx_builder
-        .set_private_key_file("examples/cert.key", boring::ssl::SslFiletype::PEM)
+        .set_private_key_file("examples/cert.key", btls::ssl::SslFiletype::PEM)
         .unwrap();
     server_tls_ctx_builder.set_select_certificate_callback(|mut hello| {
         <Connection>::set_discover_pmtu_in_handshake(hello.ssl_mut(), true, 1)
@@ -13750,7 +13695,7 @@ fn enable_pmtud_mid_handshake(
         Ok(())
     });
 
-    let mut server_config = Config::with_boring_ssl_ctx_builder(
+    let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
         server_tls_ctx_builder,
     )
@@ -13836,7 +13781,7 @@ fn enable_pmtud_mid_handshake(
     assert_eq!(pipe.server.path_event_next(), None);
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
+#[cfg(feature = "boringssl-btls-crate")]
 #[rstest]
 fn disable_pmtud_mid_handshake(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -13844,13 +13789,12 @@ fn disable_pmtud_mid_handshake(
     // Manually construct `SslContextBuilder` for the server so we can disable
     // PMTUD during the handshake.
     let mut server_tls_ctx_builder =
-        boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
-            .unwrap();
+        btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls()).unwrap();
     server_tls_ctx_builder
         .set_certificate_chain_file("examples/cert.crt")
         .unwrap();
     server_tls_ctx_builder
-        .set_private_key_file("examples/cert.key", boring::ssl::SslFiletype::PEM)
+        .set_private_key_file("examples/cert.key", btls::ssl::SslFiletype::PEM)
         .unwrap();
     server_tls_ctx_builder.set_select_certificate_callback(|mut hello| {
         <Connection>::set_discover_pmtu_in_handshake(hello.ssl_mut(), false, 0)
@@ -13859,7 +13803,7 @@ fn disable_pmtud_mid_handshake(
         Ok(())
     });
 
-    let mut server_config = Config::with_boring_ssl_ctx_builder(
+    let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
         server_tls_ctx_builder,
     )

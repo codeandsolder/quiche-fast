@@ -139,7 +139,7 @@ impl TestConnectionHook {
 impl ConnectionHook for TestConnectionHook {
     fn create_custom_ssl_context_builder(
         &self, _settings: TlsCertificatePaths<'_>,
-    ) -> Option<boring::ssl::SslContextBuilder> {
+    ) -> Option<btls::ssl::SslContextBuilder> {
         self.was_called.store(true, Ordering::SeqCst);
         None
     }

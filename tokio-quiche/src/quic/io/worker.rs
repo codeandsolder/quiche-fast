@@ -56,7 +56,7 @@ use crate::quic::DscpHandle;
 use crate::quic::QuicheConnection;
 use crate::QuicResult;
 
-use boring::ssl::SslRef;
+use btls::ssl::SslRef;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::DatagramSocketSendExt;
 use datagram_socket::MaybeConnectedSocket;
@@ -1402,7 +1402,7 @@ impl<M: Metrics> Drop for TrackMidHandshakeFlush<M> {
 
 fn random_u128() -> u128 {
     let mut buf = [0; 16];
-    boring::rand::rand_bytes(&mut buf).expect("boring's RAND_bytes never fails");
+    btls::rand::rand_bytes(&mut buf).expect("boring's RAND_bytes never fails");
     u128::from_ne_bytes(buf)
 }
 

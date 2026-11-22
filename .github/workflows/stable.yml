@@ -32,10 +32,6 @@ jobs:
   quiche:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_only
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        boring_version: ${{ fromJSON(startsWith(github.ref, 'refs/tags/') && '["latest","4"]' || '["latest"]') }}
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -63,20 +59,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
-
-      - name: Maybe pin boring to MSRV (4.19.0)
-        if: matrix.boring_version == '4'
-        run: |
-          # Pin boring to the minimum supported 4.x. cargo's resolver
-          # normally picks the highest match (5.x); generate the
-          # lockfile first, then downgrade to the floor of the
-          # workspace dep range (`>= 4.19, < 6`) via `--precise`.
-          # Pinning to the floor (rather than the latest 4.x) catches
-          # accidental use of APIs added in later 4.x point releases.
-          # `quiche/src/build.rs` and `tokio-quiche/build.rs` then read
-          # the lockfile and leave `cfg(boring_v5)` off (the default).
-          cargo generate-lockfile
-          cargo update -p boring --precise 4.19.0
 
       - name: Unused dependency check
         uses: bnjbvr/cargo-machete@e63e5dc335b5b238aca9fd9b79650a1f5ee45f42 # main

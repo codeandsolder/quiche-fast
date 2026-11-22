@@ -70,7 +70,7 @@
 //!
 //! [`Config`] also holds TLS configuration. This can be changed by mutators on
 //! the an existing object, or by constructing a TLS context manually and
-//! creating a configuration using [`with_boring_ssl_ctx_builder()`].
+//! creating a configuration using [`with_btls_ssl_ctx_builder()`].
 //!
 //! A configuration object can be shared among multiple connections.
 //!
@@ -310,7 +310,7 @@
 //! [`set_initial_max_stream_data_bidi_local()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_bidi_local
 //! [`set_initial_max_stream_data_bidi_remote()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_bidi_remote
 //! [`set_initial_max_stream_data_uni()`]: https://docs.rs/quiche/latest/quiche/struct.Config.html#method.set_initial_max_stream_data_uni
-//! [`with_boring_ssl_ctx_builder()`]: https://docs.quic.tech/quiche/struct.Config.html#method.with_boring_ssl_ctx_builder
+//! [`with_btls_ssl_ctx_builder()`]: https://docs.quic.tech/quiche/struct.Config.html#method.with_btls_ssl_ctx_builder
 //! [`connect()`]: fn.connect.html
 //! [`accept()`]: fn.accept.html
 //! [`recv()`]: struct.Connection.html#method.recv
@@ -359,8 +359,8 @@
 //! quiche defines a number of [feature flags] to reduce the amount of compiled
 //! code and dependencies:
 //!
-//! * `boringssl-boring-crate` (default): Use the `BoringSSL` library provided
-//!   by the [boring] crate.
+//! * `boringssl-btls-crate` (default): Use the `BoringSSL` library provided by
+//!   the [btls] crate.
 //!
 //! * `pkg-config-meta`: Generate pkg-config metadata file for libquiche.
 //!
@@ -373,7 +373,7 @@
 //!   unpredictability and length requirements.
 //!
 //! [feature flags]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-features-section
-//! [boring]: https://crates.io/crates/boring
+//! [btls]: https://github.com/codeandsolder/btls-fast
 //! [qlog]: https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema
 
 #![deny(missing_docs)]
@@ -639,10 +639,10 @@ impl Config {
     /// version, or `Error::TlsFail` if the TLS context cannot be created.
     ///
     /// [`SslContextBuilder`]: https://docs.rs/boring/latest/boring/ssl/struct.SslContextBuilder.html
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
-    pub fn with_boring_ssl_ctx_builder(
-        version: u32, tls_ctx_builder: boring::ssl::SslContextBuilder,
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
+    pub fn with_btls_ssl_ctx_builder(
+        version: u32, tls_ctx_builder: btls::ssl::SslContextBuilder,
     ) -> Result<Self> {
         Self::with_tls_ctx(version, tls::Context::from_boring(tls_ctx_builder)?)
     }
@@ -2619,10 +2619,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_cc_algorithm()`]: struct.Config.html#method.set_cc_algorithm
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_cc_algorithm_in_handshake(
-        ssl: &mut boring::ssl::SslRef, algo: CongestionControlAlgorithm,
+        ssl: &mut btls::ssl::SslRef, algo: CongestionControlAlgorithm,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2650,11 +2650,11 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_custom_bbr_settings()`]: struct.Config.html#method.set_custom_bbr_settings
-    #[cfg(all(feature = "boringssl-boring-crate", feature = "internal"))]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(all(feature = "boringssl-btls-crate", feature = "internal"))]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     #[doc(hidden)]
     pub fn set_custom_bbr_settings_in_handshake(
-        ssl: &mut boring::ssl::SslRef, custom_bbr_params: BbrParams,
+        ssl: &mut btls::ssl::SslRef, custom_bbr_params: BbrParams,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2678,10 +2678,10 @@ impl<F: BufFactory> Connection<F> {
     /// state.
     ///
     /// [`Config::set_cc_algorithm_name()`]: struct.Config.html#method.set_cc_algorithm_name
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_cc_algorithm_name_in_handshake(
-        ssl: &mut boring::ssl::SslRef, name: &str,
+        ssl: &mut btls::ssl::SslRef, name: &str,
     ) -> Result<()> {
         let cc_algo = CongestionControlAlgorithm::from_str(name)?;
         Self::set_cc_algorithm_in_handshake(ssl, cc_algo)
@@ -2701,10 +2701,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_initial_congestion_window_packets()`]: struct.Config.html#method.set_initial_congestion_window_packets
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_initial_congestion_window_packets_in_handshake(
-        ssl: &mut boring::ssl::SslRef, packets: usize,
+        ssl: &mut btls::ssl::SslRef, packets: usize,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2727,10 +2727,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_enable_relaxed_loss_threshold()`]: struct.Config.html#method.set_enable_relaxed_loss_threshold
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_enable_relaxed_loss_threshold_in_handshake(
-        ssl: &mut boring::ssl::SslRef, enable: bool,
+        ssl: &mut btls::ssl::SslRef, enable: bool,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2753,10 +2753,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_enable_cubic_idle_restart_fix()`]: struct.Config.html#method.set_enable_cubic_idle_restart_fix
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_enable_cubic_idle_restart_fix_in_handshake(
-        ssl: &mut boring::ssl::SslRef, enable: bool,
+        ssl: &mut btls::ssl::SslRef, enable: bool,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2779,10 +2779,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::enable_hystart()`]: struct.Config.html#method.enable_hystart
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_hystart_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: bool,
+        ssl: &mut btls::ssl::SslRef, v: bool,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2805,10 +2805,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::enable_pacing()`]: struct.Config.html#method.enable_pacing
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_pacing_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: bool,
+        ssl: &mut btls::ssl::SslRef, v: bool,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2831,10 +2831,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_max_pacing_rate()`]: struct.Config.html#method.set_max_pacing_rate
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_max_pacing_rate_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: Option<u64>,
+        ssl: &mut btls::ssl::SslRef, v: Option<u64>,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2857,10 +2857,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_max_send_udp_payload_size()`]: struct.Config.html#method.set_max_send_udp_payload_size
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_max_send_udp_payload_size_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: usize,
+        ssl: &mut btls::ssl::SslRef, v: usize,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2884,10 +2884,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::set_send_capacity_factor()`]: struct.Config.html#method.set_send_capacity_factor
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_send_capacity_factor_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: f64,
+        ssl: &mut btls::ssl::SslRef, v: f64,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2910,10 +2910,10 @@ impl<F: BufFactory> Connection<F> {
     /// handshake state.
     ///
     /// [`Config::discover_pmtu()`]: struct.Config.html#method.discover_pmtu
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_discover_pmtu_in_handshake(
-        ssl: &mut boring::ssl::SslRef, discover: bool, max_probes: u8,
+        ssl: &mut btls::ssl::SslRef, discover: bool, max_probes: u8,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2937,10 +2937,10 @@ impl<F: BufFactory> Connection<F> {
     /// transport parameters.
     ///
     /// [`Config::set_max_idle_timeout()`]: struct.Config.html#method.set_max_idle_timeout
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_max_idle_timeout_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: u64,
+        ssl: &mut btls::ssl::SslRef, v: u64,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2969,10 +2969,10 @@ impl<F: BufFactory> Connection<F> {
     /// transport parameters.
     ///
     /// [`Config::set_initial_max_streams_bidi()`]: struct.Config.html#method.set_initial_max_streams_bidi
-    #[cfg(feature = "boringssl-boring-crate")]
-    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-boring-crate")))]
+    #[cfg(feature = "boringssl-btls-crate")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "boringssl-btls-crate")))]
     pub fn set_initial_max_streams_bidi_in_handshake(
-        ssl: &mut boring::ssl::SslRef, v: u64,
+        ssl: &mut btls::ssl::SslRef, v: u64,
     ) -> Result<()> {
         let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
 
@@ -2986,9 +2986,9 @@ impl<F: BufFactory> Connection<F> {
         )
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg(feature = "boringssl-btls-crate")]
     fn set_transport_parameters_in_hanshake(
-        params: TransportParams, is_server: bool, ssl: &mut boring::ssl::SslRef,
+        params: TransportParams, is_server: bool, ssl: &mut btls::ssl::SslRef,
     ) -> Result<()> {
         use foreign_types_shared::ForeignTypeRef;
         use std::mem::ManuallyDrop;
@@ -10043,9 +10043,9 @@ impl<F: BufFactory> Connection<F> {
     }
 }
 
-#[cfg(feature = "boringssl-boring-crate")]
-impl<F: BufFactory> AsMut<boring::ssl::SslRef> for Connection<F> {
-    fn as_mut(&mut self) -> &mut boring::ssl::SslRef {
+#[cfg(feature = "boringssl-btls-crate")]
+impl<F: BufFactory> AsMut<btls::ssl::SslRef> for Connection<F> {
+    fn as_mut(&mut self) -> &mut btls::ssl::SslRef {
         self.handshake.ssl_mut()
     }
 }
