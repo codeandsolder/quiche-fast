@@ -253,6 +253,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.windows_only)
     runs-on: windows-2025
     strategy:
+      fail-fast: false
       matrix:
         target: ["x86_64-pc-windows-msvc", "i686-pc-windows-msvc", "x86_64-pc-windows-gnu", "i686-pc-windows-gnu"]
         include:
@@ -277,6 +278,13 @@ jobs:
     steps:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      # Rustc receives a path per dependency artifact. A short artifact root
+      # avoids the Windows CreateProcess limit even for large workspaces.
+      - name: Use short Windows Cargo artifact directory
+        shell: pwsh
+        run: |
+          "CARGO_TARGET_DIR=$(Join-Path $env:RUNNER_TEMP 't')" >> $env:GITHUB_ENV
 
       - name: Setup mandatory sccache
         uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@d168449633a47de6c0166f0c0cff903e96983820 # main
