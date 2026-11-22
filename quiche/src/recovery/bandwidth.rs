@@ -92,7 +92,7 @@ const U64_MAX_U128: u128 = u64::MAX as u128;
 
 impl Bandwidth {
     pub const fn from_bytes_and_time_delta(
-        bytes: usize, time_delta: Duration,
+        bytes: u64, time_delta: Duration,
     ) -> Self {
         if bytes == 0 {
             return Bandwidth { bits_per_second: 0 };
@@ -338,10 +338,21 @@ mod tests {
             800
         );
 
+        // Byte counts larger than the address space of a 32-bit target are
+        // still valid bandwidth samples.
+        assert_eq!(
+            Bandwidth::from_bytes_and_time_delta(
+                1_u64 << 32,
+                Duration::from_secs(1)
+            )
+            .to_bytes_per_second(),
+            1_u64 << 32
+        );
+
         // Large numerators saturate instead of overflowing u64 arithmetic.
         assert_eq!(
             Bandwidth::from_bytes_and_time_delta(
-                usize::MAX,
+                u64::MAX,
                 Duration::from_nanos(1)
             ),
             Bandwidth::infinite()
@@ -357,7 +368,7 @@ mod tests {
         // Preserve the existing non-zero-bytes / zero-time behavior while
         // making the overflow policy explicit.
         assert_eq!(
-            Bandwidth::from_bytes_and_time_delta(usize::MAX, Duration::ZERO),
+            Bandwidth::from_bytes_and_time_delta(u64::MAX, Duration::ZERO),
             Bandwidth::infinite()
         );
     }
