@@ -139,13 +139,7 @@ impl Bandwidth {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "test-only rate-conversion assertions inspect the raw bit/s representation; production uses byte/s accessors"
-        )
-    )]
+    #[cfg(any(test, feature = "qlog"))]
     pub const fn to_bits_per_second(self) -> u64 {
         self.bits_per_second
     }
