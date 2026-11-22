@@ -246,7 +246,7 @@ where
         )
     }
 
-    fn on_incoming(&mut self, mut incoming: Incoming) -> io::Result<()> {
+    fn on_incoming(&mut self, incoming: Incoming) -> io::Result<()> {
         #[cfg(feature = "perf-quic-listener-metrics")]
         let start = std::time::Instant::now();
 
@@ -257,11 +257,15 @@ where
             }
         }
 
-        let hdr = Header::from_slice(&mut incoming.buf, MAX_CONN_ID_LEN)
-            .map_err(|e| match e {
-                quiche::Error::BufferTooShort | quiche::Error::InvalidPacket =>
-                    labels::QuicInvalidInitialPacketError::FailedToParse.into(),
-                e => io::Error::other(e),
+        let hdr =
+            Header::from_slice(&incoming.buf, MAX_CONN_ID_LEN).map_err(|e| {
+                match e {
+                    quiche::Error::BufferTooShort |
+                    quiche::Error::InvalidPacket =>
+                        labels::QuicInvalidInitialPacketError::FailedToParse
+                            .into(),
+                    e => io::Error::other(e),
+                }
             })?;
 
         if let Some(ev_sender) = self.conns.get(&hdr.dcid) {
@@ -1169,8 +1173,9 @@ mod tests {
                     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                         time::sleep(Duration::from_millis(5)).await;
                     },
-                    Err(error) =>
-                        panic!("failed to rebind listener socket: {error}"),
+                    Err(error) => {
+                        panic!("failed to rebind listener socket: {error}")
+                    },
                 }
             }
         })

@@ -468,7 +468,7 @@ fn version_negotiation() {
 
     let (mut len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let hdr = Header::from_slice(&mut buf[..len], 0).unwrap();
+    let hdr = Header::from_slice(&buf[..len], 0).unwrap();
     len = negotiate_version(&hdr.scid, &hdr.dcid, &mut buf).unwrap();
 
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
@@ -6500,7 +6500,7 @@ fn retry_client(
     // Complete the stateless Retry exchange; the next client flight contains
     // the original destination ID relationship and echoed token.
     let (len, _) = pipe.client.send(buf).unwrap();
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
+    let hdr = Header::from_slice(&buf[..len], MAX_CONN_ID_LEN).unwrap();
     let odcid = hdr.dcid.into_owned();
     let (retry_scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
     let len = crate::retry(
@@ -6525,7 +6525,7 @@ fn retry(
     let (mut config, mut pipe, odcid, scid) =
         retry_client(cc_algorithm_name, &mut buf);
     let (len, send_info) = pipe.client.send(&mut buf).unwrap();
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
+    let hdr = Header::from_slice(&buf[..len], MAX_CONN_ID_LEN).unwrap();
     assert_eq!(hdr.token.as_deref(), Some(TEST_RETRY_TOKEN));
     pipe.server = accept(
         &scid,
@@ -6583,7 +6583,7 @@ fn retry_separate_source_connection_id(
     let (mut config, mut pipe, odcid, retry_scid) =
         retry_client(cc_algorithm_name, &mut buf);
     let (len, send_info) = pipe.client.send(&mut buf).unwrap();
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
+    let hdr = Header::from_slice(&buf[..len], MAX_CONN_ID_LEN).unwrap();
     assert_eq!(hdr.token.as_deref(), Some(TEST_RETRY_TOKEN));
 
     let (scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
@@ -9056,7 +9056,7 @@ fn handshake_packet_type_corruption(
     // Packet type is corrupted to Initial.
     buf[0] &= !(0x20);
 
-    let hdr = Header::from_slice(&mut buf[..len], 0).unwrap();
+    let hdr = Header::from_slice(&buf[..len], 0).unwrap();
     assert_eq!(hdr.ty, Type::Initial);
 
     // Server receives corrupted packet without returning an error.
@@ -14069,8 +14069,7 @@ fn connect_custom_client_dcid() {
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
 
     let (pkt, _info) = flight.first().unwrap();
-    let header =
-        Header::from_slice(&mut pkt.to_vec()[..], client_dcid.len()).unwrap();
+    let header = Header::from_slice(pkt, client_dcid.len()).unwrap();
 
     // Validate that the dcid is the same as the one we provided.
     assert_eq!(client_dcid, header.dcid);

@@ -566,7 +566,7 @@ pub fn decode_pkt<F: BufFactory>(
 ) -> Result<Vec<frame::Frame>> {
     let mut b = octets::OctetsMut::with_slice(buf);
 
-    let mut hdr = Header::from_bytes(&mut b, conn.source_id().len())?;
+    let mut hdr = Header::from_mutable_cursor(&mut b, conn.source_id().len())?;
 
     let epoch = hdr.ty.to_epoch()?;
 

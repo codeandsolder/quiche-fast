@@ -405,9 +405,9 @@ mod initial_size_tests {
     }
 
     fn incoming(
-        mut buf: Vec<u8>, peer_addr: SocketAddr, local_addr: SocketAddr,
+        buf: Vec<u8>, peer_addr: SocketAddr, local_addr: SocketAddr,
     ) -> (Incoming, Header<'static>) {
-        let hdr = Header::from_slice(&mut buf, MAX_CONN_ID_LEN).unwrap();
+        let hdr = Header::from_slice(&buf, MAX_CONN_ID_LEN).unwrap();
 
         let incoming = Incoming {
             peer_addr,
@@ -475,7 +475,7 @@ mod initial_size_tests {
             .unwrap()
             .unwrap();
 
-        let hdr = Header::from_slice(&mut out[..len], MAX_CONN_ID_LEN).unwrap();
+        let hdr = Header::from_slice(&out[..len], MAX_CONN_ID_LEN).unwrap();
         assert_eq!(hdr.ty, PacketType::Retry);
     }
 }

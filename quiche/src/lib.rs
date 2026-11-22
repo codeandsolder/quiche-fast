@@ -1930,8 +1930,7 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
 /// # let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
 /// let (len, src) = socket.recv_from(&mut buf).unwrap();
 ///
-/// let hdr =
-///     quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)?;
+/// let hdr = quiche::Header::from_slice(&buf[..len], quiche::MAX_CONN_ID_LEN)?;
 ///
 /// if hdr.version != quiche::PROTOCOL_VERSION {
 ///     let len = quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out)?;
@@ -1989,7 +1988,7 @@ pub fn negotiate_version(
 /// # }
 /// let (len, peer) = socket.recv_from(&mut buf).unwrap();
 ///
-/// let hdr = quiche::Header::from_slice(&mut buf[..len], quiche::MAX_CONN_ID_LEN)?;
+/// let hdr = quiche::Header::from_slice(&buf[..len], quiche::MAX_CONN_ID_LEN)?;
 ///
 /// let token = hdr.token.as_ref().unwrap();
 ///
@@ -3172,7 +3171,7 @@ impl<F: BufFactory> Connection<F> {
                     // Short headers and malformed lengths have no reliable
                     // boundary, so discard the rest of the datagram.
                     packet::long_header_packet_len(
-                        &mut buf[len - left..len],
+                        &buf[len - left..len],
                         self.source_id().len(),
                     )
                     .unwrap_or(left)
@@ -3283,7 +3282,7 @@ impl<F: BufFactory> Connection<F> {
 
         let mut b = octets::OctetsMut::with_slice(buf);
 
-        let mut hdr = Header::from_bytes(&mut b, self.source_id().len())
+        let mut hdr = Header::from_mutable_cursor(&mut b, self.source_id().len())
             .map_err(|e| {
                 drop_pkt_on_err(
                     e,
