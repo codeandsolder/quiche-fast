@@ -1350,18 +1350,13 @@ impl Connection {
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
         headers: &[T], priority: &Priority, fin: bool,
     ) -> Result<()> {
-        match self.streams.get(&stream_id) {
-            Some(s) => {
-                // Only one initial HEADERS allowed.
-                if s.local_initialized() {
-                    return Err(Error::FrameUnexpected);
-                }
-
-                s
-            },
-
-            None => return Err(Error::FrameUnexpected),
-        };
+        if !self
+            .streams
+            .get(&stream_id)
+            .is_some_and(stream::Stream::can_send_initial_headers)
+        {
+            return Err(Error::FrameUnexpected);
+        }
 
         self.send_headers(conn, stream_id, headers, fin)?;
 
@@ -1417,23 +1412,13 @@ impl Connection {
             return Err(Error::FrameUnexpected);
         }
 
-        match self.streams.get(&stream_id) {
-            Some(s) => {
-                // Initial HEADERS must have been sent.
-                if !s.local_initialized() {
-                    return Err(Error::FrameUnexpected);
-                }
-
-                // Only one trailing HEADERS allowed.
-                if s.trailers_sent() {
-                    return Err(Error::FrameUnexpected);
-                }
-
-                s
-            },
-
-            None => return Err(Error::FrameUnexpected),
-        };
+        if !self
+            .streams
+            .get(&stream_id)
+            .is_some_and(stream::Stream::can_send_message_frames)
+        {
+            return Err(Error::FrameUnexpected);
+        }
 
         self.send_headers(conn, stream_id, headers, fin)?;
 
@@ -1581,7 +1566,7 @@ impl Connection {
         });
 
         if fin {
-            self.finish_local_stream(conn, stream_id, true);
+            self.finish_local_stream(conn, stream_id);
         } else if let Some(s) = self.streams.get_mut(&stream_id) {
             s.initialize_local();
         }
@@ -1735,20 +1720,12 @@ impl Connection {
             return Err(Error::FrameUnexpected);
         }
 
-        match self.streams.get_mut(&stream_id) {
-            Some(s) => {
-                if !s.local_initialized() {
-                    return Err(Error::FrameUnexpected);
-                }
-
-                if s.trailers_sent() {
-                    return Err(Error::FrameUnexpected);
-                }
-            },
-
-            None => {
-                return Err(Error::FrameUnexpected);
-            },
+        if !self
+            .streams
+            .get(&stream_id)
+            .is_some_and(stream::Stream::can_send_message_frames)
+        {
+            return Err(Error::FrameUnexpected);
         }
 
         // Avoid sending 0-length DATA frames when the fin flag is false.
@@ -1833,7 +1810,7 @@ impl Connection {
         }
 
         if fin && written == len {
-            self.finish_local_stream(conn, stream_id, false);
+            self.finish_local_stream(conn, stream_id);
         }
 
         Ok(ret)
@@ -2960,22 +2937,13 @@ impl Connection {
 
     fn finish_local_stream<F: BufFactory>(
         &mut self, conn: &super::Connection<F>, stream_id: u64,
-        initialize_local: bool,
     ) {
         let hash_map::Entry::Occupied(mut stream) = self.streams.entry(stream_id)
         else {
             return;
         };
 
-        {
-            let stream = stream.get_mut();
-
-            if initialize_local {
-                stream.initialize_local();
-            }
-
-            stream.finish_local();
-        }
+        stream.get_mut().finish_local();
 
         if conn.stream_finished(stream_id) {
             stream.remove();
@@ -3074,20 +3042,6 @@ impl Connection {
             },
 
             frame::Frame::Headers { header_block } => {
-                // Servers reject too many HEADERS frames.
-                if let Some(s) = self.streams.get_mut(&stream_id) {
-                    if self.is_server && s.headers_received_count() == 2 {
-                        conn.close(
-                            true,
-                            Error::FrameUnexpected.to_wire(),
-                            b"Too many HEADERS frames",
-                        )?;
-                        return Err(Error::FrameUnexpected);
-                    }
-
-                    s.increment_headers_received();
-                }
-
                 // Use "infinite" as default value for max_field_section_size if
                 // it is not configured by the application.
                 let max_size = self
@@ -3112,6 +3066,10 @@ impl Connection {
                         return Err(e);
                     },
                 };
+
+                if let Some(stream) = self.streams.get_mut(&stream_id) {
+                    stream.on_decoded_headers(&headers);
+                }
 
                 qlog_with_type!(QLOG_FRAME_PARSED, conn.qlog, q, {
                     let qlog_headers = headers
@@ -4358,6 +4316,80 @@ mod tests {
         assert_eq!(s.poll_client(), Err(Error::Done));
     }
 
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
+    /// DATA is invalid before a final response, even after informational
+    /// HEADERS.
+    fn received_data_before_final_response(#[case] informational: bool) {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+
+        let (stream, _) = s.send_request(true).unwrap();
+        if informational {
+            s.poll_server().unwrap();
+            let headers = [Header::new(b":status", b"103")];
+            s.server
+                .send_response(&mut s.pipe.server, stream, &headers, false)
+                .unwrap();
+            s.advance().unwrap();
+            assert!(matches!(s.poll_client(), Ok((_, Event::Headers { .. }))));
+        }
+
+        s.send_frame_server(
+            frame::Frame::Data { payload: vec![1] },
+            stream,
+            true,
+        )
+        .unwrap();
+        assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+    }
+
+    #[test]
+    fn received_data_after_response_trailers_without_body() {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+        let (stream, _) = s.send_request(true).unwrap();
+        s.poll_server().unwrap();
+        let headers = [Header::new(b":status", b"200")];
+        let trailers = [Header::new(b"foo", b"bar")];
+        s.server
+            .send_response(&mut s.pipe.server, stream, &headers, false)
+            .unwrap();
+        s.server
+            .send_additional_headers(
+                &mut s.pipe.server,
+                stream,
+                &trailers,
+                true,
+                false,
+            )
+            .unwrap();
+        s.advance().unwrap();
+
+        assert_eq!(
+            s.poll_client(),
+            Ok((stream, Event::Headers {
+                list: headers.to_vec(),
+                more_frames: true
+            }))
+        );
+        assert_eq!(
+            s.poll_client(),
+            Ok((stream, Event::Headers {
+                list: trailers.to_vec(),
+                more_frames: true
+            }))
+        );
+        s.send_frame_server(
+            frame::Frame::Data { payload: vec![1] },
+            stream,
+            true,
+        )
+        .unwrap();
+        assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+    }
+
     #[test]
     /// Try to send DATA frames on wrong streams, ensure the API returns an
     /// error before anything hits the transport layer.
@@ -4694,16 +4726,21 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
     }
 
-    #[test]
+    #[rstest::rstest]
+    #[case(false)]
+    #[case(true)]
     /// Client sends multiple HEADERS before data.
-    fn data_after_trailers_client() {
+    fn data_after_trailers_client(#[case] with_body: bool) {
         let mut s = Session::new().unwrap();
         s.handshake().unwrap();
 
         let (stream, req) = s.send_request(false).unwrap();
 
-        let body = s.send_body_client(stream, false).unwrap();
-
+        let body = if with_body {
+            s.send_body_client(stream, false).unwrap()
+        } else {
+            Vec::new()
+        };
         let mut recv_buf = vec![0; body.len()];
 
         let req_trailers = vec![Header::new(b"foo", b"bar")];
@@ -4740,8 +4777,10 @@ mod tests {
         };
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
-        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
+        if with_body {
+            assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
+            assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
+        }
         assert_eq!(s.poll_server(), Ok((stream, ev_trailers)));
         assert_eq!(s.poll_server(), Err(Error::FrameUnexpected));
     }
