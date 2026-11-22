@@ -7294,7 +7294,7 @@ fn client_rst_stream_while_bytes_in_flight(
         pipe.server.stream_send(8, &send_buf, false),
         Ok(expected_cwnd)
     );
-    assert_eq!(pipe.server.streams.tx_buffered(), expected_cwnd);
+    assert_eq!(pipe.server.streams.tx_buffered(), expected_cwnd as u64);
     assert_eq!(
         pipe.server
             .paths
@@ -7387,7 +7387,7 @@ fn client_rst_stream_while_bytes_in_flight_with_packet_loss(
         // lost packet.  The exact send size varies.
         assert!((15000..17000).contains(&send_result));
     }
-    assert_eq!(pipe.server.streams.tx_buffered(), send_result);
+    assert_eq!(pipe.server.streams.tx_buffered(), send_result as u64);
     assert_eq!(
         pipe.server
             .paths

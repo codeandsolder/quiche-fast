@@ -5493,7 +5493,7 @@ impl<F: BufFactory> Connection<F> {
                 }
 
                 // Update tx_buffered when data is emitted.
-                self.streams.sub_tx_buffered(len);
+                self.streams.sub_tx_buffered(len as u64);
 
                 #[cfg(feature = "fuzzing")]
                 // Coalesce STREAM frames when fuzzing.
@@ -6325,7 +6325,7 @@ impl<F: BufFactory> Connection<F> {
 
         self.tx_data += sent as u64;
 
-        self.streams.add_tx_buffered(sent);
+        self.streams.add_tx_buffered(sent as u64);
 
         qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
             let ev_data = EventData::QuicStreamDataMoved(
@@ -6481,7 +6481,7 @@ impl<F: BufFactory> Connection<F> {
             Shutdown::Write => {
                 // Save the buffered length before shutdown (shutdown clears the
                 // buffer).
-                let buffered_len = stream.send.buffered_bytes() as usize;
+                let buffered_len = stream.send.buffered_bytes();
 
                 let (final_size, unsent) = stream.send.shutdown()?;
 
@@ -8812,7 +8812,7 @@ impl<F: BufFactory> Connection<F> {
 
                 // Save the buffered length before stopping (stop clears the
                 // buffer).
-                let buffered_len = stream.send.buffered_bytes() as usize;
+                let buffered_len = stream.send.buffered_bytes();
 
                 // Try stopping the stream.
                 if let Ok((final_size, unsent)) = stream.send.stop(error_code) {
@@ -9325,13 +9325,15 @@ impl<F: BufFactory> Connection<F> {
             .paths
             .iter()
             .filter(|&(_, p)| p.active())
-            .map(|(_, p)| p.recovery.cwnd_available())
-            .sum();
+            .map(|(_, p)| p.recovery.cwnd_available() as u64)
+            .fold(0, u64::saturating_add);
 
-        ((self.streams.tx_buffered() + self.dgram_send_queue_byte_size()) <
+        (self
+            .streams
+            .tx_buffered()
+            .saturating_add(self.dgram_send_queue_byte_size() as u64) <
             cwin_available) &&
-            (self.tx_data.saturating_sub(self.last_tx_data)) <
-                cwin_available as u64 &&
+            self.tx_data.saturating_sub(self.last_tx_data) < cwin_available &&
             cwin_available > 0
     }
 

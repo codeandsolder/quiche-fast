@@ -225,7 +225,7 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
     max_stream_window: u64,
 
     /// Total number of bytes in send buffers across all streams.
-    tx_buffered: usize,
+    tx_buffered: u64,
 }
 
 impl<F: BufFactory> StreamMap<F> {
@@ -837,18 +837,15 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Returns the total number of bytes buffered across all streams.
-    pub(crate) fn tx_buffered(&self) -> usize {
+    pub(crate) fn tx_buffered(&self) -> u64 {
         self.tx_buffered
     }
 
     /// Computes the actual number of bytes in send buffers by summing across
     /// all streams. This is used for debugging to verify that tx_buffered
     /// is accurate.
-    fn tx_buffered_actual(&self) -> usize {
-        self.streams
-            .values()
-            .map(|s| s.send.buffered_bytes() as usize)
-            .sum()
+    fn tx_buffered_actual(&self) -> u64 {
+        self.streams.values().map(|s| s.send.buffered_bytes()).sum()
     }
 
     /// Checks if the stored tx_buffered matches the actual value.
@@ -858,7 +855,7 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Updates the tx_buffered value by adding the delta.
-    pub(crate) fn add_tx_buffered(&mut self, delta: usize) {
+    pub(crate) fn add_tx_buffered(&mut self, delta: u64) {
         self.tx_buffered += delta;
 
         #[cfg(debug_assertions)]
@@ -866,7 +863,7 @@ impl<F: BufFactory> StreamMap<F> {
     }
 
     /// Updates the tx_buffered value by subtracting the delta.
-    pub(crate) fn sub_tx_buffered(&mut self, delta: usize) {
+    pub(crate) fn sub_tx_buffered(&mut self, delta: u64) {
         debug_assert!(self.tx_buffered >= delta);
         self.tx_buffered = self.tx_buffered.saturating_sub(delta);
 
@@ -892,7 +889,7 @@ impl<F: BufFactory> StreamMap<F> {
                 "tx_buffered mismatch: stored={}, actual={}, diff={}, buffered_per_stream={:?}",
                 stored,
                 actual,
-                stored as i64 - actual as i64,
+                i128::from(stored) - i128::from(actual),
                 buffered_per_stream
             );
         }
