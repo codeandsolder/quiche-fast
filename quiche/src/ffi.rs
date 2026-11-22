@@ -925,9 +925,13 @@ pub extern "C" fn quiche_negotiate_version(
     let dcid = ConnectionId::from_ref(dcid);
 
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    match negotiate_version(&scid, &dcid, out) {
+    match packet::negotiate_version(
+        &scid,
+        &dcid,
+        &mut packet::PacketWriter::new(out),
+    ) {
         Ok(v) => ssize_t::try_from(v).unwrap_or(ssize_t::MAX),
 
         Err(e) => ssize_t::from(e.to_c()),
@@ -963,9 +967,16 @@ pub extern "C" fn quiche_retry(
     let token =
         ffi_slice!(token, token_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    match retry(&scid, &dcid, &new_scid, token, version, out) {
+    match packet::retry(
+        &scid,
+        &dcid,
+        &new_scid,
+        token,
+        version,
+        &mut packet::PacketWriter::new(out),
+    ) {
         Ok(v) => ssize_t::try_from(v).unwrap_or(ssize_t::MAX),
 
         Err(e) => ssize_t::from(e.to_c()),
@@ -1291,9 +1302,10 @@ pub extern "C" fn quiche_conn_send(
     }
 
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    match conn.send(out) {
+    match conn.send_on_path_into(&mut packet::PacketWriter::new(out), None, None)
+    {
         Ok((v, info)) => {
             out_info.write(info.into());
 
@@ -1325,9 +1337,9 @@ pub extern "C" fn quiche_conn_send_on_path(
     let to =
         ffi_optional_addr!(to, to_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
     let out =
-        ffi_slice_mut!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
+        ffi_slice_out!(out, out_len, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
-    match conn.send_on_path(out, from, to) {
+    match conn.send_on_path_into(&mut packet::PacketWriter::new(out), from, to) {
         Ok((v, info)) => {
             out_info.write(info.into());
 
@@ -3342,14 +3354,14 @@ mod tests {
     ) {
         let mut pipe = test_utils::Pipe::new("cubic").unwrap();
         let mut info = MaybeUninit::<SendInfo>::uninit();
-        let mut buf = [0; 1500];
+        let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
         let written = if specified_path {
             let (from, from_len) =
                 std_addr_to_c(&test_utils::Pipe::client_addr());
             let (to, to_len) = std_addr_to_c(&test_utils::Pipe::server_addr());
             quiche_conn_send_on_path(
                 &mut pipe.client,
-                buf.as_mut_ptr(),
+                buf.as_mut_ptr().cast(),
                 buf.len(),
                 (&raw const from).cast(),
                 from_len,
@@ -3360,12 +3372,18 @@ mod tests {
         } else {
             quiche_conn_send(
                 &mut pipe.client,
-                buf.as_mut_ptr(),
+                buf.as_mut_ptr().cast(),
                 buf.len(),
                 info.as_mut_ptr(),
             )
         };
         assert!(written > 0);
+        let len = usize::try_from(written).unwrap();
+        // SAFETY: the successful send initialized exactly the returned prefix.
+        let packet = unsafe {
+            slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), len)
+        };
+        assert_eq!(pipe.server_recv(packet), Ok(len));
         // SAFETY: positive send return means the complete SendInfo was written.
         let info = unsafe { info.assume_init() };
         assert_eq!(
@@ -3377,6 +3395,95 @@ mod tests {
         assert_eq!(
             unsafe { std_addr_from_c((&raw const info.to).cast(), info.to_len) },
             Ok(test_utils::Pipe::server_addr())
+        );
+    }
+
+    #[test]
+    fn c_send_protects_stream_and_datagram_in_uninitialized_storage() {
+        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+        config.enable_dgram(true, 4, 4);
+        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+        pipe.handshake().unwrap();
+        pipe.client.stream_send(4, b"stream payload", true).unwrap();
+        pipe.client.dgram_send(b"datagram").unwrap();
+        // Each successful output is consumed by the actual packet decryptor.
+        for _ in 0..2 {
+            let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
+            let mut info = MaybeUninit::<SendInfo>::uninit();
+            let len = usize::try_from(quiche_conn_send(
+                &mut pipe.client,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                info.as_mut_ptr(),
+            ))
+            .unwrap();
+            assert!(len > 0);
+            // SAFETY: successful send initialized the reported packet prefix.
+            let packet = unsafe {
+                slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), len)
+            };
+            assert_eq!(pipe.server_recv(packet), Ok(len));
+        }
+        let mut payload = [0; 32];
+        assert_eq!(pipe.server.stream_recv(4, &mut payload), Ok((14, true)));
+        assert_eq!(&payload[..14], b"stream payload");
+        assert_eq!(pipe.server.dgram_recv(&mut payload), Ok(8));
+        assert_eq!(&payload[..8], b"datagram");
+    }
+
+    #[test]
+    fn stateless_c_packets_initialize_uninitialized_output() {
+        let scid = [1, 2, 3];
+        let dcid = [4, 5];
+        let new_scid = [6, 7, 8, 9];
+        let token = b"token";
+        let mut out = [MaybeUninit::<u8>::uninit(); 128];
+        let len = usize::try_from(quiche_negotiate_version(
+            scid.as_ptr(),
+            scid.len(),
+            dcid.as_ptr(),
+            dcid.len(),
+            out.as_mut_ptr().cast(),
+            out.len(),
+        ))
+        .unwrap();
+        // SAFETY: successful negotiation initialized the returned prefix.
+        let packet = unsafe {
+            slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len)
+        };
+        let hdr = Header::from_slice(packet, 0).unwrap();
+        assert_eq!(hdr.ty, Type::VersionNegotiation);
+        assert_eq!(hdr.dcid.as_ref(), scid);
+        assert_eq!(hdr.scid.as_ref(), dcid);
+
+        let mut out = [MaybeUninit::<u8>::uninit(); 128];
+        let len = usize::try_from(quiche_retry(
+            scid.as_ptr(),
+            scid.len(),
+            dcid.as_ptr(),
+            dcid.len(),
+            new_scid.as_ptr(),
+            new_scid.len(),
+            token.as_ptr(),
+            token.len(),
+            PROTOCOL_VERSION,
+            out.as_mut_ptr().cast(),
+            out.len(),
+        ))
+        .unwrap();
+        // SAFETY: successful Retry initialized the returned prefix.
+        let packet = unsafe {
+            slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len)
+        };
+        let mut reader = octets::OctetsMut::with_slice(packet);
+        let hdr = Header::from_bytes(&mut reader, 0).unwrap();
+        assert_eq!(hdr.ty, Type::Retry);
+        assert_eq!(hdr.dcid.as_ref(), scid);
+        assert_eq!(hdr.scid.as_ref(), new_scid);
+        assert_eq!(hdr.token.as_deref(), Some(token.as_slice()));
+        assert_eq!(
+            packet::verify_retry_integrity(&reader, &dcid, PROTOCOL_VERSION),
+            Ok(())
         );
     }
 

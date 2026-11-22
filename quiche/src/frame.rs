@@ -439,6 +439,7 @@ impl Frame {
         Ok(frame)
     }
 
+    #[cfg(any(test, feature = "internal"))]
     pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
         let before = b.cap();
         self.encode(b)?;
@@ -451,7 +452,7 @@ impl Frame {
         Ok(sizer.len)
     }
 
-    fn encode(&self, b: &mut impl FrameSink) -> Result<()> {
+    pub(crate) fn encode(&self, b: &mut impl FrameSink) -> Result<()> {
         match self {
             Self::Padding { len } => b.put_padding(*len)?,
 

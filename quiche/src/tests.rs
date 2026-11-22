@@ -6440,10 +6440,16 @@ fn peer_cert_chain(
     }
 }
 
-#[rstest]
-fn retry(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
-    let mut buf = [0; 65535];
+const TEST_RETRY_TOKEN: &[u8] = b"quiche test retry token";
 
+fn retry_client(
+    cc_algorithm_name: &str, buf: &mut [u8],
+) -> (
+    Config,
+    test_utils::Pipe,
+    ConnectionId<'static>,
+    ConnectionId<'static>,
+) {
     let mut config = Config::new(PROTOCOL_VERSION).unwrap();
     assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
     config
@@ -6455,36 +6461,38 @@ fn retry(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     config
         .set_application_protos(&[b"proto1", b"proto2"])
         .unwrap();
-
     let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
 
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
+    // Complete the stateless Retry exchange; the next client flight contains
+    // the original destination ID relationship and echoed token.
+    let (len, _) = pipe.client.send(buf).unwrap();
     let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let odcid = hdr.dcid.clone();
-
-    let mut scid = [0; MAX_CONN_ID_LEN];
-    rand::rand_bytes(&mut scid[..]);
-    let scid = ConnectionId::from_ref(&scid);
-
-    let token = b"quiche test retry token";
-
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
-
-    // Client receives Retry and sends new Initial.
+    let odcid = hdr.dcid.into_owned();
+    let (retry_scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
+    let len = crate::retry(
+        &hdr.scid,
+        &odcid,
+        &retry_scid,
+        TEST_RETRY_TOKEN,
+        hdr.version,
+        buf,
+    )
+    .unwrap();
     assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
+    (config, pipe, odcid, retry_scid)
+}
 
+#[rstest]
+fn retry(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] wait_for_pto: bool,
+) {
+    let mut buf = [0; 65535];
+    let (mut config, mut pipe, odcid, scid) =
+        retry_client(cc_algorithm_name, &mut buf);
     let (len, send_info) = pipe.client.send(&mut buf).unwrap();
-
     let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-    assert_eq!(&hdr.token.unwrap(), token);
-
-    // Server accepts connection.
+    assert_eq!(hdr.token.as_deref(), Some(TEST_RETRY_TOKEN));
     pipe.server = accept(
         &scid,
         Some(&odcid),
@@ -6495,199 +6503,38 @@ fn retry(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     .unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
 
-    assert_eq!(pipe.advance(), Ok(()));
+    if wait_for_pto {
+        let timer = pipe.client.timeout().unwrap();
+        std::thread::sleep(timer + Duration::from_millis(1));
+        pipe.client.on_timeout();
+    }
 
+    assert_eq!(pipe.advance(), Ok(()));
     assert!(pipe.client.is_established());
     assert!(pipe.server.is_established());
 }
 
 #[rstest]
-fn retry_with_pto(
+fn retry_original_destination_connection_id_invalid(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] missing: bool,
 ) {
     let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-
-    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
-
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let odcid = hdr.dcid.clone();
-
-    let mut scid = [0; MAX_CONN_ID_LEN];
-    rand::rand_bytes(&mut scid[..]);
-    let scid = ConnectionId::from_ref(&scid);
-
-    let token = b"quiche test retry token";
-
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
-
-    // Client receives Retry and sends new Initial.
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
-
-    let (len, send_info) = pipe.client.send(&mut buf).unwrap();
-
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-    assert_eq!(&hdr.token.unwrap(), token);
-
-    // Server accepts connection.
-    pipe.server = accept(
-        &scid,
-        Some(&odcid),
-        test_utils::Pipe::server_addr(),
-        send_info.from,
-        &mut config,
-    )
-    .unwrap();
-    assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
-
-    // Wait for the client's PTO so it will try to send an Initial again.
-    let timer = pipe.client.timeout().unwrap();
-    std::thread::sleep(timer + Duration::from_millis(1));
-    pipe.client.on_timeout();
-
-    assert_eq!(pipe.advance(), Ok(()));
-
-    assert!(pipe.client.is_established());
-    assert!(pipe.server.is_established());
-}
-
-#[rstest]
-fn retry_missing_original_destination_connection_id(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-
-    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
-
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let mut scid = [0; MAX_CONN_ID_LEN];
-    rand::rand_bytes(&mut scid[..]);
-    let scid = ConnectionId::from_ref(&scid);
-
-    let token = b"quiche test retry token";
-
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
-
-    // Client receives Retry and sends new Initial.
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
-
+    let (mut config, mut pipe, _, scid) =
+        retry_client(cc_algorithm_name, &mut buf);
     let client_flight = test_utils::emit_flight(&mut pipe.client).unwrap();
-
-    // Server accepts connection and send first flight. But original
-    // destination connection ID is ignored.
-    let from = "127.0.0.1:1234".parse().unwrap();
+    let invalid = ConnectionId::from_ref(b"bogus value");
+    let odcid = (!missing).then_some(&invalid);
     pipe.server = accept(
         &scid,
-        None,
+        odcid,
         test_utils::Pipe::server_addr(),
-        from,
+        client_flight[0].1.from,
         &mut config,
     )
     .unwrap();
     test_utils::process_flight(&mut pipe.server, client_flight).unwrap();
-
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
-
-    assert_eq!(
-        test_utils::process_flight(&mut pipe.client, flight),
-        Err(Error::InvalidTransportParam)
-    );
-}
-
-#[rstest]
-fn retry_invalid_original_destination_connection_id(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-
-    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
-
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let mut scid = [0; MAX_CONN_ID_LEN];
-    rand::rand_bytes(&mut scid[..]);
-    let scid = ConnectionId::from_ref(&scid);
-
-    let token = b"quiche test retry token";
-
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
-
-    // Client receives Retry and sends new Initial.
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
-
-    let client_flight = test_utils::emit_flight(&mut pipe.client).unwrap();
-
-    // Server accepts connection and send first flight. But original
-    // destination connection ID is invalid.
-    let from = "127.0.0.1:1234".parse().unwrap();
-    let odcid = ConnectionId::from_ref(b"bogus value");
-    pipe.server = accept(
-        &scid,
-        Some(&odcid),
-        test_utils::Pipe::server_addr(),
-        from,
-        &mut config,
-    )
-    .unwrap();
-    test_utils::process_flight(&mut pipe.server, client_flight).unwrap();
-
-    let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
-
     assert_eq!(
         test_utils::process_flight(&mut pipe.client, flight),
         Err(Error::InvalidTransportParam)
@@ -6699,56 +6546,17 @@ fn retry_separate_source_connection_id(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
     let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-
-    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
-
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let odcid = hdr.dcid.clone();
-    let (retry_scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
-    let token = b"quiche test retry token";
-
-    len = packet::retry(
-        &hdr.scid,
-        &hdr.dcid,
-        &retry_scid,
-        token,
-        hdr.version,
-        &mut buf,
-    )
-    .unwrap();
-
-    // Client receives Retry and sends new Initial.
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
-
+    let (mut config, mut pipe, odcid, retry_scid) =
+        retry_client(cc_algorithm_name, &mut buf);
     let (len, send_info) = pipe.client.send(&mut buf).unwrap();
-
     let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-    assert_eq!(&hdr.token.unwrap(), token);
+    assert_eq!(hdr.token.as_deref(), Some(TEST_RETRY_TOKEN));
 
-    // Server accepts connection.
     let (scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
     let retry_cids = RetryConnectionIds {
         original_destination_cid: &odcid,
         retry_source_cid: &retry_scid,
     };
-
     pipe.server = accept_with_retry(
         &scid,
         retry_cids,
@@ -6758,9 +6566,7 @@ fn retry_separate_source_connection_id(
     )
     .unwrap();
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
-
     assert_eq!(pipe.advance(), Ok(()));
-
     assert!(pipe.client.is_established());
     assert!(pipe.server.is_established());
 }
@@ -6770,63 +6576,24 @@ fn retry_invalid_source_connection_id(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
 ) {
     let mut buf = [0; 65535];
-
-    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-    assert_eq!(config.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config
-        .set_application_protos(&[b"proto1", b"proto2"])
-        .unwrap();
-
-    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
-
-    // Client sends initial flight.
-    let (mut len, _) = pipe.client.send(&mut buf).unwrap();
-
-    // Server sends Retry packet.
-    let hdr = Header::from_slice(&mut buf[..len], MAX_CONN_ID_LEN).unwrap();
-
-    let odcid = hdr.dcid.clone();
-    let (scid, _) = test_utils::create_cid_and_reset_token(MAX_CONN_ID_LEN);
-    let token = b"quiche test retry token";
-
-    len =
-        packet::retry(&hdr.scid, &hdr.dcid, &scid, token, hdr.version, &mut buf)
-            .unwrap();
-
-    // Client receives Retry and sends new Initial.
-    assert_eq!(pipe.client_recv(&mut buf[..len]), Ok(len));
-
+    let (mut config, mut pipe, odcid, scid) =
+        retry_client(cc_algorithm_name, &mut buf);
     let client_flight = test_utils::emit_flight(&mut pipe.client).unwrap();
-    // `accept_with_retry` below needs a client source address; take it from
-    // the first client-emitted datagram of the flight.
-    let send_info = client_flight[0].1;
-
-    // Server accepts connection and send first flight. But retry source
-    // connection ID is invalid.
     let retry_scid = ConnectionId::from_ref(b"bogus value");
     let retry_cids = RetryConnectionIds {
         original_destination_cid: &odcid,
         retry_source_cid: &retry_scid,
     };
-
     pipe.server = accept_with_retry(
         &scid,
         retry_cids,
         test_utils::Pipe::server_addr(),
-        send_info.from,
+        client_flight[0].1.from,
         &mut config,
     )
     .unwrap();
     test_utils::process_flight(&mut pipe.server, client_flight).unwrap();
-
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
-
     assert_eq!(
         test_utils::process_flight(&mut pipe.client, flight),
         Err(Error::InvalidTransportParam)
@@ -8827,7 +8594,12 @@ fn pto_probe_not_stranded_by_earlier_epoch_data(
     // the earlier Handshake data.
     let (ty, _) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Short);
     assert_eq!(
@@ -9224,7 +8996,12 @@ fn handshake_packet_type_corruption(
     let active_pid = pipe.client.paths.get_active_path_id().expect("no active");
     let (ty, len) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Initial);
 
@@ -9233,7 +9010,12 @@ fn handshake_packet_type_corruption(
     // Client sends Handshake packet.
     let (ty, len) = pipe
         .client
-        .send_single(&mut buf, active_pid, false, Instant::now())
+        .send_single(
+            &mut packet::PacketWriter::from_initialized(&mut buf),
+            active_pid,
+            false,
+            Instant::now(),
+        )
         .unwrap();
     assert_eq!(ty, Type::Handshake);
 
