@@ -82,9 +82,9 @@ where
 
 /// Construct the fixture configuration with its packaged server identity.
 pub fn config_with_test_identity() -> Result<Config> {
-    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg(feature = "boringssl-btls-crate")]
     {
-        let mut config = Config::with_boring_ssl_ctx_builder(
+        let mut config = Config::with_btls_ssl_ctx_builder(
             PROTOCOL_VERSION,
             Pipe::default_tls_ctx_builder()?,
         )?;
@@ -92,7 +92,7 @@ pub fn config_with_test_identity() -> Result<Config> {
         Ok(config)
     }
 
-    #[cfg(not(feature = "boringssl-boring-crate"))]
+    #[cfg(not(feature = "boringssl-btls-crate"))]
     {
         // The externally linked TLS backend does not expose the Rust
         // certificate object API. Use the packaged fixture files directly.
@@ -134,15 +134,15 @@ impl Pipe {
         Ok(config)
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub fn default_tls_ctx_builder() -> Result<boring::ssl::SslContextBuilder> {
+    #[cfg(feature = "boringssl-btls-crate")]
+    pub fn default_tls_ctx_builder() -> Result<btls::ssl::SslContextBuilder> {
         let mut ctx =
-            boring::ssl::SslContextBuilder::new(boring::ssl::SslMethod::tls())
+            btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls())
                 .map_err(|_| Error::TlsFail)?;
         let cert =
-            boring::x509::X509::from_pem(include_bytes!("../examples/cert.crt"))
+            btls::x509::X509::from_pem(include_bytes!("../examples/cert.crt"))
                 .map_err(|_| Error::TlsFail)?;
-        let key = boring::pkey::PKey::private_key_from_pem(include_bytes!(
+        let key = btls::pkey::PKey::private_key_from_pem(include_bytes!(
             "../examples/cert.key"
         ))
         .map_err(|_| Error::TlsFail)?;

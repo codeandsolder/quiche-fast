@@ -131,7 +131,7 @@ fn make_quiche_config(
         .and_then(|(hook, tls)| hook.create_custom_ssl_context_builder(tls));
 
     let mut config = if let Some(builder) = ssl_ctx_builder {
-        quiche::Config::with_boring_ssl_ctx_builder(
+        quiche::Config::with_btls_ssl_ctx_builder(
             quiche::PROTOCOL_VERSION,
             builder,
         )?
@@ -244,48 +244,26 @@ fn quiche_config_with_tls(
             "raw public key certificates require the `rpk` feature",
         )
         .into()),
-        #[cfg(all(feature = "rpk", not(boring_v5)))]
+        #[cfg(feature = "rpk")]
         CertificateKind::RawPublicKey => {
-            // boring 4.x (the default) exposes a dedicated
-            // `SslContextBuilder::new_rpk()` constructor plus
-            // `set_rpk_certificate` / `set_null_chain_private_key`.
-            let mut ssl_ctx_builder = boring::ssl::SslContextBuilder::new_rpk()?;
-            let raw_public_key = read_file(tls.cert)?;
-            ssl_ctx_builder.set_rpk_certificate(&raw_public_key)?;
-
-            let raw_private_key = read_file(tls.private_key)?;
-            let pkey =
-                boring::pkey::PKey::private_key_from_pem(&raw_private_key)?;
-            ssl_ctx_builder.set_null_chain_private_key(&pkey)?;
-
-            Ok(quiche::Config::with_boring_ssl_ctx_builder(
-                quiche::PROTOCOL_VERSION,
-                ssl_ctx_builder,
-            )?)
-        },
-        #[cfg(all(feature = "rpk", boring_v5))]
-        CertificateKind::RawPublicKey => {
-            // boring 5.x replaced the dedicated `SslContextBuilder::new_rpk()`
-            // entry point with a credential-based API: build an
+            // Build an
             // `SslCredential` configured for raw public keys and add it
             // to a regular `SslContextBuilder` via `add_credential`.
             let raw_public_key = read_file(tls.cert)?;
             let raw_private_key = read_file(tls.private_key)?;
-            let pkey =
-                boring::pkey::PKey::private_key_from_pem(&raw_private_key)?;
+            let pkey = btls::pkey::PKey::private_key_from_pem(&raw_private_key)?;
 
             let mut credential_builder =
-                boring::ssl::SslCredential::new_raw_public_key()?;
+                btls::ssl::SslCredential::new_raw_public_key()?;
             credential_builder.set_spki_bytes(Some(&raw_public_key))?;
             credential_builder.set_private_key(&pkey)?;
             let credential = credential_builder.build();
 
-            let mut ssl_ctx_builder = boring::ssl::SslContextBuilder::new(
-                boring::ssl::SslMethod::tls(),
-            )?;
+            let mut ssl_ctx_builder =
+                btls::ssl::SslContextBuilder::new(btls::ssl::SslMethod::tls())?;
             ssl_ctx_builder.add_credential(&credential)?;
 
-            Ok(quiche::Config::with_boring_ssl_ctx_builder(
+            Ok(quiche::Config::with_btls_ssl_ctx_builder(
                 quiche::PROTOCOL_VERSION,
                 ssl_ctx_builder,
             )?)

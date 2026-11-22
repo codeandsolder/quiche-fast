@@ -28,7 +28,7 @@ pre-build = [
     "ln -sf /usr/bin/g++ /usr/local/bin/i686-linux-gnu-g++",
 ]
 
-# BoringSSL's x86 assembly requires SSE2. `boring-sys`'s cmake build
+# BoringSSL's x86 assembly requires SSE2. `btls-sys`'s cmake build
 # doesn't add `-msse2` for i686 targets (its 32-bit-toolchain.cmake
 # sets it as a CACHE STRING, but cmake-rs's `-DCMAKE_C_FLAGS=...` on
 # the command line wins), so inject it via the target-scoped

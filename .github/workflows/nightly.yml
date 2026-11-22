@@ -77,7 +77,7 @@ jobs:
     # exports when built with `FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION`.
     # BoringSSL 5.x consolidated the older
     # `BORINGSSL_UNSAFE_{DETERMINISTIC,FUZZER}_MODE` defines into this
-    # single switch. `boring-sys` doesn't expose a feature for it, but
+    # single switch. `btls-sys` doesn't expose a feature for it, but
     # cmake-rs (via cc-rs) honors `CFLAGS`/`CXXFLAGS`, so inject the
     # define there.
     env:

@@ -40,7 +40,7 @@ include/
   quiche.h        (1.2k)     C API header — mirrors ffi.rs
 ```
 
-BoringSSL itself is built by `boring-sys` (no in-tree submodule).
+BoringSSL itself is built by `btls-sys` (no in-tree submodule).
 
 ## WHERE TO LOOK
 
@@ -53,7 +53,7 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 | TLS handshake | `tls/mod.rs` — cfg-gated per backend |
 | C bindings | `ffi.rs` + `include/quiche.h` |
 | Test harness | `test_utils.rs` (`Pipe` struct) |
-| Build system | `src/build.rs` — link directives + pkg-config metadata (BoringSSL is built by `boring-sys`) |
+| Build system | `src/build.rs` — link directives + pkg-config metadata (BoringSSL is built by `btls-sys`) |
 
 ## ANTI-PATTERNS
 
@@ -65,12 +65,12 @@ BoringSSL itself is built by `boring-sys` (no in-tree submodule).
 
 ## NOTES
 
-- `build.rs` is at `src/build.rs` (Cargo.toml: `build = "src/build.rs"`), not crate root. Emits link directives and, with `pkg-config-meta`, writes `quiche.pc`; BoringSSL itself is built by `boring-sys`.
-- Single TLS backend: `boringssl-boring-crate` (default), via the `boring`/`boring-sys` crates.
+- `build.rs` is at `src/build.rs` (Cargo.toml: `build = "src/build.rs"`), not crate root. Emits link directives and, with `pkg-config-meta`, writes `quiche.pc`; BoringSSL itself is built by `btls-sys`.
+- Single TLS backend: `boringssl-btls-crate` (default), via the `boring`/`btls-sys` crates.
 - `quiche::Error` is `Copy + Clone` — intentional for hot-path ergonomics.
 - `test_utils::Pipe` exposed via `internal` feature for downstream crate integration tests.
 - Tests use `rstest` with `#[values("cubic", "bbr2_gcongestion")]` parameterization for CC coverage.
-- `BORING_BSSL_PATH` env var (consumed by `boring-sys`) points at a custom BoringSSL source tree.
+- `BORING_BSSL_PATH` env var (consumed by `btls-sys`) points at a custom BoringSSL source tree.
 - Crate-type: `lib` + `staticlib` + `cdylib` — the latter two for C consumers.
 - `BufFactory` trait (`buffers.rs`) enables zero-copy buffer creation; `Connection<F>` is generic over it.
 - `flowcontrol.rs` maintains monotone receive-side flow-control limits; counters and window multiplication saturate at `u64::MAX`, half-window thresholds round upward for odd/one-byte windows, and autotuning ignores timestamps earlier than the last advertised limit. Keep boundary and out-of-order regression coverage.

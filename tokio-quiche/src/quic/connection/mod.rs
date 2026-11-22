@@ -34,7 +34,7 @@ pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
 pub(crate) use self::map::ConnectionMap;
 
-use boring::ssl::SslRef;
+use btls::ssl::SslRef;
 use datagram_socket::AsSocketStats;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::MaybeConnectedSocket;
@@ -289,7 +289,7 @@ where
         self.params.peer_addr
     }
 
-    /// [boring]'s SSL object for this connection.
+    /// [btls]'s SSL object for this connection.
     #[doc(hidden)]
     pub fn ssl_mut(&mut self) -> &mut SslRef {
         // Deref to pick `Connection::as_mut` over `Box::as_mut`.

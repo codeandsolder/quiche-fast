@@ -187,9 +187,9 @@ impl Context {
         Ok(ctx)
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
+    #[cfg(feature = "boringssl-btls-crate")]
     pub fn from_boring(
-        ssl_ctx_builder: boring::ssl::SslContextBuilder,
+        ssl_ctx_builder: btls::ssl::SslContextBuilder,
     ) -> Result<Self> {
         use foreign_types_shared::ForeignType;
 
@@ -472,7 +472,7 @@ impl Handshake {
     /// # Safety
     /// The pointer must be null or a live, exclusively owned SSL reference
     /// transferred to this Handshake. It must not be freed by the caller.
-    #[cfg(any(feature = "ffi", feature = "boringssl-boring-crate"))]
+    #[cfg(any(feature = "ffi", feature = "boringssl-btls-crate"))]
     pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Self> {
         let ptr = NonNull::new(ssl.cast()).ok_or(Error::TlsFail)?;
 
@@ -834,14 +834,14 @@ impl Handshake {
         }
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub(crate) fn ssl_mut(&mut self) -> &mut boring::ssl::SslRef {
+    #[cfg(feature = "boringssl-btls-crate")]
+    pub(crate) fn ssl_mut(&mut self) -> &mut btls::ssl::SslRef {
         use foreign_types_shared::ForeignTypeRef;
 
         // SAFETY: This is the same BoringSSL SSL type used by boring.
         // The reference borrows the owned SSL exclusively without transferring
         // it.
-        unsafe { boring::ssl::SslRef::from_ptr_mut(self.as_mut_ptr().cast()) }
+        unsafe { btls::ssl::SslRef::from_ptr_mut(self.as_mut_ptr().cast()) }
     }
 }
 
@@ -902,14 +902,14 @@ impl ExData<'_> {
         unsafe { SSL_get_ex_data(ptr, index).cast::<Self>().as_mut() }
     }
 
-    #[cfg(feature = "boringssl-boring-crate")]
-    pub fn from_ssl_ref(ssl: &mut boring::ssl::SslRef) -> Option<&mut Self> {
-        use boring::ex_data::Index;
+    #[cfg(feature = "boringssl-btls-crate")]
+    pub fn from_ssl_ref(ssl: &mut btls::ssl::SslRef) -> Option<&mut Self> {
+        use btls::ex_data::Index;
 
         let index = (*QUICHE_EX_DATA_INDEX)?;
         // SAFETY: The reserved index is private to this module and only
         // run_with_ex_data installs a value, always of type ExData.
-        let idx: Index<boring::ssl::Ssl, ExData> =
+        let idx: Index<btls::ssl::Ssl, ExData> =
             unsafe { Index::from_raw(index) };
 
         ssl.ex_data_mut(idx)
