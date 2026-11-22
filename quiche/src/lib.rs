@@ -6247,7 +6247,6 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::Done);
         }
 
-        let local = stream.local;
         let priority_key = Arc::clone(stream.priority_key());
 
         #[cfg(feature = "qlog")]
@@ -6267,7 +6266,7 @@ impl<F: BufFactory> Connection<F> {
                 // A StreamReset read completes the receive side, but an
                 // unreported STOP error still needs the send-side state.
                 if stream.is_collectable() {
-                    self.streams.collect(stream_id, local);
+                    self.streams.collect(stream_id);
                 }
 
                 self.streams.remove_readable(&priority_key);
@@ -6290,7 +6289,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         if collectable {
-            self.streams.collect(stream_id, local);
+            self.streams.collect(stream_id);
         }
 
         qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
@@ -6702,7 +6701,6 @@ impl<F: BufFactory> Connection<F> {
                 // Discarding unread data can complete the receive side, so no
                 // later read would collect the stream.
                 let collectable = stream.is_collectable();
-                let local = stream.local;
 
                 if !stream.recv.is_fin() {
                     self.streams.insert_stopped(stream_id, err);
@@ -6715,7 +6713,7 @@ impl<F: BufFactory> Connection<F> {
                     self.stopped_stream_local_count.saturating_add(1);
 
                 if collectable {
-                    self.streams.collect(stream_id, local);
+                    self.streams.collect(stream_id);
                 }
             },
 
@@ -9076,7 +9074,6 @@ impl<F: BufFactory> Connection<F> {
                 // The receive side can complete without the stream becoming
                 // readable, so no later read would collect it.
                 let collectable = stream.is_collectable();
-                let local = stream.local;
 
                 if !was_readable && stream.is_readable() {
                     self.streams
@@ -9092,7 +9089,7 @@ impl<F: BufFactory> Connection<F> {
                     self.reset_stream_remote_count.saturating_add(1);
 
                 if collectable {
-                    self.streams.collect(stream_id, local);
+                    self.streams.collect(stream_id);
                 }
             },
 
@@ -9263,7 +9260,6 @@ impl<F: BufFactory> Connection<F> {
                 // The receive side can complete without the stream becoming
                 // readable, so no later read would collect it.
                 let collectable = stream.is_collectable();
-                let local = stream.local;
 
                 if !was_readable && stream.is_readable() {
                     self.streams
@@ -9281,7 +9277,7 @@ impl<F: BufFactory> Connection<F> {
                 }
 
                 if collectable {
-                    self.streams.collect(stream_id, local);
+                    self.streams.collect(stream_id);
                 }
             },
 
