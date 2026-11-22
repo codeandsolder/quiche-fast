@@ -176,7 +176,7 @@ impl Mode {
     pub(super) fn drain(model: BBRv2NetworkModel) -> Self {
         Self::Drain(Drain {
             model,
-            cycle: Default::default(),
+            cycle: Cycle::default(),
         })
     }
 

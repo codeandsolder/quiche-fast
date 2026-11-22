@@ -71,11 +71,11 @@ impl PathState {
     #[cfg(feature = "ffi")]
     pub fn to_c(self) -> libc::ssize_t {
         match self {
-            PathState::Failed => -1,
-            PathState::Unknown => 0,
-            PathState::Validating => 1,
-            PathState::ValidatingMTU => 2,
-            PathState::Validated => 3,
+            Self::Failed => -1,
+            Self::Unknown => 0,
+            Self::Validating => 1,
+            Self::ValidatingMTU => 2,
+            Self::Validated => 3,
         }
     }
 }

@@ -1059,7 +1059,7 @@ impl Connection {
 
             next_uni_stream_id: initial_uni_stream_id,
 
-            streams: Default::default(),
+            streams: HashMap::default(),
 
             local_settings: ConnectionSettings {
                 max_field_section_size: config.max_field_section_size,
@@ -1068,7 +1068,7 @@ impl Connection {
                 connect_protocol_enabled: config.connect_protocol_enabled,
                 h3_datagram,
                 additional_settings: config.additional_settings.clone(),
-                raw: Default::default(),
+                raw: None,
             },
 
             peer_settings: ConnectionSettings {
@@ -1077,15 +1077,15 @@ impl Connection {
                 qpack_blocked_streams: None,
                 h3_datagram: None,
                 connect_protocol_enabled: None,
-                additional_settings: Default::default(),
-                raw: Default::default(),
+                additional_settings: None,
+                raw: None,
             },
 
             control_stream_id: None,
             peer_control_stream_id: None,
 
-            local_qpack_streams: Default::default(),
-            peer_qpack_streams: Default::default(),
+            local_qpack_streams: QpackStreams::default(),
+            peer_qpack_streams: QpackStreams::default(),
 
             max_push_id: 0,
 
@@ -1142,7 +1142,7 @@ impl Connection {
                 conn.close(true, e.to_wire(), b"Error opening control stream")?;
                 return Err(e);
             },
-        };
+        }
 
         // Try opening QPACK streams, but ignore errors if it fails since we
         // don't need them right now.
@@ -1217,7 +1217,7 @@ impl Connection {
             }
 
             return Err(e.into());
-        };
+        }
 
         if let Err(e) = self.send_headers(conn, stream_id, headers, fin) {
             // If the stream was blocked before any header bytes were written,
@@ -1288,7 +1288,7 @@ impl Connection {
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
         headers: &[T], fin: bool,
     ) -> Result<()> {
-        let priority = Default::default();
+        let priority = Priority::default();
 
         self.send_response_with_priority(
             conn, stream_id, headers, &priority, fin,
@@ -1539,7 +1539,7 @@ impl Connection {
 
                 return Err(e.into());
             },
-        };
+        }
 
         b.put_varint(frame::HEADERS_FRAME_TYPE_ID)?;
         b.put_varint(header_block.len() as u64)?;
@@ -1550,11 +1550,9 @@ impl Connection {
         conn.stream_send(stream_id, &header_block, fin)?;
 
         trace!(
-            "{} tx frm HEADERS stream={} len={} fin={}",
+            "{} tx frm HEADERS stream={stream_id} len={} fin={fin}",
             conn.trace_id(),
-            stream_id,
-            header_block.len(),
-            fin
+            header_block.len()
         );
 
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
@@ -1751,7 +1749,7 @@ impl Connection {
             None => {
                 return Err(Error::FrameUnexpected);
             },
-        };
+        }
 
         // Avoid sending 0-length DATA frames when the fin flag is false.
         if len == 0 && !fin {
@@ -1808,11 +1806,8 @@ impl Connection {
         }
 
         trace!(
-            "{} tx frm DATA stream={} len={} fin={}",
-            conn.trace_id(),
-            stream_id,
-            written,
-            fin
+            "{} tx frm DATA stream={stream_id} len={written} fin={fin}",
+            conn.trace_id()
         );
 
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
@@ -1991,7 +1986,7 @@ impl Connection {
                 },
 
                 Err(e) => return Err(e),
-            };
+            }
 
             if conn.stream_finished(stream_id) {
                 break;
@@ -2093,10 +2088,8 @@ impl Connection {
         conn.stream_send(control_stream_id, priority_field_value, false)?;
 
         trace!(
-            "{} tx frm PRIORITY_UPDATE request_stream={} priority_field_value={}",
+            "{} tx frm PRIORITY_UPDATE request_stream={stream_id} priority_field_value={field_value}",
             conn.trace_id(),
-            stream_id,
-            field_value,
         );
 
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
@@ -2209,7 +2202,7 @@ impl Connection {
                 Err(Error::Done) => (),
 
                 Err(e) => return Err(e),
-            };
+            }
         }
 
         if let Some(stream_id) = self.peer_qpack_streams.encoder_stream_id {
@@ -2219,7 +2212,7 @@ impl Connection {
                 Err(Error::Done) => (),
 
                 Err(e) => return Err(e),
-            };
+            }
         }
 
         if let Some(stream_id) = self.peer_qpack_streams.decoder_stream_id {
@@ -2229,7 +2222,7 @@ impl Connection {
                 Err(Error::Done) => (),
 
                 Err(e) => return Err(e),
-            };
+            }
         }
 
         // Process finished streams list.
@@ -2239,7 +2232,7 @@ impl Connection {
 
         // Process HTTP/3 data from readable streams.
         for s in conn.readable() {
-            trace!("{} stream id {} is readable", conn.trace_id(), s);
+            trace!("{} stream id {s} is readable", conn.trace_id());
 
             let ev = match self.process_readable_stream(conn, s, true) {
                 Ok(v) => Some(v),
@@ -2329,7 +2322,7 @@ impl Connection {
                 return Err(Error::StreamBlocked);
             }
 
-            trace!("{} tx frm {:?}", conn.trace_id(), frame);
+            trace!("{} tx frm {frame:?}", conn.trace_id());
 
             qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
                 let ev_data = EventData::Http3FrameCreated(FrameCreated {
@@ -2481,11 +2474,7 @@ impl Connection {
         let mut b = octets::OctetsMut::with_slice(&mut d);
         conn.stream_send(stream_id, b.put_varint(0)?, false)?;
 
-        trace!(
-            "{} tx frm GREASE stream={} len=0",
-            conn.trace_id(),
-            stream_id
-        );
+        trace!("{} tx frm GREASE stream={stream_id} len=0", conn.trace_id());
 
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
             let frame = Http3Frame::Reserved {
@@ -2512,9 +2501,8 @@ impl Connection {
         conn.stream_send(stream_id, grease_payload, false)?;
 
         trace!(
-            "{} tx frm GREASE stream={} len={}",
+            "{} tx frm GREASE stream={stream_id} len={}",
             conn.trace_id(),
-            stream_id,
             grease_payload.len()
         );
 
@@ -2546,7 +2534,7 @@ impl Connection {
             Ok(stream_id) => {
                 conn.stream_send(stream_id, b"GREASE is the word", true)?;
 
-                trace!("{} open GREASE stream {}", conn.trace_id(), stream_id);
+                trace!("{} open GREASE stream {stream_id}", conn.trace_id());
 
                 qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
                     let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
@@ -2568,7 +2556,7 @@ impl Connection {
             },
 
             Err(e) => return Err(e),
-        };
+        }
 
         Ok(())
     }
@@ -2624,7 +2612,7 @@ impl Connection {
             h3_datagram: self.local_settings.h3_datagram,
             grease,
             additional_settings: self.local_settings.additional_settings.clone(),
-            raw: Default::default(),
+            raw: None,
         };
 
         let mut d = [42; 128];
@@ -2637,12 +2625,7 @@ impl Connection {
         if let Some(id) = self.control_stream_id {
             conn.stream_send(id, &d[..off], false)?;
 
-            trace!(
-                "{} tx frm SETTINGS stream={} len={}",
-                conn.trace_id(),
-                id,
-                off
-            );
+            trace!("{} tx frm SETTINGS stream={id} len={off}", conn.trace_id());
 
             qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
                 let frame = frame.to_qlog();
@@ -2675,7 +2658,7 @@ impl Connection {
             Err(Error::Done) => (),
 
             Err(e) => return Err(e),
-        };
+        }
 
         close_conn_if_critical_stream_finished(conn, stream_id)?;
 
@@ -2745,9 +2728,8 @@ impl Connection {
                             }
 
                             trace!(
-                                "{} open peer's control stream {}",
-                                conn.trace_id(),
-                                stream_id
+                                "{} open peer's control stream {stream_id}",
+                                conn.trace_id()
                             );
 
                             close_conn_if_critical_stream_finished(
@@ -2867,10 +2849,8 @@ impl Connection {
                     // DATA framing is no longer visible after this point.
                     if Some(frame::DATA_FRAME_TYPE_ID) == stream.frame_type() {
                         trace!(
-                            "{} rx frm DATA stream={} wire_payload_len={}",
-                            conn.trace_id(),
-                            stream_id,
-                            payload_len
+                            "{} rx frm DATA stream={stream_id} wire_payload_len={payload_len}",
+                            conn.trace_id()
                         );
 
                         qlog_with_type!(QLOG_FRAME_PARSED, conn.qlog, q, {
@@ -2933,7 +2913,7 @@ impl Connection {
                         },
 
                         Err(e) => return Err(e),
-                    };
+                    }
                 },
 
                 stream::State::Data => {
@@ -2964,7 +2944,7 @@ impl Connection {
                                 self.peer_qpack_streams.decoder_stream_bytes +=
                                     recv as u64,
                             _ => unreachable!(),
-                        };
+                        }
 
                         if fin {
                             close_conn_critical_stream(conn)?;
@@ -3001,10 +2981,8 @@ impl Connection {
     }
 
     fn process_finished_stream(&mut self, stream_id: u64) {
-        let stream = match self.streams.get_mut(&stream_id) {
-            Some(v) => v,
-
-            None => return,
+        let Some(stream) = self.streams.get_mut(&stream_id) else {
+            return;
         };
 
         if stream.state() == stream::State::Finished {
@@ -3025,7 +3003,7 @@ impl Connection {
             Some(stream::Type::Control) |
             Some(stream::Type::QpackEncoder) |
             Some(stream::Type::QpackDecoder) => (),
-        };
+        }
     }
 
     fn finish_local_stream<F: BufFactory>(
@@ -3089,11 +3067,8 @@ impl Connection {
         frame: frame::Frame, payload_len: u64,
     ) -> Result<(u64, Event)> {
         trace!(
-            "{} rx frm {:?} stream={} payload_len={}",
-            conn.trace_id(),
-            frame,
-            stream_id,
-            payload_len
+            "{} rx frm {frame:?} stream={stream_id} payload_len={payload_len}",
+            conn.trace_id()
         );
 
         qlog_with_type!(QLOG_FRAME_PARSED, conn.qlog, q, {
@@ -3464,14 +3439,14 @@ pub mod testing {
     }
 
     impl Session {
-        pub fn new() -> Result<Session> {
-            Session::<DefaultBufFactory>::new_with_buf()
+        pub fn new() -> Result<Self> {
+            Self::new_with_buf()
         }
 
         pub fn with_configs(
             config: &mut crate::Config, h3_config: &Config,
-        ) -> Result<Session> {
-            Session::<DefaultBufFactory>::with_configs_and_buf(config, h3_config)
+        ) -> Result<Self> {
+            Self::with_configs_and_buf(config, h3_config)
         }
 
         pub fn default_configs() -> Result<(crate::Config, Config)> {
@@ -3527,18 +3502,18 @@ pub mod testing {
     }
 
     impl<F: BufFactory> Session<F> {
-        pub fn new_with_buf() -> Result<Session<F>> {
+        pub fn new_with_buf() -> Result<Self> {
             let (mut config, h3_config) = Session::default_configs()?;
-            Session::with_configs_and_buf(&mut config, &h3_config)
+            Self::with_configs_and_buf(&mut config, &h3_config)
         }
 
         pub fn with_configs_and_buf(
             config: &mut crate::Config, h3_config: &Config,
-        ) -> Result<Session<F>> {
+        ) -> Result<Self> {
             let pipe = test_utils::Pipe::with_config_and_buf(config)?;
             let client_dgram = pipe.client.dgram_enabled();
             let server_dgram = pipe.server.dgram_enabled();
-            Ok(Session {
+            Ok(Self {
                 pipe,
                 client: Connection::new(h3_config, false, client_dgram),
                 server: Connection::new(h3_config, true, server_dgram),

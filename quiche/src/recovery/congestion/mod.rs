@@ -129,7 +129,7 @@ impl Congestion {
         let mut cc = Self {
             congestion_window: initial_congestion_window,
 
-            ssthresh: Default::default(),
+            ssthresh: SsThresh::default(),
 
             bytes_acked_sl: 0,
 

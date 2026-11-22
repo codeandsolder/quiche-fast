@@ -179,7 +179,7 @@ impl Rate {
             if v { self.last_sent_packet.max(1) } else { 0 };
     }
 
-    pub const fn app_limited(&mut self) -> bool {
+    pub const fn app_limited(&self) -> bool {
         self.end_of_app_limited != 0
     }
 

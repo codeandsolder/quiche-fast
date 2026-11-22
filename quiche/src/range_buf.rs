@@ -92,7 +92,7 @@ where
             pos: 0,
             off,
             fin,
-            _bf: Default::default(),
+            _bf: PhantomData,
         }
     }
 
@@ -146,7 +146,7 @@ where
             pos: cmp::max(self.pos, middle),
             len: self.len - at,
             off: offset,
-            _bf: Default::default(),
+            _bf: PhantomData,
             fin: self.fin,
         };
 

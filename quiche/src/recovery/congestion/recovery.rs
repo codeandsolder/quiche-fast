@@ -437,7 +437,7 @@ impl LegacyRecovery {
         Self {
             epochs: Default::default(),
 
-            loss_timer: Default::default(),
+            loss_timer: LossDetectionTimer::default(),
 
             pto_count: 0,
 
@@ -452,7 +452,7 @@ impl LegacyRecovery {
 
             time_thresh: INITIAL_TIME_THRESHOLD,
 
-            bytes_in_flight: Default::default(),
+            bytes_in_flight: BytesInFlight::default(),
 
             bytes_lost: 0,
 

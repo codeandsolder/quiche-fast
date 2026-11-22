@@ -513,7 +513,7 @@ impl BBRv2CongestionEvent {
             bytes_acked: 0,
             bytes_lost: 0,
             end_of_round_trip: false,
-            last_packet_send_state: Default::default(),
+            last_packet_send_state: SendTimeState::default(),
             sample_max_bandwidth: None,
             sample_min_rtt: None,
         }
