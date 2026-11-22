@@ -244,17 +244,15 @@ impl InlineRangeSet {
                     // next range.
                     *e = end;
                     break;
-                } else {
-                    return;
                 }
-            } else {
-                if self.inner.len() == self.capacity {
-                    self.inner.remove(0);
-                }
-
-                self.inner.push((start, end));
                 return;
             }
+            if self.inner.len() == self.capacity {
+                self.inner.remove(0);
+            }
+
+            self.inner.push((start, end));
+            return;
         }
 
         // Merge any newly overlapping ranges

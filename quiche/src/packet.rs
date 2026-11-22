@@ -329,7 +329,7 @@ pub struct Header<'a> {
     pub(crate) key_phase: bool,
 }
 
-impl<'a> Header<'a> {
+impl Header<'_> {
     /// Parses a QUIC packet header from the given buffer.
     ///
     /// The `dcid_len` parameter is the length of the destination connection ID,
@@ -444,7 +444,7 @@ impl<'a> Header<'a> {
             },
 
             _ => (),
-        };
+        }
 
         Ok(Header {
             ty,
@@ -564,9 +564,7 @@ impl<'a> Header<'a> {
 ///
 /// A short header, Retry, or Version Negotiation packet occupies the rest of
 /// the datagram. Malformed lengths must also consume the remaining bytes.
-pub(crate) fn long_header_packet_len(
-    buf: &mut [u8], dcid_len: usize,
-) -> Option<usize> {
+pub fn long_header_packet_len(buf: &mut [u8], dcid_len: usize) -> Option<usize> {
     let mut b = octets::OctetsMut::with_slice(buf);
     let hdr = Header::from_bytes(&mut b, dcid_len).ok()?;
 

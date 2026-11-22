@@ -78,10 +78,10 @@ impl SentStatus {
     }
 
     const fn lose(&mut self) -> Self {
-        if !matches!(self, Self::Acked) {
-            std::mem::replace(self, Self::Lost)
-        } else {
+        if matches!(self, Self::Acked) {
             Self::Acked
+        } else {
+            std::mem::replace(self, Self::Lost)
         }
     }
 }
@@ -196,8 +196,8 @@ impl RecoveryEpoch {
             let start = if self
                 .sent_packets
                 .front()
-                .filter(|e| e.pkt_num >= peer_sent_range.start)
-                .is_some()
+                .as_ref()
+                .is_some_and(|e| e.pkt_num >= peer_sent_range.start)
             {
                 // Usually it will be the first packet.
                 0
@@ -368,7 +368,7 @@ impl RecoveryEpoch {
     }
 
     fn least_unacked(&self) -> u64 {
-        for pkt in self.sent_packets.iter() {
+        for pkt in &self.sent_packets {
             if let SentPacket {
                 pkt_num,
                 status: SentStatus::Sent { .. },
@@ -446,29 +446,26 @@ impl LossThreshold {
     }
 
     fn on_spurious_loss(&mut self, new_pkt_thresh: u64) {
-        match &mut self.time_thresh_overhead {
-            Some(time_thresh_overhead) => {
-                if self.pkt_thresh.is_some() {
-                    // Disable packet threshold on first spurious loss.
-                    self.pkt_thresh = None;
-                } else {
-                    // Double time threshold but cap it at `1.0`, which ends up
-                    // being 2x the RTT.
-                    *time_thresh_overhead *= TIME_THRESHOLD_OVERHEAD_MULTIPLIER;
-                    *time_thresh_overhead = time_thresh_overhead.min(1.0);
+        if let Some(time_thresh_overhead) = &mut self.time_thresh_overhead {
+            if self.pkt_thresh.is_some() {
+                // Disable packet threshold on first spurious loss.
+                self.pkt_thresh = None;
+            } else {
+                // Double time threshold but cap it at `1.0`, which ends up
+                // being 2x the RTT.
+                *time_thresh_overhead *= TIME_THRESHOLD_OVERHEAD_MULTIPLIER;
+                *time_thresh_overhead = time_thresh_overhead.min(1.0);
 
-                    self.time_thresh = 1.0 + *time_thresh_overhead;
-                }
-            },
-            None => {
-                let new_packet_threshold = self
-                    .pkt_thresh
-                    .expect("packet threshold should always be Some when `enable_relaxed_loss_threshold` is false")
-                    .max(new_pkt_thresh.min(MAX_PACKET_THRESHOLD));
-                self.pkt_thresh = Some(new_packet_threshold);
+                self.time_thresh = 1.0 + *time_thresh_overhead;
+            }
+        } else {
+            let new_packet_threshold = self
+                .pkt_thresh
+                .expect("packet threshold should always be Some when `enable_relaxed_loss_threshold` is false")
+                .max(new_pkt_thresh.min(MAX_PACKET_THRESHOLD));
+            self.pkt_thresh = Some(new_packet_threshold);
 
-                self.time_thresh = PACKET_REORDER_TIME_THRESHOLD;
-            },
+            self.time_thresh = PACKET_REORDER_TIME_THRESHOLD;
         }
     }
 }
@@ -908,12 +905,12 @@ impl RecoveryOps for GRecovery {
 
         epoch.loss_probes = probe_count;
 
-        let sent_packets_iter_limit = if !epoch.lost_frames_pto.is_empty() {
+        let sent_packets_iter_limit = if epoch.lost_frames_pto.is_empty() {
+            usize::MAX
+        } else {
             // Skip the search for frames to add to PTO probes if frames
             // added in a prior PTO haven't been processed yet.
             0
-        } else {
-            usize::MAX
         };
 
         // Skip packets that have already been acked or lost, and packets
@@ -1041,12 +1038,12 @@ impl RecoveryOps for GRecovery {
     fn update_max_datagram_size(&mut self, new_max_datagram_size: usize) {
         self.pmtud_update_max_datagram_size(
             self.max_datagram_size.min(new_max_datagram_size),
-        )
+        );
     }
 
     // FIXME only used by gcongestion
     fn on_app_limited(&mut self) {
-        self.pacer.on_app_limited(self.bytes_in_flight.get())
+        self.pacer.on_app_limited(self.bytes_in_flight.get());
     }
 
     #[cfg(test)]

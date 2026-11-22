@@ -30,7 +30,7 @@ use std::time::Instant;
 use crate::minmax::Minmax;
 use crate::recovery::GRANULARITY;
 
-pub(crate) const RTT_WINDOW: Duration = Duration::from_secs(300);
+pub const RTT_WINDOW: Duration = Duration::from_secs(300);
 
 pub struct RttStats {
     pub(super) latest_rtt: Duration,
@@ -158,7 +158,7 @@ impl RttStats {
 
 /// Computes floor(duration * NUM / DEN) without overflowing an intermediate
 /// Duration. In the ordinary RTT range the checked multiplication is enough;
-/// the quotient/remainder decomposition also handles Duration::MAX exactly.
+/// the quotient/remainder decomposition also handles `Duration::MAX` exactly.
 fn weighted_part<const NUM: u32, const DEN: u32>(duration: Duration) -> Duration {
     const { assert!(DEN > 0 && NUM <= DEN) };
     if let Some(scaled) = duration.checked_mul(NUM) {

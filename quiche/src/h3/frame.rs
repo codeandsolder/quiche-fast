@@ -47,7 +47,7 @@ pub const SETTINGS_H3_DATAGRAM_00: u64 = 0x276;
 pub const SETTINGS_H3_DATAGRAM: u64 = 0x33;
 
 // Permit between 16 maximally-encoded and 128 minimally-encoded SETTINGS.
-pub(crate) const MAX_SETTINGS_PAYLOAD_SIZE: usize = 256;
+pub const MAX_SETTINGS_PAYLOAD_SIZE: usize = 256;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum Frame {
@@ -532,8 +532,7 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "PUSH_PROMISE push_id={} len={}",
-                    push_id,
+                    "PUSH_PROMISE push_id={push_id} len={}",
                     header_block.len()
                 )?;
             },
@@ -552,8 +551,7 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "PRIORITY_UPDATE request_stream_id={}, priority_field_len={}",
-                    prioritized_element_id,
+                    "PRIORITY_UPDATE request_stream_id={prioritized_element_id}, priority_field_len={}",
                     priority_field_value.len()
                 )?;
             },
@@ -564,14 +562,13 @@ impl std::fmt::Debug for Frame {
             } => {
                 write!(
                     f,
-                    "PRIORITY_UPDATE push_id={}, priority_field_len={}",
-                    prioritized_element_id,
+                    "PRIORITY_UPDATE push_id={prioritized_element_id}, priority_field_len={}",
                     priority_field_value.len()
                 )?;
             },
 
             Self::Unknown { raw_type, .. } => {
-                write!(f, "UNKNOWN raw_type={raw_type}",)?;
+                write!(f, "UNKNOWN raw_type={raw_type}")?;
             },
         }
 

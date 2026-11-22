@@ -476,9 +476,11 @@ impl Stream {
 
             // These frames carry a mandatory single varint, so their payload
             // size has to be at least 1 byte and at most 8 bytes.
-            Some(frame::CANCEL_PUSH_FRAME_TYPE_ID) |
-            Some(frame::GOAWAY_FRAME_TYPE_ID) |
-            Some(frame::MAX_PUSH_FRAME_TYPE_ID) => {
+            Some(
+                frame::CANCEL_PUSH_FRAME_TYPE_ID |
+                frame::GOAWAY_FRAME_TYPE_ID |
+                frame::MAX_PUSH_FRAME_TYPE_ID,
+            ) => {
                 if !(1..=8).contains(&len) {
                     return Err(Error::FrameError);
                 }
@@ -510,8 +512,10 @@ impl Stream {
                 State::FramePayload
             },
 
-            Some(frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID) |
-            Some(frame::PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID) => {
+            Some(
+                frame::PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID |
+                frame::PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
+            ) => {
                 if len == 0 {
                     return Err(Error::FrameError);
                 }
@@ -540,7 +544,7 @@ impl Stream {
 
     /// Ensure bounded incremental growth and return the number of bytes that
     /// may be appended without allocating additional capacity. The transport
-    /// writes through BufMut, which advances the initialized length itself.
+    /// writes through `BufMut`, which advances the initialized length itself.
     fn state_buf_read_limit(&mut self) -> Result<usize> {
         if !self.state.buffers_input() {
             return Err(Error::InternalError);
@@ -584,9 +588,8 @@ impl Stream {
                     }
 
                     trace!(
-                        "{} read {} bytes on stream {}",
+                        "{} read {read} bytes on stream {}",
                         conn.trace_id(),
-                        read,
                         self.id,
                     );
 
@@ -616,7 +619,7 @@ impl Stream {
 
                     return Err(e.into());
                 },
-            };
+            }
         }
 
         if !self.state_buffer_complete() {
@@ -672,9 +675,8 @@ impl Stream {
         };
 
         trace!(
-            "{} discarded {} bytes on stream {}",
+            "{} discarded {read} bytes on stream {}",
             conn.trace_id(),
-            read,
             self.id,
         );
 
@@ -691,7 +693,7 @@ impl Stream {
 
     /// Initialize the local part of the stream.
     pub const fn initialize_local(&mut self) {
-        self.local_initialized = true
+        self.local_initialized = true;
     }
 
     /// Whether the stream has been locally initialized.
@@ -701,7 +703,7 @@ impl Stream {
 
     /// Finish the local part of the stream.
     pub const fn finish_local(&mut self) {
-        self.local_finished = true
+        self.local_finished = true;
     }
 
     /// Whether the local send-side of the stream has finished.
@@ -930,9 +932,7 @@ impl Stream {
     const fn critical_stream_closed(&self, fin: bool) -> bool {
         fin && matches!(
             self.ty,
-            Some(Type::Control) |
-                Some(Type::QpackEncoder) |
-                Some(Type::QpackDecoder)
+            Some(Type::Control | Type::QpackEncoder | Type::QpackDecoder)
         )
     }
 

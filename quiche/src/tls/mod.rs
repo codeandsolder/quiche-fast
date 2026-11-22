@@ -193,7 +193,7 @@ impl Context {
     ) -> Result<Self> {
         use foreign_types_shared::ForeignType;
 
-        let ctx_raw = NonNull::new(ssl_ctx_builder.build().into_ptr() as _)
+        let ctx_raw = NonNull::new(ssl_ctx_builder.build().into_ptr().cast())
             .ok_or(Error::TlsFail)?;
 
         let mut ctx = Self(ctx_raw);
@@ -536,7 +536,10 @@ impl Handshake {
         // SAFETY: The live SSL is exclusively borrowed and the static method
         // table outlives it.
         map_result(unsafe {
-            SSL_set_quic_method(self.as_mut_ptr(), &QUICHE_STREAM_METHOD)
+            SSL_set_quic_method(
+                self.as_mut_ptr(),
+                &raw const QUICHE_STREAM_METHOD,
+            )
         })
     }
 
@@ -608,7 +611,11 @@ impl Handshake {
 
         // SAFETY: The SSL is live and the two output slots are writable.
         unsafe {
-            SSL_get_peer_quic_transport_params(self.as_ptr(), &mut ptr, &mut len);
+            SSL_get_peer_quic_transport_params(
+                self.as_ptr(),
+                &raw mut ptr,
+                &raw mut len,
+            );
         }
 
         if ptr.is_null() || len == 0 || len > isize::MAX as usize {
@@ -625,7 +632,7 @@ impl Handshake {
 
         // SAFETY: The SSL is live and the two output slots are writable.
         unsafe {
-            SSL_get0_alpn_selected(self.as_ptr(), &mut ptr, &mut len);
+            SSL_get0_alpn_selected(self.as_ptr(), &raw mut ptr, &raw mut len);
         }
 
         let len = len as usize;
@@ -877,11 +884,11 @@ pub struct ExData<'a> {
     pub is_server: bool,
 }
 
-impl<'a> ExData<'a> {
+impl ExData<'_> {
     /// # Safety
     /// A non-null SSL pointer must be live. The returned mutable borrow is
     /// valid only for the current synchronous TLS callback, and no other
-    /// callback or Rust code may access the installed ExData concurrently.
+    /// callback or Rust code may access the installed `ExData` concurrently.
     unsafe fn from_ssl_ptr<'callback>(
         ptr: *const SSL,
     ) -> Option<&'callback mut Self> {
@@ -910,7 +917,7 @@ impl<'a> ExData<'a> {
 }
 
 /// # Safety
-/// A non-null cipher must point to a live BoringSSL cipher descriptor.
+/// A non-null cipher must point to a live `BoringSSL` cipher descriptor.
 unsafe fn get_cipher_from_ptr(
     cipher: *const SSL_CIPHER,
 ) -> Result<crypto::Algorithm> {
@@ -947,8 +954,8 @@ unsafe extern "C" fn set_write_secret(
 }
 
 /// # Safety
-/// Called synchronously by BoringSSL with a live SSL, valid cipher descriptor
-/// and a secret buffer readable for secret_len bytes.
+/// Called synchronously by `BoringSSL` with a live SSL, valid cipher descriptor
+/// and a secret buffer readable for `secret_len` bytes.
 unsafe fn install_secret<const READ: bool>(
     ssl: *mut SSL, level: crypto::Level, cipher: *const SSL_CIPHER,
     secret: *const u8, secret_len: usize,
@@ -959,10 +966,9 @@ unsafe fn install_secret<const READ: bool>(
     };
 
     trace!(
-        "{} set {} secret lvl={:?}",
+        "{} set {} secret lvl={level:?}",
         ex_data.trace_id,
-        if READ { "read" } else { "write" },
-        level
+        if READ { "read" } else { "write" }
     );
     // SAFETY: the cipher descriptor is supplied by BoringSSL.
     let Ok(aead) = (unsafe { get_cipher_from_ptr(cipher) }) else {
@@ -1016,12 +1022,7 @@ extern "C" fn add_handshake_data(
         None => return 0,
     };
 
-    trace!(
-        "{} write message lvl={:?} len={}",
-        ex_data.trace_id,
-        level,
-        len
-    );
+    trace!("{} write message lvl={level:?} len={len}", ex_data.trace_id);
 
     if len == 0 {
         return 1;
@@ -1068,10 +1069,8 @@ extern "C" fn send_alert(
     };
 
     trace!(
-        "{} send alert lvl={:?} alert={:x}",
-        ex_data.trace_id,
-        level,
-        alert
+        "{} send alert lvl={level:?} alert={alert:x}",
+        ex_data.trace_id
     );
 
     let error: u64 = TLS_ALERT_ERROR + u64::from(alert);

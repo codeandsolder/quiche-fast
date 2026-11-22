@@ -291,21 +291,19 @@ fn on_packet_acked(
                 r.cubic_state.w_est = r.congestion_window as f64;
                 r.cubic_state.alpha_aimd = ALPHA_AIMD;
             }
+        } else if let Some(t) = r.congestion_recovery_start_time {
+            ca_start_time = t;
         } else {
-            if let Some(t) = r.congestion_recovery_start_time {
-                ca_start_time = t;
-            } else {
-                // When we come here without congestion_event() triggered,
-                // initialize congestion_recovery_start_time, w_max and k.
-                ca_start_time = now;
-                r.congestion_recovery_start_time = Some(now);
+            // When we come here without congestion_event() triggered,
+            // initialize congestion_recovery_start_time, w_max and k.
+            ca_start_time = now;
+            r.congestion_recovery_start_time = Some(now);
 
-                r.cubic_state.w_max = r.congestion_window as f64;
-                r.cubic_state.k = 0.0;
+            r.cubic_state.w_max = r.congestion_window as f64;
+            r.cubic_state.k = 0.0;
 
-                r.cubic_state.w_est = r.congestion_window as f64;
-                r.cubic_state.alpha_aimd = ALPHA_AIMD;
-            }
+            r.cubic_state.w_est = r.congestion_window as f64;
+            r.cubic_state.alpha_aimd = ALPHA_AIMD;
         }
 
         let t = now.saturating_duration_since(ca_start_time);

@@ -1342,7 +1342,7 @@ impl Config {
 }
 
 /// Tracks the health of the `tx_buffered` value.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TxBufferTrackingState {
     /// The send buffer is in a good state
     #[default]
@@ -2395,7 +2395,7 @@ impl<F: BufFactory> Connection<F> {
 
             let reset_token = conn.peer_transport_params.stateless_reset_token;
             conn.set_initial_dcid(
-                dcid.to_vec().into(),
+                dcid.clone().into(),
                 reset_token,
                 active_path_id,
             )?;
@@ -2981,7 +2981,7 @@ impl<F: BufFactory> Connection<F> {
         // a borrowed view of `ssl`. The caller retains ownership of the
         // underlying BoringSSL object.
         let mut handshake = ManuallyDrop::new(unsafe {
-            tls::Handshake::from_ptr(ssl.as_ptr() as _)?
+            tls::Handshake::from_ptr(ssl.as_ptr().cast())?
         });
 
         handshake.set_quic_transport_params(&params, is_server)
@@ -3122,9 +3122,8 @@ impl<F: BufFactory> Connection<F> {
             // If a client receives packets from an unknown server address,
             // the client MUST discard these packets.
             trace!(
-                "{} client received packet from unknown address {:?}, dropping",
+                "{} client received packet from unknown address {info:?}, dropping",
                 self.trace_id,
-                info,
             );
 
             return Ok(len);
@@ -3314,7 +3313,7 @@ impl<F: BufFactory> Connection<F> {
                 return Err(Error::Done);
             }
 
-            trace!("{} rx pkt {:?}", self.trace_id, hdr);
+            trace!("{} rx pkt {hdr:?}", self.trace_id);
 
             let versions = hdr.versions.ok_or(Error::Done)?;
 
@@ -3402,7 +3401,7 @@ impl<F: BufFactory> Connection<F> {
                 return Err(Error::Done);
             }
 
-            trace!("{} rx pkt {:?}", self.trace_id, hdr);
+            trace!("{} rx pkt {hdr:?}", self.trace_id);
 
             self.token = hdr.token;
             self.did_retry = true;
@@ -3516,35 +3515,33 @@ impl<F: BufFactory> Connection<F> {
         };
 
         // Finally, discard packet if no usable key is available.
-        let mut aead = match aead {
-            Some(v) => v,
+        let mut aead = if let Some(v) = aead {
+            v
+        } else {
+            if hdr.ty == Type::ZeroRTT &&
+                self.undecryptable_pkts.len() < MAX_UNDECRYPTABLE_PACKETS &&
+                !self.is_established()
+            {
+                // Buffer 0-RTT packets when the required read key is not
+                // available yet, and process them later.
+                //
+                // TODO: in the future we might want to buffer other types
+                // of undecryptable packets as well.
+                let pkt_len = b.off() + payload_len;
+                let pkt = (b.buf()[..pkt_len]).to_vec();
 
-            None => {
-                if hdr.ty == Type::ZeroRTT &&
-                    self.undecryptable_pkts.len() < MAX_UNDECRYPTABLE_PACKETS &&
-                    !self.is_established()
-                {
-                    // Buffer 0-RTT packets when the required read key is not
-                    // available yet, and process them later.
-                    //
-                    // TODO: in the future we might want to buffer other types
-                    // of undecryptable packets as well.
-                    let pkt_len = b.off() + payload_len;
-                    let pkt = (b.buf()[..pkt_len]).to_vec();
+                self.undecryptable_pkts.push_back((pkt, *info));
+                return Ok(pkt_len);
+            }
 
-                    self.undecryptable_pkts.push_back((pkt, *info));
-                    return Ok(pkt_len);
-                }
+            let e = drop_pkt_on_err(
+                Error::CryptoFail,
+                self.recv_count,
+                self.is_server,
+                &self.trace_id,
+            );
 
-                let e = drop_pkt_on_err(
-                    Error::CryptoFail,
-                    self.recv_count,
-                    self.is_server,
-                    &self.trace_id,
-                );
-
-                return Err(e);
-            },
+            return Err(e);
         };
 
         let aead_tag_len = aead.alg().tag_len();
@@ -3567,11 +3564,8 @@ impl<F: BufFactory> Connection<F> {
         let pn_len = hdr.pkt_num_len;
 
         trace!(
-            "{} rx pkt {:?} len={} pn={} {}",
+            "{} rx pkt {hdr:?} len={payload_len} pn={pn} {}",
             self.trace_id,
-            hdr,
-            payload_len,
-            pn,
             AddrTupleFmt(info.from, info.to)
         );
 
@@ -3639,7 +3633,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         if self.pkt_num_spaces[epoch].recv_pkt_num.contains(pn) {
-            trace!("{} ignored duplicate packet {}", self.trace_id, pn);
+            trace!("{} ignored duplicate packet {pn}", self.trace_id);
             return Err(Error::Done);
         }
 
@@ -3895,9 +3889,8 @@ impl<F: BufFactory> Connection<F> {
                         mtu_probe: Some(mtu_probe),
                     } => {
                         trace!(
-                            "{} pmtud probe acked; probe size {:?}",
-                            self.trace_id,
-                            mtu_probe
+                            "{} pmtud probe acked; probe size {mtu_probe:?}",
+                            self.trace_id
                         );
 
                         let local = p.local_addr();
@@ -4368,7 +4361,7 @@ impl<F: BufFactory> Connection<F> {
             ) {
                 Ok(v) => v,
 
-                Err(Error::BufferTooShort) | Err(Error::Done) => break,
+                Err(Error::BufferTooShort | Error::Done) => break,
 
                 Err(e) => return Err(e),
             };
@@ -4383,7 +4376,7 @@ impl<F: BufFactory> Connection<F> {
                 Type::Short => break,
 
                 _ => (),
-            };
+            }
 
             // When sending multiple PTO probes, don't coalesce them together,
             // so they are sent on separate UDP datagrams.
@@ -4503,10 +4496,10 @@ impl<F: BufFactory> Connection<F> {
 
         let mut b = octets::OctetsMut::with_slice(out);
 
-        let max_dgram_len = if !self.dgram_send_queue.is_empty() {
-            self.dgram_max_writable_len()
-        } else {
+        let max_dgram_len = if self.dgram_send_queue.is_empty() {
             None
+        } else {
+            self.dgram_max_writable_len()
         };
 
         let epoch = pkt_type.to_epoch()?;
@@ -4878,19 +4871,17 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Make sure we have enough space left for the packet overhead.
-        match left.checked_sub(overhead) {
-            Some(v) => left = v,
-
-            None => {
-                // We can't send more because there isn't enough space available
-                // in the output buffer.
-                //
-                // This usually happens when we try to send a new packet but
-                // failed because cwnd is almost full. In such case app_limited
-                // is set to false here to make cwnd grow when ACK is received.
-                path.recovery.update_app_limited(false);
-                return Err(Error::Done);
-            },
+        if let Some(v) = left.checked_sub(overhead) {
+            left = v;
+        } else {
+            // We can't send more because there isn't enough space available
+            // in the output buffer.
+            //
+            // This usually happens when we try to send a new packet but
+            // failed because cwnd is almost full. In such case app_limited
+            // is set to false here to make cwnd grow when ACK is received.
+            path.recovery.update_app_limited(false);
+            return Err(Error::Done);
         }
 
         // Make sure there is enough space for the minimum payload length.
@@ -5020,9 +5011,8 @@ impl<F: BufFactory> Connection<F> {
                 is_closing || !frames.is_empty(),
             ) {
                 trace!(
-                    "{} sending PMTUD probe of {} bytes",
+                    "{} sending PMTUD probe of {probe_size} bytes",
                     self.trace_id,
-                    probe_size,
                 );
 
                 left = probe_size
@@ -5212,15 +5202,13 @@ impl<F: BufFactory> Connection<F> {
 
             // Create MAX_STREAM_DATA frames as needed.
             for stream_id in self.streams.almost_full() {
-                let stream = match self.streams.get_mut(stream_id) {
-                    Some(v) => v,
-
-                    None => {
-                        // The stream doesn't exist anymore, so remove it from
-                        // the almost full set.
-                        self.streams.remove_almost_full(stream_id);
-                        continue;
-                    },
+                let stream = if let Some(v) = self.streams.get_mut(stream_id) {
+                    v
+                } else {
+                    // The stream doesn't exist anymore, so remove it from
+                    // the almost full set.
+                    self.streams.remove_almost_full(stream_id);
+                    continue;
                 };
 
                 // Autotune the stream window size, but only if this is not a
@@ -5566,7 +5554,7 @@ impl<F: BufFactory> Connection<F> {
                             },
 
                             None => continue,
-                        };
+                        }
                     } else if len > max_dgram_payload {
                         // This dgram frame will never fit. Let's purge it.
                         self.dgram_send_queue.pop();
@@ -5811,11 +5799,9 @@ impl<F: BufFactory> Connection<F> {
         }
 
         trace!(
-            "{} tx pkt {} len={} pn={} {}",
+            "{} tx pkt {} len={payload_len} pn={pn} {}",
             self.trace_id,
             hdr_trace.unwrap_or_default(),
-            payload_len,
-            pn,
             AddrTupleFmt(path.local_addr(), path.peer_addr())
         );
 
@@ -5824,7 +5810,7 @@ impl<F: BufFactory> Connection<F> {
             Vec::with_capacity(frames.len());
 
         for frame in &mut frames {
-            trace!("{} tx frm {:?}", self.trace_id, frame);
+            trace!("{} tx frm {frame:?}", self.trace_id);
 
             qlog_with_type!(QLOG_PACKET_TX, self.qlog, _q, {
                 qlog_frames.push(frame.to_qlog());
@@ -6029,8 +6015,9 @@ impl<F: BufFactory> Connection<F> {
     pub fn max_release_into_future(&self) -> Duration {
         self.paths
             .get_active()
-            .map(|p| p.recovery.rtt().mul_f64(0.125))
-            .unwrap_or(Duration::from_millis(1))
+            .map_or(Duration::from_millis(1), |p| {
+                p.recovery.rtt().mul_f64(0.125)
+            })
             .max(Duration::from_millis(1))
             .min(Duration::from_millis(5))
     }
@@ -6077,8 +6064,7 @@ impl<F: BufFactory> Connection<F> {
         self.paths
             .path_id_from_addrs(&(local_addr, peer_addr))
             .and_then(|pid| self.paths.get(pid).ok())
-            .map(|path| path.recovery.send_quantum())
-            .unwrap_or(0)
+            .map_or(0, |path| path.recovery.send_quantum())
     }
 
     /// Reads contiguous data from a stream into the provided slice.
@@ -6496,7 +6482,7 @@ impl<F: BufFactory> Connection<F> {
         if let Err(Error::StreamStopped(e)) = stream.send.cap() {
             self.streams.mark_stop_reported(stream_id);
             return Err(Error::StreamStopped(e));
-        };
+        }
 
         let priority_key = Arc::clone(stream.priority_key());
 
@@ -6638,7 +6624,7 @@ impl<F: BufFactory> Connection<F> {
             Err(Error::Done) => return Ok(()),
 
             Err(e) => return Err(e),
-        };
+        }
 
         self.streams.set_priority(stream_id, urgency, incremental);
 
@@ -6813,7 +6799,7 @@ impl<F: BufFactory> Connection<F> {
 
             let cap = cmp::min(self.tx_cap, stream_cap);
             return Ok(cap);
-        };
+        }
 
         Err(Error::InvalidStreamState(stream_id))
     }
@@ -7026,7 +7012,7 @@ impl<F: BufFactory> Connection<F> {
     /// stream without trying it first.
     #[inline]
     #[must_use]
-    pub fn peer_streams_left_bidi(&self) -> u64 {
+    pub const fn peer_streams_left_bidi(&self) -> u64 {
         self.streams.peer_streams_left_bidi()
     }
 
@@ -7037,7 +7023,7 @@ impl<F: BufFactory> Connection<F> {
     /// stream without trying it first.
     #[inline]
     #[must_use]
-    pub fn peer_streams_left_uni(&self) -> u64 {
+    pub const fn peer_streams_left_uni(&self) -> u64 {
         self.streams.peer_streams_left_uni()
     }
 
@@ -7317,7 +7303,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the total size of all items in the DATAGRAM receive queue.
     #[inline]
     #[must_use]
-    pub fn dgram_recv_queue_byte_size(&self) -> usize {
+    pub const fn dgram_recv_queue_byte_size(&self) -> usize {
         self.dgram_recv_queue.byte_size()
     }
 
@@ -7331,7 +7317,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the total size of all items in the DATAGRAM send queue.
     #[inline]
     #[must_use]
-    pub fn dgram_send_queue_byte_size(&self) -> usize {
+    pub const fn dgram_send_queue_byte_size(&self) -> usize {
         self.dgram_send_queue.byte_size()
     }
 
@@ -8231,7 +8217,7 @@ impl<F: BufFactory> Connection<F> {
     #[must_use]
     pub fn pmtu(&self) -> Option<usize> {
         if let Ok(path) = self.paths.get_active() {
-            path.pmtud.as_ref().and_then(|pmtud| pmtud.get_pmtu())
+            path.pmtud.as_ref().and_then(pmtud::Pmtud::get_pmtu)
         } else {
             None
         }
@@ -8312,7 +8298,7 @@ impl<F: BufFactory> Connection<F> {
     /// requests after the handshake completes.
     #[inline]
     #[must_use]
-    pub fn early_data_rejected(&self) -> bool {
+    pub const fn early_data_rejected(&self) -> bool {
         self.handshake.early_data_rejected()
     }
 
@@ -8636,7 +8622,7 @@ impl<F: BufFactory> Connection<F> {
 
         let handshake_needs_retry =
             match self.handshake.do_handshake(&mut ex_data) {
-                Ok(_) => false,
+                Ok(()) => false,
                 Err(Error::Done) => true,
                 Err(e) => return Err(e),
             };
@@ -8647,8 +8633,7 @@ impl<F: BufFactory> Connection<F> {
         if self
             .paths
             .get_active()
-            .map(|p| p.can_reinit_recovery())
-            .unwrap_or(false)
+            .is_ok_and(path::Path::can_reinit_recovery)
         {
             if ex_data.recovery_config != self.recovery_config {
                 if let Ok(path) = self.paths.get_active_mut() {
@@ -8800,7 +8785,7 @@ impl<F: BufFactory> Connection<F> {
                         return Ok(Type::Initial),
 
                     _ => (),
-                };
+                }
             }
 
             return Ok(Type::from_epoch(epoch));
@@ -8876,7 +8861,7 @@ impl<F: BufFactory> Connection<F> {
                 send_path
                     .pmtud
                     .as_ref()
-                    .is_some_and(|pmtud| pmtud.should_probe()) ||
+                    .is_some_and(pmtud::Pmtud::should_probe) ||
                 send_path.needs_ack_eliciting ||
                 send_path.probing_required())
         {
@@ -8962,7 +8947,7 @@ impl<F: BufFactory> Connection<F> {
         &mut self, frame: frame::Frame, hdr: &Header, recv_path_id: usize,
         epoch: packet::Epoch, now: Instant,
     ) -> Result<()> {
-        trace!("{} rx frm {:?}", self.trace_id, frame);
+        trace!("{} rx frm {frame:?}", self.trace_id);
 
         match frame {
             frame::Frame::Padding { .. } => (),
@@ -9430,16 +9415,16 @@ impl<F: BufFactory> Connection<F> {
                         self.ids.link_dcid_to_path_id(new_dcid_seq, pid)?;
 
                         trace!(
-                            "{} path ID {} changed DCID: old seq num {} new seq num {}",
-                            self.trace_id, pid, dcid_seq, new_dcid_seq,
+                            "{} path ID {pid} changed DCID: old seq num {dcid_seq} new seq num {new_dcid_seq}",
+                            self.trace_id,
                         );
                     } else {
                         // We cannot use this path anymore for now.
                         path.active_dcid_seq = None;
 
                         trace!(
-                            "{} path ID {} cannot be used; DCID seq num {} has been retired",
-                            self.trace_id, pid, dcid_seq,
+                            "{} path ID {pid} cannot be used; DCID seq num {dcid_seq} has been retired",
+                            self.trace_id,
                         );
                     }
                 }
@@ -9558,16 +9543,16 @@ impl<F: BufFactory> Connection<F> {
                 .on_pkt_num_space_discarded(epoch, handshake_status, now);
         }
 
-        trace!("{} dropped epoch {} state", self.trace_id, epoch);
+        trace!("{} dropped epoch {epoch} state", self.trace_id);
     }
 
     /// Returns the connection level flow control limit.
-    fn max_rx_data(&self) -> u64 {
+    const fn max_rx_data(&self) -> u64 {
         self.flow_control.max_data()
     }
 
     /// Returns true if the `HANDSHAKE_DONE` frame needs to be sent.
-    fn should_send_handshake_done(&self) -> bool {
+    const fn should_send_handshake_done(&self) -> bool {
         self.is_established() && !self.handshake_done_sent && self.is_server
     }
 
@@ -9717,21 +9702,16 @@ impl<F: BufFactory> Connection<F> {
 
             if prev_recv_pid != recv_pid {
                 trace!(
-                    "{} peer reused CID {:?} from path {} on path {}",
-                    self.trace_id,
-                    dcid,
-                    prev_recv_pid,
-                    recv_pid
+                    "{} peer reused CID {dcid:?} from path {prev_recv_pid} on path {recv_pid}",
+                    self.trace_id
                 );
 
                 // TODO: reset congestion control.
             }
 
             trace!(
-                "{} path ID {} now see SCID with seq num {}",
-                self.trace_id,
-                recv_pid,
-                in_scid_seq
+                "{} path ID {recv_pid} now see SCID with seq num {in_scid_seq}",
+                self.trace_id
             );
 
             recv_path.active_scid_seq = Some(in_scid_seq);
@@ -9788,12 +9768,8 @@ impl<F: BufFactory> Connection<F> {
         // by rotating source ports.
         if let Some((old_pid, old_local_addr, old_peer_addr)) = reused_cid_info {
             trace!(
-                "{} reused CID seq {} of ({},{}) (path {}) on ({},{})",
+                "{} reused CID seq {in_scid_seq} of ({old_local_addr},{old_peer_addr}) (path {old_pid}) on ({},{})",
                 self.trace_id,
-                in_scid_seq,
-                old_local_addr,
-                old_peer_addr,
-                old_pid,
                 info.to,
                 info.from
             );
@@ -9858,7 +9834,7 @@ impl<F: BufFactory> Connection<F> {
             }
 
             return Ok(pid);
-        };
+        }
 
         Err(Error::InvalidState)
     }
@@ -9968,7 +9944,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     // Marks the connection as closed and does any related tidyup.
-    fn mark_closed(&mut self) {
+    const fn mark_closed(&mut self) {
         #[cfg(feature = "qlog")]
         {
             let cc = match (self.is_established(), self.timed_out, &self.peer_error, &self.local_error) {

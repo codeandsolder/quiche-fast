@@ -303,7 +303,7 @@ impl<'a> PeerCertificates<'a> {
 /// Serialize a borrowed session into Rust-owned storage.
 ///
 /// # Safety
-/// session must point to a live SSL_SESSION for the duration of the call.
+/// session must point to a live `SSL_SESSION` for the duration of the call.
 pub(super) unsafe fn get_session_bytes(
     session: NonNull<SSL_SESSION>,
 ) -> Result<Vec<u8>> {
@@ -313,7 +313,9 @@ pub(super) unsafe fn get_session_bytes(
         let mut out: *mut u8 = ptr::null_mut();
         let mut out_len: usize = 0;
 
-        if SSL_SESSION_to_bytes(session.as_ptr(), &mut out, &mut out_len) == 0 {
+        if SSL_SESSION_to_bytes(session.as_ptr(), &raw mut out, &raw mut out_len) ==
+            0
+        {
             return Err(Error::TlsFail);
         }
         let encoded = if out_len == 0 {

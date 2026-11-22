@@ -31,7 +31,7 @@ use std::time::Instant;
 use crate::frame;
 use crate::packet;
 use crate::ranges::RangeSet;
-pub(crate) use crate::recovery::bandwidth::Bandwidth;
+pub use crate::recovery::bandwidth::Bandwidth;
 use crate::Config;
 use crate::Error;
 use crate::Result;
@@ -98,7 +98,7 @@ const LOSS_REDUCTION_FACTOR: f64 = 0.5;
 
 // How many non ACK eliciting packets we send before including a PING to solicit
 // an ACK.
-pub(super) const MAX_OUTSTANDING_NON_ACK_ELICITING: usize = 24;
+pub const MAX_OUTSTANDING_NON_ACK_ELICITING: usize = 24;
 
 /// A deadline always identifies a concrete packet number space.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -249,12 +249,12 @@ impl RecoveryConfig {
     reason = "Boxing the large variant would add unnecessary indirection"
 )]
 #[derive(Debug)]
-pub(crate) enum Recovery {
+pub enum Recovery {
     Legacy(LegacyRecovery),
     GCongestion(GRecovery),
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct OnAckReceivedOutcome {
     pub lost_packets: usize,
     pub lost_bytes: usize,
@@ -263,7 +263,7 @@ pub struct OnAckReceivedOutcome {
 }
 
 /// Validates the complete ACK before any recovery state is changed.
-pub(crate) fn validate_ack_ranges(
+pub fn validate_ack_ranges(
     ranges: &RangeSet, skip_pn: Option<u64>,
 ) -> Result<u64> {
     let largest = ranges.last().ok_or(Error::InvalidAckRange)?;
@@ -921,7 +921,7 @@ impl StartupExit {
 }
 
 /// The reason a CCA exited the startup phase.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupExitReason {
     /// Exit slow start or BBR startup due to excessive loss
     Loss,
