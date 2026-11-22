@@ -54,12 +54,12 @@ impl Type {
     #[cfg(feature = "qlog")]
     pub fn to_qlog(self) -> qlog::events::http3::StreamType {
         match self {
-            Type::Control => qlog::events::http3::StreamType::Control,
-            Type::Request => qlog::events::http3::StreamType::Request,
-            Type::Push => qlog::events::http3::StreamType::Push,
-            Type::QpackEncoder => qlog::events::http3::StreamType::QpackEncode,
-            Type::QpackDecoder => qlog::events::http3::StreamType::QpackDecode,
-            Type::Unknown => qlog::events::http3::StreamType::Unknown,
+            Self::Control => qlog::events::http3::StreamType::Control,
+            Self::Request => qlog::events::http3::StreamType::Request,
+            Self::Push => qlog::events::http3::StreamType::Push,
+            Self::QpackEncoder => qlog::events::http3::StreamType::QpackEncode,
+            Self::QpackDecoder => qlog::events::http3::StreamType::QpackDecode,
+            Self::Unknown => qlog::events::http3::StreamType::Unknown,
         }
     }
 }

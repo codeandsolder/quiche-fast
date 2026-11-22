@@ -543,14 +543,14 @@ impl GRecovery {
                 recovery_config.max_ack_delay,
             ),
             recovery_stats: RecoveryStats::default(),
-            loss_timer: Default::default(),
+            loss_timer: LossDetectionTimer::default(),
             pto_count: 0,
 
             lost_count: 0,
             lost_spurious_count: 0,
 
             loss_thresh: LossThreshold::new(recovery_config),
-            bytes_in_flight: Default::default(),
+            bytes_in_flight: BytesInFlight::default(),
             bytes_lost: 0,
 
             max_datagram_size: recovery_config.max_send_udp_payload_size,

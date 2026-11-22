@@ -257,10 +257,14 @@ impl Handshake {
     }
 
     pub fn is_in_early_data(&self) -> bool {
+        // SAFETY: Handshake owns a live SSL object; this getter only
+        // reads the early-data state of that object.
         unsafe { SSL_in_early_data(self.as_ptr()) == 1 }
     }
 
     pub fn early_data_reason(&self) -> u32 {
+        // SAFETY: Handshake owns a live SSL object for this call and
+        // SSL_get_early_data_reason returns the status by value.
         let reuse_reason_status =
             unsafe { SSL_get_early_data_reason(self.as_ptr()) };
         reuse_reason_status.0

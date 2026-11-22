@@ -166,18 +166,18 @@ impl Type {
     #[cfg(feature = "qlog")]
     pub(crate) fn to_qlog(self) -> qlog::events::quic::PacketType {
         match self {
-            Type::Initial => qlog::events::quic::PacketType::Initial,
+            Self::Initial => qlog::events::quic::PacketType::Initial,
 
-            Type::Retry => qlog::events::quic::PacketType::Retry,
+            Self::Retry => qlog::events::quic::PacketType::Retry,
 
-            Type::Handshake => qlog::events::quic::PacketType::Handshake,
+            Self::Handshake => qlog::events::quic::PacketType::Handshake,
 
-            Type::ZeroRTT => qlog::events::quic::PacketType::ZeroRtt,
+            Self::ZeroRTT => qlog::events::quic::PacketType::ZeroRtt,
 
-            Type::VersionNegotiation =>
+            Self::VersionNegotiation =>
                 qlog::events::quic::PacketType::VersionNegotiation,
 
-            Type::Short => qlog::events::quic::PacketType::OneRtt,
+            Self::Short => qlog::events::quic::PacketType::OneRtt,
         }
     }
 }
@@ -1198,7 +1198,7 @@ impl PktNumWindow {
         self.window |= mask;
     }
 
-    pub fn contains(&mut self, seq: u64) -> bool {
+    pub fn contains(&self, seq: u64) -> bool {
         // Packet is on the right end of the window.
         if seq > self.upper() {
             return false;

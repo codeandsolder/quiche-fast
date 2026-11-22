@@ -92,9 +92,8 @@ impl PacketKey {
     ) -> Result<usize> {
         let tag_len = self.alg.tag_len();
 
-        let mut out_len = match buf.len().checked_sub(tag_len) {
-            Some(n) => n,
-            None => return Err(Error::CryptoFail),
+        let Some(mut out_len) = buf.len().checked_sub(tag_len) else {
+            return Err(Error::CryptoFail);
         };
 
         let max_out_len = out_len;

@@ -221,9 +221,8 @@ impl PacketProtection<false> {
     ) -> Result<usize> {
         if cfg!(feature = "fuzzing") {
             let tag_len = self.alg.tag_len();
-            let out_len = match buf.len().checked_sub(tag_len) {
-                Some(n) => n,
-                None => return Err(Error::CryptoFail),
+            let Some(out_len) = buf.len().checked_sub(tag_len) else {
+                return Err(Error::CryptoFail);
             };
             if ad.len() > tag_len && buf[out_len..] == ad[..tag_len] {
                 return Err(Error::CryptoFail);

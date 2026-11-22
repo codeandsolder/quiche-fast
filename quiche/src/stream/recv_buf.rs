@@ -261,9 +261,8 @@ impl RecvBuf {
         }
 
         while self.ready() {
-            let mut entry = match self.data.first_entry() {
-                Some(entry) => entry,
-                None => break,
+            let Some(mut entry) = self.data.first_entry() else {
+                break;
             };
 
             let buf = entry.get_mut();
@@ -357,7 +356,7 @@ impl RecvBuf {
     }
 
     /// Return the new `max_data` limit.
-    pub fn max_data_next(&mut self) -> u64 {
+    pub fn max_data_next(&self) -> u64 {
         self.flow_control.max_data_next()
     }
 
@@ -424,9 +423,8 @@ impl RecvBuf {
 
     /// Returns true if the stream has data to be read.
     pub fn ready(&self) -> bool {
-        let (_, buf) = match self.data.first_key_value() {
-            Some(v) => v,
-            None => return false,
+        let Some((_, buf)) = self.data.first_key_value() else {
+            return false;
         };
 
         buf.off() == self.off

@@ -353,22 +353,22 @@ impl Frame {
         use qlog::events::RawInfo;
 
         match self {
-            Frame::Data { .. } => Http3Frame::Data { raw: None },
+            Self::Data { .. } => Http3Frame::Data { raw: None },
 
             // Qlog expects the `headers` to be represented as an array of
             // name:value pairs. At this stage, we only have the qpack block, so
             // populate the field with an empty vec.
-            Frame::Headers { .. } => Http3Frame::Headers {
+            Self::Headers { .. } => Http3Frame::Headers {
                 headers: vec![],
                 raw: None,
             },
 
-            Frame::CancelPush { push_id } => Http3Frame::CancelPush {
+            Self::CancelPush { push_id } => Http3Frame::CancelPush {
                 push_id: *push_id,
                 raw: None,
             },
 
-            Frame::Settings {
+            Self::Settings {
                 max_field_section_size,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
@@ -449,20 +449,20 @@ impl Frame {
             // Qlog expects the `headers` to be represented as an array of
             // name:value pairs. At this stage, we only have the qpack block, so
             // populate the field with an empty vec.
-            Frame::PushPromise { push_id, .. } => Http3Frame::PushPromise {
+            Self::PushPromise { push_id, .. } => Http3Frame::PushPromise {
                 push_id: *push_id,
                 headers: vec![],
                 raw: None,
             },
 
-            Frame::GoAway { id } => Http3Frame::Goaway { id: *id, raw: None },
+            Self::GoAway { id } => Http3Frame::Goaway { id: *id, raw: None },
 
-            Frame::MaxPushId { push_id } => Http3Frame::MaxPushId {
+            Self::MaxPushId { push_id } => Http3Frame::MaxPushId {
                 push_id: *push_id,
                 raw: None,
             },
 
-            Frame::PriorityUpdateRequest {
+            Self::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
             } => Http3Frame::PriorityUpdate {
@@ -475,7 +475,7 @@ impl Frame {
                 raw: None,
             },
 
-            Frame::PriorityUpdatePush {
+            Self::PriorityUpdatePush {
                 prioritized_element_id,
                 priority_field_value,
             } => Http3Frame::PriorityUpdate {
@@ -488,7 +488,7 @@ impl Frame {
                 raw: None,
             },
 
-            Frame::Unknown { raw_type, payload } => Http3Frame::Unknown {
+            Self::Unknown { raw_type, payload } => Http3Frame::Unknown {
                 frame_type_bytes: *raw_type,
                 raw: Some(RawInfo {
                     data: None,

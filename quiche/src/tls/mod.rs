@@ -1016,10 +1016,8 @@ extern "C" fn add_handshake_data(
 ) -> c_int {
     // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
     // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
-
-        None => return 0,
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return 0;
     };
 
     trace!("{} write message lvl={level:?} len={len}", ex_data.trace_id);
@@ -1062,10 +1060,8 @@ extern "C" fn send_alert(
 ) -> c_int {
     // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
     // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
-
-        None => return 0,
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return 0;
     };
 
     trace!(
@@ -1086,10 +1082,8 @@ extern "C" fn send_alert(
 extern "C" fn keylog(ssl: *const SSL, line: *const c_char) {
     // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
     // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl) } {
-        Some(v) => v,
-
-        None => return,
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl) }) else {
+        return;
     };
 
     if line.is_null() {
@@ -1170,18 +1164,14 @@ extern "C" fn select_alpn(
 }
 
 extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
-    let ssl = match NonNull::new(ssl) {
-        Some(v) => v,
-
-        None => return 0,
+    let Some(ssl) = NonNull::new(ssl) else {
+        return 0;
     };
 
     // SAFETY: BoringSSL invokes this callback synchronously on its live SSL
     // object; the installed callback state is exclusively borrowed here.
-    let ex_data = match unsafe { ExData::from_ssl_ptr(ssl.as_ptr()) } {
-        Some(v) => v,
-
-        None => return 0,
+    let Some(ex_data) = (unsafe { ExData::from_ssl_ptr(ssl.as_ptr()) }) else {
+        return 0;
     };
 
     // This callback receives a borrowed `SSL*`, so the temporary `Handshake`
@@ -1194,9 +1184,8 @@ extern "C" fn new_session(ssl: *mut SSL, session: *mut SSL_SESSION) -> c_int {
         return 0;
     };
     // SAFETY: BoringSSL supplies a live, borrowed session to this callback.
-    let session_bytes = match unsafe { get_session_bytes(session) } {
-        Ok(v) => v,
-        Err(_) => return 0,
+    let Ok(session_bytes) = (unsafe { get_session_bytes(session) }) else {
+        return 0;
     };
 
     let Some(capacity) = session_bytes

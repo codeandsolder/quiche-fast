@@ -113,164 +113,93 @@ impl Pipe {
         "127.0.0.1:4321".parse().unwrap()
     }
 
-    pub fn new(cc_algorithm_name: &str) -> Result<Pipe> {
+    pub fn new(cc_algorithm_name: &str) -> Result<Self> {
         let mut config = Self::default_config(cc_algorithm_name)?;
-        Pipe::with_config(&mut config)
+        Self::with_config(&mut config)
     }
 
-    pub fn with_config(config: &mut Config) -> Result<Pipe> {
-        Pipe::<DefaultBufFactory>::with_config_and_buf(config)
+    pub fn with_config(config: &mut Config) -> Result<Self> {
+        Self::with_config_and_buf(config)
     }
 
     pub fn with_config_and_scid_lengths(
         config: &mut Config, client_scid_len: usize, server_scid_len: usize,
-    ) -> Result<Pipe> {
-        Pipe::<DefaultBufFactory>::with_config_and_scid_lengths_and_buf(
+    ) -> Result<Self> {
+        Self::with_config_and_scid_lengths_and_buf(
             config,
             client_scid_len,
             server_scid_len,
         )
     }
 
-    pub fn with_client_config(client_config: &mut Config) -> Result<Pipe> {
-        Pipe::<DefaultBufFactory>::with_client_config_and_buf(client_config)
+    pub fn with_client_config(client_config: &mut Config) -> Result<Self> {
+        Self::with_client_config_and_buf(client_config)
     }
 
-    pub fn with_server_config(server_config: &mut Config) -> Result<Pipe> {
-        Pipe::<DefaultBufFactory>::with_server_config_and_buf(server_config)
+    pub fn with_server_config(server_config: &mut Config) -> Result<Self> {
+        Self::with_server_config_and_buf(server_config)
     }
 
     pub fn with_client_and_server_config(
         client_config: &mut Config, server_config: &mut Config,
-    ) -> Result<Pipe> {
-        Pipe::<DefaultBufFactory>::with_client_and_server_config_and_buf(
-            client_config,
-            server_config,
-        )
+    ) -> Result<Self> {
+        Self::with_client_and_server_config_and_buf(client_config, server_config)
     }
 }
 
 impl<F: BufFactory> Pipe<F> {
-    pub fn new_with_buf(cc_algorithm_name: &str) -> Result<Pipe<F>> {
+    pub fn new_with_buf(cc_algorithm_name: &str) -> Result<Self> {
         let mut config = Pipe::default_config(cc_algorithm_name)?;
-        Pipe::with_config_and_buf(&mut config)
+        Self::with_config_and_buf(&mut config)
     }
 
-    pub fn with_config_and_buf(config: &mut Config) -> Result<Pipe<F>> {
-        let mut client_scid = [0; 16];
-        rand::rand_bytes(&mut client_scid[..]);
-        let client_scid = ConnectionId::from_ref(&client_scid);
-        let client_addr = Pipe::client_addr();
-
-        let mut server_scid = [0; 16];
-        rand::rand_bytes(&mut server_scid[..]);
-        let server_scid = ConnectionId::from_ref(&server_scid);
-        let server_addr = Pipe::server_addr();
-
-        Ok(Pipe {
-            client: connect_with_buffer_factory(
-                Some("quic.tech"),
-                &client_scid,
-                client_addr,
-                server_addr,
-                config,
-            )?,
-            server: accept_with_buf_factory(
-                &server_scid,
-                None,
-                server_addr,
-                client_addr,
-                config,
-            )?,
-        })
+    pub fn with_config_and_buf(config: &mut Config) -> Result<Self> {
+        Self::with_config_and_scid_lengths_and_buf(config, 16, 16)
     }
 
     pub fn with_config_and_scid_lengths_and_buf(
         config: &mut Config, client_scid_len: usize, server_scid_len: usize,
-    ) -> Result<Pipe<F>> {
-        let mut client_scid = vec![0; client_scid_len];
-        rand::rand_bytes(&mut client_scid[..]);
-        let client_scid = ConnectionId::from_ref(&client_scid);
-        let client_addr = Pipe::client_addr();
-
-        let mut server_scid = vec![0; server_scid_len];
-        rand::rand_bytes(&mut server_scid[..]);
-        let server_scid = ConnectionId::from_ref(&server_scid);
-        let server_addr = Pipe::server_addr();
-
-        Ok(Pipe {
-            client: connect_with_buffer_factory(
-                Some("quic.tech"),
-                &client_scid,
-                client_addr,
-                server_addr,
-                config,
-            )?,
-            server: accept_with_buf_factory(
-                &server_scid,
-                None,
-                server_addr,
-                client_addr,
-                config,
-            )?,
-        })
+    ) -> Result<Self> {
+        Self::with_configs_and_scids(
+            config,
+            None,
+            client_scid_len,
+            server_scid_len,
+        )
     }
 
     pub fn with_client_config_and_buf(
         client_config: &mut Config,
-    ) -> Result<Pipe<F>> {
-        let mut client_scid = [0; 16];
-        rand::rand_bytes(&mut client_scid[..]);
-        let client_scid = ConnectionId::from_ref(&client_scid);
-        let client_addr = Pipe::client_addr();
-
-        let mut server_scid = [0; 16];
-        rand::rand_bytes(&mut server_scid[..]);
-        let server_scid = ConnectionId::from_ref(&server_scid);
-        let server_addr = Pipe::server_addr();
-
-        let mut config = Config::new(PROTOCOL_VERSION)?;
-        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        config.load_priv_key_from_pem_file("examples/cert.key")?;
-        config.set_application_protos(&[b"proto1", b"proto2"])?;
-        config.set_initial_max_data(30);
-        config.set_initial_max_stream_data_bidi_local(15);
-        config.set_initial_max_stream_data_bidi_remote(15);
-        config.set_initial_max_streams_bidi(3);
-        config.set_initial_max_streams_uni(3);
-        config.set_ack_delay_exponent(8);
-
-        Ok(Pipe {
-            client: connect_with_buffer_factory(
-                Some("quic.tech"),
-                &client_scid,
-                client_addr,
-                server_addr,
-                client_config,
-            )?,
-            server: accept_with_buf_factory(
-                &server_scid,
-                None,
-                server_addr,
-                client_addr,
-                &mut config,
-            )?,
-        })
+    ) -> Result<Self> {
+        let mut server_config = Self::default_counterpart_config()?;
+        server_config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        server_config.load_priv_key_from_pem_file("examples/cert.key")?;
+        Self::with_client_and_server_config_and_buf(
+            client_config,
+            &mut server_config,
+        )
     }
 
     pub fn with_server_config_and_buf(
         server_config: &mut Config,
-    ) -> Result<Pipe<F>> {
-        let mut client_scid = [0; 16];
-        rand::rand_bytes(&mut client_scid[..]);
-        let client_scid = ConnectionId::from_ref(&client_scid);
-        let client_addr = Pipe::client_addr();
+    ) -> Result<Self> {
+        let mut client_config = Self::default_counterpart_config()?;
+        Self::with_client_and_server_config_and_buf(
+            &mut client_config,
+            server_config,
+        )
+    }
 
-        let mut server_scid = [0; 16];
-        rand::rand_bytes(&mut server_scid[..]);
-        let server_scid = ConnectionId::from_ref(&server_scid);
-        let server_addr = Pipe::server_addr();
+    pub fn with_client_and_server_config_and_buf(
+        client_config: &mut Config, server_config: &mut Config,
+    ) -> Result<Self> {
+        Self::with_configs_and_scids(client_config, Some(server_config), 16, 16)
+    }
 
+    // Default for the counterpart when only the client or server config was
+    // supplied. This deliberately differs from Pipe::default_config: it
+    // retains the regular verification, idle timeout, and uni-stream limits.
+    fn default_counterpart_config() -> Result<Config> {
         let mut config = Config::new(PROTOCOL_VERSION)?;
         config.set_application_protos(&[b"proto1", b"proto2"])?;
         config.set_initial_max_data(30);
@@ -279,54 +208,40 @@ impl<F: BufFactory> Pipe<F> {
         config.set_initial_max_streams_bidi(3);
         config.set_initial_max_streams_uni(3);
         config.set_ack_delay_exponent(8);
-
-        Ok(Pipe {
-            client: connect_with_buffer_factory(
-                Some("quic.tech"),
-                &client_scid,
-                client_addr,
-                server_addr,
-                &mut config,
-            )?,
-            server: accept_with_buf_factory(
-                &server_scid,
-                None,
-                server_addr,
-                client_addr,
-                server_config,
-            )?,
-        })
+        Ok(config)
     }
 
-    pub fn with_client_and_server_config_and_buf(
-        client_config: &mut Config, server_config: &mut Config,
-    ) -> Result<Pipe<F>> {
-        let mut client_scid = [0; 16];
-        rand::rand_bytes(&mut client_scid[..]);
+    fn with_configs_and_scids(
+        client_config: &mut Config, server_config: Option<&mut Config>,
+        client_scid_len: usize, server_scid_len: usize,
+    ) -> Result<Self> {
+        let mut client_scid = vec![0; client_scid_len];
+        rand::rand_bytes(&mut client_scid);
         let client_scid = ConnectionId::from_ref(&client_scid);
         let client_addr = Pipe::client_addr();
 
-        let mut server_scid = [0; 16];
-        rand::rand_bytes(&mut server_scid[..]);
+        let mut server_scid = vec![0; server_scid_len];
+        rand::rand_bytes(&mut server_scid);
         let server_scid = ConnectionId::from_ref(&server_scid);
         let server_addr = Pipe::server_addr();
 
-        Ok(Pipe {
-            client: connect_with_buffer_factory(
-                Some("quic.tech"),
-                &client_scid,
-                client_addr,
-                server_addr,
-                client_config,
-            )?,
-            server: accept_with_buf_factory(
-                &server_scid,
-                None,
-                server_addr,
-                client_addr,
-                server_config,
-            )?,
-        })
+        let client = connect_with_buffer_factory(
+            Some("quic.tech"),
+            &client_scid,
+            client_addr,
+            server_addr,
+            client_config,
+        )?;
+        // If both ends share one config, use it sequentially: no aliasing
+        // mutable references, and the client setup occurs before server setup.
+        let server = accept_with_buf_factory(
+            &server_scid,
+            None,
+            server_addr,
+            client_addr,
+            server_config.unwrap_or(client_config),
+        )?;
+        Ok(Self { client, server })
     }
 
     pub fn handshake(&mut self) -> Result<()> {
@@ -352,7 +267,7 @@ impl<F: BufFactory> Pipe<F> {
                 Err(Error::Done) => client_done = true,
 
                 Err(e) => return Err(e),
-            };
+            }
 
             match emit_flight(&mut self.server) {
                 Ok(flight) => process_flight(&mut self.client, flight)?,
@@ -360,7 +275,7 @@ impl<F: BufFactory> Pipe<F> {
                 Err(Error::Done) => server_done = true,
 
                 Err(e) => return Err(e),
-            };
+            }
         }
 
         Ok(())
@@ -576,9 +491,8 @@ pub fn encode_raw_pkt<F: BufFactory>(
 
     b.put_bytes(payload)?;
 
-    let aead = match crypto_ctx.crypto_seal {
-        Some(ref mut v) => v,
-        None => return Err(Error::InvalidState),
+    let Some(ref mut aead) = crypto_ctx.crypto_seal else {
+        return Err(Error::InvalidState);
     };
 
     let written = packet::encrypt_pkt(
