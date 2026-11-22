@@ -1256,13 +1256,8 @@ pub struct SendInfo {
 
 impl From<crate::SendInfo> for SendInfo {
     fn from(info: crate::SendInfo) -> Self {
-        // SAFETY: sockaddr_storage contains integer/byte fields; zero
-        // initializes all storage before writing the actual address.
-        let mut from = unsafe { std::mem::zeroed() };
-        // SAFETY: same layout as from.
-        let mut to = unsafe { std::mem::zeroed() };
-        let from_len = std_addr_to_c(&info.from, &mut from);
-        let to_len = std_addr_to_c(&info.to, &mut to);
+        let (from, from_len) = std_addr_to_c(&info.from);
+        let (to, to_len) = std_addr_to_c(&info.to);
         let mut at = timespec {
             tv_sec: 0,
             tv_nsec: 0,
@@ -1283,10 +1278,7 @@ pub extern "C" fn quiche_conn_send(
     conn: *mut Connection, out: *mut u8, out_len: size_t, out_info: *mut SendInfo,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let out_info = ffi_mut!(
-        out_info.cast::<MaybeUninit<SendInfo>>(),
-        ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
-    );
+    let out_info = ffi_out!(out_info, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
@@ -1313,10 +1305,7 @@ pub extern "C" fn quiche_conn_send_on_path(
     out_info: *mut SendInfo,
 ) -> ssize_t {
     let conn = ffi_mut!(conn, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
-    let out_info = ffi_mut!(
-        out_info.cast::<MaybeUninit<SendInfo>>(),
-        ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
-    );
+    let out_info = ffi_out!(out_info, ssize_t::from(FFI_ERR_INVALID_ARGUMENT));
 
     if let Err(e) = validate_ssize_len(out_len) {
         return e;
@@ -1989,13 +1978,8 @@ pub extern "C" fn quiche_conn_path_stats(
         None => return c_int::from(Error::Done.to_c()),
     };
 
-    // SAFETY: sockaddr_storage is a C integer/byte storage type; zero
-    // is valid for every field on the supported platforms.
-    let mut local_addr: sockaddr_storage = unsafe { std::mem::zeroed() };
-    // SAFETY: same storage invariant as for local_addr.
-    let mut peer_addr: sockaddr_storage = unsafe { std::mem::zeroed() };
-    let local_addr_len = std_addr_to_c(&stats.local_addr, &mut local_addr);
-    let peer_addr_len = std_addr_to_c(&stats.peer_addr, &mut peer_addr);
+    let (local_addr, local_addr_len) = std_addr_to_c(&stats.local_addr);
+    let (peer_addr, peer_addr_len) = std_addr_to_c(&stats.peer_addr);
     out.write(PathStats {
         local_addr,
         peer_addr,
@@ -2342,13 +2326,11 @@ pub extern "C" fn quiche_socket_addr_iter_next(
     peer_len: *mut socklen_t,
 ) -> bool {
     let iter = ffi_mut!(iter, false);
-    let peer = ffi_mut!(peer.cast::<MaybeUninit<sockaddr_storage>>(), false);
-    let peer_len = ffi_mut!(peer_len.cast::<MaybeUninit<socklen_t>>(), false);
+    let peer = ffi_out!(peer, false);
+    let peer_len = ffi_out!(peer_len, false);
 
     if let Some(v) = iter.next() {
-        // SAFETY: sockaddr_storage is an integer/byte storage type.
-        let mut address = unsafe { std::mem::zeroed() };
-        let len = std_addr_to_c(&v, &mut address);
+        let (address, len) = std_addr_to_c(&v);
         peer.write(address);
         peer_len.write(len);
         return true;
@@ -2387,10 +2369,7 @@ fn path_operation(
     op: impl FnOnce(&mut Connection, SocketAddr, SocketAddr) -> Result<u64>,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let seq = ffi_mut!(
-        seq.cast::<MaybeUninit<u64>>(),
-        c_int::from(FFI_ERR_INVALID_ARGUMENT)
-    );
+    let seq = ffi_out!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let local =
         ffi_addr!(local.0, local.1, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     let peer = ffi_addr!(peer.0, peer.1, c_int::from(FFI_ERR_INVALID_ARGUMENT));
@@ -2423,13 +2402,13 @@ pub extern "C" fn quiche_conn_migrate_source(
     seq: *mut u64,
 ) -> c_int {
     let conn = ffi_mut!(conn, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let seq = ffi_mut!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
+    let seq = ffi_out!(seq, c_int::from(FFI_ERR_INVALID_ARGUMENT));
 
     let local =
         ffi_addr!(local, local_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
     match conn.migrate_source(local) {
         Ok(v) => {
-            *seq = v;
+            seq.write(v);
             0
         },
         Err(e) => c_int::from(e.to_c()),
@@ -2483,6 +2462,34 @@ pub extern "C" fn quiche_path_event_type(ev: *const PathEvent) -> c_int {
     }
 }
 
+// Each tuple is a value plus its C storage and length output. A path event
+// writes all its addresses or none if any output pointer is invalid.
+fn write_path_addresses<const N: usize>(
+    outputs: [(&SocketAddr, *mut sockaddr_storage, *mut socklen_t); N],
+) -> bool {
+    for &(_, address, len) in &outputs {
+        if address.is_null() ||
+            !address.is_aligned() ||
+            len.is_null() ||
+            !len.is_aligned()
+        {
+            return false;
+        }
+    }
+    for (addr, address, len) in outputs {
+        let (value, size) = std_addr_to_c(addr);
+        // SAFETY: metadata was validated for every output before any write;
+        // the C caller supplies writable storage for the declared types.
+        // No references are formed to caller storage, which may be
+        // uninitialized.
+        unsafe {
+            address.write(value);
+            len.write(size);
+        }
+    }
+    true
+}
+
 #[no_mangle]
 pub extern "C" fn quiche_path_event_new(
     ev: *const PathEvent, local_addr: *mut sockaddr_storage,
@@ -2490,14 +2497,11 @@ pub extern "C" fn quiche_path_event_new(
     peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-
     if let PathEvent::New(local, peer) = ev {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]);
     }
 }
 
@@ -2508,14 +2512,11 @@ pub extern "C" fn quiche_path_event_validated(
     peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-
     if let PathEvent::Validated(local, peer) = ev {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]);
     }
 }
 
@@ -2526,14 +2527,11 @@ pub extern "C" fn quiche_path_event_failed_validation(
     peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-
     if let PathEvent::FailedValidation(local, peer) = ev {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]);
     }
 }
 
@@ -2544,14 +2542,26 @@ pub extern "C" fn quiche_path_event_closed(
     peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-
     if let PathEvent::Closed(local, peer) = ev {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn quiche_path_event_peer_migrated(
+    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
+    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
+    peer_addr_len: *mut socklen_t,
+) {
+    let ev = ffi_ref!(ev);
+    if let PathEvent::PeerMigrated(local, peer) = ev {
+        write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]);
     }
 }
 
@@ -2564,41 +2574,17 @@ pub extern "C" fn quiche_path_event_reused_source_connection_id(
     peer_addr: *mut sockaddr_storage, peer_addr_len: *mut socklen_t,
 ) {
     let ev = ffi_ref!(ev);
-    let cid_sequence_number = ffi_mut!(cid_sequence_number);
-    let old_local_addr = ffi_mut!(old_local_addr);
-    let old_local_addr_len = ffi_mut!(old_local_addr_len);
-    let old_peer_addr = ffi_mut!(old_peer_addr);
-    let old_peer_addr_len = ffi_mut!(old_peer_addr_len);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
+    let cid_sequence_number = ffi_out!(cid_sequence_number);
 
     if let PathEvent::ReusedSourceConnectionId(id, old, new) = ev {
-        *cid_sequence_number = *id;
-        *old_local_addr_len = std_addr_to_c(&old.0, old_local_addr);
-        *old_peer_addr_len = std_addr_to_c(&old.1, old_peer_addr);
-
-        *local_addr_len = std_addr_to_c(&new.0, local_addr);
-        *peer_addr_len = std_addr_to_c(&new.1, peer_addr);
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn quiche_path_event_peer_migrated(
-    ev: *const PathEvent, local_addr: *mut sockaddr_storage,
-    local_addr_len: *mut socklen_t, peer_addr: *mut sockaddr_storage,
-    peer_addr_len: *mut socklen_t,
-) {
-    let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-
-    if let PathEvent::PeerMigrated(local, peer) = ev {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
+        if write_path_addresses([
+            (&old.0, old_local_addr, old_local_addr_len),
+            (&old.1, old_peer_addr, old_peer_addr_len),
+            (&new.0, local_addr, local_addr_len),
+            (&new.1, peer_addr, peer_addr_len),
+        ]) {
+            cid_sequence_number.write(*id);
+        }
     }
 }
 
@@ -2609,21 +2595,19 @@ pub extern "C" fn quiche_path_event_pmtu_updated(
     peer_addr_len: *mut socklen_t, pmtu: *mut size_t,
 ) {
     let ev = ffi_ref!(ev);
-    let local_addr = ffi_mut!(local_addr);
-    let local_addr_len = ffi_mut!(local_addr_len);
-    let peer_addr = ffi_mut!(peer_addr);
-    let peer_addr_len = ffi_mut!(peer_addr_len);
-    let pmtu = ffi_mut!(pmtu);
-
+    let pmtu = ffi_out!(pmtu);
     if let PathEvent::PmtuUpdated {
         local,
         peer,
         pmtu: value,
     } = ev
     {
-        *local_addr_len = std_addr_to_c(local, local_addr);
-        *peer_addr_len = std_addr_to_c(peer, peer_addr);
-        *pmtu = *value;
+        if write_path_addresses([
+            (local, local_addr, local_addr_len),
+            (peer, peer_addr, peer_addr_len),
+        ]) {
+            pmtu.write(*value);
+        }
     }
 }
 
@@ -2789,13 +2773,16 @@ unsafe fn std_addr_from_c(
     }
 }
 
-fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
+fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
+    // SAFETY: the platform sockaddr_storage type consists of integer/byte
+    // fields, all of which admit zero initialization.
+    let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
     let sin_port = addr.port().to_be();
 
-    match addr {
-        SocketAddr::V4(addr) => unsafe {
+    let len = match addr {
+        SocketAddr::V4(addr) => {
             let sa_len = size_of::<sockaddr_in>();
-            let out_in = out as *mut _ as *mut sockaddr_in;
+            let out_in = (&raw mut out).cast::<sockaddr_in>();
 
             let s_addr = u32::from_ne_bytes(addr.ip().octets());
 
@@ -2806,7 +2793,7 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
                 S_un: IN_ADDR_0 { S_addr: s_addr },
             };
 
-            *out_in = sockaddr_in {
+            let address = sockaddr_in {
                 sin_family: AF_INET as sa_family_t,
 
                 sin_addr,
@@ -2824,15 +2811,18 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
 
                 sin_port,
 
-                sin_zero: std::mem::zeroed(),
+                sin_zero: [0; 8],
             };
 
+            // SAFETY: sockaddr_storage has sufficient size and alignment
+            // for sockaddr_in; the raw pointer comes from this local object.
+            unsafe { out_in.write(address) };
             sa_len as socklen_t
         },
 
-        SocketAddr::V6(addr) => unsafe {
+        SocketAddr::V6(addr) => {
             let sa_len = size_of::<sockaddr_in6>();
-            let out_in6 = out as *mut _ as *mut sockaddr_in6;
+            let out_in6 = (&raw mut out).cast::<sockaddr_in6>();
 
             #[cfg(not(windows))]
             let sin6_addr = in6_addr {
@@ -2845,7 +2835,7 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
                 },
             };
 
-            *out_in6 = sockaddr_in6 {
+            let address = sockaddr_in6 {
                 sin6_family: AF_INET6 as sa_family_t,
 
                 sin6_addr,
@@ -2873,9 +2863,13 @@ fn std_addr_to_c(addr: &SocketAddr, out: &mut sockaddr_storage) -> socklen_t {
                 },
             };
 
+            // SAFETY: sockaddr_storage has sufficient size and alignment
+            // for sockaddr_in6; the raw pointer comes from this local object.
+            unsafe { out_in6.write(address) };
             sa_len as socklen_t
         },
-    }
+    };
+    (out, len)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
@@ -3188,11 +3182,9 @@ mod tests {
         let mut info = MaybeUninit::<SendInfo>::uninit();
         let mut buf = [0; 1500];
         let written = if specified_path {
-            let mut from = unsafe { std::mem::zeroed() };
-            let mut to = unsafe { std::mem::zeroed() };
-            let from_len =
-                std_addr_to_c(&test_utils::Pipe::client_addr(), &mut from);
-            let to_len = std_addr_to_c(&test_utils::Pipe::server_addr(), &mut to);
+            let (from, from_len) =
+                std_addr_to_c(&test_utils::Pipe::client_addr());
+            let (to, to_len) = std_addr_to_c(&test_utils::Pipe::server_addr());
             quiche_conn_send_on_path(
                 &mut pipe.client,
                 buf.as_mut_ptr(),
@@ -3281,6 +3273,112 @@ mod tests {
         );
     }
 
+    #[rstest::rstest]
+    fn path_event_pair_initializes_c_outputs(#[values(0, 1, 2, 3, 5)] kind: u8) {
+        let local: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let peer: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+        type Accessor = extern "C" fn(
+            *const PathEvent,
+            *mut sockaddr_storage,
+            *mut socklen_t,
+            *mut sockaddr_storage,
+            *mut socklen_t,
+        );
+        let (event, accessor): (PathEvent, Accessor) = match kind {
+            0 => (PathEvent::New(local, peer), quiche_path_event_new),
+            1 => (
+                PathEvent::Validated(local, peer),
+                quiche_path_event_validated,
+            ),
+            2 => (
+                PathEvent::FailedValidation(local, peer),
+                quiche_path_event_failed_validation,
+            ),
+            3 => (PathEvent::Closed(local, peer), quiche_path_event_closed),
+            5 => (
+                PathEvent::PeerMigrated(local, peer),
+                quiche_path_event_peer_migrated,
+            ),
+            _ => unreachable!(),
+        };
+        let mut local_out = MaybeUninit::<sockaddr_storage>::uninit();
+        let mut peer_out = MaybeUninit::<sockaddr_storage>::uninit();
+        let mut local_len = MaybeUninit::<socklen_t>::uninit();
+        let mut peer_len = MaybeUninit::<socklen_t>::uninit();
+        accessor(
+            &event,
+            local_out.as_mut_ptr(),
+            local_len.as_mut_ptr(),
+            peer_out.as_mut_ptr(),
+            peer_len.as_mut_ptr(),
+        );
+        // SAFETY: matching accessor has written the complete results.
+        let (local_len, peer_len) =
+            unsafe { (local_len.assume_init(), peer_len.assume_init()) };
+        assert_eq!(
+            unsafe { std_addr_from_c(local_out.as_ptr().cast(), local_len) },
+            Ok(local)
+        );
+        assert_eq!(
+            unsafe { std_addr_from_c(peer_out.as_ptr().cast(), peer_len) },
+            Ok(peer)
+        );
+
+        // An invalid second output must not change the first.
+        let mut unchanged_len: socklen_t = 77;
+        let mut unused_len: socklen_t = 0;
+        accessor(
+            &event,
+            local_out.as_mut_ptr(),
+            &mut unchanged_len,
+            ptr::null_mut(),
+            &mut unused_len,
+        );
+        assert_eq!(unchanged_len, 77);
+    }
+
+    #[test]
+    fn reused_cid_event_initializes_all_four_addresses() {
+        let endpoints: [SocketAddr; 4] = [
+            "127.0.0.1:8080".parse().unwrap(),
+            "[2001:db8::1]:443".parse().unwrap(),
+            "127.0.0.2:8081".parse().unwrap(),
+            "[2001:db8::2]:443".parse().unwrap(),
+        ];
+        let event = PathEvent::ReusedSourceConnectionId(
+            42,
+            (endpoints[0], endpoints[1]),
+            (endpoints[2], endpoints[3]),
+        );
+        let mut seq = MaybeUninit::<u64>::uninit();
+        let mut addrs = [const { MaybeUninit::<sockaddr_storage>::uninit() }; 4];
+        let mut lengths = [MaybeUninit::<socklen_t>::uninit(); 4];
+        let [a, b, c, d] = &mut addrs;
+        let [al, bl, cl, dl] = &mut lengths;
+        quiche_path_event_reused_source_connection_id(
+            &event,
+            seq.as_mut_ptr(),
+            a.as_mut_ptr(),
+            al.as_mut_ptr(),
+            b.as_mut_ptr(),
+            bl.as_mut_ptr(),
+            c.as_mut_ptr(),
+            cl.as_mut_ptr(),
+            d.as_mut_ptr(),
+            dl.as_mut_ptr(),
+        );
+        // SAFETY: the matching accessor wrote all four addresses and the ID.
+        assert_eq!(unsafe { seq.assume_init() }, 42);
+        for ((addr, len), expected) in addrs.iter().zip(lengths).zip(endpoints) {
+            assert_eq!(
+                unsafe {
+                    std_addr_from_c(addr.as_ptr().cast(), len.assume_init())
+                },
+                Ok(expected)
+            );
+        }
+    }
+
     #[test]
     fn mismatched_path_event_accessor_is_noop() {
         let local = "127.0.0.1:8080".parse().unwrap();
@@ -3318,36 +3416,34 @@ mod tests {
         };
         assert_eq!(quiche_path_event_type(&event), 6);
 
-        let mut local_out: sockaddr_storage = unsafe { std::mem::zeroed() };
-        let mut peer_out: sockaddr_storage = unsafe { std::mem::zeroed() };
-        let mut local_len = 0;
-        let mut peer_len = 0;
-        let mut pmtu = usize::MAX;
+        let mut local_out = MaybeUninit::<sockaddr_storage>::uninit();
+        let mut peer_out = MaybeUninit::<sockaddr_storage>::uninit();
+        let mut local_len = MaybeUninit::<socklen_t>::uninit();
+        let mut peer_len = MaybeUninit::<socklen_t>::uninit();
+        let mut pmtu = MaybeUninit::<size_t>::uninit();
 
         quiche_path_event_pmtu_updated(
             &event,
-            &mut local_out,
-            &mut local_len,
-            &mut peer_out,
-            &mut peer_len,
-            &mut pmtu,
+            local_out.as_mut_ptr(),
+            local_len.as_mut_ptr(),
+            peer_out.as_mut_ptr(),
+            peer_len.as_mut_ptr(),
+            pmtu.as_mut_ptr(),
         );
-        assert_eq!(pmtu, 1400);
+        // SAFETY: the matching event writes each output.
+        assert_eq!(unsafe { pmtu.assume_init() }, 1400);
         assert_eq!(
             unsafe {
                 std_addr_from_c(
-                    (&raw const local_out).cast::<sockaddr>(),
-                    local_len,
+                    local_out.as_ptr().cast(),
+                    local_len.assume_init(),
                 )
             },
             Ok(local)
         );
         assert_eq!(
             unsafe {
-                std_addr_from_c(
-                    (&raw const peer_out).cast::<sockaddr>(),
-                    peer_len,
-                )
+                std_addr_from_c(peer_out.as_ptr().cast(), peer_len.assume_init())
             },
             Ok(peer)
         );
@@ -3358,9 +3454,7 @@ mod tests {
     #[case("[2001:db8:85a3::8a2e:370:7334]:8080")]
     fn address_round_trip(#[case] address: &str) {
         let addr: SocketAddr = address.parse().unwrap();
-        // SAFETY: sockaddr_storage consists of integer and byte fields.
-        let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
-        let len = std_addr_to_c(&addr, &mut out);
+        let (out, len) = std_addr_to_c(&addr);
 
         // Independently verify the C layout using inet_ntop rather than only
         // round-tripping through our own encoder and decoder.
