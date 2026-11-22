@@ -2406,29 +2406,24 @@ impl<F: BufFactory> Connection<F> {
         if !is_server {
             let dcid = if let Some(client_dcid) = client_dcid {
                 // We already had an dcid generated for us, use it.
-                client_dcid.to_vec()
+                ConnectionId::copy_from_slice(client_dcid.as_ref())
             } else {
                 // Derive initial secrets for the client. We can do this here
                 // because we already generated the random
                 // destination connection ID.
                 let mut dcid = [0; 16];
                 rand::rand_bytes(&mut dcid[..]);
-                dcid.to_vec()
+                ConnectionId::copy_from_slice(&dcid)
             };
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &dcid,
-                conn.version,
                 conn.is_server,
-                false,
+                crypto::CounterInitialization::FirstPacket,
             )?;
 
             let reset_token = conn.peer_transport_params.stateless_reset_token;
-            conn.set_initial_dcid(
-                dcid.clone().into(),
-                reset_token,
-                active_path_id,
-            )?;
+            conn.set_initial_dcid(dcid, reset_token, active_path_id)?;
 
             conn.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             conn.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
@@ -3370,9 +3365,8 @@ impl<F: BufFactory> Connection<F> {
             // Derive Initial secrets based on the new version.
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 self.destination_id(),
-                self.version,
                 self.is_server,
-                true,
+                crypto::CounterInitialization::Prime,
             )?;
 
             // Reset connection state to force sending another Initial packet.
@@ -3434,9 +3428,8 @@ impl<F: BufFactory> Connection<F> {
             // Derive Initial secrets using the new connection ID.
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &hdr.scid,
-                self.version,
                 self.is_server,
-                true,
+                crypto::CounterInitialization::Prime,
             )?;
 
             // Reset connection state to force sending another Initial packet.
@@ -3505,9 +3498,8 @@ impl<F: BufFactory> Connection<F> {
         if !self.derived_initial_secrets {
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &hdr.dcid,
-                self.version,
                 self.is_server,
-                false,
+                crypto::CounterInitialization::FirstPacket,
             )?;
 
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
@@ -3556,7 +3548,7 @@ impl<F: BufFactory> Connection<F> {
             return Err(e);
         };
 
-        let aead_tag_len = aead.alg().tag_len();
+        let aead_tag_len = crypto::TAG_LEN;
 
         packet::decrypt_hdr(&mut b, &mut hdr, aead).map_err(|e| {
             drop_pkt_on_err(e, self.recv_count, self.is_server, &self.trace_id)

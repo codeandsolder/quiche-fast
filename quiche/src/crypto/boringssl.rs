@@ -2,13 +2,16 @@ use super::derive_pkt_iv;
 use super::derive_pkt_key;
 use super::make_nonce;
 use super::Algorithm;
+use super::CounterInitialization;
 use super::Error;
 use super::HeaderProtectionMask;
 use super::Result;
 use super::EVP_AEAD;
 use super::EVP_MD;
 use super::HP_MASK_LEN;
-use super::MAX_NONCE_LEN;
+use super::MAX_KEY_LEN;
+use super::NONCE_LEN;
+use super::TAG_LEN;
 
 use std::ptr::NonNull;
 
@@ -47,34 +50,31 @@ impl Algorithm {
 }
 
 pub struct PacketKey {
-    alg: Algorithm,
-
     ctx: NonNull<EVP_AEAD_CTX>,
 
-    nonce: [u8; MAX_NONCE_LEN],
+    nonce: [u8; NONCE_LEN],
 }
 
 impl PacketKey {
-    pub fn new(alg: Algorithm, key: Vec<u8>, iv: Vec<u8>) -> Result<Self> {
+    pub fn new(alg: Algorithm, key: &[u8], iv: &[u8]) -> Result<Self> {
         let nonce = iv.try_into().map_err(|_| Error::CryptoFail)?;
         Ok(Self {
-            alg,
-            ctx: make_aead_ctx(alg, &key)?,
+            ctx: make_aead_ctx(alg, key)?,
             nonce,
         })
     }
 
-    pub fn from_secret(aead: Algorithm, secret: &[u8]) -> Result<Self> {
-        let key_len = aead.key_len();
-        let nonce_len = aead.nonce_len();
+    pub fn from_secret(
+        aead: Algorithm, secret: &[u8], initialization: CounterInitialization,
+    ) -> Result<Self> {
+        let mut key = [0; MAX_KEY_LEN];
+        let key = &mut key[..aead.key_len()];
+        let mut iv = [0; NONCE_LEN];
 
-        let mut key = vec![0; key_len];
-        let mut iv = vec![0; nonce_len];
-
-        derive_pkt_key(aead, secret, &mut key)?;
+        derive_pkt_key(aead, secret, key)?;
         derive_pkt_iv(aead, secret, &mut iv)?;
 
-        let mut pkt_key = Self::new(aead, key, iv)?;
+        let mut pkt_key = Self::new(aead, key, &iv)?;
 
         // Dummy seal operation to prime the AEAD context with the nonce mask.
         //
@@ -82,7 +82,10 @@ impl PacketKey {
         // packet number) to be zero, which would not be the case for packet
         // number spaces after Initial as the same packet number sequence is
         // shared.
-        let _ = pkt_key.seal_with_u64_counter(0, b"", &mut [0_u8; 16], 0, None);
+        if initialization == CounterInitialization::Prime {
+            let _ =
+                pkt_key.seal_with_u64_counter(0, b"", &mut [0; TAG_LEN], 0, None);
+        }
 
         Ok(pkt_key)
     }
@@ -90,7 +93,7 @@ impl PacketKey {
     pub fn open_with_u64_counter(
         &self, counter: u64, ad: &[u8], buf: &mut [u8],
     ) -> Result<usize> {
-        let tag_len = self.alg.tag_len();
+        let tag_len = TAG_LEN;
 
         let Some(mut out_len) = buf.len().checked_sub(tag_len) else {
             return Err(Error::CryptoFail);
@@ -130,7 +133,7 @@ impl PacketKey {
         &mut self, counter: u64, ad: &[u8], buf: &mut [u8], in_len: usize,
         extra_in: Option<&[u8]>,
     ) -> Result<usize> {
-        let tag_len = self.alg.tag_len();
+        let tag_len = TAG_LEN;
 
         let mut out_tag_len = tag_len;
 
@@ -209,7 +212,7 @@ pub enum HeaderProtectionKey {
 }
 
 impl HeaderProtectionKey {
-    pub fn new(alg: Algorithm, hp_key: Vec<u8>) -> Result<Self> {
+    pub fn new(alg: Algorithm, hp_key: &[u8]) -> Result<Self> {
         if hp_key.len() != alg.key_len() {
             return Err(Error::CryptoFail);
         }
@@ -303,12 +306,7 @@ fn make_aead_ctx(alg: Algorithm, key: &[u8]) -> Result<NonNull<EVP_AEAD_CTX>> {
     // SAFETY: The descriptor is static and key has the exact required
     // length. BoringSSL copies the key into its newly allocated context.
     let ctx = unsafe {
-        EVP_AEAD_CTX_new(
-            alg.get_evp_aead(),
-            key.as_ptr(),
-            key.len(),
-            alg.tag_len(),
-        )
+        EVP_AEAD_CTX_new(alg.get_evp_aead(), key.as_ptr(), key.len(), TAG_LEN)
     };
 
     NonNull::new(ctx).ok_or(Error::CryptoFail)
