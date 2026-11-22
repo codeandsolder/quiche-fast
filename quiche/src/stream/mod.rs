@@ -747,11 +747,15 @@ impl<F: BufFactory> StreamMap<F> {
             // If the stream was created by the peer, give back a max streams
             // credit.
             if is_bidi(stream_id) {
-                self.local_max_streams_bidi_next =
-                    self.local_max_streams_bidi_next.saturating_add(1);
+                self.local_max_streams_bidi_next = self
+                    .local_max_streams_bidi_next
+                    .saturating_add(1)
+                    .min(crate::MAX_STREAM_COUNT);
             } else {
-                self.local_max_streams_uni_next =
-                    self.local_max_streams_uni_next.saturating_add(1);
+                self.local_max_streams_uni_next = self
+                    .local_max_streams_uni_next
+                    .saturating_add(1)
+                    .min(crate::MAX_STREAM_COUNT);
             }
         }
 
@@ -1465,6 +1469,26 @@ mod tests {
             );
             assert_eq!(pipe.client.streams.len(), 0);
         }
+    }
+
+    #[rstest]
+    fn returning_stream_credit_at_protocol_limit_does_not_overflow(
+        #[values(0, 1, 2, 3)] stream_type: u64,
+    ) {
+        let max = crate::MAX_STREAM_COUNT;
+        let params = crate::TransportParams::default();
+        let mut streams = <StreamMap>::new(max, max, DEFAULT_STREAM_WINDOW);
+        let is_server = stream_type & 1 == 0;
+        streams
+            .get_or_create(stream_type, &params, &params, false, is_server)
+            .unwrap();
+        // Collect one peer-created stream. No additional stream ID in this
+        // type exists once the maximum has already been advertised.
+        streams.collect(stream_type, false);
+        assert_eq!(streams.max_streams_bidi_next(), max);
+        assert_eq!(streams.max_streams_uni_next(), max);
+        assert!(!streams.should_update_max_streams_bidi());
+        assert!(!streams.should_update_max_streams_uni());
     }
 
     #[rstest]
