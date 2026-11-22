@@ -259,7 +259,7 @@ impl HeaderProtectionKey {
                     AES_ecb_encrypt(
                         sample.as_ptr(),
                         block.as_mut_ptr(),
-                        aes_key as _,
+                        std::ptr::from_ref(aes_key),
                         1,
                     );
                 };

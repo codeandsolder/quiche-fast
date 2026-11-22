@@ -138,7 +138,7 @@ pub enum PathEvent {
     },
 }
 
-pub(crate) fn pmtu_event(
+pub fn pmtu_event(
     local: SocketAddr, peer: SocketAddr, old: usize, new: usize,
 ) -> Option<PathEvent> {
     (old != new).then_some(PathEvent::PmtuUpdated {
@@ -527,8 +527,8 @@ impl Path {
         // If we lost probing packets, check if the path failed
         // validation.
         if let Some(lost_probe_time) = lost_probe_time {
-            self.last_probe_lost_time = match self.last_probe_lost_time {
-                Some(last) => {
+            self.last_probe_lost_time =
+                if let Some(last) = self.last_probe_lost_time {
                     // Count a loss if at least 1-RTT happened.
                     if lost_probe_time - last >= self.recovery.rtt() {
                         self.probing_lost += 1;
@@ -536,12 +536,10 @@ impl Path {
                     } else {
                         Some(last)
                     }
-                },
-                None => {
+                } else {
                     self.probing_lost += 1;
                     Some(lost_probe_time)
-                },
-            };
+                };
             // As a server, if requesting a challenge is not
             // possible due to the amplification attack, declare the
             // validation as failed.
@@ -575,11 +573,11 @@ impl Path {
     pub fn reinit_recovery(
         &mut self, recovery_config: &recovery::RecoveryConfig,
     ) {
-        self.recovery = recovery::Recovery::new_with_config(recovery_config)
+        self.recovery = recovery::Recovery::new_with_config(recovery_config);
     }
 
     pub fn stats(&self) -> PathStats {
-        let pmtu = match self.pmtud.as_ref().map(|p| p.get_current_mtu()) {
+        let pmtu = match self.pmtud.as_ref().map(pmtud::Pmtud::get_current_mtu) {
             Some(v) => v,
 
             None => self.recovery.max_datagram_size(),
@@ -972,7 +970,7 @@ impl PathMap {
         &mut self, discover: bool, max_send_udp_payload_size: usize,
         pmtud_max_probes: u8,
     ) {
-        for (_, path) in self.paths.iter_mut() {
+        for (_, path) in &mut self.paths {
             let old_pmtu = path
                 .pmtud
                 .as_ref()

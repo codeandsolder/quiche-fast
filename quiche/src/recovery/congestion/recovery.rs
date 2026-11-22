@@ -156,8 +156,8 @@ impl RecoveryEpoch {
             let start = if self
                 .sent_packets
                 .front()
-                .filter(|e| e.pkt_num >= peer_sent_range.start)
-                .is_some()
+                .as_ref()
+                .is_some_and(|e| e.pkt_num >= peer_sent_range.start)
             {
                 // Usually it will be the first packet.
                 0
@@ -215,7 +215,7 @@ impl RecoveryEpoch {
                         is_app_limited: unacked.is_app_limited,
                     });
 
-                    trace!("{} packet newly acked {}", trace_id, unacked.pkt_num);
+                    trace!("{trace_id} packet newly acked {}", unacked.pkt_num);
 
                     self.acked_frames
                         .extend(std::mem::take(&mut unacked.frames));
@@ -319,10 +319,8 @@ impl RecoveryEpoch {
                     self.timing.in_flight_count -= 1;
 
                     trace!(
-                        "{} packet {} lost on epoch {}",
-                        trace_id,
-                        unacked.pkt_num,
-                        epoch
+                        "{trace_id} packet {} lost on epoch {epoch}",
+                        unacked.pkt_num
                     );
                 }
 
@@ -590,7 +588,7 @@ impl LegacyRecovery {
 
             self.bytes_in_flight
                 .saturating_subtract(loss.lost_bytes, now);
-        };
+        }
 
         // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6
         // Losing every packet sent over a long enough period means the network
@@ -854,12 +852,12 @@ impl RecoveryOps for LegacyRecovery {
 
         epoch.loss_probes = probe_count;
 
-        let sent_packets_iter_limit = if !epoch.lost_frames_pto.is_empty() {
+        let sent_packets_iter_limit = if epoch.lost_frames_pto.is_empty() {
+            usize::MAX
+        } else {
             // Skip the search for frames to add to PTO probes if frames
             // added in a prior PTO haven't been processed yet.
             0
-        } else {
-            usize::MAX
         };
 
         let unacked_iter = epoch
@@ -1011,7 +1009,7 @@ impl RecoveryOps for LegacyRecovery {
     fn update_max_datagram_size(&mut self, new_max_datagram_size: usize) {
         self.pmtud_update_max_datagram_size(
             self.max_datagram_size.min(new_max_datagram_size),
-        )
+        );
     }
 
     #[cfg(test)]

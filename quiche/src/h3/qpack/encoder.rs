@@ -81,7 +81,7 @@ impl Encoder {
                     encode_str::<true>(h.name(), LITERAL, 3, &mut b)?;
                     encode_str::<false>(h.value(), 0, 7, &mut b)?;
                 },
-            };
+            }
         }
 
         Ok(b.off())
@@ -99,11 +99,11 @@ fn lookup_static<T: NameValue>(h: &T) -> Option<(u64, bool)> {
         std::iter::zip(a, b).all(|(a, b)| a.eq(&b.to_ascii_lowercase()))
     };
 
-    for (name, values) in table_for_len.iter() {
+    for (name, values) in *table_for_len {
         // Match header name first.
         if cmp_lowercase(name, h.name()) {
             // Second iterate over possible values for the header.
-            for (value, enc) in values.iter() {
+            for (value, enc) in *values {
                 // Match header value.
                 if value.is_empty() {
                     return Some((*enc, false));
@@ -160,20 +160,16 @@ pub fn encode_str<const LOWER_CASE: bool>(
 
     // Huffman-encoding generally saves space but in some cases it doesn't, for
     // those just encode the literal string.
-    match octets::huffman_encoding_len::<LOWER_CASE>(v) {
-        Ok(len) => {
-            encode_int(len as u64, first | huffman_bit, prefix, b)?;
-            b.put_huffman_encoded::<LOWER_CASE>(v)?;
-        },
-
-        Err(_) => {
-            encode_int(v.len() as u64, first, prefix, b)?;
-            if LOWER_CASE {
-                b.put_bytes(&v.to_ascii_lowercase())?;
-            } else {
-                b.put_bytes(v)?;
-            }
-        },
+    if let Ok(len) = octets::huffman_encoding_len::<LOWER_CASE>(v) {
+        encode_int(len as u64, first | huffman_bit, prefix, b)?;
+        b.put_huffman_encoded::<LOWER_CASE>(v)?;
+    } else {
+        encode_int(v.len() as u64, first, prefix, b)?;
+        if LOWER_CASE {
+            b.put_bytes(&v.to_ascii_lowercase())?;
+        } else {
+            b.put_bytes(v)?;
+        }
     }
 
     Ok(())

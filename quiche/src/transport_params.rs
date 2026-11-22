@@ -99,7 +99,7 @@ impl From<UnknownTransportParameter<&[u8]>>
 }
 
 /// Track unknown transport parameters, up to a limit.
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct UnknownTransportParameters {
     /// The space remaining for storing unknown transport parameters.
     pub capacity: usize,

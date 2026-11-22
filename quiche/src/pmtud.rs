@@ -19,7 +19,7 @@
 
 /// Maximum number of probe attempts before treating a size as failed.
 /// <https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2>
-pub(crate) const MAX_PROBES_DEFAULT: u8 = 3;
+pub const MAX_PROBES_DEFAULT: u8 = 3;
 
 /// Min Packetization Layer Path MTU (PLPMTU).
 /// <https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2>
@@ -62,10 +62,7 @@ impl Pmtud {
     /// If `max_probes` is 0, uses the default value of [`MAX_PROBES_DEFAULT`].
     pub fn new(maximum_supported_mtu: usize, max_probes: u8) -> Self {
         let max_probes = if max_probes == 0 {
-            warn!(
-                "max_probes is 0, using default value {}",
-                MAX_PROBES_DEFAULT
-            );
+            warn!("max_probes is 0, using default value {MAX_PROBES_DEFAULT}");
             MAX_PROBES_DEFAULT
         } else {
             max_probes
@@ -161,7 +158,7 @@ impl Pmtud {
                     self.set_pmtu(successful_probe_size);
                 } else {
                     self.probe_size =
-                        successful_probe_size.midpoint(failed_probe_size)
+                        successful_probe_size.midpoint(failed_probe_size);
                 }
             },
 
@@ -211,16 +208,16 @@ impl Pmtud {
 
         if self.probe_failure_count < self.max_probes {
             debug!(
-                "Probe size {} failed ({}/{}), will retry",
-                probe_size, self.probe_failure_count, self.max_probes
+                "Probe size {probe_size} failed ({}/{}), will retry",
+                self.probe_failure_count, self.max_probes
             );
             self.in_flight = false;
             return;
         }
 
         debug!(
-            "Probe size {} failed {} times, treating as MTU limitation",
-            probe_size, self.probe_failure_count
+            "Probe size {probe_size} failed {} times, treating as MTU limitation",
+            self.probe_failure_count
         );
 
         // Check if we have one instance of a failed probe so that a min

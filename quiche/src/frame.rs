@@ -406,7 +406,7 @@ impl Frame {
 
         let allowed = match (pkt, &frame) {
             // PADDING and PING are allowed on all packet types.
-            (_, Self::Padding { .. }) | (_, Self::Ping { .. }) => true,
+            (_, Self::Padding { .. } | Self::Ping { .. }) => true,
 
             // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, and
             // RETIRE_CONNECTION_ID can't be sent on 0-RTT packets.
@@ -1003,8 +1003,7 @@ impl std::fmt::Debug for Frame {
             Self::Stream { stream_id, data } => {
                 write!(
                     f,
-                    "STREAM id={} off={} len={} fin={}",
-                    stream_id,
+                    "STREAM id={stream_id} off={} len={} fin={}",
                     data.off(),
                     data.len(),
                     data.fin()
@@ -1251,7 +1250,7 @@ fn parse_stream_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
     Ok(Frame::Stream { stream_id, data })
 }
 
-pub(crate) fn parse_datagram_payload<'a>(
+pub fn parse_datagram_payload<'a>(
     ty: u64, b: &mut octets::Octets<'a>,
 ) -> Result<octets::Octets<'a>> {
     if ty & 0x01 != 0 {
