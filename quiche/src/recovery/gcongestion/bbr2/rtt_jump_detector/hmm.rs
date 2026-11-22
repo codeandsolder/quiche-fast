@@ -238,7 +238,7 @@ pub(super) struct HmmDetector {
     /// Count of valid RTT samples fed to the HMM detector.
     valid_samples: u32,
     /// Count of warmup samples that carried usable dispersion information.
-    warmup_contrib: u32,
+    warmup_contrib: u8,
     /// Online per-connection estimate of the elevation the connection operates
     /// at above the running-min baseline.
     dispersion: f32,
@@ -286,7 +286,7 @@ impl HmmDetector {
             if rel > 0.0 {
                 self.warmup_contrib = self.warmup_contrib.saturating_add(1);
                 self.dispersion +=
-                    (rel - self.dispersion) / self.warmup_contrib as f32;
+                    (rel - self.dispersion) / f32::from(self.warmup_contrib);
             }
             self.update_baseline(rtt_sample);
             return RttJumpUpdate::None;

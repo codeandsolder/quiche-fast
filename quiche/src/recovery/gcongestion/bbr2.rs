@@ -807,16 +807,19 @@ impl CongestionControl for BBRv2 {
     fn update_mss(&mut self, new_mss: usize) {
         let old_mss = self.mss;
         let scale = |window: usize| {
-            let scaled = window as u128 * new_mss as u128 / old_mss as u128;
-            usize::try_from(scaled).unwrap_or(usize::MAX)
+            crate::scale::scale_ratio_usize(
+                window,
+                u64::try_from(new_mss).unwrap_or(u64::MAX),
+                u64::try_from(old_mss).unwrap_or(u64::MAX),
+                crate::scale::Rounding::Down,
+            )
         };
         self.cwnd_limits.hi = scale(self.cwnd_limits.hi);
         self.cwnd_limits.lo = scale(self.cwnd_limits.lo);
         self.cwnd = scale(self.cwnd);
         self.initial_cwnd = scale(self.initial_cwnd);
         if self.params.scale_pacing_rate_by_mss {
-            self.pacing_rate =
-                self.pacing_rate * (new_mss as f64 / self.mss as f64);
+            self.pacing_rate = self.pacing_rate.scale_ratio(new_mss, old_mss);
         }
         self.mss = new_mss;
     }
