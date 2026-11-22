@@ -37,7 +37,6 @@ use super::Sent;
 
 use super::Congestion;
 use super::CongestionControlOps;
-use crate::recovery::LOSS_REDUCTION_FACTOR;
 use crate::recovery::MINIMUM_WINDOW_PACKETS;
 
 pub static RENO: CongestionControlOps = CongestionControlOps {
@@ -125,16 +124,14 @@ fn congestion_event(
     if !r.in_congestion_recovery(time_sent) {
         r.congestion_recovery_start_time = Some(now);
 
-        r.congestion_window =
-            (r.congestion_window as f64 * LOSS_REDUCTION_FACTOR) as usize;
+        r.congestion_window = r.congestion_window / 2;
 
         r.congestion_window = cmp::max(
             r.congestion_window,
             r.max_datagram_size.saturating_mul(MINIMUM_WINDOW_PACKETS),
         );
 
-        r.bytes_acked_ca =
-            (r.congestion_window as f64 * LOSS_REDUCTION_FACTOR) as usize;
+        r.bytes_acked_ca = r.congestion_window / 2;
 
         r.ssthresh.update(r.congestion_window, r.hystart.in_css());
 
@@ -312,6 +309,17 @@ mod tests {
     }
 
     #[test]
+    fn reno_loss_reduction_is_exact_at_width_limit() {
+        let mut sender = test_sender();
+        let size = sender.max_datagram_size;
+        sender.congestion_window = usize::MAX;
+        sender.send_packet(size);
+        sender.lose_n_packets(1, size, None);
+        assert_eq!(sender.congestion_window, usize::MAX / 2);
+        assert_eq!(sender.bytes_acked_ca, usize::MAX / 4);
+    }
+
+    #[test]
     fn reno_congestion_avoidance() {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -328,7 +336,7 @@ mod tests {
         sender.lose_n_packets(1, size, None);
 
         // After congestion event, cwnd will be reduced.
-        let cur_cwnd = (prev_cwnd as f64 * LOSS_REDUCTION_FACTOR) as usize;
+        let cur_cwnd = prev_cwnd / 2;
         assert_eq!(sender.congestion_window, cur_cwnd);
 
         sender.update_rtt(rtt);

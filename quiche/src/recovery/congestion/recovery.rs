@@ -1198,7 +1198,7 @@ pub struct Acked {
 
     pub rtt: Duration,
 
-    pub delivered: usize,
+    pub delivered: u64,
 
     pub delivered_time: Instant,
 

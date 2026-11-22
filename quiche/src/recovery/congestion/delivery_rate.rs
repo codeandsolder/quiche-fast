@@ -39,7 +39,7 @@ use super::Sent;
 
 #[derive(Debug)]
 pub struct Rate {
-    delivered: usize,
+    delivered: u64,
 
     delivered_time: Instant,
 
@@ -102,7 +102,7 @@ impl Rate {
 
     // Update the delivery rate sample when a packet is acked.
     pub fn update_rate_sample(&mut self, pkt: &Acked, now: Instant) {
-        self.delivered += pkt.size;
+        self.delivered = self.delivered.saturating_add(pkt.size as u64);
         self.delivered_time = now;
 
         // Update info using the newest packet. If rate_sample is not yet
@@ -150,14 +150,10 @@ impl Rate {
             }
 
             if !interval.is_zero() {
-                let rate_sample_bandwidth = {
-                    let rate_sample_bytes_per_second = (self.rate_sample.delivered
-                        as f64 /
-                        interval.as_secs_f64())
-                        as u64;
-
-                    Bandwidth::from_bytes_per_second(rate_sample_bytes_per_second)
-                };
+                let rate_sample_bandwidth = Bandwidth::from_bytes_and_time_delta(
+                    self.rate_sample.delivered,
+                    interval,
+                );
 
                 // Match the [linux] implementation and only generate a new
                 // sample delivery rate if either:
@@ -188,7 +184,7 @@ impl Rate {
     }
 
     #[cfg(test)]
-    pub fn delivered(&self) -> usize {
+    pub fn delivered(&self) -> u64 {
         self.delivered
     }
 
@@ -211,9 +207,9 @@ struct RateSample {
 
     interval: Duration,
 
-    delivered: usize,
+    delivered: u64,
 
-    prior_delivered: usize,
+    prior_delivered: u64,
 
     prior_time: Option<Instant>,
 
@@ -253,6 +249,33 @@ mod tests {
     use crate::Config;
     use crate::OnAckReceivedOutcome;
     use std::ops::Range;
+
+    #[test]
+    fn legacy_delivery_rate_crosses_four_gib() {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let mut r = LegacyRecovery::new(&config);
+        let now = Instant::now();
+        let mss = r.max_datagram_size();
+        let baseline = u64::from(u32::MAX) - 100;
+        r.congestion.delivery_rate.delivered = baseline;
+        let interval = Duration::from_millis(100);
+        helper_send_and_ack_packets(&mut r, 0..2, now, interval, mss);
+        let delivered = 2 * mss as u64;
+        assert_eq!(r.congestion.delivery_rate.delivered(), baseline + delivered);
+        assert_eq!(
+            r.delivery_rate(),
+            Bandwidth::from_bytes_and_time_delta(delivered, interval)
+        );
+        helper_send_and_ack_packets(&mut r, 2..4, now + interval, interval, mss);
+        assert_eq!(
+            r.congestion.delivery_rate.delivered(),
+            baseline + 2 * delivered
+        );
+        assert_eq!(
+            r.delivery_rate(),
+            Bandwidth::from_bytes_and_time_delta(delivered, interval)
+        );
+    }
 
     // A `RateSample` generated while `Rate` is app-limited inherits that state.
     //

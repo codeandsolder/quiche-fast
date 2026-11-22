@@ -94,8 +94,6 @@ const MINIMUM_WINDOW_PACKETS: usize = 2;
 // https://www.rfc-editor.org/rfc/rfc9002.html#section-7.6.1
 const PERSISTENT_CONGESTION_THRESHOLD: u32 = 3;
 
-const LOSS_REDUCTION_FACTOR: f64 = 0.5;
-
 // How many non ACK eliciting packets we send before including a PING to solicit
 // an ACK.
 pub(super) const MAX_OUTSTANDING_NON_ACK_ELICITING: usize = 24;
@@ -517,7 +515,7 @@ pub struct Sent {
 
     pub in_flight: bool,
 
-    pub delivered: usize,
+    pub delivered: u64,
 
     pub delivered_time: Instant,
 
