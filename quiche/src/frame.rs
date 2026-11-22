@@ -53,17 +53,14 @@ pub trait FrameSink {
         self.put_varint_with_len(value, octets::varint_len(value))
     }
 
-    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()>;
+    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
+        self.put_bytes(octets::EncodedVarint::with_len(value, len)?.as_ref())
+    }
     fn put_bytes(&mut self, value: &[u8]) -> Result<()>;
     fn put_padding(&mut self, len: usize) -> Result<()>;
 }
 
 impl FrameSink for octets::OctetsMut<'_> {
-    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
-        octets::OctetsMut::put_varint_with_len(self, value, len)?;
-        Ok(())
-    }
-
     fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
         octets::OctetsMut::put_bytes(self, value)?;
         Ok(())
@@ -88,18 +85,6 @@ impl FrameSizer {
 }
 
 impl FrameSink for FrameSizer {
-    fn put_varint_with_len(&mut self, value: u64, len: usize) -> Result<()> {
-        if !matches!(len, 1 | 2 | 4 | 8) ||
-            value > octets::MAX_VAR_INT ||
-            octets::varint_len(value) > len
-        {
-            return Err(Error::BufferTooShort);
-        }
-        // All callers supply the natural varint width or the fixed two-byte
-        // payload length specified by the stream/crypto/datagram schema.
-        self.add(len)
-    }
-
     fn put_bytes(&mut self, value: &[u8]) -> Result<()> {
         self.add(value.len())
     }

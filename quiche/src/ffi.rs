@@ -2683,11 +2683,9 @@ pub extern "C" fn quiche_put_varint(
 ) -> c_int {
     let mut buf =
         ffi_slice_out!(buf, buf_len, c_int::from(FFI_ERR_INVALID_ARGUMENT));
-    let mut encoded = [0; 8];
-    let mut b = octets::OctetsMut::with_slice(&mut encoded);
-    match b.put_varint(val) {
-        Ok(bytes) if bytes.len() <= buf.len() => {
-            buf.put_slice(bytes);
+    match octets::EncodedVarint::new(val) {
+        Ok(encoded) if encoded.as_ref().len() <= buf.len() => {
+            buf.put_slice(encoded.as_ref());
             0
         },
         Ok(_) => c_int::from(Error::BufferTooShort.to_c()),

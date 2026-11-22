@@ -378,6 +378,51 @@ fn varint_too_large() {
 }
 
 #[test]
+fn encoded_varint_width_boundaries() {
+    for width in 0..=10 {
+        for value in [
+            0,
+            1,
+            63,
+            64,
+            16383,
+            16384,
+            (1 << 30) - 1,
+            1 << 30,
+            octets::MAX_VAR_INT,
+            octets::MAX_VAR_INT + 1,
+            u64::MAX,
+        ] {
+            let expected = matches!(width, 1 | 2 | 4 | 8) &&
+                value <= octets::MAX_VAR_INT &&
+                octets::varint_len(value) <= width;
+            let encoded = octets::EncodedVarint::with_len(value, width);
+            assert_eq!(encoded.is_ok(), expected);
+
+            let mut storage = [0xa5; 9];
+            let mut writer = OctetsMut::with_slice(&mut storage);
+            let actual = writer.put_varint_with_len(value, width);
+            assert_eq!(actual.is_ok(), expected);
+
+            if let Ok(encoded) = encoded {
+                let bytes = encoded.as_ref();
+                assert_eq!(bytes.len(), width);
+                assert_eq!(actual.unwrap(), bytes);
+                assert_eq!(writer.off(), width);
+                let mut reader = Octets::with_slice(bytes);
+                assert_eq!(reader.get_varint(), Ok(value));
+                assert_eq!(reader.cap(), 0);
+                assert_eq!(octets::varint_parse_len(bytes[0]), width);
+                assert_eq!(&storage[width..], &vec![0xa5; 9 - width]);
+            } else {
+                assert_eq!(writer.off(), 0);
+                assert_eq!(storage, [0xa5; 9]);
+            }
+        }
+    }
+}
+
+#[test]
 fn put_varint_with_len_rejects_invalid_values() {
     let mut storage = [0_u8; 8];
     let mut b = OctetsMut::with_slice(&mut storage);
