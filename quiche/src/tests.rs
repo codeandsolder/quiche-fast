@@ -634,6 +634,41 @@ fn handshake_resumption(
     config.set_initial_max_streams_bidi(3);
     config.set_ticket_key(&SESSION_TICKET_KEY).unwrap();
 
+    // Use a genuine resumable session so a truncated 64-bit length would
+    // otherwise select valid TLS bytes/transport parameters on 32-bit targets.
+    let session_len = u64::from_be_bytes(session[..8].try_into().unwrap());
+    let params_offset = 8 + usize::try_from(session_len).unwrap();
+    let params_len = u64::from_be_bytes(
+        session[params_offset..params_offset + 8]
+            .try_into()
+            .unwrap(),
+    );
+    let mut oversized_session = session.to_vec();
+    oversized_session[..8]
+        .copy_from_slice(&(session_len + (1_u64 << 32)).to_be_bytes());
+    let mut oversized_params = session.to_vec();
+    oversized_params[params_offset..params_offset + 8]
+        .copy_from_slice(&(params_len + (1_u64 << 32)).to_be_bytes());
+
+    for malformed in [
+        oversized_session.as_slice(),
+        oversized_params.as_slice(),
+        &session[..params_offset + 7],
+        &session[..session.len() - 1],
+    ] {
+        let mut rejected =
+            test_utils::Pipe::with_server_config(&mut config).unwrap();
+        let original_params = rejected.client.peer_transport_params.clone();
+        assert_eq!(
+            rejected.client.set_session(malformed),
+            Err(Error::BufferTooShort),
+        );
+        assert_eq!(rejected.client.peer_transport_params, original_params);
+        rejected.handshake().unwrap();
+        assert!(!rejected.client.is_resumed());
+        assert!(!rejected.server.is_resumed());
+    }
+
     let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
 
     assert_eq!(pipe.client.set_session(session), Ok(()));

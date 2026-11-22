@@ -2418,17 +2418,24 @@ impl<F: BufFactory> Connection<F> {
     /// This must only be called immediately after creating a connection, that
     /// is, before any packet is sent or received.
     ///
+    ///
+    /// # Errors
+    /// Returns [`Error::BufferTooShort`] if a serialized field is truncated
+    /// or its declared length cannot fit in the target's address space.
+    /// Returns the transport parameter decoding or TLS error if the stored
+    /// parameters or session are invalid.
+    ///
     /// [`session()`]: struct.Connection.html#method.session
     #[inline]
     pub fn set_session(&mut self, session: &[u8]) -> Result<()> {
         let mut b = octets::Octets::with_slice(session);
 
-        let session_len = b.get_u64()? as usize;
+        let session_len =
+            usize::try_from(b.get_u64()?).map_err(|_| Error::BufferTooShort)?;
         let session_bytes = b.get_bytes(session_len)?;
 
-        self.handshake.set_session(session_bytes.as_ref())?;
-
-        let raw_params_len = b.get_u64()? as usize;
+        let raw_params_len =
+            usize::try_from(b.get_u64()?).map_err(|_| Error::BufferTooShort)?;
         let raw_params_bytes = b.get_bytes(raw_params_len)?;
 
         let peer_params = TransportParams::decode(
@@ -2437,6 +2444,10 @@ impl<F: BufFactory> Connection<F> {
             self.peer_transport_params_track_unknown,
         )?;
 
+        // Validate both serialized fields before installing the TLS session.
+        // In particular, a malformed transport-parameter suffix must not
+        // leave a usable resumption ticket configured on error.
+        self.handshake.set_session(session_bytes.as_ref())?;
         self.process_peer_transport_params(peer_params)?;
 
         Ok(())
