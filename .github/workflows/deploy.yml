@@ -7,7 +7,6 @@ name: Deploy
 
 env:
   RUSTDOCFLAGS: "--cfg docsrs"
-  RUST_NIGHTLY_TOOLCHAIN: "nightly-2026-11-22"
 
 concurrency:
   group: deploy-${{ github.ref }}
@@ -22,15 +21,20 @@ jobs:
       - name: Checkout sources
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
-        with:
-          rust-toolchain: ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
+      - name: Resolve quarantined compiler
+        id: compiler
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
-      - name: Install pinned Rust nightly
+      - name: Install repository compiler
         uses: dtolnay/rust-toolchain@0e28dd9a7764e5f83064112bb1f24025a14c313c
         with:
-          toolchain: ${{ env.RUST_NIGHTLY_TOOLCHAIN }}
+          toolchain: ${{ steps.compiler.outputs.channel }}
+          components: clippy,rustfmt
+
+      - name: Setup mandatory sccache
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        with:
+          rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
       - name: Install qlog-dancer dependencies
         run: |
@@ -38,7 +42,7 @@ jobs:
           sudo apt-get install libexpat1-dev libfreetype6-dev libfontconfig1-dev
 
       - name: Run cargo doc
-        run: cargo +"$RUST_NIGHTLY_TOOLCHAIN" doc --no-deps --all-features
+        run: cargo doc --no-deps --all-features
 
       - name: Deploy to GitHub Pages
         uses: crazy-max/ghaction-github-pages@1d6ee9b181a81033a16bd707a1401afa978daab4 # v5
@@ -51,7 +55,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@ecf97ef6708aaba39d6afad83bb82ebcca84723a # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   docker:
     runs-on: ubuntu-latest

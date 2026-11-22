@@ -75,7 +75,7 @@ quiche  datagram-socket  qlog-dancer        (Layer 1)
 ## CONVENTIONS
 
 - **Line width 82** (`rustfmt.toml`), comments 80. Nightly rustfmt required.
-- **MANDATORY: run `cargo +nightly fmt` after every code change, no exceptions** -- this includes trivial edits like renames, comment changes, or single-line fixes.
+- **MANDATORY: run `cargo fmt` after every code change, no exceptions** -- this includes trivial edits like renames, comment changes, or single-line fixes.
 - **One `use` per item** (`imports_granularity = "Item"`, vertical layout).
 - **`pub(crate)`** for cross-module internals; `pub` only for true public API.
 - **BSD-2-Clause copyright header** on every `.rs` file.
@@ -116,7 +116,7 @@ cargo test --doc --features=async,ffi,qlog --workspace          # doc tests (sep
 
 # Lint
 cargo clippy --features=async,ffi,qlog --workspace -- -D warnings
-cargo +nightly fmt -- --check                                  
+cargo fmt -- --check
 
 # Fuzz
 cargo fuzz run packet_recv_client -- -runs=1
@@ -128,7 +128,7 @@ make docker-build                                     # quiche-base + quiche-qns
 ## NOTES
 
 - **No git submodules**: BoringSSL is built by `btls-sys`; `cmake` must be available.
-- **MSRV 1.88**: `rust-version` field in Cargo.toml.
+- **Compiler:** use the fleet-approved dated nightly in root `rust-toolchain.toml`; all routine CI and local development use this pin.
 - **Doc tests are separate**: `cargo test --all-targets` does NOT run doc tests (cargo#6669).
 - **`BORING_BSSL_PATH`**: env var to point `btls-sys` at a custom BoringSSL source tree.
 - **`RUSTFLAGS="-D warnings"`**: CI enforces; all warnings are errors.

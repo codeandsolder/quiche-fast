@@ -2,6 +2,9 @@ FROM rust:1.100.0@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f0
 
 WORKDIR /build
 
+COPY rust-toolchain.toml ./
+COPY Cargo.lock ./
+
 COPY Cargo.toml ./
 COPY apps/ ./apps/
 COPY buffer-pool ./buffer-pool/
@@ -18,7 +21,7 @@ COPY tokio-quiche ./tokio-quiche/
 # clang and cmake are required by btls-sys to build BoringSSL.
 RUN apt-get update && apt-get install -y clang cmake && rm -rf /var/lib/apt/lists/*
 
-RUN cargo build --release --manifest-path apps/Cargo.toml
+RUN cargo build --locked --release --manifest-path apps/Cargo.toml
 
 ##
 ## quiche-base: quiche image for apps

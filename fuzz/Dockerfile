@@ -2,6 +2,9 @@ FROM rustlang/rust:nightly@sha256:804de53425cd96dad8b6447ee5e8cfae1e0fbd11bd0983
 
 WORKDIR /build
 
+COPY rust-toolchain.toml ./
+COPY Cargo.lock ./
+
 COPY Cargo.toml Cargo.toml
 COPY Makefile Makefile
 COPY apps/ ./apps/

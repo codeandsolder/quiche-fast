@@ -305,8 +305,9 @@ is disabled by default), by passing ``--features ffi`` to ``cargo``.
 Building
 --------
 
-quiche requires Rust 1.88 or later to build. The latest stable Rust release can
-be installed using [rustup](https://rustup.rs/).
+This fork uses the fleet-approved dated Rust nightly in the root
+`rust-toolchain.toml`. Install [rustup](https://rustup.rs/); Cargo automatically
+selects the pinned toolchain from the checkout.
 
 Once the Rust build environment is setup, the quiche source code can be fetched
 using git:
