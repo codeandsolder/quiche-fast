@@ -237,14 +237,45 @@ pub enum Frame {
     },
 }
 
-impl Frame {
-    pub fn from_bytes(b: &mut octets::Octets, pkt: packet::Type) -> Result<Self> {
-        let frame_type = b.get_varint()?;
-        Self::from_bytes_with_type(frame_type, b, pkt)
+/// Read and validate a frame type before interpreting any type-dependent
+/// payload. RFC 9000 sections 12.4–12.5 and RFC 9221 section 4.
+pub(crate) fn read_frame_type(
+    b: &mut octets::Octets, pkt: packet::Type,
+) -> Result<u64> {
+    let before = b.off();
+    let ty = b.get_varint()?;
+    if !matches!(ty, 0x00..=0x1e | 0x30 | 0x31) {
+        return Err(Error::InvalidFrame);
+    }
+    // Every currently supported frame type fits in a single byte. Other
+    // varints in the frame payload may use any legal encoding width.
+    if b.off() - before != octets::varint_len(ty) {
+        return Err(Error::InvalidPacket);
     }
 
+    let allowed = match pkt {
+        packet::Type::Initial | packet::Type::Handshake =>
+            matches!(ty, 0x00..=0x03 | 0x06 | 0x1c),
+        packet::Type::ZeroRTT =>
+            !matches!(ty, 0x02 | 0x03 | 0x06 | 0x07 | 0x19 | 0x1b | 0x1e),
+        packet::Type::Short => true,
+        packet::Type::Retry | packet::Type::VersionNegotiation => false,
+    };
+    if !allowed {
+        return Err(Error::InvalidPacket);
+    }
+    Ok(ty)
+}
+
+impl Frame {
+    pub fn from_bytes(b: &mut octets::Octets, pkt: packet::Type) -> Result<Self> {
+        let frame_type = read_frame_type(b, pkt)?;
+        Self::from_bytes_with_type(frame_type, b)
+    }
+
+    /// Decode the payload after read_frame_type has validated the type.
     pub(crate) fn from_bytes_with_type(
-        frame_type: u64, b: &mut octets::Octets, pkt: packet::Type,
+        frame_type: u64, b: &mut octets::Octets,
     ) -> Result<Self> {
         let frame = match frame_type {
             0x00 => {
@@ -388,38 +419,6 @@ impl Frame {
 
             _ => return Err(Error::InvalidFrame),
         };
-
-        let allowed = match (pkt, &frame) {
-            // PADDING and PING are allowed on all packet types.
-            (_, Self::Padding { .. } | Self::Ping { .. }) => true,
-
-            // ACK, CRYPTO, HANDSHAKE_DONE, NEW_TOKEN, PATH_RESPONSE, and
-            // RETIRE_CONNECTION_ID can't be sent on 0-RTT packets.
-            (packet::Type::ZeroRTT, Self::ACK { .. }) => false,
-            (packet::Type::ZeroRTT, Self::Crypto { .. }) => false,
-            (packet::Type::ZeroRTT, Self::HandshakeDone) => false,
-            (packet::Type::ZeroRTT, Self::NewToken { .. }) => false,
-            (packet::Type::ZeroRTT, Self::PathResponse { .. }) => false,
-            (packet::Type::ZeroRTT, Self::RetireConnectionId { .. }) => false,
-            (packet::Type::ZeroRTT, Self::ConnectionClose { .. }) => false,
-
-            // ACK, CRYPTO and CONNECTION_CLOSE can be sent on all other packet
-            // types.
-            (_, Self::ACK { .. }) => true,
-            (_, Self::Crypto { .. }) => true,
-            (_, Self::ConnectionClose { .. }) => true,
-
-            // All frames are allowed on 0-RTT and 1-RTT packets.
-            (packet::Type::Short, _) => true,
-            (packet::Type::ZeroRTT, _) => true,
-
-            // All other cases are forbidden.
-            (..) => false,
-        };
-
-        if !allowed {
-            return Err(Error::InvalidPacket);
-        }
 
         Ok(frame)
     }
@@ -1290,6 +1289,70 @@ mod tests {
     }
 
     #[test]
+    fn frame_type_validation_matches_packet_spaces() {
+        use packet::Type::Handshake;
+        use packet::Type::Initial;
+        use packet::Type::Retry;
+        use packet::Type::Short;
+        use packet::Type::VersionNegotiation;
+        use packet::Type::ZeroRTT;
+        let cases = [
+            (Initial, &[0, 1, 2, 3, 6, 0x1c][..]),
+            (Handshake, &[0, 1, 2, 3, 6, 0x1c][..]),
+            (
+                ZeroRTT,
+                &[
+                    0, 1, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+                    21, 22, 23, 24, 26, 28, 29, 48, 49,
+                ][..],
+            ),
+            (Short, &(0..=30).chain([48, 49]).collect::<Vec<_>>()[..]),
+            (Retry, &[][..]),
+            (VersionNegotiation, &[][..]),
+        ];
+        for (packet, allowed) in cases {
+            for ty in 0_u8..=63 {
+                let wire = [ty];
+                let mut reader = octets::Octets::with_slice(&wire);
+                let expected = if allowed.contains(&ty) {
+                    Ok(u64::from(ty))
+                } else if matches!(ty, 0..=30 | 48 | 49) {
+                    Err(Error::InvalidPacket)
+                } else {
+                    Err(Error::InvalidFrame)
+                };
+                assert_eq!(
+                    read_frame_type(&mut reader, packet),
+                    expected,
+                    "{packet:?} type {ty:#x}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_frame_type_requires_minimal_varint_encoding() {
+        for ty in [0_u64, 1, 0x08, 0x1c, 0x30, 0x31] {
+            for width in [2, 4, 8] {
+                let mut wire = [0; 16];
+                let mut writer = octets::OctetsMut::with_slice(&mut wire);
+                writer.put_varint_with_len(ty, width).unwrap();
+                let mut reader = octets::Octets::with_slice(&wire[..width]);
+                assert_eq!(
+                    Frame::from_bytes(&mut reader, packet::Type::Short),
+                    Err(Error::InvalidPacket)
+                );
+            }
+        }
+        // A non-minimal encoding of a frame field remains legal.
+        let mut reader = octets::Octets::with_slice(&[0x10, 0x40, 0x01]);
+        assert_eq!(
+            Frame::from_bytes(&mut reader, packet::Type::Short),
+            Ok(Frame::MaxData { max: 1 })
+        );
+    }
+
+    #[test]
     fn rejects_invalid_frame_layouts_consistently() {
         let mut ranges = ranges::RangeSet::default();
         ranges.insert(octets::MAX_VAR_INT + 1..octets::MAX_VAR_INT + 2);
@@ -1694,6 +1757,7 @@ mod tests {
         assert_roundtrip(&frame, &mut d, 22, &[
             packet::Type::Initial,
             packet::Type::Handshake,
+            packet::Type::ZeroRTT,
         ]);
     }
 

@@ -3747,15 +3747,9 @@ impl<F: BufFactory> Connection<F> {
                 // Decode the frame type only once. DATAGRAM payloads can then
                 // be consumed in place before the receive buffer is reused,
                 // while every other frame follows the normal parser path.
-                let frame_type = payload.get_varint()?;
+                let frame_type = frame::read_frame_type(&mut payload, hdr.ty)?;
 
                 if matches!(frame_type, 0x30 | 0x31) {
-                    // DATAGRAM frames are only valid in 0-RTT and 1-RTT
-                    // packets.
-                    if hdr.ty != Type::Short && hdr.ty != Type::ZeroRTT {
-                        return Err(Error::InvalidPacket);
-                    }
-
                     let data =
                         frame::parse_datagram_payload(frame_type, &mut payload)?;
 
@@ -3783,11 +3777,7 @@ impl<F: BufFactory> Connection<F> {
                     continue;
                 }
 
-                frame::Frame::from_bytes_with_type(
-                    frame_type,
-                    &mut payload,
-                    hdr.ty,
-                )?
+                frame::Frame::from_bytes_with_type(frame_type, &mut payload)?
             } else {
                 frame::Frame::from_bytes(&mut payload, hdr.ty)?
             };
