@@ -2479,48 +2479,24 @@ fn stream_left(
 }
 
 #[rstest]
-fn stream_limit_bidi(
+fn stream_limit(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] uni: bool,
 ) {
     let mut buf = [0; 65535];
-
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    let frames = [
-        frame::Frame::Stream {
-            stream_id: 4,
-            data: <RangeBuf>::from(b"a", 0, false),
+    let frames = std::array::from_fn::<_, 7, _>(|i| frame::Frame::Stream {
+        stream_id: if uni {
+            2 + 4 * i as u64
+        } else {
+            4 + 4 * i as u64
         },
-        frame::Frame::Stream {
-            stream_id: 8,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 12,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 16,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 20,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 24,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 28,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-    ];
-
-    let pkt_type = Type::Short;
+        data: <RangeBuf>::from(b"a", 0, false),
+    });
     assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
+        pipe.send_pkt_to_server(Type::Short, &frames, &mut buf),
         Err(Error::StreamLimit),
     );
 }
@@ -2554,53 +2530,6 @@ fn stream_count_frame_bounds(
             &mut buf
         ),
         Err(Error::InvalidFrame),
-    );
-}
-
-#[rstest]
-fn stream_limit_uni(
-    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
-) {
-    let mut buf = [0; 65535];
-
-    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
-    assert_eq!(pipe.handshake(), Ok(()));
-
-    let frames = [
-        frame::Frame::Stream {
-            stream_id: 2,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 6,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 10,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 14,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 18,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 22,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-        frame::Frame::Stream {
-            stream_id: 26,
-            data: <RangeBuf>::from(b"a", 0, false),
-        },
-    ];
-
-    let pkt_type = Type::Short;
-    assert_eq!(
-        pipe.send_pkt_to_server(pkt_type, &frames, &mut buf),
-        Err(Error::StreamLimit),
     );
 }
 
