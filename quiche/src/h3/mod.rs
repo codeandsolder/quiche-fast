@@ -2724,15 +2724,9 @@ impl Connection {
         while let Some(stream) = self.streams.get_mut(&stream_id) {
             match stream.state() {
                 stream::State::StreamType => {
-                    stream.try_fill_buffer(conn)?;
+                    let varint = stream.read_varint(conn)?;
 
-                    let varint = match stream.try_consume_varint() {
-                        Ok(v) => v,
-
-                        Err(_) => continue,
-                    };
-
-                    let ty = stream::Type::deserialize(varint)?;
+                    let ty = stream::Type::deserialize(varint);
 
                     if let Err(e) = stream.set_ty(ty) {
                         conn.close(true, e.to_wire(), b"")?;
@@ -2849,13 +2843,7 @@ impl Connection {
                 },
 
                 stream::State::PushId => {
-                    stream.try_fill_buffer(conn)?;
-
-                    let varint = match stream.try_consume_varint() {
-                        Ok(v) => v,
-
-                        Err(_) => continue,
-                    };
+                    let varint = stream.read_varint(conn)?;
 
                     if let Err(e) = stream.set_push_id(varint) {
                         conn.close(true, e.to_wire(), b"")?;
@@ -2864,13 +2852,7 @@ impl Connection {
                 },
 
                 stream::State::FrameType => {
-                    stream.try_fill_buffer(conn)?;
-
-                    let varint = match stream.try_consume_varint() {
-                        Ok(v) => v,
-
-                        Err(_) => continue,
-                    };
+                    let varint = stream.read_varint(conn)?;
 
                     match stream.set_frame_type(varint) {
                         Err(Error::FrameUnexpected) => {
@@ -2900,13 +2882,7 @@ impl Connection {
                 },
 
                 stream::State::FramePayloadLen => {
-                    stream.try_fill_buffer(conn)?;
-
-                    let payload_len = match stream.try_consume_varint() {
-                        Ok(v) => v,
-
-                        Err(_) => continue,
-                    };
+                    let payload_len = stream.read_varint(conn)?;
 
                     // DATA frames are handled uniquely. Log them here because
                     // DATA framing is no longer visible after this point.
