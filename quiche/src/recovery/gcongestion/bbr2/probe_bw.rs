@@ -82,7 +82,7 @@ impl ModeImpl for ProbeBW {
         match self.cycle.phase {
             CyclePhase::NotStarted => {
                 // First time entering PROBE_BW. Start a new probing cycle.
-                self.enter_probe_down(false, false, now, params)
+                self.enter_probe_down(false, false, now, params);
             },
             CyclePhase::Cruise => self.enter_probe_cruise(now),
             CyclePhase::Refill =>
@@ -597,26 +597,25 @@ impl ProbeBW {
             // When inflight_hi is disabled in PROBE_UP, it increases when
             // the number of bytes delivered in a round is larger inflight_hi.
             return;
-        } else {
-            // TODO(vlad): probe_up_simplify_inflight_hi?
-            // A full DATAGRAM cannot be split to fill the last bytes of cwnd.
-            // Treat a sub-packet remainder as congestion-window limited, using
-            // the current path MSS so this remains valid after PMTU changes.
-            // Requiring exact utilization can prevent inflight_hi from growing
-            // even when the application has queued datagrams.
-            if congestion_event
-                .prior_cwnd
-                .saturating_sub(congestion_event.prior_bytes_in_flight) >=
-                congestion_event.max_datagram_size
-            {
-                // At least one full packet still fits: do not grow the bound.
-                return;
-            }
+        }
+        // TODO(vlad): probe_up_simplify_inflight_hi?
+        // A full DATAGRAM cannot be split to fill the last bytes of cwnd.
+        // Treat a sub-packet remainder as congestion-window limited, using
+        // the current path MSS so this remains valid after PMTU changes.
+        // Requiring exact utilization can prevent inflight_hi from growing
+        // even when the application has queued datagrams.
+        if congestion_event
+            .prior_cwnd
+            .saturating_sub(congestion_event.prior_bytes_in_flight) >=
+            congestion_event.max_datagram_size
+        {
+            // At least one full packet still fits: do not grow the bound.
+            return;
+        }
 
-            if congestion_event.prior_cwnd < self.model.inflight_hi() {
-                // Not fully using inflight_hi, so don't grow it.
-                return;
-            }
+        if congestion_event.prior_cwnd < self.model.inflight_hi() {
+            // Not fully using inflight_hi, so don't grow it.
+            return;
         }
 
         let acked = congestion_event.bytes_acked;

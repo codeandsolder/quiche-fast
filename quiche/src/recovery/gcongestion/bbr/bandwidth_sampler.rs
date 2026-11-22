@@ -54,7 +54,7 @@ impl<T> Default for ConnectionStateMap<T> {
 impl<T> ConnectionStateMap<T> {
     fn insert(&mut self, pkt_num: u64, val: T) {
         if let Some((last_pkt, _)) = self.packet_map.back() {
-            assert!(pkt_num > *last_pkt, "{} > {}", pkt_num, *last_pkt);
+            assert!(pkt_num > *last_pkt, "{pkt_num} > {}", *last_pkt);
         }
 
         self.packet_map.push_back((pkt_num, Some(val)));
@@ -259,7 +259,7 @@ struct MaxAckHeightTracker {
 /// Measurements collected from a congestion event, used for bandwidth
 /// estimation and congestion control in BBR.
 #[derive(Default)]
-pub(crate) struct CongestionEventSample {
+pub struct CongestionEventSample {
     /// The maximum bandwidth sample from all acked packets.
     pub sample_max_bandwidth: Option<Bandwidth>,
     /// Whether [`Self::sample_max_bandwidth`] is from a app-limited sample.
@@ -288,7 +288,7 @@ pub(crate) struct CongestionEventSample {
 }
 
 impl MaxAckHeightTracker {
-    pub(crate) fn new(window: usize, overestimate_avoidance: bool) -> Self {
+    pub(crate) const fn new(window: usize, overestimate_avoidance: bool) -> Self {
         Self {
             max_ack_height_filter: WindowedFilter::new(window),
             aggregation_epoch_start_time: None,
@@ -419,7 +419,7 @@ impl RecentAckPoints {
     fn update(&mut self, ack_time: Instant, total_bytes_acked: u64) {
         assert!(
             total_bytes_acked >=
-                self.ack_points[1].map(|p| p.total_bytes_acked).unwrap_or(0)
+                self.ack_points[1].map_or(0, |p| p.total_bytes_acked)
         );
 
         self.ack_points[0] = self.ack_points[1];
@@ -797,9 +797,8 @@ impl BandwidthSampler {
             if candidate.total_bytes_acked > total_bytes_acked {
                 if choose_a0_point_fix {
                     break;
-                } else {
-                    return Some(*candidate);
                 }
+                return Some(*candidate);
             }
             a0_candidates.pop_front();
         }

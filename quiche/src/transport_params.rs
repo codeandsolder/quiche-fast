@@ -50,7 +50,7 @@ pub const MAX_ACK_DELAY_EXPONENT: u64 = 20;
 ///
 /// A QUIC transport parameter that is not specifically recognized
 /// by this implementation.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnknownTransportParameter<T> {
     /// The ID of the unknown transport parameter.
     pub id: u64,
@@ -418,7 +418,7 @@ impl TransportParams {
                 Self::encode_param(&mut b, 0x0000, odcid.len())?;
                 b.put_bytes(odcid)?;
             }
-        };
+        }
 
         if tp.max_idle_timeout != 0 {
             assert!(tp.max_idle_timeout <= octets::MAX_VAR_INT);

@@ -196,11 +196,11 @@ impl RecvBuf {
 
             self.len = cmp::max(self.len, buf.max_off());
 
-            if !self.drain {
-                self.data.insert(buf.max_off(), buf);
-            } else {
+            if self.drain {
                 // we are not storing any data, off == len
                 self.off = self.len;
+            } else {
+                self.data.insert(buf.max_off(), buf);
             }
         }
 
@@ -280,7 +280,7 @@ impl RecvBuf {
                     cap <= out.remaining_mut(),
                     "We updated `cap` incorrectly"
                 );
-                out.put_slice(&buf[..buf_len])
+                out.put_slice(&buf[..buf_len]);
             }
 
             self.off += buf_len as u64;
@@ -358,12 +358,12 @@ impl RecvBuf {
     }
 
     /// Return the current flow control limit.
-    pub fn max_data(&self) -> u64 {
+    pub const fn max_data(&self) -> u64 {
         self.flow_control.max_data()
     }
 
     /// Return the current window.
-    pub fn window(&self) -> u64 {
+    pub const fn window(&self) -> u64 {
         self.flow_control.window()
     }
 

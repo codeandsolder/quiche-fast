@@ -103,7 +103,7 @@ impl Hystart {
         self.css_start_time
     }
 
-    pub fn in_css(&self) -> bool {
+    pub const fn in_css(&self) -> bool {
         self.enabled && self.css_start_time().is_some()
     }
 

@@ -241,7 +241,7 @@ impl Pacer {
     }
 
     pub fn on_retransmission_timeout(&mut self, packets_retransmitted: bool) {
-        self.sender.on_retransmission_timeout(packets_retransmitted)
+        self.sender.on_retransmission_timeout(packets_retransmitted);
     }
 
     pub fn pacing_rate(
@@ -282,7 +282,7 @@ impl Pacer {
     }
 
     pub fn update_mss(&mut self, new_mss: usize) {
-        self.sender.update_mss(new_mss)
+        self.sender.update_mss(new_mss);
     }
 
     #[cfg(feature = "qlog")]

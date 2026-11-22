@@ -50,7 +50,7 @@ impl std::ops::Mul<f32> for Bandwidth {
     type Output = Self;
 
     fn mul(self, rhs: f32) -> Self::Output {
-        self * rhs as f64
+        self * f64::from(rhs)
     }
 }
 
@@ -180,7 +180,8 @@ impl Bandwidth {
         }
 
         // Slow path: exact u128 intermediate, then saturate.
-        let nanos = (bytes as u128) * BITS_NANOS_PER_BYTE_U128 / (bps as u128);
+        let nanos =
+            u128::from(bytes) * BITS_NANOS_PER_BYTE_U128 / u128::from(bps);
         Duration::from_nanos(nanos.min(U64_MAX_U128) as u64)
     }
 

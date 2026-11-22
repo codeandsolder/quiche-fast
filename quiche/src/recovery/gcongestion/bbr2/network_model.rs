@@ -71,7 +71,7 @@ impl RoundTripCounter {
     }
 
     const fn restart_round(&mut self) {
-        self.end_of_round_trip = Some(self.last_sent_packet)
+        self.end_of_round_trip = Some(self.last_sent_packet);
     }
 }
 
@@ -282,11 +282,11 @@ impl BBRv2NetworkModel {
         self.bdp1(self.max_bandwidth())
     }
 
-    pub(super) fn min_rtt(&self) -> Duration {
+    pub(super) const fn min_rtt(&self) -> Duration {
         self.min_rtt_filter.get()
     }
 
-    pub(super) fn min_rtt_timestamp(&self) -> Instant {
+    pub(super) const fn min_rtt_timestamp(&self) -> Instant {
         self.min_rtt_filter.get_timestamps()
     }
 
@@ -445,7 +445,7 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) fn on_packet_neutered(&mut self, packet_number: u64) {
-        self.bandwidth_sampler.on_packet_neutered(packet_number)
+        self.bandwidth_sampler.on_packet_neutered(packet_number);
     }
 
     fn adapt_lower_bounds(
@@ -554,7 +554,7 @@ impl BBRv2NetworkModel {
             ));
         } else {
             // Ensure bandwidth_lo isn't lower than last_bandwidth.
-            self.bandwidth_lo = self.bandwidth_lo.max(Some(last_bandwidth))
+            self.bandwidth_lo = self.bandwidth_lo.max(Some(last_bandwidth));
         }
         // At the end of a round, ensure `bandwidth_lo` does not decrease by
         // more than `beta`.
@@ -563,7 +563,7 @@ impl BBRv2NetworkModel {
                 self.prior_bandwidth_lo
                     .take()
                     .map(|b| b * (1.0 - params.beta)),
-            )
+            );
         }
         // These modes ignore inflight_lo as well.
     }
@@ -632,7 +632,7 @@ impl BBRv2NetworkModel {
         false
     }
 
-    pub(super) fn restart_round_early(&mut self) {
+    pub(super) const fn restart_round_early(&mut self) {
         self.on_new_round();
         self.round_trip_counter.restart_round();
         self.rounds_with_queueing = 0;
@@ -710,17 +710,17 @@ impl BBRv2NetworkModel {
         self.max_bytes_delivered_in_round
     }
 
-    pub(super) fn total_bytes_acked(&self) -> u64 {
+    pub(super) const fn total_bytes_acked(&self) -> u64 {
         self.bandwidth_sampler.total_bytes_acked()
     }
 
-    pub(super) fn total_bytes_lost(&self) -> u64 {
+    pub(super) const fn total_bytes_lost(&self) -> u64 {
         self.bandwidth_sampler.total_bytes_lost()
     }
 
     /// Total number of confirmed persistent RTT jump episodes over the
     /// lifetime of the connection.
-    pub(super) fn rtt_persistent_jump_count(&self) -> u64 {
+    pub(super) const fn rtt_persistent_jump_count(&self) -> u64 {
         self.rtt_jump_detector.rtt_persistent_jump_count()
     }
 
@@ -754,7 +754,7 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) const fn set_full_bandwidth_reached(&mut self) {
-        self.full_bandwidth_reached = true
+        self.full_bandwidth_reached = true;
     }
 
     pub(super) const fn pacing_gain(&self) -> f32 {
@@ -762,7 +762,7 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) const fn set_pacing_gain(&mut self, pacing_gain: f32) {
-        self.pacing_gain = pacing_gain
+        self.pacing_gain = pacing_gain;
     }
 
     pub(super) const fn cwnd_gain(&self) -> f32 {
@@ -770,7 +770,7 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) const fn set_cwnd_gain(&mut self, cwnd_gain: f32) {
-        self.cwnd_gain = cwnd_gain
+        self.cwnd_gain = cwnd_gain;
     }
 
     pub(super) const fn inflight_hi(&self) -> usize {
@@ -784,7 +784,7 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) const fn set_inflight_hi(&mut self, new_inflight_hi: usize) {
-        self.inflight_hi = new_inflight_hi
+        self.inflight_hi = new_inflight_hi;
     }
 
     pub(super) const fn inflight_hi_default(&self) -> usize {
@@ -796,21 +796,21 @@ impl BBRv2NetworkModel {
     }
 
     pub(super) const fn clear_inflight_lo(&mut self) {
-        self.inflight_lo = usize::MAX
+        self.inflight_lo = usize::MAX;
     }
 
     pub(super) fn cap_inflight_lo(&mut self, cap: usize) {
         if self.inflight_lo != usize::MAX {
-            self.inflight_lo = cap.min(self.inflight_lo)
+            self.inflight_lo = cap.min(self.inflight_lo);
         }
     }
 
     pub(super) const fn clear_bandwidth_lo(&mut self) {
-        self.bandwidth_lo = None
+        self.bandwidth_lo = None;
     }
 
     pub(super) fn advance_max_bandwidth_filter(&mut self) {
-        self.max_bandwidth_filter.advance()
+        self.max_bandwidth_filter.advance();
     }
 
     pub(super) fn postpone_min_rtt_timestamp(&mut self, duration: Duration) {
@@ -818,8 +818,8 @@ impl BBRv2NetworkModel {
             .force_update(self.min_rtt(), self.min_rtt_timestamp().add(duration));
     }
 
-    pub(super) fn on_app_limited(&mut self) {
-        self.bandwidth_sampler.on_app_limited()
+    pub(super) const fn on_app_limited(&mut self) {
+        self.bandwidth_sampler.on_app_limited();
     }
 
     pub(super) const fn loss_events_in_round(&self) -> usize {

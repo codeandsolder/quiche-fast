@@ -74,43 +74,43 @@ impl RangeSet {
     /// The number of nonoverlapping ranges stored in this [`RangeSet`].
     pub fn len(&self) -> usize {
         match self {
-            RangeSet::Inline(set) => set.inner.len(),
-            RangeSet::BTree(set) => set.inner.len(),
+            Self::Inline(set) => set.inner.len(),
+            Self::BTree(set) => set.inner.len(),
         }
     }
 
     /// Returns true if the collection contains the given value.
     pub fn contains(&self, item: u64) -> bool {
         match self {
-            RangeSet::Inline(set) => set
+            Self::Inline(set) => set
                 .inner
                 .iter()
                 .any(|&(start, end)| start <= item && item < end),
 
-            RangeSet::BTree(set) =>
+            Self::BTree(set) =>
                 set.prev_to(item).is_some_and(|range| item < range.end),
         }
     }
 
-    /// Converts the inner representation from a BTree to Inline and vice versa
-    /// when the proper conditions are met. Keeps the stored data intact.
+    /// Converts the inner representation from a `BTree` to Inline and vice
+    /// versa when the proper conditions are met. Keeps the stored data intact.
     #[inline]
     fn fixup(&mut self) {
         match self {
-            RangeSet::Inline(set) if set.inner.len() == MAX_INLINE_CAPACITY => {
+            Self::Inline(set) if set.inner.len() == MAX_INLINE_CAPACITY => {
                 let old_inner = std::mem::take(&mut set.inner);
-                *self = RangeSet::BTree(BTreeRangeSet {
+                *self = Self::BTree(BTreeRangeSet {
                     inner: old_inner.into_iter().collect(),
                     capacity: set.capacity,
                 });
             },
 
-            RangeSet::BTree(set) if set.inner.len() <= MIN_TO_INLINE => {
+            Self::BTree(set) if set.inner.len() <= MIN_TO_INLINE => {
                 let old_inner = std::mem::take(&mut set.inner);
-                *self = RangeSet::Inline(InlineRangeSet {
+                *self = Self::Inline(InlineRangeSet {
                     inner: SmallVec::from_iter(old_inner),
                     capacity: set.capacity,
-                })
+                });
             },
 
             _ => {},
@@ -129,8 +129,8 @@ impl RangeSet {
             return;
         }
         match self {
-            RangeSet::Inline(set) => set.insert(item),
-            RangeSet::BTree(set) => set.insert(item),
+            Self::Inline(set) => set.insert(item),
+            Self::BTree(set) => set.insert(item),
         }
 
         self.fixup();
@@ -142,10 +142,10 @@ impl RangeSet {
     ) -> impl DoubleEndedIterator<Item = Range<u64>> + ExactSizeIterator + '_
     {
         match self {
-            RangeSet::BTree(set) =>
+            Self::BTree(set) =>
                 Either::Left(set.inner.iter().map(|(k, v)| *k..*v)),
 
-            RangeSet::Inline(set) =>
+            Self::Inline(set) =>
                 Either::Right(set.inner.iter().map(|(s, e)| *s..*e)),
         }
     }
@@ -176,25 +176,24 @@ impl RangeSet {
     /// The largest value covered by ranges in this collection.
     pub fn last(&self) -> Option<u64> {
         match self {
-            RangeSet::Inline(set) => set.inner.last().map(|(_, e)| *e - 1),
+            Self::Inline(set) => set.inner.last().map(|(_, e)| *e - 1),
 
-            RangeSet::BTree(set) =>
-                set.inner.last_key_value().map(|(_, v)| *v - 1),
+            Self::BTree(set) => set.inner.last_key_value().map(|(_, v)| *v - 1),
         }
     }
 
     #[inline]
     pub fn remove_until(&mut self, largest: u64) {
         match self {
-            RangeSet::Inline(set) => set.remove_until(largest),
-            RangeSet::BTree(set) => set.remove_until(largest),
+            Self::Inline(set) => set.remove_until(largest),
+            Self::BTree(set) => set.remove_until(largest),
         }
 
         self.fixup();
     }
 
     pub fn push_item(&mut self, item: u64) {
-        self.insert(item..item + 1)
+        self.insert(item..item + 1);
     }
 }
 
@@ -209,56 +208,52 @@ impl InlineRangeSet {
         let mut pos = 0;
 
         loop {
-            match self.inner.get_mut(pos) {
-                Some((s, e)) => {
-                    if start > *e {
-                        // Skip while start is greater than end
-                        pos += 1;
-                        continue;
-                    }
+            if let Some((s, e)) = self.inner.get_mut(pos) {
+                if start > *e {
+                    // Skip while start is greater than end
+                    pos += 1;
+                    continue;
+                }
 
-                    if end < *s {
-                        // Inserted range is entirely before this range. Insert
-                        // and return.
-                        if self.inner.len() == self.capacity {
-                            // The incoming range itself is lowest, so it is
-                            // the range that must be discarded.
-                            if pos == 0 {
-                                return;
-                            }
-                            self.inner.remove(0);
-                            pos -= 1;
-                        }
-
-                        self.inner.insert(pos, (start, end));
-                        return;
-                    }
-
-                    // At this point, `start <= *e`.
-                    if start < *s {
-                        // We know we are completely past the previous range, so
-                        // we can simply adjust the lower bound.
-                        *s = start;
-                    }
-
-                    if end > *e {
-                        // Check for overlap between the expanded range and the
-                        // next range.
-                        *e = end;
-                        break;
-                    } else {
-                        return;
-                    }
-                },
-
-                None => {
+                if end < *s {
+                    // Inserted range is entirely before this range. Insert
+                    // and return.
                     if self.inner.len() == self.capacity {
+                        // The incoming range itself is lowest, so it is
+                        // the range that must be discarded.
+                        if pos == 0 {
+                            return;
+                        }
                         self.inner.remove(0);
+                        pos -= 1;
                     }
 
-                    self.inner.push((start, end));
+                    self.inner.insert(pos, (start, end));
                     return;
-                },
+                }
+
+                // At this point, `start <= *e`.
+                if start < *s {
+                    // We know we are completely past the previous range, so
+                    // we can simply adjust the lower bound.
+                    *s = start;
+                }
+
+                if end > *e {
+                    // Check for overlap between the expanded range and the
+                    // next range.
+                    *e = end;
+                    break;
+                } else {
+                    return;
+                }
+            } else {
+                if self.inner.len() == self.capacity {
+                    self.inner.remove(0);
+                }
+
+                self.inner.push((start, end));
+                return;
             }
         }
 

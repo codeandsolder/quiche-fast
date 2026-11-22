@@ -60,7 +60,7 @@ pub struct StreamIdHasher {
 }
 
 /// Return value type of `RecvBuf::reset()`
-#[derive(Debug, PartialEq, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct RecvBufResetReturn {
     /// Returns the difference between the previous `max_data` offset
     /// received and the final size reported by the reset
@@ -382,7 +382,7 @@ impl<F: BufFactory> StreamMap<F> {
 
                         self.peer_opened_streams_uni = n;
                     },
-                };
+                }
 
                 let initial_window = max_rx_data;
                 let s = Stream::new(
@@ -819,7 +819,7 @@ impl<F: BufFactory> StreamMap<F> {
     ///
     /// Opening a local stream implicitly opens all lower-numbered local streams
     /// of the same type, even if they do not have `Stream` objects yet.
-    pub fn local_stream_opened(&self, stream_id: u64) -> bool {
+    pub const fn local_stream_opened(&self, stream_id: u64) -> bool {
         let opened = if is_bidi(stream_id) {
             self.local_opened_streams_bidi
         } else {
@@ -968,11 +968,8 @@ impl<F: BufFactory> StreamMap<F> {
             let actual = self.tx_buffered_actual();
             let stored = self.tx_buffered;
             panic!(
-                "tx_buffered mismatch: stored={}, actual={}, diff={}, buffered_per_stream={:?}",
-                stored,
-                actual,
-                i128::from(stored) - i128::from(actual),
-                buffered_per_stream
+                "tx_buffered mismatch: stored={stored}, actual={actual}, diff={}, buffered_per_stream={buffered_per_stream:?}",
+                i128::from(stored) - i128::from(actual)
             );
         }
     }
@@ -1016,7 +1013,7 @@ impl<F: BufFactory> Stream<F> {
         }
     }
 
-    pub fn priority_key(&self) -> &Arc<StreamPriorityKey> {
+    pub const fn priority_key(&self) -> &Arc<StreamPriorityKey> {
         &self.priority_key
     }
 
@@ -1129,9 +1126,9 @@ impl Default for StreamPriorityKey {
 impl StreamPriorityKey {
     /// Urgency first, non-incremental before incremental. Non-incremental
     /// streams are ordered by ID; equal-urgency incremental streams have
-    /// equal scheduling keys. RBTree::insert inserts equal keys to the
+    /// equal scheduling keys. `RBTree::insert` inserts equal keys to the
     /// right, so removal and reinsertion rotate them in FIFO order.
-    fn scheduling_key(&self) -> (u8, bool, u64) {
+    const fn scheduling_key(&self) -> (u8, bool, u64) {
         (
             self.urgency,
             self.incremental,
