@@ -3438,46 +3438,36 @@ pub mod testing {
         pub fn handshake(&mut self) -> Result<()> {
             self.pipe.handshake()?;
 
-            // Client streams.
-            self.client.send_settings(&mut self.pipe.client)?;
-            self.pipe.advance().ok();
+            // The two peers initialize their local streams in the same
+            // order. Advance the transport after each stream to preserve
+            // incremental flow-control and stream-count behavior.
+            for is_client in [true, false] {
+                if is_client {
+                    self.client.send_settings(&mut self.pipe.client)?;
+                } else {
+                    self.server.send_settings(&mut self.pipe.server)?;
+                }
+                self.pipe.advance().ok();
 
-            self.client.open_qpack_stream(
-                &mut self.pipe.client,
-                stream::Type::QpackEncoder,
-            )?;
-            self.pipe.advance().ok();
+                for kind in
+                    [stream::Type::QpackEncoder, stream::Type::QpackDecoder]
+                {
+                    if is_client {
+                        self.client
+                            .open_qpack_stream(&mut self.pipe.client, kind)?;
+                    } else {
+                        self.server
+                            .open_qpack_stream(&mut self.pipe.server, kind)?;
+                    }
+                    self.pipe.advance().ok();
+                }
 
-            self.client.open_qpack_stream(
-                &mut self.pipe.client,
-                stream::Type::QpackDecoder,
-            )?;
-            self.pipe.advance().ok();
-
-            if self.pipe.client.grease {
-                self.client.open_grease_stream(&mut self.pipe.client)?;
-            }
-
-            self.pipe.advance().ok();
-
-            // Server streams.
-            self.server.send_settings(&mut self.pipe.server)?;
-            self.pipe.advance().ok();
-
-            self.server.open_qpack_stream(
-                &mut self.pipe.server,
-                stream::Type::QpackEncoder,
-            )?;
-            self.pipe.advance().ok();
-
-            self.server.open_qpack_stream(
-                &mut self.pipe.server,
-                stream::Type::QpackDecoder,
-            )?;
-            self.pipe.advance().ok();
-
-            if self.pipe.server.grease {
-                self.server.open_grease_stream(&mut self.pipe.server)?;
+                if is_client && self.pipe.client.grease {
+                    self.client.open_grease_stream(&mut self.pipe.client)?;
+                } else if !is_client && self.pipe.server.grease {
+                    self.server.open_grease_stream(&mut self.pipe.server)?;
+                }
+                self.pipe.advance().ok();
             }
 
             self.advance().ok();
