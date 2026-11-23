@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["MAX_VAR_INT"],"enum":["HuffmanDecodeError"],"fn":["huffman_encoding_len","varint_len","varint_parse_len"],"struct":["BufferTooShortError","EncodedVarint","Octets","OctetsMut"],"trait":["OctetsWriter"],"type":["Result"]};
