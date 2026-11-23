@@ -374,11 +374,13 @@ impl Path {
                 self.active_dcid_seq.is_some())
     }
 
-    /// Returns whether the path is unused.
+    /// Returns whether the path is unused and contains no outstanding
+    /// delivery, acknowledgment, or retransmission work.
     #[inline]
     fn unused(&self) -> bool {
-        // FIXME: we should check that there is nothing in the sent queue.
-        !self.active() && self.active_dcid_seq.is_none()
+        !self.active() &&
+            self.active_dcid_seq.is_none() &&
+            !self.recovery.has_pending_recovery_work()
     }
 
     /// Returns whether the path requires sending a probing packet.
@@ -827,7 +829,9 @@ impl PathMap {
                     return None;
                 }
 
-                self.paths.iter().find(|(_, p)| p.superseded)
+                self.paths.iter().find(|(_, p)| {
+                    p.superseded && !p.recovery.has_pending_recovery_work()
+                })
             })
             .ok_or(Error::Done)?;
 
@@ -1163,6 +1167,228 @@ mod tests {
     use crate::Config;
 
     use super::*;
+
+    #[rstest::rstest]
+    fn path_reuse_preserves_outstanding_stream_recovery(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+        #[values(false, true)] cid_retired: bool,
+    ) {
+        use crate::frame::Frame;
+        use crate::packet::Epoch;
+        use crate::range_buf::RangeBuf;
+
+        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
+        let recovery_config = RecoveryConfig::from_config(&config);
+        let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let old_peer: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+        let new_peer: SocketAddr = "127.0.0.1:4322".parse().unwrap();
+        let third_peer: SocketAddr = "127.0.0.1:4323".parse().unwrap();
+        let initial = Path::new(
+            local,
+            old_peer,
+            &recovery_config,
+            config.path_challenge_recv_max_queue_len,
+            true,
+            None,
+        );
+        let mut paths = PathMap::new(initial, 2, false);
+        let now = Instant::now();
+        let mut packet = test_utils::helper_packet_sent(0, now, 1200);
+        packet.frames.push(Frame::Stream {
+            stream_id: 0,
+            data: RangeBuf::from(b"deliver-me", 0, false),
+        });
+        let handshake = HandshakeStatus {
+            has_handshake_keys: true,
+            peer_verified_address: true,
+            completed: true,
+        };
+        paths.get_mut(0).unwrap().recovery.on_packet_sent(
+            packet,
+            Epoch::Application,
+            handshake,
+            now,
+            "",
+        );
+
+        let mut second = Path::new(
+            local,
+            new_peer,
+            &recovery_config,
+            config.path_challenge_recv_max_queue_len,
+            false,
+            None,
+        );
+        second.state = PathState::Validated;
+        second.active_dcid_seq = Some(1);
+        let (second_pid, _) = paths.insert_path(second, false).unwrap();
+        paths.set_active_path(second_pid).unwrap();
+        if cid_retired {
+            paths.get_mut(0).unwrap().active_dcid_seq = None;
+        }
+
+        let third = Path::new(
+            local,
+            third_peer,
+            &recovery_config,
+            config.path_challenge_recv_max_queue_len,
+            false,
+            None,
+        );
+        // Before the fix this evicted the old Path and destroyed its
+        // unacknowledged STREAM frame's only recovery ownership.
+        assert_eq!(paths.insert_path(third, false), Err(Error::Done));
+        assert_eq!(paths.len(), 2);
+        assert!(paths.path_id_from_addrs(&(local, old_peer)).is_some());
+        assert!(paths.path_id_from_addrs(&(local, third_peer)).is_none());
+        assert_eq!(paths.get(0).unwrap().recovery.bytes_in_flight(), 1200);
+
+        // Once its packet number space is intentionally discarded, the old
+        // path is safe to recycle without discarding outstanding data.
+        paths
+            .get_mut(0)
+            .unwrap()
+            .recovery
+            .on_pkt_num_space_discarded(Epoch::Application, handshake, now);
+        let (third_pid, released_dcid) = paths
+            .insert_path(
+                Path::new(
+                    local,
+                    third_peer,
+                    &recovery_config,
+                    config.path_challenge_recv_max_queue_len,
+                    false,
+                    None,
+                ),
+                false,
+            )
+            .unwrap();
+        assert_eq!(released_dcid, (!cid_retired).then_some(0));
+        assert_eq!(paths.get(third_pid).unwrap().peer_addr(), third_peer);
+        assert!(paths.path_id_from_addrs(&(local, old_peer)).is_none());
+    }
+
+    #[rstest::rstest]
+    fn path_retirement_waits_for_acked_and_lost_frames(
+        #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    ) {
+        use crate::frame::Frame;
+        use crate::packet::Epoch;
+        use crate::range_buf::RangeBuf;
+        use crate::ranges::RangeSet;
+
+        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
+        let mut recovery = recovery::Recovery::new_with_config(
+            &RecoveryConfig::from_config(&config),
+        );
+        let now = Instant::now();
+        let handshake = HandshakeStatus {
+            has_handshake_keys: true,
+            peer_verified_address: true,
+            completed: true,
+        };
+        let mut stream_packet = test_utils::helper_packet_sent(0, now, 1200);
+        stream_packet.frames.push(Frame::Stream {
+            stream_id: 0,
+            data: RangeBuf::from(b"ack-me", 0, false),
+        });
+        recovery.on_packet_sent(
+            stream_packet,
+            Epoch::Application,
+            handshake,
+            now,
+            "",
+        );
+        assert!(recovery.has_pending_recovery_work());
+
+        // ACK processing can still contain STREAM state after the congestion
+        // controller reports zero bytes in flight.
+        let mut ack = RangeSet::default();
+        ack.insert(0..1);
+        recovery
+            .on_ack_received(
+                &ack,
+                0,
+                Epoch::Application,
+                handshake,
+                now + Duration::from_millis(20),
+                None,
+                "",
+            )
+            .unwrap();
+        assert_eq!(recovery.bytes_in_flight(), 0);
+        assert!(recovery.has_pending_recovery_work());
+        assert!(matches!(
+            recovery.next_acked_frame(Epoch::Application),
+            Some(Frame::Stream { .. })
+        ));
+        assert!(!recovery.has_pending_recovery_work());
+
+        // An ACK for a later packet declares the earlier STREAM lost by the
+        // packet threshold. Its payload must remain available for retransmit.
+        let mut stream_packet = test_utils::helper_packet_sent(1, now, 1200);
+        stream_packet.frames.push(Frame::Stream {
+            stream_id: 0,
+            data: RangeBuf::from(b"retry-me", 6, false),
+        });
+        recovery.on_packet_sent(
+            stream_packet,
+            Epoch::Application,
+            handshake,
+            now,
+            "",
+        );
+        let mut ping_packet = test_utils::helper_packet_sent(4, now, 1200);
+        ping_packet.has_data = false;
+        ping_packet.frames.push(Frame::Ping { mtu_probe: None });
+        recovery.on_packet_sent(
+            ping_packet,
+            Epoch::Application,
+            handshake,
+            now,
+            "",
+        );
+        let mut ack = RangeSet::default();
+        ack.insert(4..5);
+        recovery
+            .on_ack_received(
+                &ack,
+                0,
+                Epoch::Application,
+                handshake,
+                now + Duration::from_millis(40),
+                None,
+                "",
+            )
+            .unwrap();
+        assert_eq!(recovery.bytes_in_flight(), 0);
+        while recovery.next_acked_frame(Epoch::Application).is_some() {}
+        assert!(recovery.has_lost_frames(Epoch::Application));
+        assert!(recovery.has_pending_recovery_work());
+        assert!(matches!(
+            recovery.next_lost_frame(Epoch::Application),
+            Some(Frame::Stream { .. })
+        ));
+        assert!(!recovery.has_pending_recovery_work());
+
+        // A scheduled PTO is recovery work even if it has no bytes in flight.
+        recovery.inc_loss_probes(Epoch::Application);
+        assert!(recovery.has_pending_recovery_work());
+        recovery.ping_sent(Epoch::Application);
+        assert!(!recovery.has_pending_recovery_work());
+
+        // ACK-only packets are not themselves acknowledged and must not keep
+        // a superseded path alive indefinitely.
+        let mut ack_only = test_utils::helper_packet_sent(5, now, 40);
+        ack_only.ack_eliciting = false;
+        ack_only.in_flight = false;
+        ack_only.has_data = false;
+        ack_only.frames.push(Frame::Padding { len: 1 });
+        recovery.on_packet_sent(ack_only, Epoch::Application, handshake, now, "");
+        assert!(!recovery.has_pending_recovery_work());
+    }
 
     #[test]
     fn amplification_credit_saturates_product_and_accumulation() {

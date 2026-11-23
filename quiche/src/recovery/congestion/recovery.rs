@@ -1009,6 +1009,20 @@ impl RecoveryOps for LegacyRecovery {
         self.bytes_in_flight.get()
     }
 
+    fn has_pending_recovery_work(&self) -> bool {
+        self.epochs.iter().any(|epoch| {
+            // ACK-only packets need no acknowledgment of their own, so they
+            // must not prevent an otherwise idle path from being retired.
+            epoch.sent_packets.iter().any(|pkt| {
+                pkt.time_acked.is_none() &&
+                    pkt.time_lost.is_none() &&
+                    pkt.ack_eliciting
+            }) || !epoch.acked_frames.is_empty() ||
+                epoch.has_lost_frames() ||
+                epoch.loss_probes != 0
+        })
+    }
+
     fn bytes_in_flight_duration(&self) -> Duration {
         self.bytes_in_flight.get_duration()
     }
