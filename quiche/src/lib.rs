@@ -3197,19 +3197,16 @@ impl<F: BufFactory> Connection<F> {
 
         // TODO: we should iterate over all active destination connection IDs
         // and check against their reset token.
-        match self.peer_transport_params.stateless_reset_token {
-            Some(token) => {
-                let token_len = 16;
-
+        self.peer_transport_params
+            .stateless_reset_token
+            .is_some_and(|token| {
+                let expected = token.to_be_bytes();
                 crypto::verify_slices_are_equal(
-                    &token.to_be_bytes(),
-                    &buf[buf_len - token_len..buf_len],
+                    &expected,
+                    &buf[buf_len - expected.len()..],
                 )
                 .is_ok()
-            },
-
-            None => false,
-        }
+            })
     }
 
     /// Processes a single QUIC packet received from the peer.
@@ -4781,12 +4778,11 @@ impl<F: BufFactory> Connection<F> {
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
 
-        let mut left = if let Some(pmtud) = path.pmtud.as_mut() {
-            // Limit output buffer size by estimated path MTU.
-            cmp::min(pmtud.get_current_mtu(), b.cap())
-        } else {
-            b.cap()
-        };
+        // Limit output buffer size by estimated path MTU if enabled.
+        let mut left = path
+            .pmtud
+            .as_ref()
+            .map_or(b.cap(), |pmtud| cmp::min(pmtud.get_current_mtu(), b.cap()));
 
         // The AEAD overhead at the current encryption level.
         let crypto_overhead = crypto_ctx.crypto_overhead().ok_or(Error::Done)?;
@@ -6021,10 +6017,9 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result bounds the next packet burst"]
     pub fn send_quantum(&self) -> usize {
-        match self.paths.get_active() {
-            Ok(p) => p.recovery.send_quantum(),
-            _ => 0,
-        }
+        self.paths
+            .get_active()
+            .map_or(0, |path| path.recovery.send_quantum())
     }
 
     /// Returns the size of the send quantum over the given 4-tuple, in bytes.
@@ -6802,13 +6797,9 @@ impl<F: BufFactory> Connection<F> {
     /// Returns true if the stream has data that can be read.
     #[must_use = "the result indicates whether the stream can currently be read"]
     pub fn stream_readable(&self, stream_id: u64) -> bool {
-        let stream = match self.streams.get(stream_id) {
-            Some(v) => v,
-
-            None => return false,
-        };
-
-        stream.is_readable()
+        self.streams
+            .get(stream_id)
+            .is_some_and(stream::Stream::is_readable)
     }
 
     /// Returns the number of contiguous bytes buffered for a stream, up to
@@ -6832,11 +6823,9 @@ impl<F: BufFactory> Connection<F> {
     /// [`stream_readable`]: struct.Connection.html#method.stream_readable
     #[must_use = "the result bounds the immediately readable stream data"]
     pub fn stream_readable_len(&self, stream_id: u64, max_len: usize) -> usize {
-        match self.streams.get(stream_id) {
-            Some(s) => s.recv.readable_len(max_len),
-
-            None => 0,
-        }
+        self.streams
+            .get(stream_id)
+            .map_or(0, |stream| stream.recv.readable_len(max_len))
     }
 
     /// Returns the next stream that can be written to.
@@ -6897,10 +6886,8 @@ impl<F: BufFactory> Connection<F> {
             return Ok(true);
         }
 
-        let stream = match self.streams.get_mut(stream_id) {
-            Some(v) => v,
-
-            None => return Err(Error::InvalidStreamState(stream_id)),
+        let Some(stream) = self.streams.get_mut(stream_id) else {
+            return Err(Error::InvalidStreamState(stream_id));
         };
 
         stream.send_lowat = cmp::max(1, len);
@@ -6944,13 +6931,9 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result indicates whether the stream receive side is complete"]
     pub fn stream_finished(&self, stream_id: u64) -> bool {
-        let stream = match self.streams.get(stream_id) {
-            Some(v) => v,
-
-            None => return true,
-        };
-
-        stream.recv.is_fin()
+        self.streams
+            .get(stream_id)
+            .is_none_or(|stream| stream.recv.is_fin())
     }
 
     /// Returns true if the specified stream is closed.
@@ -7380,11 +7363,8 @@ impl<F: BufFactory> Connection<F> {
     ///
     /// [`dgram_send()`]: struct.Connection.html#method.dgram_send
     pub fn dgram_send_buf(&mut self, buf: F::DgramBuf) -> Result<()> {
-        let max_payload_len = match self.dgram_max_writable_len() {
-            Some(v) => v,
-
-            None => return Err(Error::InvalidState),
-        };
+        let max_payload_len =
+            self.dgram_max_writable_len().ok_or(Error::InvalidState)?;
 
         if buf.as_ref().len() > max_payload_len {
             return Err(Error::BufferTooShort);
@@ -8201,11 +8181,11 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result describes the discovered path MTU"]
     pub fn pmtu(&self) -> Option<usize> {
-        if let Ok(path) = self.paths.get_active() {
-            path.pmtud.as_ref().and_then(pmtud::Pmtud::get_pmtu)
-        } else {
-            None
-        }
+        self.paths
+            .get_active()
+            .ok()
+            .and_then(|path| path.pmtud.as_ref())
+            .and_then(pmtud::Pmtud::get_pmtu)
     }
 
     /// Revalidates the PMTU for the active path by sending a new probe packet
@@ -9527,10 +9507,10 @@ impl<F: BufFactory> Connection<F> {
             )
         };
 
-        let path_pto = match self.paths.get_active() {
-            Ok(p) => p.recovery.pto(),
-            Err(_) => Duration::ZERO,
-        };
+        let path_pto = self
+            .paths
+            .get_active()
+            .map_or(Duration::ZERO, |path| path.recovery.pto());
 
         let idle_timeout = Duration::from_millis(idle_timeout);
         let idle_timeout = cmp::max(idle_timeout, path_pto.saturating_mul(3));
