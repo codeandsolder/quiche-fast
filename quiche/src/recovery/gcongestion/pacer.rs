@@ -263,7 +263,7 @@ impl Pacer {
         self.sender.max_bandwidth()
     }
 
-    pub fn rtt_persistent_jump_count(&self) -> u64 {
+    pub const fn rtt_persistent_jump_count(&self) -> u64 {
         self.sender.rtt_persistent_jump_count()
     }
 

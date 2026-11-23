@@ -843,7 +843,7 @@ impl ConnectionIdentifiers {
     /// Returns the number of source Connection IDs that are active. This is
     /// only meaningful if the host uses non-zero length Source Connection IDs.
     #[inline]
-    pub fn active_source_cids(&self) -> usize {
+    pub const fn active_source_cids(&self) -> usize {
         self.scids.len()
     }
 

@@ -334,7 +334,7 @@ impl Path {
     /// The configured amplification factor is an unrestricted `usize`.
     /// Both the product and the cumulative budget must saturate rather than
     /// wrap (which could incorrectly reduce or reset the available credit).
-    pub fn grant_amplification_credit(
+    pub const fn grant_amplification_credit(
         &mut self, received_bytes: usize, amplification_factor: usize,
     ) {
         self.max_send_bytes = self

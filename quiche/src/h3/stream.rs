@@ -52,7 +52,7 @@ pub enum Type {
 
 impl Type {
     #[cfg(feature = "qlog")]
-    pub fn to_qlog(self) -> qlog::events::http3::StreamType {
+    pub const fn to_qlog(self) -> qlog::events::http3::StreamType {
         match self {
             Self::Control => qlog::events::http3::StreamType::Control,
             Self::Request => qlog::events::http3::StreamType::Request,

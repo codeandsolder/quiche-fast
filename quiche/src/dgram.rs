@@ -100,11 +100,11 @@ impl<F: BufFactory> DatagramQueue<F> {
             .fold(0, |total, d| total + d.as_ref().len());
     }
 
-    pub fn is_full(&self) -> bool {
+    pub const fn is_full(&self) -> bool {
         self.len() == self.queue_max_len
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
