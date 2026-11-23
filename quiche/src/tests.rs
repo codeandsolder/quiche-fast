@@ -10750,11 +10750,33 @@ fn handshake_callback_state_is_not_retained(
             <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
             Err(Error::TlsFail),
         );
+        assert_eq!(
+            <Connection>::set_max_idle_timeout_in_handshake(conn.as_mut(), 1000),
+            Err(Error::TlsFail),
+        );
+        assert_eq!(
+            <Connection>::set_initial_max_streams_bidi_in_handshake(
+                conn.as_mut(),
+                10
+            ),
+            Err(Error::TlsFail),
+        );
     }
     pipe.handshake().unwrap();
     for conn in [&mut pipe.client, &mut pipe.server] {
         assert_eq!(
             <Connection>::set_hystart_in_handshake(conn.as_mut(), true),
+            Err(Error::TlsFail),
+        );
+        assert_eq!(
+            <Connection>::set_max_idle_timeout_in_handshake(conn.as_mut(), 1000),
+            Err(Error::TlsFail),
+        );
+        assert_eq!(
+            <Connection>::set_initial_max_streams_bidi_in_handshake(
+                conn.as_mut(),
+                10
+            ),
             Err(Error::TlsFail),
         );
     }
