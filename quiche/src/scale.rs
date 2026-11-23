@@ -27,7 +27,7 @@
 /// Rounding policy for a nonnegative integer multiplied by a floating-point
 /// gain. Nearest breaks ties upward, matching the prior positive `f64::round`.
 #[derive(Clone, Copy)]
-pub(super) enum Rounding {
+pub enum Rounding {
     Down,
     Up,
     Nearest,
@@ -42,7 +42,7 @@ pub(super) enum Rounding {
 /// its at-most-53-bit significand by a u64 needs at most 117 bits. Shifting
 /// that product gives the integer result, with a single final rounding step.
 #[inline]
-pub(super) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
+pub fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
     u64::try_from(scale_wide(value, gain, rounding)).unwrap_or(u64::MAX)
 }
 
@@ -50,7 +50,7 @@ pub(super) fn scale_u64(value: u64, gain: f64, rounding: Rounding) -> u64 {
 /// significand product. In particular the integer input never passes through
 /// a floating-point conversion.
 #[inline]
-pub(super) fn scale_wide(value: u64, gain: f64, rounding: Rounding) -> u128 {
+pub fn scale_wide(value: u64, gain: f64, rounding: Rounding) -> u128 {
     if value == 0 || gain.is_nan() || gain <= 0.0 {
         return 0;
     }
@@ -110,7 +110,7 @@ fn gain_product(value: u64, gain: f64) -> (u128, i32) {
 /// only the final quotient. This avoids both a rounded floating-point divisor
 /// and premature saturation of an intermediate product.
 #[inline]
-pub(super) fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
+pub fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
     if divisor == 0 {
         return 0;
     }
@@ -122,7 +122,7 @@ pub(super) fn scale_gain_div_u64(value: u64, gain: f64, divisor: u64) -> u64 {
 }
 
 #[inline]
-pub(super) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize {
+pub fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize {
     let value = u64::try_from(value).unwrap_or(u64::MAX);
     usize::try_from(scale_u64(value, gain, rounding)).unwrap_or(usize::MAX)
 }
@@ -131,7 +131,7 @@ pub(super) fn scale_usize(value: usize, gain: f64, rounding: Rounding) -> usize 
 /// full-width multiplication; never round the input or the ratio to a float.
 /// A zero denominator represents an unavailable ratio and yields zero.
 #[inline]
-pub(super) fn scale_ratio_u64(
+pub fn scale_ratio_u64(
     value: u64, numerator: u64, denominator: u64, rounding: Rounding,
 ) -> u64 {
     if denominator == 0 {
@@ -150,7 +150,7 @@ pub(super) fn scale_ratio_u64(
 }
 
 #[inline]
-pub(super) fn scale_ratio_usize(
+pub fn scale_ratio_usize(
     value: usize, numerator: u64, denominator: u64, rounding: Rounding,
 ) -> usize {
     usize::try_from(scale_ratio_u64(
