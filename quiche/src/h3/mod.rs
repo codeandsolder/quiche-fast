@@ -983,6 +983,38 @@ struct QpackStreams {
     pub decoder_stream_bytes: u64,
 }
 
+impl QpackStreams {
+    /// Consume ignored dynamic-table instructions while keeping the byte
+    /// counters and critical-stream closure semantics.
+    fn discard_instructions<F: BufFactory>(
+        &mut self, conn: &mut super::Connection<F>, stream_id: u64,
+        ty: Option<stream::Type>,
+    ) -> Result<()> {
+        let bytes = match ty {
+            Some(stream::Type::QpackEncoder) => &mut self.encoder_stream_bytes,
+            Some(stream::Type::QpackDecoder) => &mut self.decoder_stream_bytes,
+            _ => return Err(Error::InternalError),
+        };
+
+        // Dynamic table instructions are currently ignored.
+        // Discard directly from the receive buffer rather than
+        // copying them into an unused stack buffer.
+        loop {
+            let (recv, fin) = conn.stream_discard(stream_id, usize::MAX)?;
+            *bytes = bytes.saturating_add(recv as u64);
+
+            if fin {
+                close_conn_critical_stream(conn)?;
+            }
+            if recv == 0 {
+                break;
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// Statistics about the connection.
 ///
 /// A connection's statistics can be collected using the [`stats()`] method.
@@ -2715,6 +2747,112 @@ impl Connection {
         })
     }
 
+    /// Decode the peer's unidirectional stream preface. Connection-level
+    /// registration follows only after the parser accepted the type.
+    fn read_peer_stream_type<F: BufFactory>(
+        conn: &mut super::Connection<F>, stream: &mut stream::Stream,
+        stream_id: u64,
+    ) -> Result<stream::Type> {
+        #[cfg(not(feature = "qlog"))]
+        let _ = stream_id;
+
+        let varint = stream.read_varint(conn)?;
+
+        let ty = stream::Type::deserialize(varint);
+
+        if let Err(e) = stream.set_ty(ty) {
+            conn.close(true, e.to_wire(), b"")?;
+            return Err(e);
+        }
+
+        qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
+            let ty_val = if matches!(ty, stream::Type::Unknown) {
+                Some(varint)
+            } else {
+                None
+            };
+
+            let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
+                stream_id,
+                initiator: Some(Initiator::Remote),
+                stream_type: ty.to_qlog(),
+                stream_type_bytes: ty_val,
+                ..Default::default()
+            });
+
+            q.add_event_data_now(ev_data).ok();
+        });
+
+        Ok(ty)
+    }
+
+    /// Consume the frame type and length varints incrementally. If the length
+    /// has not arrived yet, the stream retains FramePayloadLen and resumes
+    /// directly there on the next call.
+    fn read_frame_header<F: BufFactory>(
+        conn: &mut super::Connection<F>, stream: &mut stream::Stream,
+        stream_id: u64,
+    ) -> Result<()> {
+        if stream.state() == stream::State::FrameType {
+            let varint = stream.read_varint(conn)?;
+
+            match stream.set_frame_type(varint) {
+                Err(Error::FrameUnexpected) => {
+                    let msg = format!("Unexpected frame type {varint}");
+
+                    conn.close(
+                        true,
+                        Error::FrameUnexpected.to_wire(),
+                        msg.as_bytes(),
+                    )?;
+
+                    return Err(Error::FrameUnexpected);
+                },
+
+                Err(e) => {
+                    conn.close(true, e.to_wire(), b"Error handling frame.")?;
+
+                    return Err(e);
+                },
+
+                _ => (),
+            }
+        }
+
+        let payload_len = stream.read_varint(conn)?;
+
+        // DATA frames are handled uniquely. Log them here because
+        // DATA framing is no longer visible after this point.
+        if Some(frame::DATA_FRAME_TYPE_ID) == stream.frame_type() {
+            trace!(
+                "{} rx frm DATA stream={stream_id} wire_payload_len={payload_len}",
+                conn.trace_id()
+            );
+
+            qlog_with_type!(QLOG_FRAME_PARSED, conn.qlog, q, {
+                let frame = Http3Frame::Data { raw: None };
+
+                let ev_data = EventData::Http3FrameParsed(FrameParsed {
+                    stream_id,
+                    length: Some(payload_len),
+                    frame,
+                    ..Default::default()
+                });
+
+                q.add_event_data_now(ev_data).ok();
+            });
+        }
+
+        let res = stream.set_frame_payload_len(payload_len);
+
+        if let Err(e) = res {
+            conn.close(true, e.to_wire(), b"")?;
+            return Err(e);
+        }
+
+        Ok(())
+    }
+
     fn process_readable_stream<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64, polling: bool,
     ) -> Result<(u64, Event)> {
@@ -2727,34 +2865,8 @@ impl Connection {
         while let Some(stream) = self.streams.get_mut(&stream_id) {
             match stream.state() {
                 stream::State::StreamType => {
-                    let varint = stream.read_varint(conn)?;
-
-                    let ty = stream::Type::deserialize(varint);
-
-                    if let Err(e) = stream.set_ty(ty) {
-                        conn.close(true, e.to_wire(), b"")?;
-                        return Err(e);
-                    }
-
-                    qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
-                        let ty_val = if matches!(ty, stream::Type::Unknown) {
-                            Some(varint)
-                        } else {
-                            None
-                        };
-
-                        let ev_data =
-                            EventData::Http3StreamTypeSet(StreamTypeSet {
-                                stream_id,
-                                initiator: Some(Initiator::Remote),
-                                stream_type: ty.to_qlog(),
-                                stream_type_bytes: ty_val,
-                                ..Default::default()
-                            });
-
-                        q.add_event_data_now(ev_data).ok();
-                    });
-
+                    let ty =
+                        Self::read_peer_stream_type(conn, stream, stream_id)?;
                     self.register_peer_stream(conn, stream_id, ty)?;
                 },
 
@@ -2767,68 +2879,8 @@ impl Connection {
                     }
                 },
 
-                stream::State::FrameType => {
-                    let varint = stream.read_varint(conn)?;
-
-                    match stream.set_frame_type(varint) {
-                        Err(Error::FrameUnexpected) => {
-                            let msg = format!("Unexpected frame type {varint}");
-
-                            conn.close(
-                                true,
-                                Error::FrameUnexpected.to_wire(),
-                                msg.as_bytes(),
-                            )?;
-
-                            return Err(Error::FrameUnexpected);
-                        },
-
-                        Err(e) => {
-                            conn.close(
-                                true,
-                                e.to_wire(),
-                                b"Error handling frame.",
-                            )?;
-
-                            return Err(e);
-                        },
-
-                        _ => (),
-                    }
-                },
-
-                stream::State::FramePayloadLen => {
-                    let payload_len = stream.read_varint(conn)?;
-
-                    // DATA frames are handled uniquely. Log them here because
-                    // DATA framing is no longer visible after this point.
-                    if Some(frame::DATA_FRAME_TYPE_ID) == stream.frame_type() {
-                        trace!(
-                            "{} rx frm DATA stream={stream_id} wire_payload_len={payload_len}",
-                            conn.trace_id()
-                        );
-
-                        qlog_with_type!(QLOG_FRAME_PARSED, conn.qlog, q, {
-                            let frame = Http3Frame::Data { raw: None };
-
-                            let ev_data =
-                                EventData::Http3FrameParsed(FrameParsed {
-                                    stream_id,
-                                    length: Some(payload_len),
-                                    frame,
-                                    ..Default::default()
-                                });
-
-                            q.add_event_data_now(ev_data).ok();
-                        });
-                    }
-
-                    let res = stream.set_frame_payload_len(payload_len);
-
-                    if let Err(e) = res {
-                        conn.close(true, e.to_wire(), b"")?;
-                        return Err(e);
-                    }
+                stream::State::FrameType | stream::State::FramePayloadLen => {
+                    Self::read_frame_header(conn, stream, stream_id)?;
                 },
 
                 stream::State::FramePayload => {
@@ -2885,29 +2937,11 @@ impl Connection {
                 },
 
                 stream::State::QpackInstruction => {
-                    let bytes = match stream.ty() {
-                        Some(stream::Type::QpackEncoder) =>
-                            &mut self.peer_qpack_streams.encoder_stream_bytes,
-                        Some(stream::Type::QpackDecoder) =>
-                            &mut self.peer_qpack_streams.decoder_stream_bytes,
-                        _ => return Err(Error::InternalError),
-                    };
-
-                    // Dynamic table instructions are currently ignored.
-                    // Discard directly from the receive buffer rather than
-                    // copying them into an unused stack buffer.
-                    loop {
-                        let (recv, fin) =
-                            conn.stream_discard(stream_id, usize::MAX)?;
-                        *bytes = bytes.saturating_add(recv as u64);
-
-                        if fin {
-                            close_conn_critical_stream(conn)?;
-                        }
-                        if recv == 0 {
-                            break;
-                        }
-                    }
+                    self.peer_qpack_streams.discard_instructions(
+                        conn,
+                        stream_id,
+                        stream.ty(),
+                    )?;
                 },
 
                 stream::State::SkipFramePayload => {
