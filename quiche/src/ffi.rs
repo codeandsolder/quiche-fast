@@ -2733,8 +2733,11 @@ unsafe fn std_addr_from_c(
     // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
     // the caller guarantees the corresponding field is readable.
     let family = unsafe { (&raw const (*addr).sa_family).read() };
+    // `AF_INET` is a c_int on Unix but an ADDRESS_FAMILY (u16) on Windows.
+    // Normalize both the incoming family and the platform constants before
+    // comparing; no lossy narrowing or inferred match-pattern types.
     match c_int::from(family) {
-        AF_INET => {
+        found if found == c_int::from(AF_INET) => {
             let in4 = addr.cast::<sockaddr_in>();
             if len != size_of::<sockaddr_in>() || !in4.is_aligned() {
                 return Err(());
@@ -2770,7 +2773,7 @@ unsafe fn std_addr_from_c(
             Ok(out.into())
         },
 
-        AF_INET6 => {
+        found if found == c_int::from(AF_INET6) => {
             let in6 = addr.cast::<sockaddr_in6>();
             if len != size_of::<sockaddr_in6>() || !in6.is_aligned() {
                 return Err(());
