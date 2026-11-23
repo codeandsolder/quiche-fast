@@ -3044,16 +3044,6 @@ impl Connection {
                 raw,
                 ..
             } => {
-                self.peer_settings = ConnectionSettings {
-                    max_field_section_size,
-                    qpack_max_table_capacity,
-                    qpack_blocked_streams,
-                    connect_protocol_enabled,
-                    h3_datagram,
-                    additional_settings,
-                    raw,
-                };
-
                 if let Some(1) = h3_datagram {
                     // The peer MUST have also enabled DATAGRAM with a TP
                     if conn.dgram_max_writable_len().is_none() {
@@ -3066,6 +3056,18 @@ impl Connection {
                         return Err(Error::SettingsError);
                     }
                 }
+
+                // A rejected SETTINGS frame must not expose negotiated
+                // capabilities or a raw peer settings snapshot.
+                self.peer_settings = ConnectionSettings {
+                    max_field_section_size,
+                    qpack_max_table_capacity,
+                    qpack_blocked_streams,
+                    connect_protocol_enabled,
+                    h3_datagram,
+                    additional_settings,
+                    raw,
+                };
             },
 
             frame::Frame::Headers { header_block } => {
@@ -3144,7 +3146,7 @@ impl Connection {
                 if !self.is_server && id % 4 != 0 {
                     conn.close(
                         true,
-                        Error::FrameUnexpected.to_wire(),
+                        Error::IdError.to_wire(),
                         b"GOAWAY received with ID of non-request stream",
                     )?;
 
@@ -3237,14 +3239,16 @@ impl Connection {
                 if prioritized_element_id % 4 != 0 {
                     conn.close(
                         true,
-                        Error::FrameUnexpected.to_wire(),
+                        Error::IdError.to_wire(),
                         b"PRIORITY_UPDATE for request stream type with wrong ID",
                     )?;
 
-                    return Err(Error::FrameUnexpected);
+                    return Err(Error::IdError);
                 }
 
-                if prioritized_element_id > conn.streams.max_streams_bidi() * 4 {
+                // MAX_STREAMS_BIDI is a count: the first forbidden request
+                // stream ID is count * 4, not count * 4 + 4.
+                if prioritized_element_id >= conn.streams.max_streams_bidi() * 4 {
                     conn.close(
                         true,
                         Error::IdError.to_wire(),
@@ -3289,10 +3293,7 @@ impl Connection {
                 }
             },
 
-            frame::Frame::PriorityUpdatePush {
-                prioritized_element_id,
-                ..
-            } => {
+            frame::Frame::PriorityUpdatePush { .. } => {
                 if !self.is_server {
                     conn.close(
                         true,
@@ -3303,17 +3304,15 @@ impl Connection {
                     return Err(Error::FrameUnexpected);
                 }
 
-                if prioritized_element_id % 3 != 0 {
-                    conn.close(
-                        true,
-                        Error::FrameUnexpected.to_wire(),
-                        b"PRIORITY_UPDATE for push stream type with wrong ID",
-                    )?;
-
-                    return Err(Error::FrameUnexpected);
-                }
-
-                // TODO: we only implement this if we implement server push
+                // This field is a push ID, not a QUIC stream ID. Server push
+                // is not implemented, so no push IDs have been promised.
+                // RFC 9218 requires H3_ID_ERROR for an unpromised push ID.
+                conn.close(
+                    true,
+                    Error::IdError.to_wire(),
+                    b"PRIORITY_UPDATE for an unpromised push ID",
+                )?;
+                return Err(Error::IdError);
             },
 
             frame::Frame::Unknown { .. } => (),
@@ -5065,6 +5064,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(s.poll_client(), Err(Error::IdError));
+        assert_eq!(
+            s.pipe.client.local_error().map(|err| err.error_code),
+            Some(WireErrorCode::IdError as u64),
+            "invalid GOAWAY stream ID must close with H3_ID_ERROR"
+        );
+        assert_eq!(s.client.peer_goaway_id, None);
     }
 
     #[test]
@@ -5582,63 +5587,56 @@ mod tests {
         assert!(s.pipe.client.streams.is_collected(0));
     }
 
-    #[test]
-    /// Send a PRIORITY_UPDATE for push stream from the client.
-    fn priority_update_push() {
+    /// RFC 9218 requires H3_ID_ERROR for a non-request stream ID in a
+    /// request priority update or an unpromised push ID in a push update.
+    /// Push IDs are not QUIC stream IDs, so they have no stream-type bits.
+    #[rstest::rstest]
+    #[case::server_bidi(1, false, false)]
+    #[case::client_uni(2, false, false)]
+    #[case::server_uni(3, false, false)]
+    #[case::server_bidi_later(5, false, false)]
+    #[case::first_request_beyond_limit(20, false, false)]
+    #[case::push_zero(0, true, false)]
+    #[case::push_one(1, true, false)]
+    #[case::push_three(3, true, false)]
+    #[case::push_five(5, true, false)]
+    #[case::unpromised_push_within_limit(1, true, true)]
+    fn priority_update_rejects_invalid_id(
+        #[case] id: u64, #[case] push: bool, #[case] raise_push_limit: bool,
+    ) {
         let mut s = Session::new().unwrap();
         s.handshake().unwrap();
+        let control = s.client.control_stream_id.unwrap();
+        if raise_push_limit {
+            // MAX_PUSH_ID is only permission to promise pushes: no push was
+            // actually promised by the server, so id=1 is still invalid.
+            s.send_frame_client(
+                &frame::Frame::MaxPushId { push_id: 10 },
+                control,
+                false,
+            )
+            .unwrap();
+            assert_eq!(s.poll_server(), Err(Error::Done));
+        }
 
-        s.send_frame_client(
-            &frame::Frame::PriorityUpdatePush {
-                prioritized_element_id: 3,
-                priority_field_value: b"u=3".to_vec(),
-            },
-            s.client.control_stream_id.unwrap(),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(s.poll_server(), Err(Error::Done));
-    }
-
-    #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the client but for an
-    /// incorrect stream type.
-    fn priority_update_request_bad_stream() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
-
-        s.send_frame_client(
-            &frame::Frame::PriorityUpdateRequest {
-                prioritized_element_id: 5,
-                priority_field_value: b"u=3".to_vec(),
-            },
-            s.client.control_stream_id.unwrap(),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(s.poll_server(), Err(Error::FrameUnexpected));
-    }
-
-    #[test]
-    /// Send a PRIORITY_UPDATE for push stream from the client but for an
-    /// incorrect stream type.
-    fn priority_update_push_bad_stream() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
-
-        s.send_frame_client(
-            &frame::Frame::PriorityUpdatePush {
-                prioritized_element_id: 5,
-                priority_field_value: b"u=3".to_vec(),
-            },
-            s.client.control_stream_id.unwrap(),
-            false,
-        )
-        .unwrap();
-
-        assert_eq!(s.poll_server(), Err(Error::FrameUnexpected));
+        let priority_field_value = b"u=3".to_vec();
+        let frame = if push {
+            frame::Frame::PriorityUpdatePush {
+                prioritized_element_id: id,
+                priority_field_value,
+            }
+        } else {
+            frame::Frame::PriorityUpdateRequest {
+                prioritized_element_id: id,
+                priority_field_value,
+            }
+        };
+        s.send_frame_client(&frame, control, false).unwrap();
+        assert_eq!(s.poll_server(), Err(Error::IdError));
+        assert_eq!(
+            s.pipe.server.local_error().map(|err| err.error_code),
+            Some(WireErrorCode::IdError as u64)
+        );
     }
 
     #[test]
@@ -7211,6 +7209,17 @@ mod tests {
         assert_eq!(s.pipe.advance(), Ok(()));
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::SettingsError));
+        assert_eq!(
+            s.pipe.server.local_error().map(|err| err.error_code),
+            Some(WireErrorCode::SettingsError as u64)
+        );
+        assert_eq!(
+            s.server.peer_settings_raw(),
+            None,
+            "rejected SETTINGS must not publish peer negotiation state"
+        );
+        assert_eq!(s.server.peer_settings.h3_datagram, None);
+        assert!(!s.server.dgram_enabled_by_peer(&s.pipe.server));
     }
 
     #[test]
