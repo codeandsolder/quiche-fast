@@ -50,15 +50,6 @@ const DEFAULT_URGENCY: u8 = 127;
 /// The maximum size of the receiver stream flow control window.
 pub const MAX_STREAM_WINDOW: u64 = 16 * 1024 * 1024;
 
-/// A simple no-op hasher for Stream IDs.
-///
-/// The QUIC protocol and quiche library guarantees stream ID uniqueness, so
-/// we can save effort by avoiding using a more complicated algorithm.
-#[derive(Default)]
-pub struct StreamIdHasher {
-    id: u64,
-}
-
 /// Return value type of `RecvBuf::reset()`
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct RecvBufResetReturn {
@@ -88,29 +79,13 @@ pub enum RecvAction<T: bytes::BufMut> {
     Discard { len: usize },
 }
 
-impl std::hash::Hasher for StreamIdHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.id
-    }
-
-    #[inline]
-    fn write_u64(&mut self, id: u64) {
-        self.id = id;
-    }
-
-    #[inline]
-    fn write(&mut self, _: &[u8]) {
-        // We need a default write() for the trait but stream IDs will always
-        // be a u64 so we just delegate to write_u64.
-        unimplemented!()
-    }
-}
-
-type BuildStreamIdHasher = std::hash::BuildHasherDefault<StreamIdHasher>;
-
-pub type StreamIdHashMap<V> = HashMap<u64, V, BuildStreamIdHasher>;
-pub type StreamIdHashSet = HashSet<u64, BuildStreamIdHasher>;
+// Stream IDs are all aligned modulo four; a raw identity hash clusters
+// badly, particularly for sparse stream sequences. Seed each map separately
+// and mix all key bits before selecting a bucket.
+//
+// foldhash is already used elsewhere in this workspace's dependency graph.
+pub type StreamIdHashMap<V> = HashMap<u64, V, foldhash::fast::RandomState>;
+pub type StreamIdHashSet = HashSet<u64, foldhash::fast::RandomState>;
 
 /// Tracks collected stream sequences separately for each stream type.
 #[derive(Default)]
@@ -1289,6 +1264,34 @@ mod tests {
         let mut shutdown = test_stream(0, 4, 0, 0);
         assert!(shutdown.send.shutdown().is_ok());
         assert!(!shutdown.is_writable());
+    }
+
+    #[test]
+    fn hashmaps_preserve_sparse_aligned_stream_ids() {
+        let mut stream_ids = StreamIdHashSet::default();
+        let mut stream_values = StreamIdHashMap::default();
+        for sequence in (0_u64..8192).rev() {
+            // Valid local unidirectional stream IDs can have very sparse
+            // sequences; they must not suffer the identity hash's clustering.
+            let id = (sequence << 16) | 0x2;
+            assert!(stream_ids.insert(id));
+            assert_eq!(stream_values.insert(id, sequence), None);
+        }
+
+        for sequence in 0_u64..8192 {
+            let id = (sequence << 16) | 0x2;
+            assert!(stream_ids.contains(&id));
+            assert_eq!(stream_values.get(&id), Some(&sequence));
+            if sequence.is_multiple_of(3) {
+                assert!(stream_ids.remove(&id));
+                assert_eq!(stream_values.remove(&id), Some(sequence));
+            }
+        }
+        assert_eq!(stream_ids.len(), stream_values.len());
+        for sequence in 0_u64..8192 {
+            let id = (sequence << 16) | 0x2;
+            assert_eq!(stream_ids.contains(&id), !sequence.is_multiple_of(3));
+        }
     }
 
     #[rstest]
