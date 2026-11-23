@@ -87,17 +87,25 @@ impl BytesInFlight {
 
     /// Total time during which `bytes_in_flight` was > 0.
     pub(crate) fn get_duration(&self) -> Duration {
-        self.closed_interval_duration + self.open_interval_duration
+        self.closed_interval_duration
+            .saturating_add(self.open_interval_duration)
     }
 
     fn update_in_flight_duration(&mut self, now: Instant) {
         if let Some(start) = self.bytes_in_flight_interval_start {
+            // Event times can arrive out of order. Duration already observed
+            // for an open interval must never decrease, and an observation
+            // earlier than the interval start adds no elapsed time.
+            let observed = self
+                .open_interval_duration
+                .max(now.saturating_duration_since(start));
             if self.bytes_in_flight == 0 {
                 self.open_interval_duration = Duration::ZERO;
-                self.closed_interval_duration += now - start;
+                self.closed_interval_duration =
+                    self.closed_interval_duration.saturating_add(observed);
                 self.bytes_in_flight_interval_start = None;
             } else {
-                self.open_interval_duration = now - start;
+                self.open_interval_duration = observed;
             }
         }
     }
@@ -106,6 +114,50 @@ impl BytesInFlight {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Multiple send, ACK and loss callbacks can pass non-monotonic event
+    /// timestamps. The duration metric must never move backwards. Earlier
+    /// timestamps must not erase elapsed time already observed.
+    #[test]
+    fn in_flight_duration_is_monotonic_under_out_of_order_timestamps() {
+        let start = Instant::now();
+        let mut in_flight = BytesInFlight::default();
+        in_flight.add(3, start);
+
+        in_flight.add(2, start + Duration::from_secs(10));
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+
+        in_flight.add(1, start + Duration::from_secs(5));
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+        in_flight.saturating_subtract(2, start + Duration::from_secs(7));
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+
+        in_flight.saturating_subtract(4, start + Duration::from_secs(8));
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+        assert!(in_flight.is_zero());
+
+        // A second interval adds its own duration instead of altering the
+        // previously closed interval, even with a backdated observation.
+        let second_start = start + Duration::from_secs(20);
+        in_flight.add(1, second_start);
+        in_flight.saturating_subtract(1, second_start - Duration::from_secs(2));
+        assert!(in_flight.is_zero());
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn in_flight_duration_handles_updates_before_interval_start() {
+        let start = Instant::now() + Duration::from_secs(5);
+        let mut in_flight = BytesInFlight::default();
+        in_flight.add(2, start);
+        in_flight.add(1, start - Duration::from_secs(3));
+        assert_eq!(in_flight.get_duration(), Duration::ZERO);
+
+        in_flight.saturating_subtract(1, start - Duration::from_secs(1));
+        assert_eq!(in_flight.get_duration(), Duration::ZERO);
+        in_flight.saturating_subtract(2, start + Duration::from_secs(7));
+        assert_eq!(in_flight.get_duration(), Duration::from_secs(7));
+    }
 
     #[test]
     fn bytes_in_flight_basic() {
