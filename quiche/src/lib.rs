@@ -10236,7 +10236,7 @@ mod crypto;
 mod dgram;
 mod error;
 #[cfg(feature = "ffi")]
-mod ffi;
+pub(crate) mod ffi;
 mod flowcontrol;
 mod frame;
 pub mod h3;
@@ -10248,7 +10248,7 @@ mod rand;
 mod range_buf;
 mod ranges;
 mod recovery;
-mod scale;
+pub(crate) mod scale;
 mod stream;
 mod tls;
 mod transport_params;
