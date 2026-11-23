@@ -47,8 +47,8 @@ use qlog::events::EventData;
 /// as mandated by RFC 9000 Section 18.2.
 pub const MAX_ACK_DELAY_EXPONENT: u64 = 20;
 
-pub(crate) const MAX_ACK_DELAY: u64 = (1 << 14) - 1;
-pub(crate) const MIN_UDP_PAYLOAD_SIZE: u64 = 1200;
+pub const MAX_ACK_DELAY: u64 = (1 << 14) - 1;
+pub const MIN_UDP_PAYLOAD_SIZE: u64 = 1200;
 const DEFAULT_UDP_PAYLOAD_SIZE: u64 = 65527;
 const DEFAULT_ACK_DELAY_EXPONENT: u64 = 3;
 const DEFAULT_MAX_ACK_DELAY: u64 = 25;

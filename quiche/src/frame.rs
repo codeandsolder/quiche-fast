@@ -237,9 +237,7 @@ pub enum Frame {
 
 /// Read and validate a frame type before interpreting any type-dependent
 /// payload. RFC 9000 sections 12.4–12.5 and RFC 9221 section 4.
-pub(crate) fn read_frame_type(
-    b: &mut octets::Octets, pkt: packet::Type,
-) -> Result<u64> {
+pub fn read_frame_type(b: &mut octets::Octets, pkt: packet::Type) -> Result<u64> {
     let before = b.off();
     let ty = b.get_varint()?;
     if !matches!(ty, 0x00..=0x1e | 0x30 | 0x31) {

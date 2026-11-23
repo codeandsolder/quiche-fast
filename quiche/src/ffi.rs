@@ -126,7 +126,7 @@ use crate::Type;
 
 const FFI_ERR_INVALID_ARGUMENT: i16 = -24;
 
-pub(super) fn into_raw_or_null<T, E>(value: std::result::Result<T, E>) -> *mut T {
+pub fn into_raw_or_null<T, E>(value: std::result::Result<T, E>) -> *mut T {
     value.map_or(ptr::null_mut(), |value| Box::into_raw(Box::new(value)))
 }
 
@@ -135,7 +135,7 @@ pub(super) fn into_raw_or_null<T, E>(value: std::result::Result<T, E>) -> *mut T
 /// # Safety
 /// A non-null, aligned pointer must identify a live initialized T for the
 /// returned lifetime. The C caller must not mutate it during that borrow.
-pub(super) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
+pub unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
     if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
@@ -150,7 +150,7 @@ pub(super) unsafe fn ffi_ptr_ref<'a, T>(ptr: *const T) -> Option<&'a T> {
 /// # Safety
 /// A non-null, aligned pointer must identify a live initialized T, with
 /// exclusive access for the returned lifetime.
-pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
+pub unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
     if ptr.is_null() || !ptr.is_aligned() {
         return None;
     }
@@ -165,7 +165,7 @@ pub(super) unsafe fn ffi_ptr_mut<'a, T>(ptr: *mut T) -> Option<&'a mut T> {
 /// # Safety
 /// A non-null, aligned pointer must come from `Box::into_raw` for the same
 /// type and transfer sole ownership to this call.
-pub(super) unsafe fn ffi_drop_box<T>(ptr: *mut T) {
+pub unsafe fn ffi_drop_box<T>(ptr: *mut T) {
     if !ptr.is_null() && ptr.is_aligned() {
         // SAFETY: the caller supplies the original owned box pointer.
         unsafe { drop(Box::from_raw(ptr)) };
@@ -259,9 +259,7 @@ macro_rules! ffi_mut {
 /// # Safety
 /// A non-null, aligned pointer must identify writable storage for one T with
 /// exclusive access for the returned lifetime.
-pub(super) unsafe fn ffi_ptr_out<'a, T>(
-    ptr: *mut T,
-) -> Option<&'a mut MaybeUninit<T>> {
+pub unsafe fn ffi_ptr_out<'a, T>(ptr: *mut T) -> Option<&'a mut MaybeUninit<T>> {
     // SAFETY: MaybeUninit has the same layout as T and permits uninitialized
     // storage. The caller provides the exclusive writable allocation.
     unsafe { ffi_ptr_mut(ptr.cast::<MaybeUninit<T>>()) }
@@ -305,7 +303,7 @@ fn ffi_slice_layout_valid<T>(ptr: *const T, len: usize) -> bool {
 ///
 /// For non-empty slices, \`ptr\` must still point to \`len\` initialized \`T\`
 /// values in one live allocation for the returned lifetime.
-pub(super) unsafe fn ffi_slice_from_raw_parts<'a, T>(
+pub unsafe fn ffi_slice_from_raw_parts<'a, T>(
     ptr: *const T, len: usize,
 ) -> Option<&'a [T]> {
     if len == 0 {
@@ -329,7 +327,7 @@ pub(super) unsafe fn ffi_slice_from_raw_parts<'a, T>(
 /// For non-empty slices, \`ptr\` must point to \`len\` initialized \`T\` values
 /// in one live allocation and be exclusively borrowed for the returned
 /// lifetime.
-pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
+pub unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
     ptr: *mut T, len: usize,
 ) -> Option<&'a mut [T]> {
     if len == 0 {
@@ -349,7 +347,7 @@ pub(super) unsafe fn ffi_slice_from_raw_parts_mut<'a, T>(
 ///
 /// # Safety
 /// Non-empty storage must be writable and exclusive for the returned lifetime.
-pub(super) unsafe fn ffi_slice_output<'a, T>(
+pub unsafe fn ffi_slice_output<'a, T>(
     ptr: *mut T, len: usize,
 ) -> Option<&'a mut [MaybeUninit<T>]> {
     // SAFETY: MaybeUninit has T's layout and permits uninitialized storage;
