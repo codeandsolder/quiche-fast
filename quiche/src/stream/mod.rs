@@ -566,10 +566,12 @@ impl<F: BufFactory> StreamMap<F> {
         let mut cursor = self.writable.front();
         while let Some(key) = cursor.clone_pointer() {
             if let Some(stream) = self.streams.get(&key.id) {
-                let ready = match stream.send.cap() {
-                    Ok(cap) => tx_cap.min(cap) >= stream.send_lowat,
-                    Err(_) => true,
-                };
+                // STOP_SENDING errors remain writable notifications so the
+                // application can observe them even without send credit.
+                let ready = stream
+                    .send
+                    .cap()
+                    .map_or(true, |cap| tx_cap.min(cap) >= stream.send_lowat);
                 if ready {
                     self.remove_writable(&key);
                     return Some(key.id);
@@ -937,20 +939,17 @@ impl<F: BufFactory> StreamMap<F> {
     /// inconsistencies early.
     #[cfg(debug_assertions)]
     pub(crate) fn debug_check_tx_buffered_consistency(&self) {
-        if !self.tx_buffered_is_consistent() {
-            let buffered_per_stream = self
-                .streams
+        let actual = self.tx_buffered_actual();
+        debug_assert_eq!(
+            self.tx_buffered,
+            actual,
+            "tx_buffered mismatch: diff={}, buffered_per_stream={:?}",
+            i128::from(self.tx_buffered) - i128::from(actual),
+            self.streams
                 .iter()
-                .map(|(id, s)| (*id, s.send.buffered_bytes()))
-                .collect::<Vec<_>>();
-
-            let actual = self.tx_buffered_actual();
-            let stored = self.tx_buffered;
-            panic!(
-                "tx_buffered mismatch: stored={stored}, actual={actual}, diff={}, buffered_per_stream={buffered_per_stream:?}",
-                i128::from(stored) - i128::from(actual)
-            );
-        }
+                .map(|(id, stream)| (*id, stream.send.buffered_bytes()))
+                .collect::<Vec<_>>()
+        );
     }
 }
 
@@ -1214,6 +1213,15 @@ mod tests {
             initial_window,
             max_window,
         )
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "tx_buffered mismatch")]
+    fn debug_buffer_invariant_reports_mismatch() {
+        let mut streams = StreamMap::<DefaultBufFactory>::new(4, 4, 4);
+        streams.tx_buffered = 1;
+        streams.debug_check_tx_buffered_consistency();
     }
 
     #[test]
