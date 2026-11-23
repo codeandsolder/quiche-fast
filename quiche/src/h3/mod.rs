@@ -553,7 +553,10 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        None
+        match self {
+            Self::TransportError(err) => Some(err),
+            _ => None,
+        }
     }
 }
 
@@ -6264,6 +6267,19 @@ mod tests {
             s.pipe.server.local_error.as_ref().unwrap().error_code,
             Error::to_wire(Error::ExcessiveLoad)
         );
+    }
+
+    #[test]
+    fn wrapped_transport_error_exposes_its_source() {
+        use std::error::Error as _;
+
+        let transport = crate::Error::StreamLimit;
+        let wrapped = Error::TransportError(transport);
+        let source = wrapped.source().expect("transport error cause");
+        assert_eq!(source.downcast_ref::<crate::Error>(), Some(&transport));
+        assert!(Error::Done.source().is_none());
+        assert!(Error::FrameError.source().is_none());
+        assert!(Error::from(crate::Error::Done).source().is_none());
     }
 
     #[test]
