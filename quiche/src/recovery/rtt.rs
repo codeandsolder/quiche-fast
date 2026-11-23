@@ -118,7 +118,7 @@ impl RttStats {
     }
 
     #[cfg(feature = "qlog")]
-    pub(crate) fn latest_rtt(&self) -> Duration {
+    pub(crate) const fn latest_rtt(&self) -> Duration {
         self.latest_rtt
     }
 
@@ -165,7 +165,10 @@ fn weighted_part<const NUM: u32, const DEN: u32>(duration: Duration) -> Duration
     }
 
     let quotient = duration / DEN;
-    let remainder = duration - quotient * DEN;
+    // Division rounds down, so quotient * DEN <= duration and the
+    // saturating subtraction is exact. The remainder is < DEN nanoseconds,
+    // hence its product with NUM fits for the full u32 const range.
+    let remainder = duration.saturating_sub(quotient * DEN);
     quotient * NUM + remainder * NUM / DEN
 }
 
@@ -186,6 +189,17 @@ mod tests {
             assert_eq!(weighted_part::<3, 4>(duration).as_nanos(), nanos * 3 / 4);
             assert_eq!(weighted_part::<7, 8>(duration).as_nanos(), nanos * 7 / 8);
         }
+    }
+
+    #[test]
+    fn weighted_duration_handles_maximal_const_ratio() {
+        let numerator = u32::MAX - 1;
+        let denominator = u32::MAX;
+        let actual =
+            weighted_part::<{ u32::MAX - 1 }, { u32::MAX }>(Duration::MAX);
+        let expected = Duration::MAX.as_nanos() * u128::from(numerator) /
+            u128::from(denominator);
+        assert_eq!(actual.as_nanos(), expected);
     }
 
     #[test]
