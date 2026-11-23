@@ -1035,8 +1035,7 @@ impl<F: BufFactory> Stream<F> {
     pub fn is_writable(&self) -> bool {
         !self.send.is_shutdown() &&
             !self.send.is_fin() &&
-            (self.send.off_back() + self.send_lowat as u64) <
-                self.send.max_off()
+            self.send.cap().is_ok_and(|cap| cap >= self.send_lowat)
     }
 
     /// Returns true if the stream has data to send and is allowed to send at
@@ -1240,6 +1239,56 @@ mod tests {
             initial_window,
             max_window,
         )
+    }
+
+    #[test]
+    fn stream_writable_credit_is_inclusive_and_overflow_safe() {
+        let mut stream = test_stream(0, 4, 0, 0);
+        for (watermark, ready) in
+            [(1, true), (4, true), (5, false), (usize::MAX, false)]
+        {
+            stream.send_lowat = watermark;
+            assert_eq!(
+                stream.is_writable(),
+                ready,
+                "at offset zero, watermark={watermark}"
+            );
+        }
+
+        // After one byte is buffered, exactly three bytes of credit remain.
+        assert_eq!(stream.send.write(b"x", false), Ok(1));
+        for (watermark, ready) in [(3, true), (4, false)] {
+            stream.send_lowat = watermark;
+            assert_eq!(
+                stream.is_writable(),
+                ready,
+                "after one byte, watermark={watermark}"
+            );
+        }
+
+        // Large offsets must not overflow the watermark addition in debug
+        // builds, nor wrap into a spurious positive readiness result.
+        let mut near_end = test_stream(0, u64::MAX, 0, 0);
+        near_end.send.seed_offsets_for_test(u64::MAX - 2);
+        for (watermark, ready) in
+            [(1, true), (2, true), (3, false), (usize::MAX, false)]
+        {
+            near_end.send_lowat = watermark;
+            assert_eq!(
+                near_end.is_writable(),
+                ready,
+                "near end, watermark={watermark}"
+            );
+        }
+
+        // FIN or local shutdown disqualifies the stream independently of
+        // credit.
+        let mut finished = test_stream(0, 4, 0, 0);
+        assert_eq!(finished.send.write(b"", true), Ok(0));
+        assert!(!finished.is_writable());
+        let mut shutdown = test_stream(0, 4, 0, 0);
+        assert!(shutdown.send.shutdown().is_ok());
+        assert!(!shutdown.is_writable());
     }
 
     #[rstest]
