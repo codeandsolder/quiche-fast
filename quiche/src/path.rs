@@ -69,7 +69,7 @@ pub enum PathState {
 
 impl PathState {
     #[cfg(feature = "ffi")]
-    pub fn to_c(self) -> libc::ssize_t {
+    pub const fn to_c(self) -> libc::ssize_t {
         match self {
             Self::Failed => -1,
             Self::Unknown => 0,
@@ -267,7 +267,7 @@ impl Path {
         path_challenge_recv_max_queue_len: usize, is_initial: bool,
         config: Option<&Config>,
     ) -> Self {
-        let (state, active_scid_seq, active_dcid_seq) = if is_initial {
+        let (state, source_sequence, destination_sequence) = if is_initial {
             (PathState::Validated, Some(0), Some(0))
         } else {
             (PathState::Unknown, None, None)
@@ -294,8 +294,8 @@ impl Path {
         Self {
             local_addr,
             peer_addr,
-            active_scid_seq,
-            active_dcid_seq,
+            active_scid_seq: source_sequence,
+            active_dcid_seq: destination_sequence,
             state,
             active: false,
             recovery: recovery::Recovery::new_with_config(recovery_config),
@@ -370,7 +370,7 @@ impl Path {
 
     /// Returns whether the path requires sending a probing packet.
     #[inline]
-    pub fn probing_required(&self) -> bool {
+    pub const fn probing_required(&self) -> bool {
         !self.received_challenges.is_empty() || self.validation_requested()
     }
 
@@ -577,11 +577,11 @@ impl Path {
     }
 
     pub fn stats(&self) -> PathStats {
-        let pmtu = match self.pmtud.as_ref().map(pmtud::Pmtud::get_current_mtu) {
-            Some(v) => v,
-
-            None => self.recovery.max_datagram_size(),
-        };
+        // Query recovery only if PMTUD is disabled for this path.
+        let pmtu = self.pmtud.as_ref().map_or_else(
+            || self.recovery.max_datagram_size(),
+            pmtud::Pmtud::get_current_mtu,
+        );
 
         PathStats {
             local_addr: self.local_addr,
@@ -971,12 +971,10 @@ impl PathMap {
         pmtud_max_probes: u8,
     ) {
         for (_, path) in &mut self.paths {
-            let old_pmtu = path
-                .pmtud
-                .as_ref()
-                .map_or(path.recovery.max_datagram_size(), |pmtud| {
-                    pmtud.get_current_mtu()
-                });
+            let old_pmtu = path.pmtud.as_ref().map_or_else(
+                || path.recovery.max_datagram_size(),
+                pmtud::Pmtud::get_current_mtu,
+            );
 
             path.pmtud = if discover {
                 Some(pmtud::Pmtud::new(
