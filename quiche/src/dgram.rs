@@ -88,7 +88,7 @@ impl<F: BufFactory> DatagramQueue<F> {
         None
     }
 
-    pub fn has_pending(&self) -> bool {
+    pub const fn has_pending(&self) -> bool {
         !self.queue.is_empty()
     }
 
@@ -108,7 +108,7 @@ impl<F: BufFactory> DatagramQueue<F> {
         self.len() == 0
     }
 
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.queue.len()
     }
 

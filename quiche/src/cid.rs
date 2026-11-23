@@ -138,7 +138,7 @@ impl BoundedNonEmptyConnectionIdVecDeque {
         std::iter::once(&self.oldest).chain(&self.rest)
     }
 
-    fn len(&self) -> usize {
+    const fn len(&self) -> usize {
         1 + self.rest.len()
     }
 
@@ -766,7 +766,7 @@ impl ConnectionIdentifiers {
 
     /// Returns true if there are new source Connection IDs to advertise.
     #[inline]
-    pub fn has_new_scids(&self) -> bool {
+    pub const fn has_new_scids(&self) -> bool {
         !self.advertise_new_scid_seqs.is_empty()
     }
 
@@ -813,7 +813,7 @@ impl ConnectionIdentifiers {
     /// Returns the number of source Connection IDs that are retired. This is
     /// only meaningful if the host uses non-zero length Source Connection IDs.
     #[inline]
-    pub fn retired_source_cids(&self) -> usize {
+    pub const fn retired_source_cids(&self) -> usize {
         self.retired_scids.len()
     }
 
