@@ -3246,7 +3246,9 @@ impl Connection {
                     return Err(Error::IdError);
                 }
 
-                if prioritized_element_id > conn.streams.max_streams_bidi() * 4 {
+                // MAX_STREAMS_BIDI is a count: the first forbidden request
+                // stream ID is count * 4, not count * 4 + 4.
+                if prioritized_element_id >= conn.streams.max_streams_bidi() * 4 {
                     conn.close(
                         true,
                         Error::IdError.to_wire(),
@@ -5593,6 +5595,7 @@ mod tests {
     #[case::client_uni(2, false, false)]
     #[case::server_uni(3, false, false)]
     #[case::server_bidi_later(5, false, false)]
+    #[case::first_request_beyond_limit(20, false, false)]
     #[case::push_zero(0, true, false)]
     #[case::push_one(1, true, false)]
     #[case::push_three(3, true, false)]
