@@ -1,7 +1,6 @@
 on:
-  push:
-    branches:
-      - master
+  release:
+    types: [published]
 
 name: Deploy
 
@@ -14,6 +13,7 @@ concurrency:
 
 jobs:
   docs:
+    if: github.event.release.prerelease == false
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -58,6 +58,7 @@ jobs:
         uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
 
   docker:
+    if: github.event.release.prerelease == false
     runs-on: ubuntu-latest
     env:
       DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
