@@ -137,11 +137,8 @@ impl PacketKey {
 
         let mut out_tag_len = tag_len;
 
-        let (extra_in_ptr, extra_in_len) = match extra_in {
-            Some(v) => (v.as_ptr(), v.len()),
-
-            None => (std::ptr::null(), 0),
-        };
+        let (extra_in_ptr, extra_in_len) =
+            extra_in.map_or((std::ptr::null(), 0), |v| (v.as_ptr(), v.len()));
 
         // Make sure all the outputs combined fit in the buffer.
         let tag_capacity =

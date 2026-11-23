@@ -2414,17 +2414,16 @@ impl<F: BufFactory> Connection<F> {
         conn.encode_transport_params()?;
 
         if !is_server {
-            let dcid = if let Some(client_dcid) = client_dcid {
-                // We already had an dcid generated for us, use it.
-                ConnectionId::copy_from_slice(client_dcid.as_ref())
-            } else {
-                // Derive initial secrets for the client. We can do this here
-                // because we already generated the random
-                // destination connection ID.
-                let mut dcid = [0; 16];
-                rand::rand_bytes(&mut dcid[..]);
-                ConnectionId::copy_from_slice(&dcid)
-            };
+            let dcid = client_dcid.map_or_else(
+                || {
+                    // Derive initial secrets for the client. We can do this
+                    // here because the random DCID has not been assigned yet.
+                    let mut dcid = [0; 16];
+                    rand::rand_bytes(&mut dcid[..]);
+                    ConnectionId::copy_from_slice(&dcid)
+                },
+                |dcid| ConnectionId::copy_from_slice(dcid.as_ref()),
+            );
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &dcid,
