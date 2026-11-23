@@ -2914,7 +2914,7 @@ impl<F: BufFactory> Connection<F> {
         ex_data.local_transport_params.max_idle_timeout =
             cmp::min(v, octets::MAX_VAR_INT);
 
-        Self::set_transport_parameters_in_hanshake(
+        Self::set_transport_parameters_in_handshake(
             ex_data.local_transport_params.clone(),
             ex_data.is_server,
             ssl,
@@ -2946,7 +2946,7 @@ impl<F: BufFactory> Connection<F> {
         ex_data.local_transport_params.initial_max_streams_bidi =
             cmp::min(v, MAX_STREAM_COUNT);
 
-        Self::set_transport_parameters_in_hanshake(
+        Self::set_transport_parameters_in_handshake(
             ex_data.local_transport_params.clone(),
             ex_data.is_server,
             ssl,
@@ -2954,7 +2954,7 @@ impl<F: BufFactory> Connection<F> {
     }
 
     #[cfg(feature = "boringssl-btls-crate")]
-    fn set_transport_parameters_in_hanshake(
+    fn set_transport_parameters_in_handshake(
         params: TransportParams, is_server: bool, ssl: &mut btls::ssl::SslRef,
     ) -> Result<()> {
         use foreign_types_shared::ForeignTypeRef;
@@ -2969,6 +2969,9 @@ impl<F: BufFactory> Connection<F> {
         // Wrap the temporary `Handshake` in `ManuallyDrop` because this is only
         // a borrowed view of `ssl`. The caller retains ownership of the
         // underlying BoringSSL object.
+        // SAFETY: `ssl` is a live, uniquely borrowed SSL object. The
+        // temporary Handshake only borrows its pointer; ManuallyDrop prevents
+        // it from freeing the caller-owned SSL object on scope exit.
         let mut handshake = ManuallyDrop::new(unsafe {
             tls::Handshake::from_ptr(ssl.as_ptr().cast())?
         });
@@ -8622,7 +8625,10 @@ impl<F: BufFactory> Connection<F> {
                 }
             }
 
-            if ex_data.tx_cap_factor != self.tx_cap_factor {
+            // Preserve the exact callback-supplied IEEE-754 value while
+            // avoiding redundant updates for unchanged NaNs. `f64 !=`
+            // treats even a value compared with itself as different for NaN.
+            if ex_data.tx_cap_factor.to_bits() != self.tx_cap_factor.to_bits() {
                 self.tx_cap_factor = ex_data.tx_cap_factor;
             }
 
