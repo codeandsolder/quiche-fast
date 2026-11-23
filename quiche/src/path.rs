@@ -976,7 +976,7 @@ impl PathMap {
 
         // Check the raw active flag instead of Path::active(), which can be
         // false for a failed path or before its DCID has been assigned.
-        for (_, old_active_path) in self.paths.iter_mut() {
+        for (_, old_active_path) in &mut self.paths {
             if old_active_path.active {
                 old_active_path.active = false;
                 old_active_path.superseded = true;
