@@ -1149,8 +1149,12 @@ impl Connection {
 
         // Try opening QPACK streams, but ignore errors if it fails since we
         // don't need them right now.
-        http3_conn.open_qpack_encoder_stream(conn).ok();
-        http3_conn.open_qpack_decoder_stream(conn).ok();
+        http3_conn
+            .open_qpack_stream(conn, stream::Type::QpackEncoder)
+            .ok();
+        http3_conn
+            .open_qpack_stream(conn, stream::Type::QpackDecoder)
+            .ok();
 
         if conn.grease {
             // Try opening a GREASE stream, but ignore errors since it's not
@@ -2374,52 +2378,33 @@ impl Connection {
         Ok(stream_id)
     }
 
-    fn open_qpack_encoder_stream<F: BufFactory>(
-        &mut self, conn: &mut super::Connection<F>,
+    fn open_qpack_stream<F: BufFactory>(
+        &mut self, conn: &mut super::Connection<F>, kind: stream::Type,
     ) -> Result<()> {
-        let stream_id = self.open_uni_stream(
-            conn,
-            stream::QPACK_ENCODER_STREAM_TYPE_ID,
-            &[],
-            false,
-        )?;
+        let stream_type = match kind {
+            stream::Type::QpackEncoder => stream::QPACK_ENCODER_STREAM_TYPE_ID,
+            stream::Type::QpackDecoder => stream::QPACK_DECODER_STREAM_TYPE_ID,
+            _ => return Err(Error::InternalError),
+        };
+        let stream_id = self.open_uni_stream(conn, stream_type, &[], false)?;
 
-        self.local_qpack_streams.encoder_stream_id = Some(stream_id);
+        match kind {
+            stream::Type::QpackEncoder => {
+                self.local_qpack_streams.encoder_stream_id = Some(stream_id);
+            },
+            stream::Type::QpackDecoder => {
+                self.local_qpack_streams.decoder_stream_id = Some(stream_id);
+            },
+            _ => return Err(Error::InternalError),
+        }
 
         qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
             let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
                 stream_id,
                 initiator: Some(Initiator::Local),
-                stream_type: StreamType::QpackEncode,
+                stream_type: kind.to_qlog(),
                 ..Default::default()
             });
-
-            q.add_event_data_now(ev_data).ok();
-        });
-
-        Ok(())
-    }
-
-    fn open_qpack_decoder_stream<F: BufFactory>(
-        &mut self, conn: &mut super::Connection<F>,
-    ) -> Result<()> {
-        let stream_id = self.open_uni_stream(
-            conn,
-            stream::QPACK_DECODER_STREAM_TYPE_ID,
-            &[],
-            false,
-        )?;
-
-        self.local_qpack_streams.decoder_stream_id = Some(stream_id);
-
-        qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
-            let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
-                stream_id,
-                initiator: Some(Initiator::Local),
-                stream_type: StreamType::QpackDecode,
-                ..Default::default()
-            });
-
             q.add_event_data_now(ev_data).ok();
         });
 
@@ -3457,12 +3442,16 @@ pub mod testing {
             self.client.send_settings(&mut self.pipe.client)?;
             self.pipe.advance().ok();
 
-            self.client
-                .open_qpack_encoder_stream(&mut self.pipe.client)?;
+            self.client.open_qpack_stream(
+                &mut self.pipe.client,
+                stream::Type::QpackEncoder,
+            )?;
             self.pipe.advance().ok();
 
-            self.client
-                .open_qpack_decoder_stream(&mut self.pipe.client)?;
+            self.client.open_qpack_stream(
+                &mut self.pipe.client,
+                stream::Type::QpackDecoder,
+            )?;
             self.pipe.advance().ok();
 
             if self.pipe.client.grease {
@@ -3475,12 +3464,16 @@ pub mod testing {
             self.server.send_settings(&mut self.pipe.server)?;
             self.pipe.advance().ok();
 
-            self.server
-                .open_qpack_encoder_stream(&mut self.pipe.server)?;
+            self.server.open_qpack_stream(
+                &mut self.pipe.server,
+                stream::Type::QpackEncoder,
+            )?;
             self.pipe.advance().ok();
 
-            self.server
-                .open_qpack_decoder_stream(&mut self.pipe.server)?;
+            self.server.open_qpack_stream(
+                &mut self.pipe.server,
+                stream::Type::QpackDecoder,
+            )?;
             self.pipe.advance().ok();
 
             if self.pipe.server.grease {
@@ -7192,23 +7185,9 @@ mod tests {
     /// Tests that receiving a H3_DATAGRAM setting when no TP is set generates
     /// an error.
     fn dgram_setting_no_tp() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let (mut config, h3_config) = Session::default_configs().unwrap();
         config.set_initial_max_data(70);
-        config.set_initial_max_stream_data_bidi_local(150);
-        config.set_initial_max_stream_data_bidi_remote(150);
-        config.set_initial_max_stream_data_uni(150);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
-
-        let h3_config = Config::new();
+        config.enable_dgram(false, 0, 0);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7246,23 +7225,9 @@ mod tests {
     #[test]
     /// Tests that receiving SETTINGS with prohibited values generates an error.
     fn settings_h2_prohibited() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let (mut config, h3_config) = Session::default_configs().unwrap();
         config.set_initial_max_data(70);
-        config.set_initial_max_stream_data_bidi_local(150);
-        config.set_initial_max_stream_data_bidi_remote(150);
-        config.set_initial_max_stream_data_uni(150);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
-
-        let h3_config = Config::new();
+        config.enable_dgram(false, 0, 0);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
