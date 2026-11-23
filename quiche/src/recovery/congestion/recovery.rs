@@ -57,6 +57,7 @@ use super::Congestion;
 use crate::recovery::bytes_in_flight::BytesInFlight;
 use crate::recovery::recovery_deadline;
 use crate::recovery::rtt::RttStats;
+use crate::recovery::spurious_packet_threshold;
 use crate::recovery::EpochTiming;
 use crate::recovery::LossDetectionTimer;
 use crate::recovery::OnAckReceivedOutcome;
@@ -176,19 +177,13 @@ impl RecoveryEpoch {
                 } else if unacked.time_lost.is_some() {
                     // An acked packet was already declared lost.
                     spurious_losses += 1;
-                    let skipped_between = self
-                        .skipped_packet_numbers
-                        .iter()
-                        .filter(|&&pn| {
-                            pn > unacked.pkt_num && pn <= largest_acked
-                        })
-                        .count() as u64;
-                    spurious_pkt_thresh.get_or_insert(
-                        largest_acked
-                            .saturating_sub(unacked.pkt_num)
-                            .saturating_sub(skipped_between) +
-                            1,
-                    );
+                    spurious_pkt_thresh.get_or_insert_with(|| {
+                        spurious_packet_threshold(
+                            largest_acked,
+                            unacked.pkt_num,
+                            &self.skipped_packet_numbers,
+                        )
+                    });
                     unacked.time_acked = Some(now);
                     self.newly_acked_send_times.push(unacked.time_sent);
 

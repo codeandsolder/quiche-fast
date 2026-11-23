@@ -53,6 +53,23 @@ const INITIAL_PACKET_THRESHOLD: u64 = 3;
 
 const MAX_PACKET_THRESHOLD: u64 = 20;
 
+/// The packet reordering distance of the first newly acknowledged packet
+/// that recovery previously declared lost. Locally skipped packet numbers
+/// cannot contribute to the peer's observed reordering distance.
+fn spurious_packet_threshold(
+    largest_acked: u64, packet_num: u64, skipped_packet_numbers: &[u64],
+) -> u64 {
+    let skipped_between = skipped_packet_numbers
+        .iter()
+        .filter(|&&pn| pn > packet_num && pn <= largest_acked)
+        .count();
+    let skipped_between = u64::try_from(skipped_between).unwrap_or(u64::MAX);
+    largest_acked
+        .saturating_sub(packet_num)
+        .saturating_sub(skipped_between)
+        .saturating_add(1)
+}
+
 // Time threshold used to calculate the loss time.
 //
 // https://www.rfc-editor.org/rfc/rfc9002.html#section-6.1.2
@@ -833,6 +850,13 @@ mod tests {
     use rstest::rstest;
     use smallvec::smallvec;
     use std::str::FromStr;
+
+    #[test]
+    fn spurious_packet_threshold_excludes_local_gaps() {
+        assert_eq!(spurious_packet_threshold(9, 3, &[2, 4, 7, 10]), 5);
+        assert_eq!(spurious_packet_threshold(9, 3, &[]), 7);
+        assert_eq!(spurious_packet_threshold(u64::MAX, 0, &[]), u64::MAX);
+    }
 
     /// Sender-induced packet-number gaps are not reordering. The gap must
     /// remain excluded from packet-threshold distance even after a higher ACK
