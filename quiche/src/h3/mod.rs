@@ -3398,18 +3398,22 @@ pub mod testing {
             let frame = frame::Frame::Data {
                 payload: data.clone(),
             };
-            let wire = Session::encode_test_frame(&frame).unwrap();
+            let wire =
+                Session::<DefaultBufFactory>::encode_test_frame(&frame).unwrap();
             assert_eq!(wire.len(), 65_535);
             let mut reader = octets::Octets::with_slice(&wire);
             assert_eq!(reader.get_varint().unwrap(), frame::DATA_FRAME_TYPE_ID);
             assert_eq!(reader.get_varint().unwrap(), data.len() as u64);
-            assert_eq!(reader.get_bytes(data.len()).unwrap().as_ref(), data);
+            assert_eq!(
+                reader.get_bytes(data.len()).unwrap().as_ref(),
+                data.as_slice()
+            );
 
             let too_big = frame::Frame::Data {
                 payload: vec![0; 65_531],
             };
             assert_eq!(
-                Session::encode_test_frame(&too_big),
+                Session::<DefaultBufFactory>::encode_test_frame(&too_big),
                 Err(Error::BufferTooShort)
             );
         }
