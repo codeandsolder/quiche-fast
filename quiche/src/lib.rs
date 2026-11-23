@@ -3744,7 +3744,9 @@ impl<F: BufFactory> Connection<F> {
                             frame::Frame::DatagramHeader {
                                 length: data.buf().len(),
                             }
-                            .to_qlog(),
+                            .to_qlog(
+                                self.peer_transport_params.ack_delay_exponent,
+                            ),
                         );
                     });
 
@@ -3769,7 +3771,9 @@ impl<F: BufFactory> Connection<F> {
             };
 
             qlog_with_type!(QLOG_PACKET_RX, self.qlog, _q, {
-                qlog_frames.push(frame.to_qlog());
+                qlog_frames.push(
+                    frame.to_qlog(self.peer_transport_params.ack_delay_exponent),
+                );
             });
 
             if frame.ack_eliciting() {
@@ -4826,8 +4830,13 @@ impl<F: BufFactory> Connection<F> {
 
         let hdr_ty = hdr.ty;
 
+        // Capture the header before packet construction can retire a CID.
+        // Do not allocate it for a disabled packet event.
         #[cfg(feature = "qlog")]
-        let qlog_pkt_hdr = self.qlog.streamer.as_ref().map(|_q| {
+        let qlog_pkt_hdr = (self.qlog.streamer.is_some() &&
+            EventImportance::from(QLOG_PACKET_TX)
+                .is_contained_in(&self.qlog.level))
+        .then(|| {
             qlog::events::quic::PacketHeader::with_type(
                 hdr.ty.to_qlog(),
                 Some(pn),
@@ -5745,46 +5754,44 @@ impl<F: BufFactory> Connection<F> {
             AddrTupleFmt(path.local_addr(), path.peer_addr())
         );
 
-        #[cfg(feature = "qlog")]
-        let mut qlog_frames: Vec<qlog::events::quic::QuicFrame> =
-            Vec::with_capacity(frames.len());
-
-        for frame in &mut frames {
+        for frame in &frames {
             trace!("{} tx frm {frame:?}", self.trace_id);
-
-            qlog_with_type!(QLOG_PACKET_TX, self.qlog, _q, {
-                qlog_frames.push(frame.to_qlog());
-            });
         }
 
-        qlog_with_type!(QLOG_PACKET_TX, self.qlog, q, {
-            if let Some(header) = qlog_pkt_hdr {
-                // Qlog packet raw info described at
-                // https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-00#section-5.1
-                //
-                // `length` includes packet headers and trailers (AEAD tag).
-                let length = payload_len + payload_offset + crypto_overhead;
-                let qlog_raw_info = RawInfo {
-                    length: Some(length as u64),
-                    payload_length: Some(payload_len as u64),
-                    data: None,
-                };
+        #[cfg(feature = "qlog")]
+        if let (Some(q), Some(header)) = (&mut self.qlog.streamer, qlog_pkt_hdr) {
+            let qlog_frames = frames
+                .iter()
+                .map(|frame| {
+                    frame.to_qlog(self.local_transport_params.ack_delay_exponent)
+                })
+                .collect();
 
-                let send_at_time =
-                    now.duration_since(q.start_time()).as_secs_f64() * 1000.0;
+            // Qlog packet raw info described at
+            // https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-00#section-5.1
+            //
+            // `length` includes packet headers and trailers (AEAD tag).
+            let length = payload_len + payload_offset + crypto_overhead;
+            let qlog_raw_info = RawInfo {
+                length: Some(length as u64),
+                payload_length: Some(payload_len as u64),
+                data: None,
+            };
 
-                let ev_data =
-                    EventData::QuicPacketSent(qlog::events::quic::PacketSent {
-                        header,
-                        frames: Some(qlog_frames),
-                        raw: Some(qlog_raw_info),
-                        send_at_time: Some(send_at_time),
-                        ..Default::default()
-                    });
+            let send_at_time =
+                now.duration_since(q.start_time()).as_secs_f64() * 1000.0;
 
-                q.add_event_data_with_instant(ev_data, now).ok();
-            }
-        });
+            let ev_data =
+                EventData::QuicPacketSent(qlog::events::quic::PacketSent {
+                    header,
+                    frames: Some(qlog_frames),
+                    raw: Some(qlog_raw_info),
+                    send_at_time: Some(send_at_time),
+                    ..Default::default()
+                });
+
+            q.add_event_data_with_instant(ev_data, now).ok();
+        }
 
         let aead = match crypto_ctx.crypto_seal {
             Some(ref mut v) => v,
