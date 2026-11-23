@@ -329,6 +329,19 @@ impl Path {
         }
     }
 
+    /// Credits pre-validation send capacity for bytes received on this path.
+    ///
+    /// The configured amplification factor is an unrestricted `usize`.
+    /// Both the product and the cumulative budget must saturate rather than
+    /// wrap (which could incorrectly reduce or reset the available credit).
+    pub fn grant_amplification_credit(
+        &mut self, received_bytes: usize, amplification_factor: usize,
+    ) {
+        self.max_send_bytes = self
+            .max_send_bytes
+            .saturating_add(received_bytes.saturating_mul(amplification_factor));
+    }
+
     /// Returns the local address on which this path operates.
     #[inline]
     pub const fn local_addr(&self) -> SocketAddr {
@@ -1150,6 +1163,31 @@ mod tests {
     use crate::Config;
 
     use super::*;
+
+    #[test]
+    fn amplification_credit_saturates_product_and_accumulation() {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery_config = RecoveryConfig::from_config(&config);
+        let mut path = Path::new(
+            "127.0.0.1:1234".parse().unwrap(),
+            "127.0.0.1:4321".parse().unwrap(),
+            &recovery_config,
+            config.path_challenge_recv_max_queue_len,
+            false,
+            None,
+        );
+
+        path.grant_amplification_credit(3, 2);
+        assert_eq!(path.max_send_bytes, 6);
+        path.grant_amplification_credit(4, 3);
+        assert_eq!(path.max_send_bytes, 18);
+        path.grant_amplification_credit(usize::MAX, 2);
+        assert_eq!(path.max_send_bytes, usize::MAX);
+        path.grant_amplification_credit(1, usize::MAX);
+        assert_eq!(path.max_send_bytes, usize::MAX);
+        path.grant_amplification_credit(usize::MAX, 0);
+        assert_eq!(path.max_send_bytes, usize::MAX);
+    }
 
     #[test]
     fn pmtud_probe_requires_validated_path_without_pending_validation() {

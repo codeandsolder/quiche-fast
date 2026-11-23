@@ -1230,6 +1230,27 @@ fn custom_limit_handshake_data(
     assert_eq!(server_sent, client_sent * CUSTOM_AMPLIFICATION_FACTOR);
 }
 
+#[test]
+fn large_amplification_factor_does_not_overflow_received_credit() {
+    let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    config.set_max_amplification_factor(usize::MAX);
+    let mut pipe = test_utils::Pipe::with_server_config(&mut config).unwrap();
+    let mut buf = [0; 2048];
+    let (len, _) = pipe.client.send(&mut buf).unwrap();
+    assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
+    assert_eq!(
+        pipe.server.paths.get_active().unwrap().max_send_bytes,
+        usize::MAX,
+    );
+
+    // Receiving another datagram must not wrap the already saturated budget.
+    let _ = pipe.server_recv(&mut buf[..len]);
+    assert_eq!(
+        pipe.server.paths.get_active().unwrap().max_send_bytes,
+        usize::MAX,
+    );
+}
+
 #[rstest]
 fn amplification_limited_stat() {
     // `cert-big.crt` is sized so the server's handshake flight exceeds the
