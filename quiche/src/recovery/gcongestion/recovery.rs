@@ -17,6 +17,7 @@ use qlog::events::EventData;
 use crate::recovery::QlogMetrics;
 
 use crate::frame;
+use crate::recovery::pending_lost_frames::PendingLostFrames;
 
 use crate::recovery::bytes_in_flight::BytesInFlight;
 use crate::recovery::gcongestion::Bandwidth;
@@ -109,8 +110,7 @@ struct RecoveryEpoch {
     // Frames scheduled for retransmission due to PTO are tracked
     // separately so we can check that frames were drained before
     // generating more PTO probes.
-    lost_frames_ack: VecDeque<frame::Frame>,
-    lost_frames_pto: VecDeque<frame::Frame>,
+    pending_lost_frames: PendingLostFrames<VecDeque<frame::Frame>>,
 
     /// The largest packet number sent in the packet number space so far.
     #[cfg_attr(
@@ -166,7 +166,7 @@ impl RecoveryEpoch {
             .sum();
 
         std::mem::take(&mut self.sent_packets);
-        self.clear_lost_frames();
+        self.pending_lost_frames.clear();
         std::mem::take(&mut self.acked_frames);
         self.timing = EpochTiming::default();
         self.loss_probes = 0;
@@ -312,7 +312,7 @@ impl RecoveryEpoch {
                         ..
                     } = status.lose()
                     {
-                        self.lost_frames_ack.extend(frames);
+                        self.pending_lost_frames.queue_ack(frames);
 
                         if in_flight {
                             self.timing.in_flight_count -= 1;
@@ -373,31 +373,6 @@ impl RecoveryEpoch {
         }
 
         self.largest_acked_packet.unwrap_or(0) + 1
-    }
-
-    /// Returns the next lost frame, trying ACK-based lost frames first,
-    /// then PTO-based lost frames.
-    fn next_lost_frame(&mut self) -> Option<frame::Frame> {
-        self.lost_frames_ack
-            .pop_front()
-            .or_else(|| self.lost_frames_pto.pop_front())
-    }
-
-    /// Returns true if there are any lost frames (ACK or PTO).
-    fn has_lost_frames(&self) -> bool {
-        !self.lost_frames_ack.is_empty() || !self.lost_frames_pto.is_empty()
-    }
-
-    /// Returns the total count of lost frames (ACK + PTO).
-    #[cfg(test)]
-    fn lost_frames_count(&self) -> usize {
-        self.lost_frames_ack.len() + self.lost_frames_pto.len()
-    }
-
-    /// Clears all lost frames (both ACK and PTO).
-    fn clear_lost_frames(&mut self) {
-        self.lost_frames_ack.clear();
-        self.lost_frames_pto.clear();
     }
 }
 
@@ -633,7 +608,7 @@ impl RecoveryOps for GRecovery {
     }
 
     fn next_lost_frame(&mut self, epoch: packet::Epoch) -> Option<frame::Frame> {
-        self.epochs[epoch].next_lost_frame()
+        self.epochs[epoch].pending_lost_frames.next_lost_frame()
     }
 
     #[cfg(test)]
@@ -642,7 +617,7 @@ impl RecoveryOps for GRecovery {
     }
 
     fn has_lost_frames(&self, epoch: packet::Epoch) -> bool {
-        self.epochs[epoch].has_lost_frames()
+        self.epochs[epoch].pending_lost_frames.has_pending()
     }
 
     fn loss_probes(&self, epoch: packet::Epoch) -> usize {
@@ -656,7 +631,7 @@ impl RecoveryOps for GRecovery {
 
     #[cfg(test)]
     fn lost_frames_count(&self, epoch: packet::Epoch) -> usize {
-        self.epochs[epoch].lost_frames_count()
+        self.epochs[epoch].pending_lost_frames.count()
     }
 
     fn ping_sent(&mut self, epoch: packet::Epoch) {
@@ -893,7 +868,8 @@ impl RecoveryOps for GRecovery {
 
         epoch.loss_probes = probe_count;
 
-        let sent_packets_iter_limit = if epoch.lost_frames_pto.is_empty() {
+        let sent_packets_iter_limit = if epoch.pending_lost_frames.pto_is_empty()
+        {
             usize::MAX
         } else {
             // Skip the search for frames to add to PTO probes if frames
@@ -931,10 +907,10 @@ impl RecoveryOps for GRecovery {
         // This will also trigger sending an ACK and retransmitting frames like
         // HANDSHAKE_DONE and MAX_DATA / MAX_STREAM_DATA as well, in addition
         // to CRYPTO and STREAM, if the original packet carried them.
-        epoch.lost_frames_pto.extend(unacked_frames.cloned());
+        epoch.pending_lost_frames.queue_pto(unacked_frames.cloned());
 
         self.pacer
-            .on_retransmission_timeout(epoch.has_lost_frames());
+            .on_retransmission_timeout(epoch.pending_lost_frames.has_pending());
 
         self.set_loss_detection_timer(handshake_status, now);
 
@@ -1056,7 +1032,7 @@ impl RecoveryOps for GRecovery {
                     ..
                 })
             }) || !epoch.acked_frames.is_empty() ||
-                epoch.has_lost_frames() ||
+                epoch.pending_lost_frames.has_pending() ||
                 epoch.loss_probes != 0
         })
     }
