@@ -2052,6 +2052,27 @@ fn push_frame_to_pkt(
     Ok(true)
 }
 
+/// Encode pending PATH_RESPONSE frames while packet space permits. Return
+/// whether at least one response was emitted.
+fn push_received_path_responses(
+    path: &mut path::Path, out: &mut impl frame::FrameSink,
+    frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+) -> Result<bool> {
+    let mut pushed = false;
+    while let Some(challenge) = path.next_received_challenge() {
+        let frame = frame::Frame::PathResponse { data: challenge };
+        if !push_frame_to_pkt(out, frames, frame, left)? {
+            // No packet space: retain this and later challenges for retry.
+            break;
+        }
+        // A response obligation is consumed only after its frame is encoded.
+        let consumed = path.pop_received_challenge();
+        debug_assert_eq!(consumed, Some(challenge));
+        pushed = true;
+    }
+    Ok(pushed)
+}
+
 /// Executes the provided body if the qlog feature is enabled, quiche has been
 /// configured with a log writer, the event's importance is within the
 /// configured level.
@@ -5033,20 +5054,11 @@ impl<F: BufFactory> Connection<F> {
                 is_pmtud_probe = true;
             }
 
-            // Create PATH_RESPONSE frame if needed.
-            // We do not try to ensure that these are really sent.
-            while let Some(challenge) = path.pop_received_challenge() {
-                let frame = frame::Frame::PathResponse { data: challenge };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    has_path_frame = true;
-                    ack_eliciting = true;
-                    in_flight = true;
-                } else {
-                    // If there are other pending PATH_RESPONSE, don't lose them
-                    // now.
-                    break;
-                }
+            // Create PATH_RESPONSE frames while space permits.
+            if push_received_path_responses(path, b, &mut frames, &mut left)? {
+                has_path_frame = true;
+                ack_eliciting = true;
+                in_flight = true;
             }
 
             // Create PATH_CHALLENGE frame if needed.

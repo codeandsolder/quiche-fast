@@ -32,6 +32,58 @@ use crate::Header;
 
 use rstest::rstest;
 
+/// A PATH_CHALLENGE must remain queued if its nine-byte response does not
+/// fit in the current packet. Packet construction can then retry later, and
+/// consecutive challenges must keep their original order.
+#[test]
+fn queued_path_responses_are_consumed_only_when_encoded() {
+    let config = Config::new(PROTOCOL_VERSION).unwrap();
+    let recovery = recovery::RecoveryConfig::from_config(&config);
+    let local = "127.0.0.1:1234".parse().unwrap();
+    let peer = "127.0.0.1:4321".parse().unwrap();
+    let first = [0x11; 8];
+    let second = [0x22; 8];
+
+    // Each response takes exactly one type byte and eight challenge bytes.
+    for available in [0, 1, 8, 9, 10, 17, 18] {
+        let mut path = path::Path::new(local, peer, &recovery, 4, true, None);
+        path.on_challenge_received(first);
+        path.on_challenge_received(second);
+
+        let mut storage = [0xAA; 18];
+        let mut writer = octets::OctetsMut::with_slice(&mut storage[..available]);
+        let mut left = available;
+        let mut frames = SmallVec::<[frame::Frame; 1]>::new();
+        let emitted = push_received_path_responses(
+            &mut path,
+            &mut writer,
+            &mut frames,
+            &mut left,
+        )
+        .unwrap();
+        let count = available / 9;
+        assert_eq!(emitted, count != 0, "space={available}");
+        assert_eq!(frames.len(), count, "space={available}");
+        assert_eq!(writer.off(), count * 9, "space={available}");
+        assert_eq!(left, available - count * 9, "space={available}");
+        assert_eq!(path.probing_required(), count < 2, "space={available}");
+        for (idx, frame) in frames.into_iter().enumerate() {
+            let expected = if idx == 0 { first } else { second };
+            assert_eq!(frame, frame::Frame::PathResponse { data: expected });
+            assert_eq!(storage[idx * 9], 0x1b);
+            assert_eq!(&storage[idx * 9 + 1..(idx + 1) * 9], &expected);
+        }
+        for expected in [first, second].into_iter().skip(count) {
+            assert_eq!(
+                path.pop_received_challenge(),
+                Some(expected),
+                "space={available}"
+            );
+        }
+        assert_eq!(path.pop_received_challenge(), None);
+    }
+}
+
 #[test]
 fn stateless_reset_recognizes_rotated_peer_cid_tokens() {
     let mut pipe = test_utils::Pipe::new("cubic").unwrap();

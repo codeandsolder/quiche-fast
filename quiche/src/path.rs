@@ -512,6 +512,12 @@ impl Path {
         self.active = false;
     }
 
+    /// Examine the next response obligation without consuming it.
+    #[inline]
+    pub fn next_received_challenge(&self) -> Option<[u8; 8]> {
+        self.received_challenges.front().copied()
+    }
+
     #[inline]
     pub fn pop_received_challenge(&mut self) -> Option<[u8; 8]> {
         self.received_challenges.pop_front()
