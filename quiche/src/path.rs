@@ -941,6 +941,20 @@ impl PathMap {
         Ok(())
     }
 
+    /// Validates the proposed active path before any recovery or path state
+    /// changes. A failed path must not replace the working path. The raw
+    /// active flag also covers the brief interval before an active DCID is
+    /// assigned during peer migration.
+    pub(crate) fn activation_target_is_current(
+        &self, path_id: usize,
+    ) -> Result<bool> {
+        let target = self.get(path_id)?;
+        if !target.working() {
+            return Err(Error::InvalidState);
+        }
+        Ok(target.active)
+    }
+
     /// Sets the path with identifier '`path_id`' to be active.
     ///
     /// There can be exactly one active path on which non-probing packets can be
@@ -952,11 +966,21 @@ impl PathMap {
     /// migrated. Otherwise, it triggers a path validation and defers the
     /// notification once it is actually validated.
     pub fn set_active_path(&mut self, path_id: usize) -> Result<()> {
+        // Preflight the replacement before touching the old active path. An
+        // invalid or failed target must leave the entire map unchanged.
+        if self.activation_target_is_current(path_id)? {
+            return Ok(());
+        }
+
         let is_server = self.is_server;
 
-        if let Ok(old_active_path) = self.get_active_mut() {
-            old_active_path.active = false;
-            old_active_path.superseded = true;
+        // Check the raw active flag instead of Path::active(), which can be
+        // false for a failed path or before its DCID has been assigned.
+        for (_, old_active_path) in self.paths.iter_mut() {
+            if old_active_path.active {
+                old_active_path.active = false;
+                old_active_path.superseded = true;
+            }
         }
 
         let new_active_path = self.get_mut(path_id)?;
@@ -1167,6 +1191,90 @@ mod tests {
     use crate::Config;
 
     use super::*;
+
+    #[rstest::rstest]
+    fn activate_invalid_or_failed_path_preserves_current_path(
+        #[values(false, true)] is_server: bool,
+    ) {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery = RecoveryConfig::from_config(&config);
+        let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let first: SocketAddr = "127.0.0.1:4321".parse().unwrap();
+        let second: SocketAddr = "127.0.0.1:4322".parse().unwrap();
+        let first_path = Path::new(
+            local,
+            first,
+            &recovery,
+            config.path_challenge_recv_max_queue_len,
+            true,
+            None,
+        );
+        let mut paths = PathMap::new(first_path, 2, is_server);
+        assert_eq!(paths.set_active_path(usize::MAX), Err(Error::InvalidState));
+        assert_eq!(paths.get_active_path_id(), Ok(0));
+        assert!(!paths.get(0).unwrap().superseded);
+        assert_eq!(paths.pop_event(), None);
+
+        // Re-selecting the current path is a no-op, not another migration.
+        assert_eq!(paths.set_active_path(0), Ok(()));
+        assert_eq!(paths.get_active_path_id(), Ok(0));
+        assert!(!paths.get(0).unwrap().superseded);
+        assert_eq!(paths.pop_event(), None);
+
+        let mut failed = Path::new(
+            local,
+            second,
+            &recovery,
+            config.path_challenge_recv_max_queue_len,
+            false,
+            None,
+        );
+        failed.state = PathState::Failed;
+        failed.active_dcid_seq = Some(1);
+        let (failed_id, _) = paths.insert_path(failed, is_server).unwrap();
+        // A failed path exists in the slab but cannot become active.
+        if is_server {
+            assert_eq!(paths.pop_event(), Some(PathEvent::New(local, second)));
+        }
+        assert_eq!(paths.set_active_path(failed_id), Err(Error::InvalidState));
+        assert_eq!(paths.get_active_path_id(), Ok(0));
+        assert!(!paths.get(0).unwrap().superseded);
+        assert!(!paths.get(failed_id).unwrap().active);
+        assert_eq!(paths.pop_event(), None);
+
+        // A client can select a new path before receiving a spare DCID. The
+        // raw active flag, not Path::active(), determines whether another
+        // transition is necessary while that identifier is pending.
+        let target = paths.get_mut(failed_id).unwrap();
+        target.state = PathState::Validated;
+        target.active_dcid_seq = None;
+        assert_eq!(paths.set_active_path(failed_id), Ok(()));
+        assert!(!paths.get(0).unwrap().active);
+        assert!(paths.get(0).unwrap().superseded);
+        assert!(paths.get(failed_id).unwrap().active);
+        if is_server {
+            assert_eq!(
+                paths.pop_event(),
+                Some(PathEvent::PeerMigrated(local, second))
+            );
+        }
+        assert_eq!(paths.set_active_path(failed_id), Ok(()));
+        assert_eq!(paths.pop_event(), None);
+
+        // Switching back must also clear the raw active bit of the DCID-less
+        // path, so the map has exactly one active path again.
+        assert_eq!(paths.set_active_path(0), Ok(()));
+        assert!(paths.get(0).unwrap().active);
+        assert!(!paths.get(failed_id).unwrap().active);
+        assert_eq!(paths.get_active_path_id(), Ok(0));
+        if is_server {
+            assert_eq!(
+                paths.pop_event(),
+                Some(PathEvent::PeerMigrated(local, first))
+            );
+        }
+        assert_eq!(paths.pop_event(), None);
+    }
 
     #[rstest::rstest]
     fn path_reuse_preserves_outstanding_stream_recovery(

@@ -9760,6 +9760,12 @@ impl<F: BufFactory> Connection<F> {
 
     /// Sets the path with identifier '`path_id`' to be active.
     fn set_active_path(&mut self, path_id: usize, now: Instant) -> Result<()> {
+        // A failed activation must not run loss detection or mutate the old
+        // path's recovery state. Re-selecting the current path is a no-op.
+        if self.paths.activation_target_is_current(path_id)? {
+            return Ok(());
+        }
+
         if let Ok(old_active_path) = self.paths.get_active_mut() {
             for &e in packet::Epoch::epochs(
                 packet::Epoch::Initial..=packet::Epoch::Application,
