@@ -664,7 +664,9 @@ impl ConnectionIdentifiers {
     pub fn matches_reset_token(
         &self, candidate: &[u8], initial_reset_token: Option<u128>,
     ) -> bool {
-        if candidate.len() != size_of::<u128>() {
+        // A connection using zero-length destination IDs has no CID token
+        // rotation and cannot support stateless resets for that ID.
+        if self.zero_length_dcid || candidate.len() != size_of::<u128>() {
             return false;
         }
 
@@ -891,6 +893,20 @@ mod tests {
         assert!(!ids.matches_reset_token(&rotated_token.to_be_bytes(), None));
         assert!(ids.matches_reset_token(&initial_token.to_be_bytes(), None));
         assert!(ids.matches_reset_token(&third_token.to_be_bytes(), None));
+    }
+
+    #[test]
+    fn zero_length_destination_id_does_not_accept_reset_tokens() {
+        let mut ids = ConnectionIdentifiers::new(
+            2,
+            &ConnectionId::from_ref(b"source"),
+            0,
+            None,
+        );
+        let token = 0x1234_u128;
+        ids.set_initial_dcid(ConnectionId::default(), Some(token), Some(0));
+        assert!(ids.zero_length_dcid());
+        assert!(!ids.matches_reset_token(&token.to_be_bytes(), Some(token)));
     }
 
     #[test]
