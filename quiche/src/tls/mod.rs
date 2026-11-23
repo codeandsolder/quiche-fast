@@ -922,7 +922,7 @@ impl ExData<'_> {
 /// the callback borrow. The borrowed SSL then copies the encoded bytes
 /// directly; no owned TLS handle or parameter clone is needed.
 #[cfg(feature = "boringssl-btls-crate")]
-pub(super) fn update_transport_params_in_handshake(
+pub fn update_transport_params_in_handshake(
     ssl: &mut btls::ssl::SslRef, update: impl FnOnce(&mut crate::TransportParams),
 ) -> Result<()> {
     let mut buf = [0; ENCODED_TRANSPORT_PARAMS_CAPACITY];
