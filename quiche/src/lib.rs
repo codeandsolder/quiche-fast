@@ -3091,7 +3091,10 @@ impl<F: BufFactory> Connection<F> {
             // Note that we also need to limit the number of bytes we sent on a
             // path if we are not the host that initiated its usage.
             if self.is_server && !recv_path.verified_peer_address {
-                recv_path.max_send_bytes += len * self.max_amplification_factor;
+                recv_path.grant_amplification_credit(
+                    len,
+                    self.max_amplification_factor,
+                );
             }
         } else if !self.is_server {
             // If a client receives packets from an unknown server address,
@@ -9671,7 +9674,7 @@ impl<F: BufFactory> Connection<F> {
             None,
         );
 
-        path.max_send_bytes = buf_len * self.max_amplification_factor;
+        path.grant_amplification_credit(buf_len, self.max_amplification_factor);
         path.active_scid_seq = Some(in_scid_seq);
 
         // Automatically probes the new path.
