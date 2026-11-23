@@ -8917,20 +8917,25 @@ impl<F: BufFactory> Connection<F> {
         let consumed = self.dgram_recv_queue.is_empty() && handler(data);
 
         if !consumed {
-            // Preserve regular queue behavior if the caller cannot consume the
-            // DATAGRAM synchronously.
-            if self.dgram_recv_queue.is_full() {
-                self.dgram_recv_queue.pop();
-            }
-
-            self.dgram_recv_queue.push(Vec::from(data).into())?;
+            self.enqueue_received_datagram(Vec::from(data))?;
         }
 
-        self.dgram_recv_count = self.dgram_recv_count.saturating_add(1);
+        self.record_received_datagram(recv_path_id)
+    }
 
+    /// Queue a datagram, evicting the oldest if the receive queue is full.
+    fn enqueue_received_datagram(&mut self, data: Vec<u8>) -> Result<()> {
+        if self.dgram_recv_queue.is_full() {
+            self.dgram_recv_queue.pop();
+        }
+
+        self.dgram_recv_queue.push(data.into())
+    }
+
+    fn record_received_datagram(&mut self, recv_path_id: usize) -> Result<()> {
+        self.dgram_recv_count = self.dgram_recv_count.saturating_add(1);
         let path = self.paths.get_mut(recv_path_id)?;
         path.dgram_recv_count = path.dgram_recv_count.saturating_add(1);
-
         Ok(())
     }
 
@@ -8942,220 +8947,26 @@ impl<F: BufFactory> Connection<F> {
         trace!("{} rx frm {frame:?}", self.trace_id);
 
         match frame {
-            frame::Frame::Padding { .. } => (),
-
-            frame::Frame::Ping { .. } => (),
+            frame::Frame::Padding { .. } | frame::Frame::Ping { .. } => (),
 
             frame::Frame::ACK {
                 ranges, ack_delay, ..
-            } => {
-                let ack_delay = decode_ack_delay(
-                    ack_delay,
-                    self.peer_transport_params.ack_delay_exponent,
-                )?;
-
-                let skip_pn = self.pkt_num_manager.skip_pn();
-                let largest_acked =
-                    recovery::validate_ack_ranges(&ranges, skip_pn)?;
-                // ACKs refer to the connection-global sent packet numbers in
-                // this packet number space, not to one particular path.
-                if self.pkt_num_spaces[epoch]
-                    .largest_tx_pkt_num
-                    .is_none_or(|largest_sent| largest_sent < largest_acked)
-                {
-                    return Err(Error::InvalidAckRange);
-                }
-
-                if epoch == packet::Epoch::Handshake ||
-                    (epoch == packet::Epoch::Application &&
-                        self.is_established())
-                {
-                    self.peer_verified_initial_address = true;
-                }
-
-                let handshake_status = self.handshake_status();
-
-                let is_app_limited = self.delivery_rate_check_if_app_limited();
-
-                for (_, p) in self.paths.iter_mut() {
-                    if is_app_limited {
-                        p.recovery.delivery_rate_update_app_limited(true);
-                    }
-
-                    let OnAckReceivedOutcome {
-                        lost_packets,
-                        lost_bytes,
-                        acked_bytes,
-                        spurious_losses,
-                    } = p.recovery.on_ack_received(
-                        &ranges,
-                        ack_delay,
-                        epoch,
-                        handshake_status,
-                        now,
-                        skip_pn,
-                        &self.trace_id,
-                    )?;
-
-                    self.lost_count += lost_packets;
-                    self.lost_bytes += lost_bytes as u64;
-                    self.acked_bytes += acked_bytes as u64;
-                    self.spurious_lost_count += spurious_losses;
-                }
-
-                let space = &mut self.pkt_num_spaces[epoch];
-                space.largest_acked_pkt_num =
-                    space.largest_acked_pkt_num.max(Some(largest_acked));
-
-                // Retire the skipped packet number after the entire ACK was
-                // validated and processed across all paths.
-                if skip_pn.is_some_and(|pn| largest_acked > pn) {
-                    self.pkt_num_manager.set_skip_pn(None);
-                }
-            },
+            } => self.process_ack_frame(&ranges, ack_delay, epoch, now)?,
 
             frame::Frame::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
-            } => {
-                let max_rx_data_left = self.max_rx_data() - self.rx_data;
-
-                let Some(stream) = self.get_or_create_stream_for_received_frame(
-                    stream_id,
-                    PeerStreamSide::Sending,
-                )?
-                else {
-                    return Ok(());
-                };
-
-                let was_readable = stream.is_readable();
-                let priority_key = Arc::clone(stream.priority_key());
-
-                let stream::RecvBufResetReturn {
-                    max_data_delta,
-                    consumed_flowcontrol,
-                } = stream.recv.reset(
-                    error_code,
-                    final_size,
-                    max_rx_data_left,
-                )?;
-
-                // The receive side can complete without the stream becoming
-                // readable, so no later read would collect it.
-                let collectable = stream.is_collectable();
-
-                if !was_readable && stream.is_readable() {
-                    self.streams
-                        .enqueue(&priority_key, stream::PriorityQueue::Readable);
-                }
-
-                self.rx_data += max_data_delta;
-                // We dropped the receive buffer, return connection level
-                // flow-control
-                self.flow_control.add_consumed(consumed_flowcontrol);
-
-                self.reset_stream_remote_count =
-                    self.reset_stream_remote_count.saturating_add(1);
-
-                if collectable {
-                    self.streams.collect(stream_id);
-                }
-            },
+            } => self
+                .process_reset_stream_frame(stream_id, error_code, final_size)?,
 
             frame::Frame::StopSending {
                 stream_id,
                 error_code,
-            } => {
-                let Some(stream) = self.get_or_create_stream_for_received_frame(
-                    stream_id,
-                    PeerStreamSide::Receiving,
-                )?
-                else {
-                    return Ok(());
-                };
+            } => self.process_stop_sending_frame(stream_id, error_code, now)?,
 
-                let priority_key = Arc::clone(stream.priority_key());
-
-                // Save the buffered length before stopping (stop clears the
-                // buffer).
-                let buffered_len = stream.send.buffered_bytes();
-
-                // Try stopping the stream.
-                if let Ok((final_size, unsent)) = stream.send.stop(error_code) {
-                    // Claw back some flow control allowance from data that was
-                    // buffered but not actually sent before the stream was
-                    // reset.
-                    //
-                    // Note that `tx_cap` will be updated later on, so no need
-                    // to touch it here.
-                    self.tx_data = self.tx_data.saturating_sub(unsent);
-
-                    // Update tx_buffered: subtract only the buffered data, not
-                    // inflight data.
-                    self.streams.sub_tx_buffered(buffered_len);
-
-                    // Match moves from App to Transport with moves from
-                    // Transport to Dropped.
-                    // A Network transition would distinguish sent bytes from
-                    // drops before transmission.
-                    qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-                        let ev_data = EventData::QuicStreamDataMoved(
-                            qlog::events::quic::StreamDataMoved {
-                                stream_id: Some(stream_id),
-                                offset: Some(final_size),
-                                raw: Some(RawInfo {
-                                    length: Some(unsent),
-                                    ..Default::default()
-                                }),
-                                from: Some(DataRecipient::Transport),
-                                to: Some(DataRecipient::Dropped),
-                                ..Default::default()
-                            },
-                        );
-
-                        q.add_event_data_with_instant(ev_data, now).ok();
-                    });
-
-                    self.streams.insert_reset(stream_id, error_code, final_size);
-
-                    self.streams.enqueue(
-                        &priority_key,
-                        stream::PriorityQueue::StoppedWritable,
-                    );
-
-                    self.stopped_stream_remote_count =
-                        self.stopped_stream_remote_count.saturating_add(1);
-                    self.reset_stream_local_count =
-                        self.reset_stream_local_count.saturating_add(1);
-                }
-            },
-
-            frame::Frame::Crypto { data } => {
-                if data.max_off() >= MAX_CRYPTO_STREAM_OFFSET {
-                    return Err(Error::CryptoBufferExceeded);
-                }
-
-                // Push the data to the stream so it can be re-ordered.
-                self.crypto_ctx[epoch].crypto_stream.recv.write(data)?;
-
-                // Feed crypto data to the TLS state, if there's data
-                // available at the expected offset.
-                let mut crypto_buf = [0; 512];
-
-                let level = crypto::Level::from_epoch(epoch);
-
-                let stream = &mut self.crypto_ctx[epoch].crypto_stream;
-
-                while let Ok((read, _)) = stream.recv.emit(&mut crypto_buf) {
-                    let recv_buf = &crypto_buf[..read];
-                    self.handshake.provide_data(level, recv_buf)?;
-                }
-
-                self.do_handshake(now)?;
-            },
-
-            frame::Frame::CryptoHeader { .. } => unreachable!(),
+            frame::Frame::Crypto { data } =>
+                self.process_crypto_frame(data, epoch, now)?,
 
             // TODO: implement stateless retry
             frame::Frame::NewToken { .. } =>
@@ -9163,106 +8974,30 @@ impl<F: BufFactory> Connection<F> {
                     return Err(Error::InvalidPacket);
                 },
 
-            frame::Frame::Stream { stream_id, data } => {
-                let max_rx_data_left = self.max_rx_data() - self.rx_data;
-
-                let Some(stream) = self.get_or_create_stream_for_received_frame(
-                    stream_id,
-                    PeerStreamSide::Sending,
-                )?
-                else {
-                    return Ok(());
-                };
-
-                // Check for the connection-level flow control limit.
-                let max_off_delta =
-                    data.max_off().saturating_sub(stream.recv.max_off());
-
-                if max_off_delta > max_rx_data_left {
-                    return Err(Error::FlowControl);
-                }
-
-                let was_readable = stream.is_readable();
-                let priority_key = Arc::clone(stream.priority_key());
-
-                let was_draining = stream.recv.is_draining();
-
-                stream.recv.write(data)?;
-
-                // The receive side can complete without the stream becoming
-                // readable, so no later read would collect it.
-                let collectable = stream.is_collectable();
-
-                if !was_readable && stream.is_readable() {
-                    self.streams
-                        .enqueue(&priority_key, stream::PriorityQueue::Readable);
-                }
-
-                self.rx_data += max_off_delta;
-
-                if was_draining {
-                    // When a stream is in draining state it will not queue
-                    // incoming data for the application to read, so consider
-                    // the received data as consumed, which might trigger a flow
-                    // control update.
-                    self.flow_control.add_consumed(max_off_delta);
-                }
-
-                if collectable {
-                    self.streams.collect(stream_id);
-                }
-            },
-
-            frame::Frame::StreamHeader { .. } => unreachable!(),
+            frame::Frame::Stream { stream_id, data } =>
+                self.process_stream_frame(stream_id, data)?,
 
             frame::Frame::MaxData { max } => {
                 self.max_tx_data = cmp::max(self.max_tx_data, max);
             },
 
-            frame::Frame::MaxStreamData { stream_id, max } => {
-                let Some(stream) = self.get_or_create_stream_for_received_frame(
-                    stream_id,
-                    PeerStreamSide::Receiving,
-                )?
-                else {
-                    return Ok(());
-                };
+            frame::Frame::MaxStreamData { stream_id, max } =>
+                self.process_max_stream_data_frame(stream_id, max)?,
 
-                let was_flushable = stream.is_flushable();
-
-                stream.send.update_max_data(max);
-
-                let writable = stream.is_writable();
-
-                let priority_key = Arc::clone(stream.priority_key());
-
-                // If the stream became flushable, add it to the queue unless it
-                // is already present.
-                if stream.is_flushable() && !was_flushable {
-                    let priority_key = Arc::clone(stream.priority_key());
-                    self.streams
-                        .enqueue(&priority_key, stream::PriorityQueue::Flushable);
-                }
-
-                if writable {
-                    self.streams
-                        .enqueue(&priority_key, stream::PriorityQueue::Writable);
-                }
+            frame::Frame::MaxStreamsBidi { max: count } |
+            frame::Frame::MaxStreamsUni { max: count } |
+            frame::Frame::StreamsBlockedBidi { limit: count } |
+            frame::Frame::StreamsBlockedUni { limit: count }
+                if count > MAX_STREAM_COUNT =>
+            {
+                return Err(Error::InvalidFrame);
             },
 
             frame::Frame::MaxStreamsBidi { max } => {
-                if max > MAX_STREAM_COUNT {
-                    return Err(Error::InvalidFrame);
-                }
-
                 self.streams.update_peer_max_streams_bidi(max);
             },
 
             frame::Frame::MaxStreamsUni { max } => {
-                if max > MAX_STREAM_COUNT {
-                    return Err(Error::InvalidFrame);
-                }
-
                 self.streams.update_peer_max_streams_uni(max);
             },
 
@@ -9286,20 +9021,12 @@ impl<F: BufFactory> Connection<F> {
                 }
             },
 
-            frame::Frame::StreamsBlockedBidi { limit } => {
-                if limit > MAX_STREAM_COUNT {
-                    return Err(Error::InvalidFrame);
-                }
-
+            frame::Frame::StreamsBlockedBidi { .. } => {
                 self.streams_blocked_bidi_recv_count =
                     self.streams_blocked_bidi_recv_count.saturating_add(1);
             },
 
-            frame::Frame::StreamsBlockedUni { limit } => {
-                if limit > MAX_STREAM_COUNT {
-                    return Err(Error::InvalidFrame);
-                }
-
+            frame::Frame::StreamsBlockedUni { .. } => {
                 self.streams_blocked_uni_recv_count =
                     self.streams_blocked_uni_recv_count.saturating_add(1);
             },
@@ -9309,82 +9036,18 @@ impl<F: BufFactory> Connection<F> {
                 retire_prior_to,
                 conn_id,
                 reset_token,
-            } => {
-                if self.ids.zero_length_dcid() {
-                    return Err(Error::InvalidState);
-                }
+            } => self.process_new_connection_id_frame(
+                seq_num,
+                retire_prior_to,
+                conn_id,
+                reset_token,
+            )?,
 
-                let mut retired_path_ids = SmallVec::new();
+            frame::Frame::RetireConnectionId { seq_num } =>
+                self.process_retire_connection_id_frame(seq_num, &hdr.dcid)?,
 
-                // Retire pending path IDs before propagating the error code to
-                // make sure retired connection IDs are not in use anymore.
-                let new_dcid_res = self.ids.new_dcid(
-                    conn_id,
-                    seq_num,
-                    u128::from_be_bytes(reset_token),
-                    retire_prior_to,
-                    &mut retired_path_ids,
-                );
-
-                for (dcid_seq, pid) in retired_path_ids {
-                    let path = self.paths.get_mut(pid)?;
-
-                    // Maybe the path already switched to another DCID.
-                    if path.active_dcid_seq != Some(dcid_seq) {
-                        continue;
-                    }
-
-                    if let Some(new_dcid_seq) =
-                        self.ids.lowest_available_dcid_seq()
-                    {
-                        path.active_dcid_seq = Some(new_dcid_seq);
-
-                        self.ids.link_dcid_to_path_id(new_dcid_seq, pid)?;
-
-                        trace!(
-                            "{} path ID {pid} changed DCID: old seq num {dcid_seq} new seq num {new_dcid_seq}",
-                            self.trace_id,
-                        );
-                    } else {
-                        // We cannot use this path anymore for now.
-                        path.active_dcid_seq = None;
-
-                        trace!(
-                            "{} path ID {pid} cannot be used; DCID seq num {dcid_seq} has been retired",
-                            self.trace_id,
-                        );
-                    }
-                }
-
-                // Propagate error (if any) now...
-                new_dcid_res?;
-            },
-
-            frame::Frame::RetireConnectionId { seq_num } => {
-                if self.ids.zero_length_scid() {
-                    return Err(Error::InvalidState);
-                }
-
-                if let Some(pid) = self.ids.retire_scid(seq_num, &hdr.dcid)? {
-                    let path = self.paths.get_mut(pid)?;
-
-                    // Maybe we already linked a new SCID to that path.
-                    if path.active_scid_seq == Some(seq_num) {
-                        // XXX: We do not remove unused paths now, we instead
-                        // wait until we need to maintain more paths than the
-                        // host is willing to.
-                        path.active_scid_seq = None;
-                    }
-                }
-            },
-
-            frame::Frame::PathChallenge { data } => {
-                self.path_challenge_rx_count += 1;
-
-                self.paths
-                    .get_mut(recv_path_id)?
-                    .on_challenge_received(data);
-            },
+            frame::Frame::PathChallenge { data } =>
+                self.process_path_challenge(data, recv_path_id)?,
 
             frame::Frame::PathResponse { data } => {
                 self.paths.on_response_received(data)?;
@@ -9392,73 +9055,473 @@ impl<F: BufFactory> Connection<F> {
 
             frame::Frame::ConnectionClose {
                 error_code, reason, ..
-            } => {
-                self.peer_error = Some(ConnectionError {
+            } => self.process_peer_close(
+                ConnectionError {
                     is_app: false,
                     error_code,
                     reason,
-                });
+                },
+                now,
+            )?,
 
-                let path = self.paths.get_active()?;
-                self.lifecycle = ConnectionLifecycle::Draining {
-                    deadline: now + (path.recovery.pto() * 3),
-                    origin: CloseOrigin::Peer,
-                };
-            },
+            frame::Frame::ApplicationClose { error_code, reason } => self
+                .process_peer_close(
+                    ConnectionError {
+                        is_app: true,
+                        error_code,
+                        reason,
+                    },
+                    now,
+                )?,
 
-            frame::Frame::ApplicationClose { error_code, reason } => {
-                self.peer_error = Some(ConnectionError {
-                    is_app: true,
-                    error_code,
-                    reason,
-                });
+            frame::Frame::HandshakeDone => self.process_handshake_done(now)?,
 
-                let path = self.paths.get_active()?;
-                self.lifecycle = ConnectionLifecycle::Draining {
-                    deadline: now + (path.recovery.pto() * 3),
-                    origin: CloseOrigin::Peer,
-                };
-            },
+            frame::Frame::Datagram { data } =>
+                self.process_datagram_frame(data, recv_path_id)?,
 
-            frame::Frame::HandshakeDone => {
-                if self.is_server {
-                    return Err(Error::InvalidPacket);
-                }
-
-                self.peer_verified_initial_address = true;
-
-                self.handshake_confirmed = true;
-
-                // Once the handshake is confirmed, we can drop Handshake keys.
-                self.drop_epoch_state(packet::Epoch::Handshake, now);
-            },
-
-            frame::Frame::Datagram { data } => {
-                // Close the connection if DATAGRAMs are not enabled.
-                // quiche always advertises support for 64K sized DATAGRAM
-                // frames, as recommended by the standard, so we don't need a
-                // size check.
-                if !self.dgram_enabled() {
-                    return Err(Error::InvalidState);
-                }
-
-                // If recv queue is full, discard oldest
-                if self.dgram_recv_queue.is_full() {
-                    self.dgram_recv_queue.pop();
-                }
-
-                self.dgram_recv_queue.push(data.into())?;
-
-                self.dgram_recv_count = self.dgram_recv_count.saturating_add(1);
-
-                let path = self.paths.get_mut(recv_path_id)?;
-                path.dgram_recv_count = path.dgram_recv_count.saturating_add(1);
-            },
-
+            // These metadata-only variants describe frames already encoded
+            // by the sender; the wire parser never emits them.
+            frame::Frame::CryptoHeader { .. } |
+            frame::Frame::StreamHeader { .. } |
             frame::Frame::DatagramHeader { .. } => unreachable!(),
         }
 
         Ok(())
+    }
+
+    /// Validate connection-wide ACK ranges and update recovery on all paths.
+    fn process_ack_frame(
+        &mut self, ranges: &ranges::RangeSet, ack_delay: u64,
+        epoch: packet::Epoch, now: Instant,
+    ) -> Result<()> {
+        let ack_delay = decode_ack_delay(
+            ack_delay,
+            self.peer_transport_params.ack_delay_exponent,
+        )?;
+
+        let skip_pn = self.pkt_num_manager.skip_pn();
+        let largest_acked = recovery::validate_ack_ranges(ranges, skip_pn)?;
+        // ACKs refer to the connection-global sent packet numbers in
+        // this packet number space, not to one particular path.
+        if self.pkt_num_spaces[epoch]
+            .largest_tx_pkt_num
+            .is_none_or(|largest_sent| largest_sent < largest_acked)
+        {
+            return Err(Error::InvalidAckRange);
+        }
+
+        if epoch == packet::Epoch::Handshake ||
+            (epoch == packet::Epoch::Application && self.is_established())
+        {
+            self.peer_verified_initial_address = true;
+        }
+
+        let handshake_status = self.handshake_status();
+
+        let is_app_limited = self.delivery_rate_check_if_app_limited();
+
+        for (_, p) in self.paths.iter_mut() {
+            if is_app_limited {
+                p.recovery.delivery_rate_update_app_limited(true);
+            }
+
+            let OnAckReceivedOutcome {
+                lost_packets,
+                lost_bytes,
+                acked_bytes,
+                spurious_losses,
+            } = p.recovery.on_ack_received(
+                ranges,
+                ack_delay,
+                epoch,
+                handshake_status,
+                now,
+                skip_pn,
+                &self.trace_id,
+            )?;
+
+            self.lost_count += lost_packets;
+            self.lost_bytes += lost_bytes as u64;
+            self.acked_bytes += acked_bytes as u64;
+            self.spurious_lost_count += spurious_losses;
+        }
+
+        let space = &mut self.pkt_num_spaces[epoch];
+        space.largest_acked_pkt_num =
+            space.largest_acked_pkt_num.max(Some(largest_acked));
+
+        // Retire the skipped packet number after the entire ACK was
+        // validated and processed across all paths.
+        if skip_pn.is_some_and(|pn| largest_acked > pn) {
+            self.pkt_num_manager.set_skip_pn(None);
+        }
+
+        Ok(())
+    }
+
+    /// Apply the peer's receive-side reset, flow control and stream lifecycle.
+    fn process_reset_stream_frame(
+        &mut self, stream_id: u64, error_code: u64, final_size: u64,
+    ) -> Result<()> {
+        let max_rx_data_left = self.max_rx_data() - self.rx_data;
+
+        let Some(stream) = self.get_or_create_stream_for_received_frame(
+            stream_id,
+            PeerStreamSide::Sending,
+        )?
+        else {
+            return Ok(());
+        };
+
+        let was_readable = stream.is_readable();
+        let priority_key = Arc::clone(stream.priority_key());
+
+        let stream::RecvBufResetReturn {
+            max_data_delta,
+            consumed_flowcontrol,
+        } = stream
+            .recv
+            .reset(error_code, final_size, max_rx_data_left)?;
+
+        // The receive side can complete without the stream becoming
+        // readable, so no later read would collect it.
+        let collectable = stream.is_collectable();
+
+        if !was_readable && stream.is_readable() {
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Readable);
+        }
+
+        self.rx_data += max_data_delta;
+        // We dropped the receive buffer, return connection level
+        // flow-control
+        self.flow_control.add_consumed(consumed_flowcontrol);
+
+        self.reset_stream_remote_count =
+            self.reset_stream_remote_count.saturating_add(1);
+
+        if collectable {
+            self.streams.collect(stream_id);
+        }
+
+        Ok(())
+    }
+
+    /// Stop local transmission, refund unsent credit and schedule a reset.
+    fn process_stop_sending_frame(
+        &mut self, stream_id: u64, error_code: u64, now: Instant,
+    ) -> Result<()> {
+        #[cfg(not(feature = "qlog"))]
+        let _ = now;
+
+        let Some(stream) = self.get_or_create_stream_for_received_frame(
+            stream_id,
+            PeerStreamSide::Receiving,
+        )?
+        else {
+            return Ok(());
+        };
+
+        let priority_key = Arc::clone(stream.priority_key());
+
+        // Save the buffered length before stopping (stop clears the
+        // buffer).
+        let buffered_len = stream.send.buffered_bytes();
+
+        // Try stopping the stream.
+        if let Ok((final_size, unsent)) = stream.send.stop(error_code) {
+            // Claw back some flow control allowance from data that was
+            // buffered but not actually sent before the stream was
+            // reset.
+            //
+            // Note that `tx_cap` will be updated later on, so no need
+            // to touch it here.
+            self.tx_data = self.tx_data.saturating_sub(unsent);
+
+            // Update tx_buffered: subtract only the buffered data, not
+            // inflight data.
+            self.streams.sub_tx_buffered(buffered_len);
+
+            // Match moves from App to Transport with moves from
+            // Transport to Dropped.
+            // A Network transition would distinguish sent bytes from
+            // drops before transmission.
+            qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
+                let ev_data = EventData::QuicStreamDataMoved(
+                    qlog::events::quic::StreamDataMoved {
+                        stream_id: Some(stream_id),
+                        offset: Some(final_size),
+                        raw: Some(RawInfo {
+                            length: Some(unsent),
+                            ..Default::default()
+                        }),
+                        from: Some(DataRecipient::Transport),
+                        to: Some(DataRecipient::Dropped),
+                        ..Default::default()
+                    },
+                );
+
+                q.add_event_data_with_instant(ev_data, now).ok();
+            });
+
+            self.streams.insert_reset(stream_id, error_code, final_size);
+
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::StoppedWritable);
+
+            self.stopped_stream_remote_count =
+                self.stopped_stream_remote_count.saturating_add(1);
+            self.reset_stream_local_count =
+                self.reset_stream_local_count.saturating_add(1);
+        }
+
+        Ok(())
+    }
+
+    /// Reassemble CRYPTO data and advance the TLS handshake.
+    fn process_crypto_frame(
+        &mut self, data: range_buf::RangeBuf, epoch: packet::Epoch, now: Instant,
+    ) -> Result<()> {
+        if data.max_off() >= MAX_CRYPTO_STREAM_OFFSET {
+            return Err(Error::CryptoBufferExceeded);
+        }
+
+        // Push the data to the stream so it can be re-ordered.
+        self.crypto_ctx[epoch].crypto_stream.recv.write(data)?;
+
+        // Feed crypto data to the TLS state, if there's data
+        // available at the expected offset.
+        let mut crypto_buf = [0; 512];
+
+        let level = crypto::Level::from_epoch(epoch);
+
+        let stream = &mut self.crypto_ctx[epoch].crypto_stream;
+
+        while let Ok((read, _)) = stream.recv.emit(&mut crypto_buf) {
+            let recv_buf = &crypto_buf[..read];
+            self.handshake.provide_data(level, recv_buf)?;
+        }
+
+        self.do_handshake(now)?;
+
+        Ok(())
+    }
+
+    /// Apply incoming stream data and update connection receive credit.
+    fn process_stream_frame(
+        &mut self, stream_id: u64, data: range_buf::RangeBuf,
+    ) -> Result<()> {
+        let max_rx_data_left = self.max_rx_data() - self.rx_data;
+
+        let Some(stream) = self.get_or_create_stream_for_received_frame(
+            stream_id,
+            PeerStreamSide::Sending,
+        )?
+        else {
+            return Ok(());
+        };
+
+        // Check for the connection-level flow control limit.
+        let max_off_delta = data.max_off().saturating_sub(stream.recv.max_off());
+
+        if max_off_delta > max_rx_data_left {
+            return Err(Error::FlowControl);
+        }
+
+        let was_readable = stream.is_readable();
+        let priority_key = Arc::clone(stream.priority_key());
+
+        let was_draining = stream.recv.is_draining();
+
+        stream.recv.write(data)?;
+
+        // The receive side can complete without the stream becoming
+        // readable, so no later read would collect it.
+        let collectable = stream.is_collectable();
+
+        if !was_readable && stream.is_readable() {
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Readable);
+        }
+
+        self.rx_data += max_off_delta;
+
+        if was_draining {
+            // When a stream is in draining state it will not queue
+            // incoming data for the application to read, so consider
+            // the received data as consumed, which might trigger a flow
+            // control update.
+            self.flow_control.add_consumed(max_off_delta);
+        }
+
+        if collectable {
+            self.streams.collect(stream_id);
+        }
+
+        Ok(())
+    }
+
+    /// Update a stream's sending credit and scheduler eligibility.
+    fn process_max_stream_data_frame(
+        &mut self, stream_id: u64, max: u64,
+    ) -> Result<()> {
+        let Some(stream) = self.get_or_create_stream_for_received_frame(
+            stream_id,
+            PeerStreamSide::Receiving,
+        )?
+        else {
+            return Ok(());
+        };
+
+        let was_flushable = stream.is_flushable();
+
+        stream.send.update_max_data(max);
+
+        let writable = stream.is_writable();
+
+        let priority_key = Arc::clone(stream.priority_key());
+
+        // If the stream became flushable, add it to the queue unless it
+        // is already present.
+        if stream.is_flushable() && !was_flushable {
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Flushable);
+        }
+
+        if writable {
+            self.streams
+                .enqueue(&priority_key, stream::PriorityQueue::Writable);
+        }
+
+        Ok(())
+    }
+
+    /// Install a destination CID and reassign paths whose CID was retired.
+    fn process_new_connection_id_frame(
+        &mut self, seq_num: u64, retire_prior_to: u64,
+        conn_id: ConnectionId<'static>, reset_token: [u8; 16],
+    ) -> Result<()> {
+        if self.ids.zero_length_dcid() {
+            return Err(Error::InvalidState);
+        }
+
+        let mut retired_path_ids = SmallVec::new();
+
+        // Retire pending path IDs before propagating the error code to
+        // make sure retired connection IDs are not in use anymore.
+        let new_dcid_res = self.ids.new_dcid(
+            conn_id,
+            seq_num,
+            u128::from_be_bytes(reset_token),
+            retire_prior_to,
+            &mut retired_path_ids,
+        );
+
+        for (dcid_seq, pid) in retired_path_ids {
+            let path = self.paths.get_mut(pid)?;
+
+            // Maybe the path already switched to another DCID.
+            if path.active_dcid_seq != Some(dcid_seq) {
+                continue;
+            }
+
+            if let Some(new_dcid_seq) = self.ids.lowest_available_dcid_seq() {
+                path.active_dcid_seq = Some(new_dcid_seq);
+
+                self.ids.link_dcid_to_path_id(new_dcid_seq, pid)?;
+
+                trace!(
+                    "{} path ID {pid} changed DCID: old seq num {dcid_seq} new seq num {new_dcid_seq}",
+                    self.trace_id,
+                );
+            } else {
+                // We cannot use this path anymore for now.
+                path.active_dcid_seq = None;
+
+                trace!(
+                    "{} path ID {pid} cannot be used; DCID seq num {dcid_seq} has been retired",
+                    self.trace_id,
+                );
+            }
+        }
+
+        // Propagate error (if any) now.
+        new_dcid_res
+    }
+
+    /// Retire a source CID and unlink it from its path when still active.
+    fn process_retire_connection_id_frame(
+        &mut self, seq_num: u64, packet_dcid: &ConnectionId,
+    ) -> Result<()> {
+        if self.ids.zero_length_scid() {
+            return Err(Error::InvalidState);
+        }
+
+        if let Some(pid) = self.ids.retire_scid(seq_num, packet_dcid)? {
+            let path = self.paths.get_mut(pid)?;
+
+            // Maybe we already linked a new SCID to that path.
+            if path.active_scid_seq == Some(seq_num) {
+                // XXX: We do not remove unused paths now, we instead
+                // wait until we need to maintain more paths than the
+                // host is willing to.
+                path.active_scid_seq = None;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Record the challenge on the path that received it.
+    fn process_path_challenge(
+        &mut self, data: [u8; 8], recv_path_id: usize,
+    ) -> Result<()> {
+        self.path_challenge_rx_count += 1;
+        self.paths
+            .get_mut(recv_path_id)?
+            .on_challenge_received(data);
+        Ok(())
+    }
+
+    /// Confirm the client handshake and retire its handshake keys.
+    fn process_handshake_done(&mut self, now: Instant) -> Result<()> {
+        if self.is_server {
+            return Err(Error::InvalidPacket);
+        }
+
+        self.peer_verified_initial_address = true;
+        self.handshake_confirmed = true;
+        self.drop_epoch_state(packet::Epoch::Handshake, now);
+        Ok(())
+    }
+
+    /// Record peer closure and enter draining for three probe timeouts.
+    fn process_peer_close(
+        &mut self, error: ConnectionError, now: Instant,
+    ) -> Result<()> {
+        self.peer_error = Some(error);
+        let path = self.paths.get_active()?;
+        self.lifecycle = ConnectionLifecycle::Draining {
+            deadline: now + (path.recovery.pto() * 3),
+            origin: CloseOrigin::Peer,
+        };
+        Ok(())
+    }
+
+    /// Enqueue a received datagram and account for its path.
+    fn process_datagram_frame(
+        &mut self, data: Vec<u8>, recv_path_id: usize,
+    ) -> Result<()> {
+        // Close the connection if DATAGRAMs are not enabled.
+        // quiche always advertises support for 64K sized DATAGRAM
+        // frames, as recommended by the standard, so we don't need a
+        // size check.
+        if !self.dgram_enabled() {
+            return Err(Error::InvalidState);
+        }
+
+        self.enqueue_received_datagram(data)?;
+        self.record_received_datagram(recv_path_id)
     }
 
     /// Drops the keys and recovery state for the given epoch.
