@@ -103,6 +103,84 @@ pub enum Frame {
     },
 }
 
+/// The wire payload shapes shared by frame variants. Calculating the exact
+/// encoded size before writing avoids leaving a partial frame in the caller's
+/// output buffer if there is insufficient space or a varint is out of range.
+enum FramePayload<'a> {
+    Bytes(&'a [u8]),
+    Varint(u64),
+    IdAndBytes(u64, &'a [u8]),
+    Settings(&'a Frame),
+}
+
+impl FramePayload<'_> {
+    fn encoded_len(&self) -> Result<usize> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes.len()),
+
+            Self::Varint(value) => {
+                if *value > octets::MAX_VAR_INT {
+                    return Err(super::Error::BufferTooShort);
+                }
+                Ok(octets::varint_len(*value))
+            },
+
+            Self::IdAndBytes(id, bytes) => {
+                if *id > octets::MAX_VAR_INT {
+                    return Err(super::Error::BufferTooShort);
+                }
+                octets::varint_len(*id)
+                    .checked_add(bytes.len())
+                    .ok_or(super::Error::BufferTooShort)
+            },
+
+            Self::Settings(frame) =>
+                frame
+                    .settings_pairs()
+                    .try_fold(0_usize, |len, (id, value)| {
+                        if id > octets::MAX_VAR_INT || value > octets::MAX_VAR_INT
+                        {
+                            return Err(super::Error::SettingsError);
+                        }
+                        let len = len
+                            .checked_add(octets::varint_len(id))
+                            .and_then(|len| {
+                                len.checked_add(octets::varint_len(value))
+                            })
+                            .ok_or(super::Error::ExcessiveLoad)?;
+                        if len > MAX_SETTINGS_PAYLOAD_SIZE {
+                            return Err(super::Error::ExcessiveLoad);
+                        }
+                        Ok(len)
+                    }),
+        }
+    }
+
+    fn encode(&self, b: &mut octets::OctetsMut) -> Result<()> {
+        match self {
+            Self::Bytes(bytes) => {
+                b.put_bytes(bytes)?;
+            },
+
+            Self::Varint(value) => {
+                b.put_varint(*value)?;
+            },
+
+            Self::IdAndBytes(id, bytes) => {
+                b.put_varint(*id)?;
+                b.put_bytes(bytes)?;
+            },
+
+            Self::Settings(frame) =>
+                for (id, value) in frame.settings_pairs() {
+                    b.put_varint(id)?;
+                    b.put_varint(value)?;
+                },
+        }
+        Ok(())
+    }
+}
+
 impl Frame {
     pub fn from_bytes(
         frame_type: u64, payload_length: u64, bytes: &[u8],
@@ -163,144 +241,121 @@ impl Frame {
         Ok(frame)
     }
 
-    pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
-        let before = b.cap();
-
+    /// Prepare a frame's wire type and payload without allocating or writing.
+    fn encoding(&self) -> (u64, FramePayload<'_>) {
         match self {
-            Self::Data { payload } => {
-                b.put_varint(DATA_FRAME_TYPE_ID)?;
-                b.put_varint(payload.len() as u64)?;
+            Self::Data { payload } =>
+                (DATA_FRAME_TYPE_ID, FramePayload::Bytes(payload)),
 
-                b.put_bytes(payload.as_ref())?;
-            },
+            Self::Headers { header_block } =>
+                (HEADERS_FRAME_TYPE_ID, FramePayload::Bytes(header_block)),
 
-            Self::Headers { header_block } => {
-                b.put_varint(HEADERS_FRAME_TYPE_ID)?;
-                b.put_varint(header_block.len() as u64)?;
+            Self::CancelPush { push_id } =>
+                (CANCEL_PUSH_FRAME_TYPE_ID, FramePayload::Varint(*push_id)),
 
-                b.put_bytes(header_block.as_ref())?;
-            },
-
-            Self::CancelPush { push_id } => {
-                b.put_varint(CANCEL_PUSH_FRAME_TYPE_ID)?;
-                b.put_varint(octets::varint_len(*push_id) as u64)?;
-
-                b.put_varint(*push_id)?;
-            },
-
-            Self::Settings {
-                max_field_section_size,
-                qpack_max_table_capacity,
-                qpack_blocked_streams,
-                connect_protocol_enabled,
-                h3_datagram,
-                grease,
-                additional_settings,
-                ..
-            } => {
-                let pairs = [
-                    max_field_section_size
-                        .map(|v| (SETTINGS_MAX_FIELD_SECTION_SIZE, v)),
-                    qpack_max_table_capacity
-                        .map(|v| (SETTINGS_QPACK_MAX_TABLE_CAPACITY, v)),
-                    qpack_blocked_streams
-                        .map(|v| (SETTINGS_QPACK_BLOCKED_STREAMS, v)),
-                    connect_protocol_enabled
-                        .map(|v| (SETTINGS_ENABLE_CONNECT_PROTOCOL, v)),
-                    h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM_00, v)),
-                    h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM, v)),
-                    *grease,
-                ]
-                .into_iter()
-                .flatten()
-                .chain(additional_settings.iter().flatten().copied());
-
-                let len =
-                    pairs.clone().try_fold(0_usize, |len, (id, value)| {
-                        if id > octets::MAX_VAR_INT || value > octets::MAX_VAR_INT
-                        {
-                            return Err(super::Error::SettingsError);
-                        }
-                        let len = len +
-                            octets::varint_len(id) +
-                            octets::varint_len(value);
-                        if len > MAX_SETTINGS_PAYLOAD_SIZE {
-                            return Err(super::Error::ExcessiveLoad);
-                        }
-                        Ok(len)
-                    })?;
-
-                b.put_varint(SETTINGS_FRAME_TYPE_ID)?;
-                b.put_varint(len as u64)?;
-                for (id, value) in pairs {
-                    b.put_varint(id)?;
-                    b.put_varint(value)?;
-                }
-            },
+            Self::Settings { .. } =>
+                (SETTINGS_FRAME_TYPE_ID, FramePayload::Settings(self)),
 
             Self::PushPromise {
                 push_id,
                 header_block,
-            } => {
-                let len = octets::varint_len(*push_id) + header_block.len();
-                b.put_varint(PUSH_PROMISE_FRAME_TYPE_ID)?;
-                b.put_varint(len as u64)?;
+            } => (
+                PUSH_PROMISE_FRAME_TYPE_ID,
+                FramePayload::IdAndBytes(*push_id, header_block),
+            ),
 
-                b.put_varint(*push_id)?;
-                b.put_bytes(header_block.as_ref())?;
-            },
+            Self::GoAway { id } =>
+                (GOAWAY_FRAME_TYPE_ID, FramePayload::Varint(*id)),
 
-            Self::GoAway { id } => {
-                b.put_varint(GOAWAY_FRAME_TYPE_ID)?;
-                b.put_varint(octets::varint_len(*id) as u64)?;
-
-                b.put_varint(*id)?;
-            },
-
-            Self::MaxPushId { push_id } => {
-                b.put_varint(MAX_PUSH_FRAME_TYPE_ID)?;
-                b.put_varint(octets::varint_len(*push_id) as u64)?;
-
-                b.put_varint(*push_id)?;
-            },
+            Self::MaxPushId { push_id } =>
+                (MAX_PUSH_FRAME_TYPE_ID, FramePayload::Varint(*push_id)),
 
             Self::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
-            } => {
-                let len = octets::varint_len(*prioritized_element_id) +
-                    priority_field_value.len();
-
-                b.put_varint(PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID)?;
-                b.put_varint(len as u64)?;
-
-                b.put_varint(*prioritized_element_id)?;
-                b.put_bytes(priority_field_value)?;
-            },
+            } => (
+                PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID,
+                FramePayload::IdAndBytes(
+                    *prioritized_element_id,
+                    priority_field_value,
+                ),
+            ),
 
             Self::PriorityUpdatePush {
                 prioritized_element_id,
                 priority_field_value,
-            } => {
-                let len = octets::varint_len(*prioritized_element_id) +
-                    priority_field_value.len();
+            } => (
+                PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
+                FramePayload::IdAndBytes(
+                    *prioritized_element_id,
+                    priority_field_value,
+                ),
+            ),
 
-                b.put_varint(PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID)?;
-                b.put_varint(len as u64)?;
+            Self::Unknown { raw_type, payload } =>
+                (*raw_type, FramePayload::Bytes(payload)),
+        }
+    }
 
-                b.put_varint(*prioritized_element_id)?;
-                b.put_bytes(priority_field_value)?;
-            },
+    /// Iterates over the encoded SETTINGS pairs, excluding the decoded `raw`
+    /// field. The same iterator is used for exact size planning and emission.
+    fn settings_pairs(&self) -> impl Iterator<Item = (u64, u64)> + Clone + '_ {
+        let Self::Settings {
+            max_field_section_size,
+            qpack_max_table_capacity,
+            qpack_blocked_streams,
+            connect_protocol_enabled,
+            h3_datagram,
+            grease,
+            additional_settings,
+            ..
+        } = self
+        else {
+            unreachable!("SETTINGS pairs requested for a different frame type");
+        };
 
-            Self::Unknown { raw_type, payload } => {
-                b.put_varint(*raw_type)?;
-                b.put_varint(payload.len() as u64)?;
+        [
+            max_field_section_size.map(|v| (SETTINGS_MAX_FIELD_SECTION_SIZE, v)),
+            qpack_max_table_capacity
+                .map(|v| (SETTINGS_QPACK_MAX_TABLE_CAPACITY, v)),
+            qpack_blocked_streams.map(|v| (SETTINGS_QPACK_BLOCKED_STREAMS, v)),
+            connect_protocol_enabled
+                .map(|v| (SETTINGS_ENABLE_CONNECT_PROTOCOL, v)),
+            h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM_00, v)),
+            h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM, v)),
+            *grease,
+        ]
+        .into_iter()
+        .flatten()
+        .chain(additional_settings.iter().flatten().copied())
+    }
 
-                b.put_bytes(payload.as_ref())?;
-            },
+    /// Encodes an entire frame, leaving the caller's buffer and write cursor
+    /// untouched if its encoded size cannot fit or a varint is invalid.
+    pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
+        let (frame_type, payload) = self.encoding();
+        if frame_type > octets::MAX_VAR_INT {
+            return Err(super::Error::BufferTooShort);
+        }
+        let payload_len = payload.encoded_len()?;
+        let wire_payload_len = u64::try_from(payload_len)
+            .map_err(|_| super::Error::BufferTooShort)?;
+        if wire_payload_len > octets::MAX_VAR_INT {
+            return Err(super::Error::BufferTooShort);
         }
 
-        Ok(before - b.cap())
+        let total = octets::varint_len(frame_type)
+            .checked_add(octets::varint_len(wire_payload_len))
+            .and_then(|len| len.checked_add(payload_len))
+            .ok_or(super::Error::BufferTooShort)?;
+        if b.cap() < total {
+            return Err(super::Error::BufferTooShort);
+        }
+
+        b.put_varint(frame_type)?;
+        b.put_varint(wire_payload_len)?;
+        payload.encode(b)?;
+        Ok(total)
     }
 
     #[cfg(feature = "qlog")]
@@ -675,6 +730,136 @@ fn parse_priority_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_encoding_does_not_write_partial_frames() {
+        // All variants must leave both the cursor and caller's buffer intact
+        // if the frame cannot be written in full. Test every truncation
+        // boundary, including a pre-existing nonzero writer offset.
+        let frames = [
+            Frame::Data {
+                payload: vec![1, 2, 3, 4, 5],
+            },
+            Frame::Headers {
+                header_block: vec![7, 8, 9],
+            },
+            Frame::CancelPush { push_id: 456 },
+            Frame::Settings {
+                max_field_section_size: Some(123),
+                qpack_max_table_capacity: Some(456),
+                qpack_blocked_streams: None,
+                connect_protocol_enabled: Some(1),
+                h3_datagram: Some(1),
+                grease: Some((0x21, 0x23)),
+                additional_settings: Some(vec![(0x45, 0x67)]),
+                raw: None,
+            },
+            Frame::PushPromise {
+                push_id: 123,
+                header_block: vec![9, 8, 7],
+            },
+            Frame::GoAway { id: 456 },
+            Frame::MaxPushId { push_id: 789 },
+            Frame::PriorityUpdateRequest {
+                prioritized_element_id: 12,
+                priority_field_value: b"u=3,i".to_vec(),
+            },
+            Frame::PriorityUpdatePush {
+                prioritized_element_id: 13,
+                priority_field_value: b"u=4".to_vec(),
+            },
+            Frame::Unknown {
+                raw_type: 0x42,
+                payload: vec![0x33; 5],
+            },
+        ];
+        for frame in frames {
+            let mut full = [0xA5; 512];
+            let total = frame
+                .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))
+                .unwrap();
+            for capacity in 0..total {
+                let mut storage = [0xA5; 512];
+                let mut writer =
+                    octets::OctetsMut::with_slice(&mut storage[..1 + capacity]);
+                writer.put_u8(0x5A).unwrap();
+                assert_eq!(
+                    frame.to_bytes(&mut writer),
+                    Err(super::super::Error::BufferTooShort),
+                    "frame={frame:?}, capacity={capacity}"
+                );
+                assert_eq!(
+                    writer.off(),
+                    1,
+                    "frame={frame:?}, capacity={capacity}"
+                );
+                assert_eq!(storage[0], 0x5A);
+                assert!(storage[1..].iter().all(|&byte| byte == 0xA5));
+            }
+        }
+    }
+
+    #[test]
+    fn payload_varint_width_transitions_are_atomic() {
+        for len in [0, 63, 64, 16_383, 16_384] {
+            let payload = vec![0x31; len];
+            for frame in [
+                Frame::Data {
+                    payload: payload.clone(),
+                },
+                Frame::PushPromise {
+                    push_id: 16_384,
+                    header_block: payload.clone(),
+                },
+                Frame::PriorityUpdatePush {
+                    prioritized_element_id: 63,
+                    priority_field_value: payload,
+                },
+            ] {
+                let mut full = vec![0xA5; len + 32];
+                let total = frame
+                    .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))
+                    .unwrap();
+                for available in [0, 1, total - 1] {
+                    let mut storage = vec![0xA5; available];
+                    let mut writer = octets::OctetsMut::with_slice(&mut storage);
+                    assert_eq!(
+                        frame.to_bytes(&mut writer),
+                        Err(super::super::Error::BufferTooShort),
+                        "frame={frame:?}, available={available}"
+                    );
+                    assert_eq!(writer.off(), 0);
+                    assert!(storage.iter().all(|&byte| byte == 0xA5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_frame_varints_do_not_write_partial_headers() {
+        for frame in [
+            Frame::GoAway {
+                id: octets::MAX_VAR_INT + 1,
+            },
+            Frame::Unknown {
+                raw_type: octets::MAX_VAR_INT + 1,
+                payload: vec![1, 2, 3],
+            },
+            Frame::PriorityUpdateRequest {
+                prioritized_element_id: octets::MAX_VAR_INT + 1,
+                priority_field_value: vec![1, 2, 3],
+            },
+        ] {
+            let mut storage = [0xA5; 64];
+            let mut writer = octets::OctetsMut::with_slice(&mut storage);
+            assert_eq!(
+                frame.to_bytes(&mut writer),
+                Err(super::super::Error::BufferTooShort)
+            );
+            assert_eq!(writer.off(), 0, "frame={frame:?}");
+            assert!(storage.iter().all(|&byte| byte == 0xA5));
+        }
+    }
 
     #[test]
     fn data() {
