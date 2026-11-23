@@ -2733,7 +2733,7 @@ unsafe fn std_addr_from_c(
     // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
     // the caller guarantees the corresponding field is readable.
     let family = unsafe { (&raw const (*addr).sa_family).read() };
-    match family as _ {
+    match c_int::from(family) {
         AF_INET => {
             let in4 = addr.cast::<sockaddr_in>();
             if len != size_of::<sockaddr_in>() || !in4.is_aligned() {
@@ -2815,7 +2815,7 @@ unsafe fn std_addr_from_c(
     }
 }
 
-const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
+fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
     // SAFETY: the platform sockaddr_storage type consists of integer/byte
     // fields, all of which admit zero initialization.
     let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
@@ -2836,7 +2836,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             };
 
             let address = sockaddr_in {
-                sin_family: AF_INET as sa_family_t,
+                sin_family: sa_family_t::try_from(AF_INET)
+                    .expect("IPv4 family fits sa_family_t"),
 
                 sin_addr,
 
@@ -2849,7 +2850,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
                     target_os = "openbsd",
                     target_os = "netbsd"
                 ))]
-                sin_len: sa_len as u8,
+                sin_len: u8::try_from(sa_len)
+                    .expect("sockaddr_in size fits in u8"),
 
                 sin_port,
 
@@ -2859,7 +2861,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             // SAFETY: sockaddr_storage has sufficient size and alignment
             // for sockaddr_in; the raw pointer comes from this local object.
             unsafe { out_in.write(address) };
-            sa_len as socklen_t
+            socklen_t::try_from(sa_len)
+                .expect("socket address size fits socklen_t")
         },
 
         SocketAddr::V6(addr) => {
@@ -2878,7 +2881,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             };
 
             let address = sockaddr_in6 {
-                sin6_family: AF_INET6 as sa_family_t,
+                sin6_family: sa_family_t::try_from(AF_INET6)
+                    .expect("IPv6 family fits sa_family_t"),
 
                 sin6_addr,
 
@@ -2891,7 +2895,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
                     target_os = "openbsd",
                     target_os = "netbsd"
                 ))]
-                sin6_len: sa_len as u8,
+                sin6_len: u8::try_from(sa_len)
+                    .expect("sockaddr_in6 size fits in u8"),
 
                 sin6_port: sin_port,
 
@@ -2908,7 +2913,8 @@ const fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             // SAFETY: sockaddr_storage has sufficient size and alignment
             // for sockaddr_in6; the raw pointer comes from this local object.
             unsafe { out_in6.write(address) };
-            sa_len as socklen_t
+            socklen_t::try_from(sa_len)
+                .expect("socket address size fits socklen_t")
         },
     };
     (out, len)
