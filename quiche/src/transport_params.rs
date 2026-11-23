@@ -99,6 +99,7 @@ pub struct UnknownTransportParameters {
 
 impl UnknownTransportParameters {
     /// Create an empty tracker with the given byte budget.
+    #[must_use = "the returned tracker enforces the requested byte budget"]
     pub const fn new(capacity: usize) -> Self {
         Self {
             remaining_capacity: capacity,
@@ -107,6 +108,7 @@ impl UnknownTransportParameters {
     }
 
     /// Number of bytes still available for parameter IDs and values.
+    #[must_use = "reading the budget does not change it"]
     pub const fn remaining_capacity(&self) -> usize {
         self.remaining_capacity
     }
@@ -223,7 +225,7 @@ impl Default for TransportParams {
             initial_source_connection_id: None,
             retry_source_connection_id: None,
             max_datagram_frame_size: None,
-            unknown_params: Default::default(),
+            unknown_params: Option::default(),
         }
     }
 }
@@ -511,7 +513,7 @@ impl TransportParams {
         );
 
         let stateless_reset_token = qlog::HexSlice::maybe_string(
-            self.stateless_reset_token.map(|s| s.to_be_bytes()).as_ref(),
+            self.stateless_reset_token.map(u128::to_be_bytes).as_ref(),
         );
 
         let tls_cipher: Option<String> = cipher.map(|f| format!("{f:?}"));

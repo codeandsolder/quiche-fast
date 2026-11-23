@@ -10251,4 +10251,4 @@ mod recovery;
 mod scale;
 mod stream;
 mod tls;
-mod transport_params;
+pub(crate) mod transport_params;
