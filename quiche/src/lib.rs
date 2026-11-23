@@ -8488,18 +8488,16 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        // Validate retry_source_connection_id.
-        if let Some(rscid) = &self.rscid {
-            match &peer_params.retry_source_connection_id {
-                Some(v) if v != rscid =>
-                    return Err(Error::InvalidTransportParam),
-
-                Some(_) => (),
-
-                // retry_source_connection_id must be sent by
-                // the server.
-                None => return Err(Error::InvalidTransportParam),
-            }
+        // The server must advertise retry_source_connection_id if and only if
+        // it sent a Retry packet. An unsolicited value is not merely redundant:
+        // RFC 9000 section 7.3 requires TRANSPORT_PARAMETER_ERROR in this case.
+        match (
+            self.rscid.as_ref(),
+            peer_params.retry_source_connection_id.as_ref(),
+        ) {
+            (None, None) => (),
+            (Some(expected), Some(received)) if expected == received => (),
+            _ => return Err(Error::InvalidTransportParam),
         }
 
         self.process_peer_transport_params(peer_params)?;
