@@ -2787,7 +2787,7 @@ impl Connection {
     }
 
     /// Consume the frame type and length varints incrementally. If the length
-    /// has not arrived yet, the stream retains FramePayloadLen and resumes
+    /// has not arrived yet, the stream retains `FramePayloadLen` and resumes
     /// directly there on the next call.
     fn read_frame_header<F: BufFactory>(
         conn: &mut super::Connection<F>, stream: &mut stream::Stream,
@@ -3102,8 +3102,10 @@ impl Connection {
                 ),
 
             // DATA events are returned separately. CANCEL_PUSH is not yet
-            // implemented.
-            frame::Frame::Data { .. } | frame::Frame::CancelPush { .. } => (),
+            // implemented, and unknown extension frames are ignored.
+            frame::Frame::Data { .. } |
+            frame::Frame::CancelPush { .. } |
+            frame::Frame::Unknown { .. } => (),
 
             frame::Frame::GoAway { id } => return self.process_goaway(conn, id),
 
@@ -3157,8 +3159,6 @@ impl Connection {
                 )?;
                 return Err(Error::IdError);
             },
-
-            frame::Frame::Unknown { .. } => (),
         }
 
         Err(Error::Done)
