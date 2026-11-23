@@ -526,11 +526,9 @@ impl BBRv2 {
     ) -> Self {
         let cwnd = initial_congestion_window.saturating_mul(max_segment_size);
 
-        let params = if let Some(custom_bbr_settings) = custom_bbr_params {
-            DEFAULT_PARAMS.with_overrides(custom_bbr_settings)
-        } else {
-            DEFAULT_PARAMS
-        };
+        let params = custom_bbr_params.map_or(DEFAULT_PARAMS, |settings| {
+            DEFAULT_PARAMS.with_overrides(settings)
+        });
 
         let min_cwnd = params
             .min_cwnd_packets

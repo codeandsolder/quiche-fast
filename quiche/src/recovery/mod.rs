@@ -448,12 +448,10 @@ pub trait RecoveryOps {
 
 impl Recovery {
     pub fn new_with_config(recovery_config: &RecoveryConfig) -> Self {
-        let grecovery = GRecovery::new(recovery_config);
-        if let Some(grecovery) = grecovery {
-            Self::from(grecovery)
-        } else {
-            Self::from(LegacyRecovery::new_with_config(recovery_config))
-        }
+        GRecovery::new(recovery_config).map_or_else(
+            || Self::from(LegacyRecovery::new_with_config(recovery_config)),
+            Self::from,
+        )
     }
 
     #[cfg(feature = "qlog")]

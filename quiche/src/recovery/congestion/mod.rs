@@ -171,12 +171,8 @@ impl Congestion {
     }
 
     pub(crate) fn in_congestion_recovery(&self, sent_time: Instant) -> bool {
-        match self.congestion_recovery_start_time {
-            Some(congestion_recovery_start_time) =>
-                sent_time <= congestion_recovery_start_time,
-
-            None => false,
-        }
+        self.congestion_recovery_start_time
+            .is_some_and(|start| sent_time <= start)
     }
 
     /// The most recent data delivery rate estimate.

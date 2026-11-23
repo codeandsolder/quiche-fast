@@ -634,11 +634,10 @@ impl BandwidthSampler {
             max_bandwidth = max_bandwidth.max(max_send_rate);
         }
 
-        let bandwidth_estimate = if let Some(max_bandwidth) = max_bandwidth {
-            max_bandwidth.min(est_bandwidth_upper_bound)
-        } else {
-            est_bandwidth_upper_bound
-        };
+        let bandwidth_estimate = max_bandwidth
+            .map_or(est_bandwidth_upper_bound, |bandwidth| {
+                bandwidth.min(est_bandwidth_upper_bound)
+            });
 
         event_sample.extra_acked = self.on_ack_event_end(
             bandwidth_estimate,
@@ -768,11 +767,7 @@ impl BandwidthSampler {
             ack_time.duration_since(a0.ack_time),
         );
 
-        let bandwidth = if let Some(send_rate) = send_rate {
-            send_rate.min(ack_rate)
-        } else {
-            ack_rate
-        };
+        let bandwidth = send_rate.map_or(ack_rate, |rate| rate.min(ack_rate));
 
         // Note: this sample does not account for delayed acknowledgement time.
         // This means that the RTT measurements here can be artificially

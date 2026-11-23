@@ -148,17 +148,18 @@ impl Window {
         let product = (acked as u128) * (mss as u128);
         let divisor = cwnd as u128;
         let factor = Self::ONE * numerator;
-        let scaled = if let Some(product) = product.checked_mul(factor) {
-            product / divisor
-        } else {
-            // Divide before multiplying by the fractional scale when the
-            // intermediate would overflow. Retain the exact remainder.
-            let whole = product / divisor;
-            let remainder = product % divisor;
-            whole
-                .saturating_mul(factor)
-                .saturating_add(remainder * factor / divisor)
-        };
+        let scaled = product.checked_mul(factor).map_or_else(
+            || {
+                // Divide before multiplying by the fractional scale when the
+                // intermediate would overflow. Retain the exact remainder.
+                let whole = product / divisor;
+                let remainder = product % divisor;
+                whole
+                    .saturating_mul(factor)
+                    .saturating_add(remainder * factor / divisor)
+            },
+            |product| product / divisor,
+        );
         Self((scaled / denominator).min(Self::MAX))
     }
 
