@@ -86,7 +86,7 @@ impl BytesInFlight {
     }
 
     /// Total time during which `bytes_in_flight` was > 0.
-    pub(crate) fn get_duration(&self) -> Duration {
+    pub(crate) const fn get_duration(&self) -> Duration {
         self.closed_interval_duration
             .saturating_add(self.open_interval_duration)
     }
