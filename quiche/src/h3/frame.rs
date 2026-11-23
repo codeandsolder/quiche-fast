@@ -359,6 +359,7 @@ impl Frame {
     }
 
     #[cfg(feature = "qlog")]
+    #[must_use]
     pub fn to_qlog(&self) -> Http3Frame {
         use qlog::events::RawInfo;
 
@@ -388,67 +389,39 @@ impl Frame {
                 additional_settings,
                 ..
             } => {
-                let mut settings = vec![];
+                use qlog::events::http3::Setting;
 
-                if let Some(v) = max_field_section_size {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some("MAX_FIELD_SECTION_SIZE".to_string()),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
+                let known = [
+                    ("MAX_FIELD_SECTION_SIZE", max_field_section_size),
+                    ("QPACK_MAX_TABLE_CAPACITY", qpack_max_table_capacity),
+                    ("QPACK_BLOCKED_STREAMS", qpack_blocked_streams),
+                    (
+                        "SETTINGS_ENABLE_CONNECT_PROTOCOL",
+                        connect_protocol_enabled,
+                    ),
+                    ("H3_DATAGRAM", h3_datagram),
+                ];
+                let mut settings: Vec<_> = known
+                    .into_iter()
+                    .filter_map(|(name, value)| {
+                        value.map(|value| Setting {
+                            name: Some(name.to_owned()),
+                            name_bytes: None,
+                            value,
+                        })
+                    })
+                    .collect();
 
-                if let Some(v) = qpack_max_table_capacity {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some("QPACK_MAX_TABLE_CAPACITY".to_string()),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
-
-                if let Some(v) = qpack_blocked_streams {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some("QPACK_BLOCKED_STREAMS".to_string()),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
-
-                if let Some(v) = connect_protocol_enabled {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some(
-                            "SETTINGS_ENABLE_CONNECT_PROTOCOL".to_string(),
-                        ),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
-
-                if let Some(v) = h3_datagram {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some("H3_DATAGRAM".to_string()),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
-
-                if let Some((k, v)) = grease {
-                    settings.push(qlog::events::http3::Setting {
-                        name: Some(k.to_string()),
-                        name_bytes: None,
-                        value: *v,
-                    });
-                }
-
-                if let Some(additional_settings) = additional_settings {
-                    for (k, v) in additional_settings {
-                        settings.push(qlog::events::http3::Setting {
+                settings.extend(
+                    grease
+                        .iter()
+                        .chain(additional_settings.iter().flatten())
+                        .map(|(k, v)| Setting {
                             name: Some(k.to_string()),
                             name_bytes: None,
                             value: *v,
-                        });
-                    }
-                }
+                        }),
+                );
 
                 Http3Frame::Settings {
                     settings,
@@ -730,6 +703,40 @@ fn parse_priority_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_settings_preserve_order_and_omit_absent_values() {
+        let frame = Frame::Settings {
+            max_field_section_size: Some(1024),
+            qpack_max_table_capacity: None,
+            qpack_blocked_streams: Some(0),
+            connect_protocol_enabled: Some(1),
+            h3_datagram: None,
+            grease: Some((33, 42)),
+            additional_settings: Some(vec![(65, 7), (66, 8)]),
+            raw: Some(vec![(99, 100)]),
+        };
+        let expected = [
+            ("MAX_FIELD_SECTION_SIZE", 1024),
+            ("QPACK_BLOCKED_STREAMS", 0),
+            ("SETTINGS_ENABLE_CONNECT_PROTOCOL", 1),
+            ("33", 42),
+            ("65", 7),
+            ("66", 8),
+        ]
+        .into_iter()
+        .map(|(name, value)| qlog::events::http3::Setting {
+            name: Some(name.to_owned()),
+            name_bytes: None,
+            value,
+        })
+        .collect();
+        assert_eq!(frame.to_qlog(), Http3Frame::Settings {
+            settings: expected,
+            raw: None,
+        });
+    }
 
     #[test]
     fn frame_encoding_does_not_write_partial_frames() {

@@ -1142,7 +1142,7 @@ impl Connection {
             Self::new(config, conn.is_server, conn.dgram_enabled());
 
         match http3_conn.send_settings(conn) {
-            Ok(_) => (),
+            Ok(()) => (),
 
             Err(e) => {
                 conn.close(true, e.to_wire(), b"Error opening control stream")?;
@@ -1677,10 +1677,10 @@ impl Connection {
              mut body_len: usize,
              fin: bool| {
                 let with_prefix = body.try_add_prefix(header);
-                if !with_prefix {
-                    conn.stream_send(stream_id, header, false)?;
-                } else {
+                if with_prefix {
                     body_len += header.len();
+                } else {
+                    conn.stream_send(stream_id, header, false)?;
                 }
 
                 let remainder = body.split_at(body_len);
@@ -2016,7 +2016,7 @@ impl Connection {
     /// [`StreamBlocked`]: enum.Error.html#variant.StreamBlocked
     /// [Extensible Priority]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     pub fn send_priority_update_for_request<F: BufFactory>(
-        &mut self, conn: &mut super::Connection<F>, stream_id: u64,
+        &self, conn: &mut super::Connection<F>, stream_id: u64,
         priority: Priority,
     ) -> Result<()> {
         let mut d = [42; 20];
@@ -2266,14 +2266,10 @@ impl Connection {
     pub fn send_goaway<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, id: u64,
     ) -> Result<()> {
-        let mut id = id;
-
         // TODO: server push
         //
         // In the meantime always send 0 from client.
-        if !self.is_server {
-            id = 0;
-        }
+        let id = if self.is_server { id } else { 0 };
 
         if self.is_server && !id.is_multiple_of(4) {
             return Err(Error::IdError);
@@ -2521,7 +2517,7 @@ impl Connection {
                 Error::Done |
                 Error::TransportError(super::Error::StreamLimit),
             ) => {
-                trace!("{} GREASE stream blocked", conn.trace_id(),);
+                trace!("{} GREASE stream blocked", conn.trace_id());
 
                 return Ok(());
             },
@@ -2946,7 +2942,7 @@ impl Connection {
         }
 
         match stream.ty() {
-            Some(stream::Type::Request) | Some(stream::Type::Push) => {
+            Some(stream::Type::Request | stream::Type::Push) => {
                 stream.finished();
 
                 self.finished_streams.push_back(stream_id);
@@ -2956,9 +2952,11 @@ impl Connection {
             },
             // Closing any of the critical streams leads to connection close,
             // so there is no need for any cleanup actions here.
-            Some(stream::Type::Control) |
-            Some(stream::Type::QpackEncoder) |
-            Some(stream::Type::QpackDecoder) => (),
+            Some(
+                stream::Type::Control |
+                stream::Type::QpackEncoder |
+                stream::Type::QpackDecoder,
+            ) => (),
         }
     }
 
@@ -3044,7 +3042,7 @@ impl Connection {
                 raw,
                 ..
             } => {
-                if let Some(1) = h3_datagram {
+                if h3_datagram == Some(1) {
                     // The peer MUST have also enabled DATAGRAM with a TP
                     if conn.dgram_max_writable_len().is_none() {
                         conn.close(
@@ -3138,9 +3136,9 @@ impl Connection {
                 }));
             },
 
-            frame::Frame::Data { .. } => {
-                // Do nothing. The Data event is returned separately.
-            },
+            // DATA events are returned separately. CANCEL_PUSH is not yet
+            // implemented.
+            frame::Frame::Data { .. } | frame::Frame::CancelPush { .. } => (),
 
             frame::Frame::GoAway { id } => {
                 if !self.is_server && id % 4 != 0 {
@@ -3218,10 +3216,6 @@ impl Connection {
                 // TODO: implement more checks and PUSH_PROMISE event
             },
 
-            frame::Frame::CancelPush { .. } => {
-                // TODO: implement CANCEL_PUSH frame
-            },
-
             frame::Frame::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
@@ -3286,11 +3280,11 @@ impl Connection {
 
                 // Only trigger the event when there wasn't already a stored
                 // PRIORITY_UPDATE.
-                if !had_priority_update {
-                    return Ok((prioritized_element_id, Event::PriorityUpdate));
-                } else {
+                if had_priority_update {
                     return Err(Error::Done);
                 }
+
+                return Ok((prioritized_element_id, Event::PriorityUpdate));
             },
 
             frame::Frame::PriorityUpdatePush { .. } => {
@@ -3360,7 +3354,14 @@ fn data_payload_capacity(requested: usize, credit: usize) -> Option<usize> {
 #[doc(hidden)]
 #[cfg(any(test, feature = "internal"))]
 pub mod testing {
-    use super::*;
+    use super::frame;
+    use super::stream;
+    use super::BufFactory;
+    use super::Config;
+    use super::Connection;
+    use super::Event;
+    use super::Header;
+    use super::Result;
 
     use crate::test_utils;
     use crate::DefaultBufFactory;
@@ -3390,6 +3391,7 @@ pub mod testing {
 
     #[cfg(test)]
     mod frame_encoding_tests {
+        use super::super::Error;
         use super::*;
 
         #[test]
