@@ -1048,6 +1048,19 @@ impl RecoveryOps for GRecovery {
         self.bytes_in_flight.get()
     }
 
+    fn has_pending_recovery_work(&self) -> bool {
+        self.epochs.iter().any(|epoch| {
+            epoch.sent_packets.iter().any(|pkt| {
+                matches!(pkt.status, SentStatus::Sent {
+                    ack_eliciting: true,
+                    ..
+                })
+            }) || !epoch.acked_frames.is_empty() ||
+                epoch.has_lost_frames() ||
+                epoch.loss_probes != 0
+        })
+    }
+
     fn bytes_in_flight_duration(&self) -> Duration {
         self.bytes_in_flight.get_duration()
     }

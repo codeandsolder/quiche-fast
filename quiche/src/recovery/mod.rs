@@ -390,6 +390,12 @@ pub trait RecoveryOps {
 
     fn bytes_in_flight(&self) -> usize;
 
+    /// Whether retiring a path would discard retransmittable packets, ACK
+    /// processing, lost/PTO frames, or pending loss probes. This is stronger
+    /// than a nonzero congestion-control bytes-in-flight count: packets can
+    /// already be declared lost while their frames still need retransmission.
+    fn has_pending_recovery_work(&self) -> bool;
+
     fn bytes_in_flight_duration(&self) -> Duration;
 
     #[cfg(test)]
