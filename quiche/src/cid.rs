@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use crate::crypto;
 use crate::Error;
 use crate::Result;
 
@@ -33,6 +34,7 @@ use crate::packet::ConnectionId;
 
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::mem::size_of;
 
 use smallvec::SmallVec;
 
@@ -651,6 +653,39 @@ impl ConnectionIdentifiers {
             .min()
     }
 
+    /// Checks the candidate stateless reset token against all live peer DCIDs.
+    ///
+    /// The initial DCID can be learned before TLS delivers its transport
+    /// parameters, including the initial reset token. Use that token only as
+    /// the fallback for DCID sequence zero, and stop accepting it once that
+    /// initial ID is retired. Other IDs carry their own NEW_CONNECTION_ID
+    /// tokens. Evaluate every candidate even after a match, so matching does
+    /// not depend on where the matching token occurs in the live CID set.
+    pub fn matches_reset_token(
+        &self, candidate: &[u8], initial_reset_token: Option<u128>,
+    ) -> bool {
+        if candidate.len() != size_of::<u128>() {
+            return false;
+        }
+
+        let mut matched = false;
+        for entry in self.dcids.iter() {
+            let token = if entry.seq == 0 {
+                entry.reset_token.or(initial_reset_token)
+            } else {
+                entry.reset_token
+            };
+            if let Some(token) = token {
+                matched |= crypto::verify_slices_are_equal(
+                    &token.to_be_bytes(),
+                    candidate,
+                )
+                .is_ok();
+            }
+        }
+        matched
+    }
+
     /// Finds the sequence number of the Source Connection ID having the
     /// provided value and the identifier of the path using it, if any.
     #[inline]
@@ -826,6 +861,58 @@ impl ConnectionIdentifiers {
 mod tests {
     use super::*;
     use crate::test_utils::create_cid_and_reset_token;
+
+    #[test]
+    fn matches_initial_and_rotated_stateless_reset_tokens_until_retirement() {
+        let mut ids = ConnectionIdentifiers::new(
+            4,
+            &ConnectionId::from_ref(b"source"),
+            0,
+            None,
+        );
+        let initial_token = u128::from_be_bytes([0x11; 16]);
+        let rotated_token = u128::from_be_bytes([0x22; 16]);
+        let third_token = u128::from_be_bytes([0x33; 16]);
+        ids.set_initial_dcid(vec![1].into(), Some(initial_token), Some(0));
+        let mut retired_path_ids = SmallVec::new();
+        ids.new_dcid(vec![2].into(), 1, rotated_token, 0, &mut retired_path_ids)
+            .unwrap();
+        ids.new_dcid(vec![3].into(), 2, third_token, 0, &mut retired_path_ids)
+            .unwrap();
+        assert!(retired_path_ids.is_empty());
+        for token in [initial_token, rotated_token, third_token] {
+            assert!(ids.matches_reset_token(&token.to_be_bytes(), None));
+        }
+        assert!(!ids.matches_reset_token(&[0x44; 16], None));
+        assert!(!ids.matches_reset_token(&rotated_token.to_be_bytes()[1..], None));
+
+        // Retirement removes the token from the set of valid live tokens.
+        assert_eq!(ids.retire_dcid(1), Ok(None));
+        assert!(!ids.matches_reset_token(&rotated_token.to_be_bytes(), None));
+        assert!(ids.matches_reset_token(&initial_token.to_be_bytes(), None));
+        assert!(ids.matches_reset_token(&third_token.to_be_bytes(), None));
+    }
+
+    #[test]
+    fn late_transport_parameter_token_only_matches_live_initial_dcid() {
+        let mut ids = ConnectionIdentifiers::new(
+            3,
+            &ConnectionId::from_ref(b"source"),
+            0,
+            None,
+        );
+        ids.set_initial_dcid(vec![1].into(), None, Some(0));
+        let token = u128::from_be_bytes([0x5a; 16]);
+        assert!(!ids.matches_reset_token(&token.to_be_bytes(), None));
+        assert!(ids.matches_reset_token(&token.to_be_bytes(), Some(token)));
+
+        let mut retired_path_ids = SmallVec::new();
+        ids.new_dcid(vec![2].into(), 1, 0xaa, 0, &mut retired_path_ids)
+            .unwrap();
+        assert_eq!(ids.retire_dcid(0), Ok(Some(0)));
+        assert!(!ids.matches_reset_token(&token.to_be_bytes(), Some(token)));
+        assert!(ids.matches_reset_token(&0xaa_u128.to_be_bytes(), Some(token)));
+    }
 
     #[test]
     fn repeated_destination_id_advances_retirement_without_replacing_path() {

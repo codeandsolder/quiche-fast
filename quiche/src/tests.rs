@@ -33,6 +33,48 @@ use crate::Header;
 use rstest::rstest;
 
 #[test]
+fn stateless_reset_recognizes_rotated_peer_cid_tokens() {
+    let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    let client = &mut pipe.client;
+    let initial_token = u128::from_be_bytes([0x61; 16]);
+    let rotated_token = u128::from_be_bytes([0x72; 16]);
+    // The initial peer CID often precedes receipt of TLS transport
+    // parameters, so its saved token is still None when the TP arrives.
+    client
+        .ids
+        .set_initial_dcid(vec![1, 2, 3].into(), None, Some(0));
+    client.peer_transport_params.stateless_reset_token = Some(initial_token);
+    let mut retired_path_ids = SmallVec::new();
+    client
+        .ids
+        .new_dcid(
+            vec![4, 5, 6].into(),
+            1,
+            rotated_token,
+            0,
+            &mut retired_path_ids,
+        )
+        .unwrap();
+    assert!(retired_path_ids.is_empty());
+
+    let mut packet = [0x40; 21];
+    for token in [initial_token, rotated_token] {
+        packet[5..].copy_from_slice(&token.to_be_bytes());
+        assert!(client.is_stateless_reset(&packet));
+    }
+    packet[5..].copy_from_slice(&[0x83; 16]);
+    assert!(!client.is_stateless_reset(&packet));
+    packet[5..].copy_from_slice(&rotated_token.to_be_bytes());
+    assert!(!client.is_stateless_reset(&packet[1..]));
+
+    // Once an ID is retired, its reset token is no longer accepted.
+    client.ids.retire_dcid(1).unwrap();
+    assert!(!client.is_stateless_reset(&packet));
+    packet[5..].copy_from_slice(&initial_token.to_be_bytes());
+    assert!(client.is_stateless_reset(&packet));
+}
+
+#[test]
 fn transport_params() {
     // Server encodes, client decodes.
     let tp = TransportParams {

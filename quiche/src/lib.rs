@@ -3195,18 +3195,12 @@ impl<F: BufFactory> Connection<F> {
             return false;
         }
 
-        // TODO: we should iterate over all active destination connection IDs
-        // and check against their reset token.
-        self.peer_transport_params
-            .stateless_reset_token
-            .is_some_and(|token| {
-                let expected = token.to_be_bytes();
-                crypto::verify_slices_are_equal(
-                    &expected,
-                    &buf[buf_len - expected.len()..],
-                )
-                .is_ok()
-            })
+        // All live peer DCIDs can have different reset tokens, including IDs
+        // learned after the handshake through NEW_CONNECTION_ID frames.
+        self.ids.matches_reset_token(
+            &buf[buf_len - size_of::<u128>()..],
+            self.peer_transport_params.stateless_reset_token,
+        )
     }
 
     /// Processes a single QUIC packet received from the peer.
