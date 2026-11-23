@@ -1149,8 +1149,12 @@ impl Connection {
 
         // Try opening QPACK streams, but ignore errors if it fails since we
         // don't need them right now.
-        http3_conn.open_qpack_encoder_stream(conn).ok();
-        http3_conn.open_qpack_decoder_stream(conn).ok();
+        http3_conn
+            .open_qpack_stream(conn, stream::Type::QpackEncoder)
+            .ok();
+        http3_conn
+            .open_qpack_stream(conn, stream::Type::QpackDecoder)
+            .ok();
 
         if conn.grease {
             // Try opening a GREASE stream, but ignore errors since it's not
@@ -2321,13 +2325,23 @@ impl Connection {
         self.peer_settings.raw.as_deref()
     }
 
+    /// Open a unidirectional stream only when its entire initial sequence
+    /// (type, initial payload, and optional FIN) can be buffered.
     fn open_uni_stream<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, ty: u64,
+        initial_payload: &[u8], fin: bool,
     ) -> Result<u64> {
         let stream_id = self.next_uni_stream_id;
-
-        let mut d = [0; 8];
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        if stream_id > octets::MAX_VAR_INT {
+            return Err(Error::IdError);
+        }
+        let next_id = stream_id.checked_add(4).ok_or(Error::IdError)?;
+        let prefix = octets::EncodedVarint::new(ty)?;
+        let len = prefix
+            .as_ref()
+            .len()
+            .checked_add(initial_payload.len())
+            .ok_or(Error::ExcessiveLoad)?;
 
         match ty {
             // Control and QPACK streams are the most important to schedule.
@@ -2337,65 +2351,60 @@ impl Connection {
                 conn.stream_priority(stream_id, 0, false)?;
             },
 
-            // TODO: Server push
-            stream::HTTP3_PUSH_STREAM_TYPE_ID => (),
+            // Preserve the default QUIC priority for server push.
+            stream::HTTP3_PUSH_STREAM_TYPE_ID => {
+                conn.stream_send(stream_id, &[], false)?;
+            },
 
-            // Anything else is a GREASE stream, so make it the least important.
+            // Unknown stream types (e.g. GREASE) have lowest priority.
             _ => {
                 conn.stream_priority(stream_id, 255, false)?;
             },
         }
 
-        conn.stream_send(stream_id, b.put_varint(ty)?, false)?;
+        if conn.stream_capacity(stream_id)? < len {
+            return Err(Error::Done);
+        }
 
-        // To avoid skipping stream IDs, we only calculate the next available
-        // stream ID when data has been successfully buffered.
-        self.next_uni_stream_id = self
-            .next_uni_stream_id
-            .checked_add(4)
-            .ok_or(Error::IdError)?;
+        // Common control, QPACK, and GREASE prefaces stay inline.
+        let mut preface =
+            smallvec::SmallVec::<[u8; 512]>::from_slice(prefix.as_ref());
+        preface.extend_from_slice(initial_payload);
+        if conn.stream_send(stream_id, &preface, fin)? != len {
+            return Err(Error::InternalError);
+        }
 
+        self.next_uni_stream_id = next_id;
         Ok(stream_id)
     }
 
-    fn open_qpack_encoder_stream<F: BufFactory>(
-        &mut self, conn: &mut super::Connection<F>,
+    fn open_qpack_stream<F: BufFactory>(
+        &mut self, conn: &mut super::Connection<F>, kind: stream::Type,
     ) -> Result<()> {
-        let stream_id =
-            self.open_uni_stream(conn, stream::QPACK_ENCODER_STREAM_TYPE_ID)?;
+        let stream_type = match kind {
+            stream::Type::QpackEncoder => stream::QPACK_ENCODER_STREAM_TYPE_ID,
+            stream::Type::QpackDecoder => stream::QPACK_DECODER_STREAM_TYPE_ID,
+            _ => return Err(Error::InternalError),
+        };
+        let stream_id = self.open_uni_stream(conn, stream_type, &[], false)?;
 
-        self.local_qpack_streams.encoder_stream_id = Some(stream_id);
+        match kind {
+            stream::Type::QpackEncoder => {
+                self.local_qpack_streams.encoder_stream_id = Some(stream_id);
+            },
+            stream::Type::QpackDecoder => {
+                self.local_qpack_streams.decoder_stream_id = Some(stream_id);
+            },
+            _ => return Err(Error::InternalError),
+        }
 
         qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
             let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
                 stream_id,
                 initiator: Some(Initiator::Local),
-                stream_type: StreamType::QpackEncode,
+                stream_type: kind.to_qlog(),
                 ..Default::default()
             });
-
-            q.add_event_data_now(ev_data).ok();
-        });
-
-        Ok(())
-    }
-
-    fn open_qpack_decoder_stream<F: BufFactory>(
-        &mut self, conn: &mut super::Connection<F>,
-    ) -> Result<()> {
-        let stream_id =
-            self.open_uni_stream(conn, stream::QPACK_DECODER_STREAM_TYPE_ID)?;
-
-        self.local_qpack_streams.decoder_stream_id = Some(stream_id);
-
-        qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
-            let ev_data = EventData::Http3StreamTypeSet(StreamTypeSet {
-                stream_id,
-                initiator: Some(Initiator::Local),
-                stream_type: StreamType::QpackDecode,
-                ..Default::default()
-            });
-
             q.add_event_data_now(ev_data).ok();
         });
 
@@ -2406,7 +2415,8 @@ impl Connection {
     fn send_grease_frames<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
     ) -> Result<()> {
-        let mut d = [0; 8];
+        const GREASE_PAYLOAD: &[u8] = b"GREASE is the word";
+        let mut d = [0; 2 * 8 + 2 + GREASE_PAYLOAD.len()];
 
         let stream_cap = match conn.stream_capacity(stream_id) {
             Ok(v) => v,
@@ -2422,26 +2432,22 @@ impl Connection {
 
         let grease_frame1 = grease_value();
         let grease_frame2 = grease_value();
-        let grease_payload = b"GREASE is the word";
 
-        let overhead = octets::varint_len(grease_frame1) + // frame type
-            1 + // payload len
-            octets::varint_len(grease_frame2) + // frame type
-            1 + // payload len
-            grease_payload.len(); // payload
-
-        // Don't send GREASE if there is not enough capacity for it. Greasing
-        // will _not_ be attempted again later on.
-        if stream_cap < overhead {
+        // Encode both frames and queue them as one complete write.
+        let mut b = octets::OctetsMut::with_slice(&mut d);
+        b.put_varint(grease_frame1)?;
+        b.put_varint(0)?;
+        b.put_varint(grease_frame2)?;
+        b.put_varint(GREASE_PAYLOAD.len() as u64)?;
+        b.put_bytes(GREASE_PAYLOAD)?;
+        let off = b.off();
+        // Optional GREASE must not consume partial stream credit.
+        if stream_cap < off {
             return Ok(());
         }
-
-        // Empty GREASE frame.
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        conn.stream_send(stream_id, b.put_varint(grease_frame1)?, false)?;
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        conn.stream_send(stream_id, b.put_varint(0)?, false)?;
+        if conn.stream_send(stream_id, &d[..off], false)? != off {
+            return Err(Error::InternalError);
+        }
 
         trace!("{} tx frm GREASE stream={stream_id} len=0", conn.trace_id());
 
@@ -2460,19 +2466,10 @@ impl Connection {
             q.add_event_data_now(ev_data).ok();
         });
 
-        // GREASE frame with payload.
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        conn.stream_send(stream_id, b.put_varint(grease_frame2)?, false)?;
-
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-        conn.stream_send(stream_id, b.put_varint(18)?, false)?;
-
-        conn.stream_send(stream_id, grease_payload, false)?;
-
         trace!(
             "{} tx frm GREASE stream={stream_id} len={}",
             conn.trace_id(),
-            grease_payload.len()
+            GREASE_PAYLOAD.len()
         );
 
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
@@ -2482,7 +2479,7 @@ impl Connection {
             };
             let ev_data = EventData::Http3FrameCreated(FrameCreated {
                 stream_id,
-                length: Some(grease_payload.len() as u64),
+                length: Some(GREASE_PAYLOAD.len() as u64),
                 frame,
                 ..Default::default()
             });
@@ -2499,10 +2496,8 @@ impl Connection {
         &mut self, conn: &mut super::Connection<F>,
     ) -> Result<()> {
         let ty = grease_value();
-        match self.open_uni_stream(conn, ty) {
+        match self.open_uni_stream(conn, ty, b"GREASE is the word", true) {
             Ok(stream_id) => {
-                conn.stream_send(stream_id, b"GREASE is the word", true)?;
-
                 trace!("{} open GREASE stream {stream_id}", conn.trace_id());
 
                 qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
@@ -2518,7 +2513,11 @@ impl Connection {
                 });
             },
 
-            Err(Error::IdError) => {
+            Err(
+                Error::IdError |
+                Error::Done |
+                Error::TransportError(super::Error::StreamLimit),
+            ) => {
                 trace!("{} GREASE stream blocked", conn.trace_id(),);
 
                 return Ok(());
@@ -2534,20 +2533,70 @@ impl Connection {
     fn send_settings<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>,
     ) -> Result<()> {
-        let stream_id = match self
-            .open_uni_stream(conn, stream::HTTP3_CONTROL_STREAM_TYPE_ID)
-        {
-            Ok(v) => v,
+        let mut grease = if conn.grease {
+            let id = grease_value();
+            let collision = self
+                .local_settings
+                .additional_settings
+                .as_deref()
+                .is_some_and(|settings| {
+                    settings.iter().any(|&(key, _)| key == id)
+                });
+            (!collision).then(|| (id, grease_value()))
+        } else {
+            None
+        };
 
-            Err(e) => {
-                trace!("{} Control stream blocked", conn.trace_id(),);
+        let mut d = [0; frame::MAX_SETTINGS_PAYLOAD_SIZE + 3];
 
-                if e == Error::Done {
+        let (stream_id, off, settings_frame) = loop {
+            let settings_frame = frame::Frame::Settings {
+                max_field_section_size: self
+                    .local_settings
+                    .max_field_section_size,
+                qpack_max_table_capacity: self
+                    .local_settings
+                    .qpack_max_table_capacity,
+                qpack_blocked_streams: self.local_settings.qpack_blocked_streams,
+                connect_protocol_enabled: self
+                    .local_settings
+                    .connect_protocol_enabled,
+                h3_datagram: self.local_settings.h3_datagram,
+                grease,
+                additional_settings: self
+                    .local_settings
+                    .additional_settings
+                    .clone(),
+                raw: None,
+            };
+
+            let result = settings_frame
+                .to_bytes(&mut octets::OctetsMut::with_slice(&mut d))
+                .and_then(|off| {
+                    let id = self.open_uni_stream(
+                        conn,
+                        stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+                        &d[..off],
+                        false,
+                    )?;
+                    Ok((id, off))
+                });
+
+            match result {
+                Ok((id, off)) => break (id, off, settings_frame),
+
+                Err(Error::ExcessiveLoad | Error::Done) if grease.is_some() => {
+                    // GREASE is optional; never allow it to displace settings.
+                    grease = None;
+                },
+
+                Err(Error::Done | Error::BufferTooShort) => {
+                    trace!("{} Control stream blocked", conn.trace_id());
                     return Err(Error::InternalError);
-                }
+                },
 
-                return Err(e);
-            },
+                Err(e) => return Err(e),
+            }
         };
 
         self.control_stream_id = Some(stream_id);
@@ -2563,66 +2612,12 @@ impl Connection {
             q.add_event_data_now(ev_data).ok();
         });
 
-        let grease = if conn.grease {
-            let id = grease_value();
-            let collision = self
-                .local_settings
-                .additional_settings
-                .as_deref()
-                .is_some_and(|settings| {
-                    settings.iter().any(|&(key, _)| key == id)
-                });
-            (!collision).then(|| (id, grease_value()))
-        } else {
-            None
-        };
-
-        let make_frame = |grease| frame::Frame::Settings {
-            max_field_section_size: self.local_settings.max_field_section_size,
-            qpack_max_table_capacity: self
-                .local_settings
-                .qpack_max_table_capacity,
-            qpack_blocked_streams: self.local_settings.qpack_blocked_streams,
-            connect_protocol_enabled: self
-                .local_settings
-                .connect_protocol_enabled,
-            h3_datagram: self.local_settings.h3_datagram,
-            grease,
-            additional_settings: self.local_settings.additional_settings.clone(),
-            raw: None,
-        };
-
-        let mut frame = make_frame(grease);
-        let mut d = [0; frame::MAX_SETTINGS_PAYLOAD_SIZE + 3];
-        let capacity = conn.stream_capacity(stream_id)?.min(d.len());
-        let write = |frame: &frame::Frame, d: &mut [u8]| {
-            frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut d[..capacity]))
-        };
-        let result = match write(&frame, &mut d) {
-            Err(Error::ExcessiveLoad | Error::BufferTooShort)
-                if grease.is_some() =>
-            {
-                // GREASE is optional; never let it displace real settings.
-                frame = make_frame(None);
-                write(&frame, &mut d)
-            },
-            result => result,
-        };
-        let off = result.map_err(|error| match error {
-            Error::BufferTooShort => Error::InternalError,
-            error => error,
-        })?;
-
-        if conn.stream_send(stream_id, &d[..off], false)? != off {
-            return Err(Error::InternalError);
-        }
-
         trace!(
-            "{} tx frm SETTINGS stream={stream_id} len={off}",
+            "{} tx frm {settings_frame:?} stream={stream_id} len={off}",
             conn.trace_id()
         );
         qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
-            let frame = frame.to_qlog();
+            let frame = settings_frame.to_qlog();
             let ev_data = EventData::Http3FrameCreated(FrameCreated {
                 stream_id,
                 length: Some(off as u64),
@@ -3443,38 +3438,36 @@ pub mod testing {
         pub fn handshake(&mut self) -> Result<()> {
             self.pipe.handshake()?;
 
-            // Client streams.
-            self.client.send_settings(&mut self.pipe.client)?;
-            self.pipe.advance().ok();
+            // The two peers initialize their local streams in the same
+            // order. Advance the transport after each stream to preserve
+            // incremental flow-control and stream-count behavior.
+            for is_client in [true, false] {
+                if is_client {
+                    self.client.send_settings(&mut self.pipe.client)?;
+                } else {
+                    self.server.send_settings(&mut self.pipe.server)?;
+                }
+                self.pipe.advance().ok();
 
-            self.client
-                .open_qpack_encoder_stream(&mut self.pipe.client)?;
-            self.pipe.advance().ok();
+                for kind in
+                    [stream::Type::QpackEncoder, stream::Type::QpackDecoder]
+                {
+                    if is_client {
+                        self.client
+                            .open_qpack_stream(&mut self.pipe.client, kind)?;
+                    } else {
+                        self.server
+                            .open_qpack_stream(&mut self.pipe.server, kind)?;
+                    }
+                    self.pipe.advance().ok();
+                }
 
-            self.client
-                .open_qpack_decoder_stream(&mut self.pipe.client)?;
-            self.pipe.advance().ok();
-
-            if self.pipe.client.grease {
-                self.client.open_grease_stream(&mut self.pipe.client)?;
-            }
-
-            self.pipe.advance().ok();
-
-            // Server streams.
-            self.server.send_settings(&mut self.pipe.server)?;
-            self.pipe.advance().ok();
-
-            self.server
-                .open_qpack_encoder_stream(&mut self.pipe.server)?;
-            self.pipe.advance().ok();
-
-            self.server
-                .open_qpack_decoder_stream(&mut self.pipe.server)?;
-            self.pipe.advance().ok();
-
-            if self.pipe.server.grease {
-                self.server.open_grease_stream(&mut self.pipe.server)?;
+                if is_client && self.pipe.client.grease {
+                    self.client.open_grease_stream(&mut self.pipe.client)?;
+                } else if !is_client && self.pipe.server.grease {
+                    self.server.open_grease_stream(&mut self.pipe.server)?;
+                }
+                self.pipe.advance().ok();
             }
 
             self.advance().ok();
@@ -4945,6 +4938,8 @@ mod tests {
             .open_uni_stream(
                 &mut s.pipe.client,
                 stream::HTTP3_PUSH_STREAM_TYPE_ID,
+                &[],
+                false,
             )
             .unwrap();
 
@@ -4964,6 +4959,8 @@ mod tests {
             .open_uni_stream(
                 &mut s.pipe.server,
                 stream::HTTP3_PUSH_STREAM_TYPE_ID,
+                &[],
+                false,
             )
             .unwrap();
 
@@ -5708,6 +5705,43 @@ mod tests {
 
         let h3_srv = Connection::new(&config, true, false);
         assert_eq!(h3_srv.next_uni_stream_id, 3);
+    }
+
+    #[test]
+    fn uni_stream_preface_and_fin_are_atomic_at_every_varint_width() {
+        for ty in [33, 64, 1 << 14, 1 << 30] {
+            let prefix = octets::EncodedVarint::new(ty).unwrap();
+            let credit = prefix.as_ref().len() + 3;
+            let (mut config, h3_config) = Session::default_configs().unwrap();
+            config.grease(false);
+            config.set_initial_max_stream_data_uni(credit as u64);
+            let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+            s.pipe.handshake().unwrap();
+
+            let id = s.client.next_uni_stream_id;
+            assert_eq!(
+                s.client
+                    .open_uni_stream(&mut s.pipe.client, ty, b"four", true),
+                Err(Error::Done),
+            );
+            assert_eq!(s.client.next_uni_stream_id, id);
+            assert_eq!(s.pipe.client.stream_capacity(id), Ok(credit));
+
+            assert_eq!(
+                s.client
+                    .open_uni_stream(&mut s.pipe.client, ty, b"abc", true),
+                Ok(id),
+            );
+            assert_eq!(s.client.next_uni_stream_id, id + 4);
+            s.pipe.advance().unwrap();
+
+            let mut out = [0; 11];
+            let (len, fin) = s.pipe.server.stream_recv(id, &mut out).unwrap();
+            assert_eq!(len, credit);
+            assert!(fin);
+            assert_eq!(&out[..prefix.as_ref().len()], prefix.as_ref());
+            assert_eq!(&out[prefix.as_ref().len()..len], b"abc");
+        }
     }
 
     #[rstest::rstest]
@@ -7141,23 +7175,9 @@ mod tests {
     /// Tests that receiving a H3_DATAGRAM setting when no TP is set generates
     /// an error.
     fn dgram_setting_no_tp() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let (mut config, h3_config) = Session::default_configs().unwrap();
         config.set_initial_max_data(70);
-        config.set_initial_max_stream_data_bidi_local(150);
-        config.set_initial_max_stream_data_bidi_remote(150);
-        config.set_initial_max_stream_data_uni(150);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
-
-        let h3_config = Config::new();
+        config.enable_dgram(false, 0, 0);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7167,6 +7187,8 @@ mod tests {
                 .open_uni_stream(
                     &mut s.pipe.client,
                     stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+                    &[],
+                    false,
                 )
                 .unwrap(),
         );
@@ -7193,23 +7215,9 @@ mod tests {
     #[test]
     /// Tests that receiving SETTINGS with prohibited values generates an error.
     fn settings_h2_prohibited() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let (mut config, h3_config) = Session::default_configs().unwrap();
         config.set_initial_max_data(70);
-        config.set_initial_max_stream_data_bidi_local(150);
-        config.set_initial_max_stream_data_bidi_remote(150);
-        config.set_initial_max_stream_data_uni(150);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
-
-        let h3_config = Config::new();
+        config.enable_dgram(false, 0, 0);
 
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
         assert_eq!(s.pipe.handshake(), Ok(()));
@@ -7219,6 +7227,8 @@ mod tests {
                 .open_uni_stream(
                     &mut s.pipe.client,
                     stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+                    &[],
+                    false,
                 )
                 .unwrap(),
         );
@@ -7228,6 +7238,8 @@ mod tests {
                 .open_uni_stream(
                     &mut s.pipe.server,
                     stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+                    &[],
+                    false,
                 )
                 .unwrap(),
         );
@@ -7444,10 +7456,12 @@ mod tests {
                 .unwrap();
             let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
             s.pipe.handshake().unwrap();
+            let stream_id = s.client.next_uni_stream_id;
             let sent = s.client.send_settings(&mut s.pipe.client);
-            let stream_id = s.client.control_stream_id.unwrap();
             if credit == 260 {
                 assert_eq!(sent, Ok(()));
+                assert_eq!(s.client.control_stream_id, Some(stream_id));
+                assert_eq!(s.client.next_uni_stream_id, stream_id + 4);
                 s.pipe.advance().unwrap();
                 assert_eq!(s.poll_server(), Err(Error::Done));
                 assert_eq!(
@@ -7456,7 +7470,9 @@ mod tests {
                 );
             } else {
                 assert_eq!(sent, Err(Error::InternalError));
-                assert_eq!(s.pipe.client.stream_capacity(stream_id), Ok(258));
+                assert_eq!(s.client.control_stream_id, None);
+                assert_eq!(s.client.next_uni_stream_id, stream_id);
+                assert_eq!(s.pipe.client.stream_capacity(stream_id), Ok(259));
             }
         }
     }
