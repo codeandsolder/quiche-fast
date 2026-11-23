@@ -103,7 +103,7 @@ impl FlowControl {
     }
 
     /// Returns the next flow-control limit. Credit is monotonic and always
-    /// representable by the MAX_DATA and MAX_STREAM_DATA wire fields.
+    /// representable by the `MAX_DATA` and `MAX_STREAM_DATA` wire fields.
     pub fn max_data_next(&self) -> u64 {
         self.consumed
             .saturating_add(self.window)

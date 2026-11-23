@@ -271,7 +271,7 @@ impl Frame {
         Self::from_bytes_with_type(frame_type, b)
     }
 
-    /// Decode the payload after read_frame_type has validated the type.
+    /// Decode the payload after `read_frame_type` has validated the type.
     pub(crate) fn from_bytes_with_type(
         frame_type: u64, b: &mut octets::Octets,
     ) -> Result<Self> {

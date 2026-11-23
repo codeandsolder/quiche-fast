@@ -1602,7 +1602,7 @@ where
     /// Whether the connection handshake has been completed.
     handshake_completed: bool,
 
-    /// Server's reliable HANDSHAKE_DONE transmission state.
+    /// Server's reliable `HANDSHAKE_DONE` transmission state.
     handshake_done: HandshakeDoneState,
 
     /// Whether the connection handshake has been confirmed.
@@ -2052,7 +2052,7 @@ fn push_frame_to_pkt(
     Ok(true)
 }
 
-/// Encode pending PATH_RESPONSE frames while packet space permits. Return
+/// Encode pending `PATH_RESPONSE` frames while packet space permits. Return
 /// whether at least one response was emitted.
 fn push_received_path_responses(
     path: &mut path::Path, out: &mut impl frame::FrameSink,
@@ -2552,7 +2552,7 @@ impl<F: BufFactory> Connection<F> {
         self.qlog.streamer = Some(streamer);
     }
 
-    /// Returns a mutable reference to the QlogStreamer, if it exists.
+    /// Returns a mutable reference to the `QlogStreamer`, if it exists.
     #[cfg(feature = "qlog")]
     #[cfg_attr(docsrs, doc(cfg(feature = "qlog")))]
     pub fn qlog_streamer(&mut self) -> Option<&mut qlog::streamer::QlogStreamer> {
