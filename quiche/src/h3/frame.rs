@@ -137,8 +137,7 @@ impl Frame {
                 push_id: parse_single_varint(payload_length, &mut b)?,
             },
 
-            SETTINGS_FRAME_TYPE_ID =>
-                parse_settings_frame(&mut b, payload_length)?,
+            SETTINGS_FRAME_TYPE_ID => parse_settings_frame(&mut b)?,
 
             PUSH_PROMISE_FRAME_TYPE_ID =>
                 parse_push_promise(payload_length, &mut b)?,
@@ -199,87 +198,43 @@ impl Frame {
                 additional_settings,
                 ..
             } => {
-                let mut len = 0;
+                let pairs = [
+                    max_field_section_size
+                        .map(|v| (SETTINGS_MAX_FIELD_SECTION_SIZE, v)),
+                    qpack_max_table_capacity
+                        .map(|v| (SETTINGS_QPACK_MAX_TABLE_CAPACITY, v)),
+                    qpack_blocked_streams
+                        .map(|v| (SETTINGS_QPACK_BLOCKED_STREAMS, v)),
+                    connect_protocol_enabled
+                        .map(|v| (SETTINGS_ENABLE_CONNECT_PROTOCOL, v)),
+                    h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM_00, v)),
+                    h3_datagram.map(|v| (SETTINGS_H3_DATAGRAM, v)),
+                    *grease,
+                ]
+                .into_iter()
+                .flatten()
+                .chain(additional_settings.iter().flatten().copied());
 
-                if let Some(val) = max_field_section_size {
-                    len += octets::varint_len(SETTINGS_MAX_FIELD_SECTION_SIZE);
-                    len += octets::varint_len(*val);
-                }
-
-                if let Some(val) = qpack_max_table_capacity {
-                    len += octets::varint_len(SETTINGS_QPACK_MAX_TABLE_CAPACITY);
-                    len += octets::varint_len(*val);
-                }
-
-                if let Some(val) = qpack_blocked_streams {
-                    len += octets::varint_len(SETTINGS_QPACK_BLOCKED_STREAMS);
-                    len += octets::varint_len(*val);
-                }
-
-                if let Some(val) = connect_protocol_enabled {
-                    len += octets::varint_len(SETTINGS_ENABLE_CONNECT_PROTOCOL);
-                    len += octets::varint_len(*val);
-                }
-
-                if let Some(val) = h3_datagram {
-                    len += octets::varint_len(SETTINGS_H3_DATAGRAM_00);
-                    len += octets::varint_len(*val);
-                    len += octets::varint_len(SETTINGS_H3_DATAGRAM);
-                    len += octets::varint_len(*val);
-                }
-
-                if let Some(val) = grease {
-                    len += octets::varint_len(val.0);
-                    len += octets::varint_len(val.1);
-                }
-
-                if let Some(vals) = additional_settings {
-                    for val in vals {
-                        len += octets::varint_len(val.0);
-                        len += octets::varint_len(val.1);
-                    }
-                }
+                let len =
+                    pairs.clone().try_fold(0_usize, |len, (id, value)| {
+                        if id > octets::MAX_VAR_INT || value > octets::MAX_VAR_INT
+                        {
+                            return Err(super::Error::SettingsError);
+                        }
+                        let len = len +
+                            octets::varint_len(id) +
+                            octets::varint_len(value);
+                        if len > MAX_SETTINGS_PAYLOAD_SIZE {
+                            return Err(super::Error::ExcessiveLoad);
+                        }
+                        Ok(len)
+                    })?;
 
                 b.put_varint(SETTINGS_FRAME_TYPE_ID)?;
                 b.put_varint(len as u64)?;
-
-                if let Some(val) = max_field_section_size {
-                    b.put_varint(SETTINGS_MAX_FIELD_SECTION_SIZE)?;
-                    b.put_varint(*val)?;
-                }
-
-                if let Some(val) = qpack_max_table_capacity {
-                    b.put_varint(SETTINGS_QPACK_MAX_TABLE_CAPACITY)?;
-                    b.put_varint(*val)?;
-                }
-
-                if let Some(val) = qpack_blocked_streams {
-                    b.put_varint(SETTINGS_QPACK_BLOCKED_STREAMS)?;
-                    b.put_varint(*val)?;
-                }
-
-                if let Some(val) = connect_protocol_enabled {
-                    b.put_varint(SETTINGS_ENABLE_CONNECT_PROTOCOL)?;
-                    b.put_varint(*val)?;
-                }
-
-                if let Some(val) = h3_datagram {
-                    b.put_varint(SETTINGS_H3_DATAGRAM_00)?;
-                    b.put_varint(*val)?;
-                    b.put_varint(SETTINGS_H3_DATAGRAM)?;
-                    b.put_varint(*val)?;
-                }
-
-                if let Some(val) = grease {
-                    b.put_varint(val.0)?;
-                    b.put_varint(val.1)?;
-                }
-
-                if let Some(vals) = additional_settings {
-                    for val in vals {
-                        b.put_varint(val.0)?;
-                        b.put_varint(val.1)?;
-                    }
+                for (id, value) in pairs {
+                    b.put_varint(id)?;
+                    b.put_varint(value)?;
                 }
             },
 
@@ -576,28 +531,26 @@ impl std::fmt::Debug for Frame {
     }
 }
 
-fn parse_settings_frame(
-    b: &mut octets::Octets, settings_length: usize,
-) -> Result<Frame> {
+fn parse_settings_frame(b: &mut octets::Octets) -> Result<Frame> {
     let mut max_field_section_size = None;
     let mut qpack_max_table_capacity = None;
     let mut qpack_blocked_streams = None;
     let mut connect_protocol_enabled = None;
     let mut h3_datagram = None;
+    let mut draft_h3_datagram = None;
     let mut raw = Vec::new();
     let mut additional_settings: Option<Vec<(u64, u64)>> = None;
 
-    // Reject SETTINGS frames that are too long.
-    if settings_length > MAX_SETTINGS_PAYLOAD_SIZE {
-        return Err(super::Error::ExcessiveLoad);
-    }
-
-    while b.off() < settings_length {
+    // The caller has already checked and bounded the payload.
+    while b.cap() > 0 {
         let identifier = b.get_varint()?;
         let value = b.get_varint()?;
 
         // MAX_SETTINGS_PAYLOAD_SIZE protects us from storing too many raw
         // settings.
+        if raw.iter().any(|&(id, _)| id == identifier) {
+            return Err(super::Error::SettingsError);
+        }
         raw.push((identifier, value));
 
         match identifier {
@@ -626,7 +579,11 @@ fn parse_settings_frame(
                     return Err(super::Error::SettingsError);
                 }
 
-                h3_datagram = Some(value);
+                if identifier == SETTINGS_H3_DATAGRAM {
+                    h3_datagram = Some(value);
+                } else {
+                    draft_h3_datagram = Some(value);
+                }
             },
 
             // Reserved values overlap with HTTP/2 and MUST be rejected
@@ -636,7 +593,7 @@ fn parse_settings_frame(
             // Unknown Settings parameters go into additional_settings.
             _ => {
                 let s: &mut Vec<(u64, u64)> =
-                    additional_settings.get_or_insert(vec![]);
+                    additional_settings.get_or_insert_with(Vec::new);
                 s.push((identifier, value));
             },
         }
@@ -647,7 +604,7 @@ fn parse_settings_frame(
         qpack_max_table_capacity,
         qpack_blocked_streams,
         connect_protocol_enabled,
-        h3_datagram,
+        h3_datagram: h3_datagram.or(draft_h3_datagram),
         grease: None,
         raw: Some(raw),
         additional_settings,
@@ -800,6 +757,60 @@ mod tests {
             .unwrap(),
             frame
         );
+    }
+
+    #[test]
+    fn settings_reject_duplicate_wire_identifiers() {
+        for id in [
+            SETTINGS_MAX_FIELD_SECTION_SIZE,
+            SETTINGS_QPACK_MAX_TABLE_CAPACITY,
+            SETTINGS_QPACK_BLOCKED_STREAMS,
+            SETTINGS_ENABLE_CONNECT_PROTOCOL,
+            SETTINGS_H3_DATAGRAM,
+            SETTINGS_H3_DATAGRAM_00,
+            9,
+            octets::MAX_VAR_INT,
+        ] {
+            let mut bytes = [0; 32];
+            let mut out = octets::OctetsMut::with_slice(&mut bytes);
+            out.put_varint(id).unwrap();
+            out.put_varint(0).unwrap();
+            out.put_varint_with_len(id, 8).unwrap();
+            out.put_varint(1).unwrap();
+            let len = out.off();
+            assert_eq!(
+                Frame::from_bytes(
+                    SETTINGS_FRAME_TYPE_ID,
+                    len as u64,
+                    &bytes[..len]
+                ),
+                Err(crate::h3::Error::SettingsError),
+                "duplicate {id}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_datagram_setting_takes_precedence_in_either_order() {
+        for bytes in [[0x42, 0x76, 1, 0x33, 0], [0x33, 0, 0x42, 0x76, 1]] {
+            let parsed = Frame::from_bytes(
+                SETTINGS_FRAME_TYPE_ID,
+                bytes.len() as u64,
+                &bytes,
+            )
+            .unwrap();
+            assert!(matches!(parsed, Frame::Settings {
+                h3_datagram: Some(0),
+                ..
+            }));
+        }
+        let parsed =
+            Frame::from_bytes(SETTINGS_FRAME_TYPE_ID, 3, &[0x42, 0x76, 1])
+                .unwrap();
+        assert!(matches!(parsed, Frame::Settings {
+            h3_datagram: Some(1),
+            ..
+        }));
     }
 
     #[test]

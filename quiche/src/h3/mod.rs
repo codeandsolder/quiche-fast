@@ -673,28 +673,31 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// Returns `Error::SettingsError` if an identifier is duplicated or
-    /// already managed by the library, including either DATAGRAM setting.
+    /// Returns `Error::SettingsError` if an identifier is duplicated,
+    /// reserved by HTTP/2, or managed by this library (including either
+    /// DATAGRAM setting), or if an identifier or value exceeds the QUIC
+    /// variable-length integer range.
     ///
     /// [`Error::SettingsError`]: enum.Error.html#variant.SettingsError
     pub fn set_additional_settings(
         &mut self, additional_settings: Vec<(u64, u64)>,
     ) -> Result<()> {
-        let explicit_quiche_settings = HashSet::from([
-            frame::SETTINGS_QPACK_MAX_TABLE_CAPACITY,
-            frame::SETTINGS_MAX_FIELD_SECTION_SIZE,
-            frame::SETTINGS_QPACK_BLOCKED_STREAMS,
-            frame::SETTINGS_ENABLE_CONNECT_PROTOCOL,
-            frame::SETTINGS_H3_DATAGRAM,
-            frame::SETTINGS_H3_DATAGRAM_00,
-        ]);
-
-        let dedup_settings: HashSet<u64> =
-            additional_settings.iter().map(|(key, _)| *key).collect();
-
-        if dedup_settings.len() != additional_settings.len() ||
-            !explicit_quiche_settings.is_disjoint(&dedup_settings)
-        {
+        let mut identifiers = HashSet::new();
+        if additional_settings.iter().any(|&(id, value)| {
+            id > octets::MAX_VAR_INT ||
+                value > octets::MAX_VAR_INT ||
+                matches!(
+                    id,
+                    0x0 | 0x2..=
+                        0x5 | frame::SETTINGS_MAX_FIELD_SECTION_SIZE |
+                            frame::SETTINGS_QPACK_MAX_TABLE_CAPACITY |
+                            frame::SETTINGS_QPACK_BLOCKED_STREAMS |
+                            frame::SETTINGS_ENABLE_CONNECT_PROTOCOL |
+                            frame::SETTINGS_H3_DATAGRAM |
+                            frame::SETTINGS_H3_DATAGRAM_00
+                ) ||
+                !identifiers.insert(id)
+        }) {
             return Err(Error::SettingsError);
         }
         self.additional_settings = Some(additional_settings);
@@ -2561,12 +2564,20 @@ impl Connection {
         });
 
         let grease = if conn.grease {
-            Some((grease_value(), grease_value()))
+            let id = grease_value();
+            let collision = self
+                .local_settings
+                .additional_settings
+                .as_deref()
+                .is_some_and(|settings| {
+                    settings.iter().any(|&(key, _)| key == id)
+                });
+            (!collision).then(|| (id, grease_value()))
         } else {
             None
         };
 
-        let frame = frame::Frame::Settings {
+        let make_frame = |grease| frame::Frame::Settings {
             max_field_section_size: self.local_settings.max_field_section_size,
             qpack_max_table_capacity: self
                 .local_settings
@@ -2581,30 +2592,46 @@ impl Connection {
             raw: None,
         };
 
-        let mut d = [42; 128];
-        let mut b = octets::OctetsMut::with_slice(&mut d);
+        let mut frame = make_frame(grease);
+        let mut d = [0; frame::MAX_SETTINGS_PAYLOAD_SIZE + 3];
+        let capacity = conn.stream_capacity(stream_id)?.min(d.len());
+        let write = |frame: &frame::Frame, d: &mut [u8]| {
+            frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut d[..capacity]))
+        };
+        let result = match write(&frame, &mut d) {
+            Err(Error::ExcessiveLoad | Error::BufferTooShort)
+                if grease.is_some() =>
+            {
+                // GREASE is optional; never let it displace real settings.
+                frame = make_frame(None);
+                write(&frame, &mut d)
+            },
+            result => result,
+        };
+        let off = result.map_err(|error| match error {
+            Error::BufferTooShort => Error::InternalError,
+            error => error,
+        })?;
 
-        frame.to_bytes(&mut b)?;
-
-        let off = b.off();
-
-        if let Some(id) = self.control_stream_id {
-            conn.stream_send(id, &d[..off], false)?;
-
-            trace!("{} tx frm SETTINGS stream={id} len={off}", conn.trace_id());
-
-            qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
-                let frame = frame.to_qlog();
-                let ev_data = EventData::Http3FrameCreated(FrameCreated {
-                    stream_id: id,
-                    length: Some(off as u64),
-                    frame,
-                    ..Default::default()
-                });
-
-                q.add_event_data_now(ev_data).ok();
-            });
+        if conn.stream_send(stream_id, &d[..off], false)? != off {
+            return Err(Error::InternalError);
         }
+
+        trace!(
+            "{} tx frm SETTINGS stream={stream_id} len={off}",
+            conn.trace_id()
+        );
+        qlog_with_type!(QLOG_FRAME_CREATED, conn.qlog, q, {
+            let frame = frame.to_qlog();
+            let ev_data = EventData::Http3FrameCreated(FrameCreated {
+                stream_id,
+                length: Some(off as u64),
+                frame,
+                ..Default::default()
+            });
+
+            q.add_event_data_now(ev_data).ok();
+        });
 
         Ok(())
     }
@@ -7392,6 +7419,67 @@ mod tests {
                 .into_bytes(),
             })
         );
+    }
+
+    #[test]
+    fn settings_send_full_budget_or_fail_without_partial_frame() {
+        let mut additional: Vec<_> =
+            (0..15).map(|n| ((1_u64 << 30) + n, 1_u64 << 30)).collect();
+        additional.extend([((1_u64 << 30) + 15, 1 << 14), (9, 0)]);
+        let mut expected = vec![(frame::SETTINGS_MAX_FIELD_SECTION_SIZE, 0)];
+        expected.extend_from_slice(&additional);
+
+        // 256 bytes of payload, a 3-byte frame header and the 1-byte
+        // control stream type. GREASE must not consume required credit.
+        for (grease, credit) in
+            [(false, 260), (true, 260), (false, 259), (true, 259)]
+        {
+            let (mut config, mut h3_config) = Session::default_configs().unwrap();
+            config.enable_dgram(false, 0, 0);
+            config.grease(grease);
+            config.set_initial_max_stream_data_uni(credit);
+            h3_config.set_max_field_section_size(0);
+            h3_config
+                .set_additional_settings(additional.clone())
+                .unwrap();
+            let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+            s.pipe.handshake().unwrap();
+            let sent = s.client.send_settings(&mut s.pipe.client);
+            let stream_id = s.client.control_stream_id.unwrap();
+            if credit == 260 {
+                assert_eq!(sent, Ok(()));
+                s.pipe.advance().unwrap();
+                assert_eq!(s.poll_server(), Err(Error::Done));
+                assert_eq!(
+                    s.server.peer_settings_raw(),
+                    Some(expected.as_slice())
+                );
+            } else {
+                assert_eq!(sent, Err(Error::InternalError));
+                assert_eq!(s.pipe.client.stream_capacity(stream_id), Ok(258));
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_additional_settings_do_not_replace_configuration() {
+        let mut config = Config::new();
+        let original = vec![(9, 42)];
+        config.set_additional_settings(original.clone()).unwrap();
+        for invalid in [
+            vec![(0, 1)],
+            vec![(5, 1)],
+            vec![(9, 0), (9, 1)],
+            vec![(octets::MAX_VAR_INT + 1, 0)],
+            vec![(9, octets::MAX_VAR_INT + 1)],
+            vec![(frame::SETTINGS_H3_DATAGRAM_00, 1)],
+        ] {
+            assert_eq!(
+                config.set_additional_settings(invalid),
+                Err(Error::SettingsError)
+            );
+            assert_eq!(config.additional_settings.as_ref(), Some(&original));
+        }
     }
 
     #[test]
