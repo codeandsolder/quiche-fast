@@ -799,7 +799,7 @@ impl<H: DriverHooks> H3Driver<H> {
 
         match &mut ctx.queued_frame {
             Some(OutboundFrame::Headers(headers, priority)) => {
-                let prio = priority.as_ref().unwrap_or(&DEFAULT_PRIO);
+                let prio = priority.unwrap_or(DEFAULT_PRIO);
 
                 let res = if ctx.initial_headers_sent {
                     // Initial headers were already sent, send additional
@@ -872,7 +872,7 @@ impl<H: DriverHooks> H3Driver<H> {
             },
 
             Some(OutboundFrame::Trailers(headers, priority)) => {
-                let prio = priority.as_ref().unwrap_or(&DEFAULT_PRIO);
+                let prio = priority.unwrap_or(DEFAULT_PRIO);
 
                 // trailers always set fin=true
                 let res = conn.send_additional_headers_with_priority(
