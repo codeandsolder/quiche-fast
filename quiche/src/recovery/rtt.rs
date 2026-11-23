@@ -165,9 +165,10 @@ fn weighted_part<const NUM: u32, const DEN: u32>(duration: Duration) -> Duration
     }
 
     let quotient = duration / DEN;
-    // Duration remainder is < DEN nanoseconds, so the numerator product
-    // fits even when both const parameters are as large as u32::MAX.
-    let remainder = duration % DEN;
+    // Division rounds down, so quotient * DEN <= duration and the
+    // saturating subtraction is exact. The remainder is < DEN nanoseconds,
+    // hence its product with NUM fits for the full u32 const range.
+    let remainder = duration.saturating_sub(quotient * DEN);
     quotient * NUM + remainder * NUM / DEN
 }
 
