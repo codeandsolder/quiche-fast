@@ -658,7 +658,7 @@ impl ConnectionIdentifiers {
     /// The initial DCID can be learned before TLS delivers its transport
     /// parameters, including the initial reset token. Use that token only as
     /// the fallback for DCID sequence zero, and stop accepting it once that
-    /// initial ID is retired. Other IDs carry their own NEW_CONNECTION_ID
+    /// initial ID is retired. Other IDs carry their own `NEW_CONNECTION_ID`
     /// tokens. Evaluate every candidate even after a match, so matching does
     /// not depend on where the matching token occurs in the live CID set.
     pub fn matches_reset_token(

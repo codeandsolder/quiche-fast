@@ -70,7 +70,7 @@ impl ProbeBW<'_> {
         }
     }
 
-    /// Returns true when the cycle enters PROBE_RTT.
+    /// Returns true when the cycle enters `PROBE_RTT`.
     pub(super) fn on_congestion_event(
         &mut self, congestion_event: &BBRv2CongestionEvent,
         target_bytes_inflight: usize, params: &Params,

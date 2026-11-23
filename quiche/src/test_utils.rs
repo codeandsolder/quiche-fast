@@ -52,7 +52,7 @@ use crate::recovery::Sent;
 
 /// Curve preference list that excludes post-quantum groups.
 ///
-/// Several tests were written against a pre-PQ world where the ClientHello
+/// Several tests were written against a pre-PQ world where the `ClientHello`
 /// fit in a single Initial packet; those tests opt out of PQ to keep that
 /// invariant. See [`config_no_pq`] and
 /// [`Config::set_curves_list`](crate::Config::set_curves_list).
@@ -63,8 +63,8 @@ const NO_PQ_CURVES: &str = "X25519:P-256:P-384";
 ///
 /// Use this as a drop-in replacement for `Config::new(version)` in tests
 /// whose expected packet counts/sizes were calibrated against a
-/// single-Initial ClientHello. A post-quantum keyshare pushes the
-/// ClientHello across two Initial packets, which perturbs those
+/// single-Initial `ClientHello`. A post-quantum keyshare pushes the
+/// `ClientHello` across two Initial packets, which perturbs those
 /// expectations.
 pub fn config_no_pq(version: u32) -> Result<Config> {
     let mut config = Config::new(version)?;

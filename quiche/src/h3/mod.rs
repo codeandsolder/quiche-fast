@@ -3453,7 +3453,7 @@ pub mod testing {
     impl<F: BufFactory> Session<F> {
         /// Serialize a test frame without placing a maximum-size HTTP/3
         /// frame buffer on every caller's stack. Keep the existing fixture
-        /// limit, so oversized frames still fail with BufferTooShort.
+        /// limit, so oversized frames still fail with `BufferTooShort`.
         fn encode_test_frame(frame: &frame::Frame) -> Result<Vec<u8>> {
             let mut data = vec![0; 65_535];
             let mut writer = octets::OctetsMut::with_slice(&mut data);

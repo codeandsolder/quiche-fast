@@ -145,7 +145,7 @@ struct Params {
     loss_threshold: f32,
 
     /// A common factor for multiplicative decreases. Used for adjusting
-    /// `bandwidth_lo``, ``inflight_lo``` and `inflight_hi` upon losses.
+    /// `bandwidth_lo`, `inflight_lo` and `inflight_hi` upon losses.
     beta: f32,
 
     // Experimental flags.
