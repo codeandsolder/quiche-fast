@@ -71,7 +71,7 @@ const RETRY_AEAD_ALG: crypto::Algorithm = crypto::Algorithm::AES128_GCM;
 /// Sequential packet output with an initialized-prefix invariant.
 /// Only the committed prefix can be read or patched. The unused capacity
 /// may be uninitialized, as is common for caller-owned C buffers.
-pub(crate) struct PacketWriter<'a> {
+pub struct PacketWriter<'a> {
     storage: &'a mut [MaybeUninit<u8>],
     off: usize,
 }
@@ -81,7 +81,7 @@ impl<'a> PacketWriter<'a> {
         Self { storage, off: 0 }
     }
 
-    pub(crate) fn from_initialized(storage: &'a mut [u8]) -> Self {
+    pub(crate) const fn from_initialized(storage: &'a mut [u8]) -> Self {
         // SAFETY: MaybeUninit<u8> has the same layout as u8. The writer and
         // its safe operations never deinitialize storage; the exclusive
         // borrow prevents access to the original slice until it is dropped.
@@ -111,7 +111,7 @@ impl<'a> PacketWriter<'a> {
         Ok(())
     }
 
-    pub(crate) fn written_mut(&mut self) -> &mut [u8] {
+    pub(crate) const fn written_mut(&mut self) -> &mut [u8] {
         // SAFETY: every advance is either preceded by an initialized write
         // or covered by the caller's unsafe BufMut::advance_mut contract.
         unsafe {
@@ -283,18 +283,16 @@ impl Type {
         match self {
             Self::Initial => Ok(Epoch::Initial),
 
-            Self::ZeroRTT => Ok(Epoch::Application),
+            Self::ZeroRTT | Self::Short => Ok(Epoch::Application),
 
             Self::Handshake => Ok(Epoch::Handshake),
-
-            Self::Short => Ok(Epoch::Application),
 
             _ => Err(Error::InvalidPacket),
         }
     }
 
     #[cfg(feature = "qlog")]
-    pub(crate) fn to_qlog(self) -> qlog::events::quic::PacketType {
+    pub(crate) const fn to_qlog(self) -> qlog::events::quic::PacketType {
         match self {
             Self::Initial => qlog::events::quic::PacketType::Initial,
 
@@ -799,9 +797,9 @@ pub fn pkt_num_len(pn: u64, largest_acked: Option<u64>) -> Result<usize> {
             .checked_sub(acked)
             .filter(|&d| d != 0)
             .ok_or(Error::InvalidState)?;
-        u64::BITS - distance.leading_zeros() + 1
+        distance.bit_width() + 1
     } else {
-        u64::BITS - pn.leading_zeros()
+        pn.bit_width()
     };
     let len = usize::try_from(bits.div_ceil(8))
         .map_err(|_| Error::InvalidPacket)?
@@ -890,18 +888,18 @@ pub fn decode_pkt_num(
     }
 
     let expected_pn = largest_pn + 1;
-    let pn_hwin = pn_win / 2;
+    let half_window = pn_win / 2;
     let pn_mask = pn_win - 1;
     let candidate = (expected_pn & !pn_mask) | truncated_pn;
 
     // At the upper boundary, the next mathematical window may lie beyond
     // the wire domain. The preceding window is then the only valid one.
     if candidate > octets::MAX_VAR_INT ||
-        (candidate > expected_pn + pn_hwin && candidate >= pn_win)
+        (candidate > expected_pn + half_window && candidate >= pn_win)
     {
         return Ok(candidate - pn_win);
     }
-    if candidate + pn_hwin <= expected_pn &&
+    if candidate + half_window <= expected_pn &&
         candidate <= octets::MAX_VAR_INT - pn_win
     {
         return Ok(candidate + pn_win);
