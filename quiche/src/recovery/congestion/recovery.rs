@@ -49,6 +49,7 @@ use crate::Result;
 use crate::recovery::QlogMetrics;
 
 use crate::frame;
+use crate::recovery::pending_lost_frames::PendingLostFrames;
 
 #[cfg(feature = "qlog")]
 use qlog::events::EventData;
@@ -99,8 +100,7 @@ struct RecoveryEpoch {
     // Frames scheduled for retransmission due to PTO are tracked
     // separately so we can check that frames were drained before
     // generating more PTO probes.
-    lost_frames_ack: Vec<frame::Frame>,
-    lost_frames_pto: Vec<frame::Frame>,
+    pending_lost_frames: PendingLostFrames<Vec<frame::Frame>>,
 
     /// The largest packet number sent in the packet number space so far.
     #[cfg(test)]
@@ -279,7 +279,7 @@ impl RecoveryEpoch {
             if lost_send_time.is_some_and(|time| unacked.time_sent <= time) ||
                 packet_distance >= pkt_thresh
             {
-                self.lost_frames_ack.extend(unacked.frames.drain(..));
+                self.pending_lost_frames.queue_ack(unacked.frames.drain(..));
 
                 unacked.time_lost = Some(now);
 
@@ -358,31 +358,6 @@ impl RecoveryEpoch {
 
             self.sent_packets.pop_front();
         }
-    }
-
-    /// Returns the next lost frame, trying ACK-based lost frames first,
-    /// then PTO-based lost frames.
-    fn next_lost_frame(&mut self) -> Option<frame::Frame> {
-        self.lost_frames_ack
-            .pop()
-            .or_else(|| self.lost_frames_pto.pop())
-    }
-
-    /// Returns true if there are any lost frames (ACK or PTO).
-    const fn has_lost_frames(&self) -> bool {
-        !self.lost_frames_ack.is_empty() || !self.lost_frames_pto.is_empty()
-    }
-
-    /// Returns the total count of lost frames (ACK + PTO).
-    #[cfg(test)]
-    fn lost_frames_count(&self) -> usize {
-        self.lost_frames_ack.len() + self.lost_frames_pto.len()
-    }
-
-    /// Clears all lost frames (both ACK and PTO).
-    fn clear_lost_frames(&mut self) {
-        self.lost_frames_ack.clear();
-        self.lost_frames_pto.clear();
     }
 }
 
@@ -611,7 +586,7 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn next_lost_frame(&mut self, epoch: Epoch) -> Option<frame::Frame> {
-        self.epochs[epoch].next_lost_frame()
+        self.epochs[epoch].pending_lost_frames.next_lost_frame()
     }
 
     #[cfg(test)]
@@ -620,7 +595,7 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn has_lost_frames(&self, epoch: Epoch) -> bool {
-        self.epochs[epoch].has_lost_frames()
+        self.epochs[epoch].pending_lost_frames.has_pending()
     }
 
     fn loss_probes(&self, epoch: Epoch) -> usize {
@@ -634,7 +609,7 @@ impl RecoveryOps for LegacyRecovery {
 
     #[cfg(test)]
     fn lost_frames_count(&self, epoch: Epoch) -> usize {
-        self.epochs[epoch].lost_frames_count()
+        self.epochs[epoch].pending_lost_frames.count()
     }
 
     fn ping_sent(&mut self, epoch: Epoch) {
@@ -835,7 +810,8 @@ impl RecoveryOps for LegacyRecovery {
 
         epoch.loss_probes = probe_count;
 
-        let sent_packets_iter_limit = if epoch.lost_frames_pto.is_empty() {
+        let sent_packets_iter_limit = if epoch.pending_lost_frames.pto_is_empty()
+        {
             usize::MAX
         } else {
             // Skip the search for frames to add to PTO probes if frames
@@ -864,7 +840,9 @@ impl RecoveryOps for LegacyRecovery {
         // HANDSHAKE_DONE and MAX_DATA / MAX_STREAM_DATA as well, in addition
         // to CRYPTO and STREAM, if the original packet carried them.
         for unacked in unacked_iter {
-            epoch.lost_frames_pto.extend_from_slice(&unacked.frames);
+            epoch
+                .pending_lost_frames
+                .queue_pto(unacked.frames.iter().cloned());
         }
 
         self.set_loss_detection_timer(handshake_status, now);
@@ -893,7 +871,7 @@ impl RecoveryOps for LegacyRecovery {
         self.bytes_in_flight.saturating_subtract(unacked_bytes, now);
 
         epoch.sent_packets.clear();
-        epoch.clear_lost_frames();
+        epoch.pending_lost_frames.clear();
         epoch.acked_frames.clear();
 
         epoch.timing = EpochTiming::default();
@@ -1018,7 +996,7 @@ impl RecoveryOps for LegacyRecovery {
                     pkt.time_lost.is_none() &&
                     pkt.ack_eliciting
             }) || !epoch.acked_frames.is_empty() ||
-                epoch.has_lost_frames() ||
+                epoch.pending_lost_frames.has_pending() ||
                 epoch.loss_probes != 0
         })
     }

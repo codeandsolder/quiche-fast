@@ -3795,4 +3795,5 @@ mod bandwidth;
 mod bytes_in_flight;
 mod congestion;
 mod gcongestion;
+mod pending_lost_frames;
 mod rtt;
