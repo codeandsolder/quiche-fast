@@ -202,7 +202,14 @@ impl From<quiche::Error> for H3ConnectionError {
     }
 }
 
-impl Error for H3ConnectionError {}
+impl Error for H3ConnectionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::H3(err) => Some(err),
+            _ => None,
+        }
+    }
+}
 
 impl fmt::Display for H3ConnectionError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

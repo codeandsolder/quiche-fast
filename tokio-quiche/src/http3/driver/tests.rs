@@ -8,6 +8,33 @@ use crate::http3::driver::server::ServerHooks;
 use super::test_utils::*;
 use super::*;
 
+#[test]
+fn wrapped_http3_and_quic_errors_expose_their_sources() {
+    use std::error::Error as _;
+
+    let transport = quiche::Error::StreamLimit;
+    let wrapped = H3ConnectionError::from(transport);
+    let h3_source = wrapped.source().expect("HTTP/3 error source");
+    let h3_error = h3_source
+        .downcast_ref::<h3::Error>()
+        .expect("wrapped HTTP/3 error");
+    assert_eq!(h3_error, &h3::Error::TransportError(transport));
+    assert_eq!(
+        h3_error
+            .source()
+            .expect("QUIC error source")
+            .downcast_ref::<quiche::Error>(),
+        Some(&transport)
+    );
+    for standalone in [
+        H3ConnectionError::ControllerWentAway,
+        H3ConnectionError::NonexistentStream,
+        H3ConnectionError::PostAcceptTimeout,
+    ] {
+        assert!(standalone.source().is_none());
+    }
+}
+
 /// Tests for the body receive buffer sizing helper.
 mod body_recv_buf_size {
     use super::*;
