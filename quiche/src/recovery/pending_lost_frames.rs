@@ -46,16 +46,16 @@ impl LostFrameQueue for Vec<Frame> {
     }
 
     fn is_empty(&self) -> bool {
-        self.as_slice().is_empty()
+        self.is_empty()
     }
 
     fn clear(&mut self) {
-        Vec::clear(self);
+        self.clear();
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        self.as_slice().len()
+        self.len()
     }
 }
 
@@ -65,16 +65,16 @@ impl LostFrameQueue for VecDeque<Frame> {
     }
 
     fn is_empty(&self) -> bool {
-        VecDeque::is_empty(self)
+        self.is_empty()
     }
 
     fn clear(&mut self) {
-        VecDeque::clear(self);
+        self.clear();
     }
 
     #[cfg(test)]
     fn len(&self) -> usize {
-        VecDeque::len(self)
+        self.len()
     }
 }
 
