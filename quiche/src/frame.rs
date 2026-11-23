@@ -94,9 +94,9 @@ impl FrameSink for FrameSizer {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EcnCounts {
-    ect0_count: u64,
-    ect1_count: u64,
-    ecn_ce_count: u64,
+    ect0: u64,
+    ect1: u64,
+    ce: u64,
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -476,9 +476,9 @@ impl Frame {
                 }
 
                 if let Some(ecn) = ecn_counts {
-                    b.put_varint(ecn.ect0_count)?;
-                    b.put_varint(ecn.ect1_count)?;
-                    b.put_varint(ecn.ecn_ce_count)?;
+                    b.put_varint(ecn.ect0)?;
+                    b.put_varint(ecn.ect1)?;
+                    b.put_varint(ecn.ce)?;
                 }
             },
 
@@ -710,15 +710,10 @@ impl Frame {
                     .map(|r| AckRange::new(r.start, r.end - 1))
                     .collect();
 
-                let (ect0, ect1, ce) = match ecn_counts {
-                    Some(ecn) => (
-                        Some(ecn.ect0_count),
-                        Some(ecn.ect1_count),
-                        Some(ecn.ecn_ce_count),
-                    ),
-
-                    None => (None, None, None),
-                };
+                let (ect0, ect1, ce) =
+                    ecn_counts.as_ref().map_or((None, None, None), |ecn| {
+                        (Some(ecn.ect0), Some(ecn.ect1), Some(ecn.ce))
+                    });
 
                 QuicFrame::Ack {
                     // The ACK frame stores wire units; qlog uses milliseconds.
@@ -1159,9 +1154,9 @@ fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
 
     let ecn_counts = if ty & 0x01 != 0 {
         let ecn = EcnCounts {
-            ect0_count: b.get_varint()?,
-            ect1_count: b.get_varint()?,
-            ecn_ce_count: b.get_varint()?,
+            ect0: b.get_varint()?,
+            ect1: b.get_varint()?,
+            ce: b.get_varint()?,
         };
 
         Some(ecn)
@@ -1328,6 +1323,40 @@ mod tests {
                 assert!(decoded.is_err(), "{ty:?}");
             }
         }
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_ack_preserves_all_ecn_counters() {
+        let mut ranges = ranges::RangeSet::default();
+        ranges.insert(12..15);
+        let frame = Frame::ACK {
+            ack_delay: 0,
+            ranges,
+            ecn_counts: Some(EcnCounts {
+                ect0: 37,
+                ect1: 42,
+                ce: 9,
+            }),
+        };
+        assert!(matches!(frame.to_qlog(3), QuicFrame::Ack {
+            ect0: Some(37),
+            ect1: Some(42),
+            ce: Some(9),
+            ..
+        }));
+
+        let frame = Frame::ACK {
+            ack_delay: 0,
+            ranges: ranges::RangeSet::default(),
+            ecn_counts: None,
+        };
+        assert!(matches!(frame.to_qlog(3), QuicFrame::Ack {
+            ect0: None,
+            ect1: None,
+            ce: None,
+            ..
+        }));
     }
 
     #[cfg(feature = "qlog")]
@@ -1622,9 +1651,9 @@ mod tests {
         ranges.insert(3000..5000);
 
         let ecn_counts = Some(EcnCounts {
-            ect0_count: 100,
-            ect1_count: 200,
-            ecn_ce_count: 300,
+            ect0: 100,
+            ect1: 200,
+            ce: 300,
         });
 
         let frame = Frame::ACK {
