@@ -5254,6 +5254,52 @@ mod tests {
     }
 
     #[test]
+    fn priority_update_with_fragmented_frame_header_and_payload() {
+        let mut s = Session::new().unwrap();
+        s.handshake().unwrap();
+
+        // Force a four-byte frame type and a two-byte payload length.
+        // Deliver each wire byte separately to exercise every resume point,
+        // including the boundary between the two varints.
+        let field = format!("u=3, x=\"{}\"", "a".repeat(65)).into_bytes();
+        let frame = frame::Frame::PriorityUpdateRequest {
+            prioritized_element_id: 0,
+            priority_field_value: field.clone(),
+        };
+        let mut wire = [0; 128];
+        let written = frame
+            .to_bytes(&mut octets::OctetsMut::with_slice(&mut wire))
+            .unwrap();
+        let (last, prefix) = wire[..written].split_last().unwrap();
+        let control = s.client.control_stream_id.unwrap();
+
+        for byte in prefix {
+            assert_eq!(
+                s.pipe.client.stream_send(
+                    control,
+                    std::slice::from_ref(byte),
+                    false
+                ),
+                Ok(1)
+            );
+            s.advance().unwrap();
+            assert_eq!(s.poll_server(), Err(Error::Done));
+            assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
+        }
+
+        assert_eq!(
+            s.pipe
+                .client
+                .stream_send(control, std::slice::from_ref(last), false),
+            Ok(1)
+        );
+        s.advance().unwrap();
+        assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
+        assert_eq!(s.server.take_last_priority_update(0), Ok(field));
+        assert_eq!(s.poll_server(), Err(Error::Done));
+    }
+
+    #[test]
     /// Send a PRIORITY_UPDATE for request stream from the client that is too
     /// large.
     fn priority_update_request_max_size_limit_default() {
