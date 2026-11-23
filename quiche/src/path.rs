@@ -826,19 +826,20 @@ impl PathMap {
             return Ok(None);
         }
 
+        let active_validated = self.get_active().is_ok_and(Path::validated);
         let (pid_to_remove, _) = self
             .paths
             .iter()
-            .find(|(_, p)| p.unused())
-            .or_else(|| {
-                if !self.get_active().is_ok_and(Path::validated) {
-                    return None;
-                }
-
-                self.paths.iter().find(|(_, p)| {
-                    p.superseded && !p.recovery.has_pending_recovery_work()
-                })
+            .filter(|(_, path)| {
+                path.unused() ||
+                    (active_validated &&
+                        path.superseded &&
+                        !path.recovery.has_pending_recovery_work())
             })
+            // Prefer a path with no pending probe or response work. If every
+            // eligible path is busy, retain the original unused-before-
+            // superseded fallback to avoid blocking new path admission.
+            .min_by_key(|(_, path)| (path.probing_required(), !path.unused()))
             .ok_or(Error::Done)?;
 
         let path = self.paths.remove(pid_to_remove);
@@ -1280,6 +1281,80 @@ mod tests {
             );
         }
         assert_eq!(paths.pop_event(), None);
+    }
+
+    /// Prefer evicting an idle candidate to dropping a queued PATH_RESPONSE.
+    /// The preference applies to both DCID-less paths and superseded paths,
+    /// without changing the bounded-capacity fallback when every path is busy.
+    #[rstest::rstest]
+    #[case::unused(false, false)]
+    #[case::superseded(true, false)]
+    #[case::all_unused_busy(false, true)]
+    #[case::all_superseded_busy(true, true)]
+    fn path_eviction_preserves_pending_probe_work_when_possible(
+        #[case] superseded: bool, #[case] both_busy: bool,
+    ) {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery = RecoveryConfig::from_config(&config);
+        let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        let peers = [4321, 4322, 4323, 4324]
+            .map(|port| SocketAddr::from(([127, 0, 0, 1], port)));
+        let mut initial = Path::new(local, peers[0], &recovery, 4, true, None);
+        if superseded {
+            initial.on_challenge_received([0x11; 8]);
+        }
+        let mut paths = PathMap::new(initial, 3, false);
+
+        let mut second = Path::new(local, peers[1], &recovery, 4, false, None);
+        if superseded {
+            second.state = PathState::Validated;
+            second.active_dcid_seq = Some(1);
+        } else {
+            second.on_challenge_received([0x11; 8]);
+        }
+        if both_busy {
+            second.on_challenge_received([0x22; 8]);
+        }
+        let (second_id, _) = paths.insert_path(second, false).unwrap();
+
+        let mut third = Path::new(local, peers[2], &recovery, 4, false, None);
+        if superseded {
+            third.state = PathState::Validated;
+            third.active_dcid_seq = Some(2);
+        } else if both_busy {
+            third.on_challenge_received([0x33; 8]);
+        }
+        let (third_id, _) = paths.insert_path(third, false).unwrap();
+        if superseded {
+            paths.set_active_path(second_id).unwrap();
+            paths.set_active_path(third_id).unwrap();
+        }
+        let busy_peer = if superseded { peers[0] } else { peers[1] };
+        let idle_peer = if superseded { peers[1] } else { peers[2] };
+        assert!(paths
+            .get(paths.path_id_from_addrs(&(local, busy_peer)).unwrap())
+            .unwrap()
+            .probing_required());
+        if !both_busy {
+            assert!(!paths
+                .get(paths.path_id_from_addrs(&(local, idle_peer)).unwrap())
+                .unwrap()
+                .probing_required());
+        }
+
+        let incoming = Path::new(local, peers[3], &recovery, 4, false, None);
+        let (_, released_cid) = paths.insert_path(incoming, false).unwrap();
+        assert_eq!(paths.len(), 3);
+        assert!(paths.path_id_from_addrs(&(local, peers[3])).is_some());
+        if both_busy {
+            // When no idle candidate exists, admission remains possible.
+            assert!(paths.path_id_from_addrs(&(local, busy_peer)).is_none());
+            assert_eq!(released_cid, superseded.then_some(0));
+        } else {
+            assert!(paths.path_id_from_addrs(&(local, busy_peer)).is_some());
+            assert!(paths.path_id_from_addrs(&(local, idle_peer)).is_none());
+            assert_eq!(released_cid, superseded.then_some(1));
+        }
     }
 
     #[rstest::rstest]
