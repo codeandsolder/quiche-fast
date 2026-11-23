@@ -2814,6 +2814,7 @@ dependencies = [
  "cdylib-link-lines",
  "either",
  "enum_dispatch",
+ "foldhash",
  "foreign-types-shared",
  "intrusive-collections",
  "libc",
