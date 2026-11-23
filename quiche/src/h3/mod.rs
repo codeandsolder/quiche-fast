@@ -1304,7 +1304,7 @@ impl Connection {
         let priority = Priority::default();
 
         self.send_response_with_priority(
-            conn, stream_id, headers, &priority, fin,
+            conn, stream_id, headers, priority, fin,
         )?;
 
         Ok(())
@@ -1361,7 +1361,7 @@ impl Connection {
     /// [Extensible Priority]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     pub fn send_response_with_priority<T: NameValue, F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
-        headers: &[T], priority: &Priority, fin: bool,
+        headers: &[T], priority: Priority, fin: bool,
     ) -> Result<()> {
         if !self
             .streams
@@ -1480,7 +1480,7 @@ impl Connection {
     /// [Extensible Priority]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     pub fn send_additional_headers_with_priority<T: NameValue, F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
-        headers: &[T], priority: &Priority, is_trailer_section: bool, fin: bool,
+        headers: &[T], priority: Priority, is_trailer_section: bool, fin: bool,
     ) -> Result<()> {
         self.send_additional_headers(
             conn,
@@ -2014,7 +2014,7 @@ impl Connection {
     /// [Extensible Priority]: https://www.rfc-editor.org/rfc/rfc9218.html#section-4.
     pub fn send_priority_update_for_request<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>, stream_id: u64,
-        priority: &Priority,
+        priority: Priority,
     ) -> Result<()> {
         let mut d = [42; 20];
         let mut b = octets::OctetsMut::with_slice(&mut d);
@@ -5200,7 +5200,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5266,7 +5266,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5277,7 +5277,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 5,
                 incremental: false,
             })
@@ -5292,7 +5292,7 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 7,
                 incremental: false,
             })
@@ -5314,7 +5314,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5325,7 +5325,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 4, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 4, Priority {
                 urgency: 1,
                 incremental: false,
             })
@@ -5336,7 +5336,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 8, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 8, Priority {
                 urgency: 2,
                 incremental: false,
             })
@@ -5410,7 +5410,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5445,7 +5445,7 @@ mod tests {
 
         // Now send a PRIORITY_UPDATE for the completed request stream.
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5500,7 +5500,7 @@ mod tests {
             .send_priority_update_for_request(
                 &mut s.pipe.client,
                 stream,
-                &Priority {
+                Priority {
                     urgency: 3,
                     incremental: false,
                 },
@@ -5522,7 +5522,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })
@@ -5559,7 +5559,7 @@ mod tests {
 
         // Now send a PRIORITY_UPDATE for the closed request stream.
         s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, &Priority {
+            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
                 urgency: 3,
                 incremental: false,
             })

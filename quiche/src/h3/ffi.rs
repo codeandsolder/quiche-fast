@@ -344,7 +344,7 @@ pub extern "C" fn quiche_h3_send_response_with_priority(
         headers_len,
         |conn, quic_conn, headers| {
             conn.send_response_with_priority(
-                quic_conn, stream_id, headers, priority, fin,
+                quic_conn, stream_id, headers, *priority, fin,
             )
         },
     )
@@ -467,7 +467,7 @@ pub extern "C" fn quiche_h3_send_priority_update_for_request(
     let quic_conn = ffi_mut!(quic_conn, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
     let priority = ffi_ref!(priority, c_int::from(H3_FFI_ERR_INVALID_ARGUMENT));
 
-    match conn.send_priority_update_for_request(quic_conn, stream_id, priority) {
+    match conn.send_priority_update_for_request(quic_conn, stream_id, *priority) {
         Ok(()) => 0,
 
         Err(e) => c_int::from(e.to_c()),

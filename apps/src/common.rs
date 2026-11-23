@@ -1170,7 +1170,7 @@ impl HttpConn for Http3Conn {
             if let Some(priority) = &req.priority {
                 // If sending the priority fails, don't try again.
                 self.h3_conn
-                    .send_priority_update_for_request(conn, s, priority)
+                    .send_priority_update_for_request(conn, s, *priority)
                     .ok();
             }
 
@@ -1486,7 +1486,7 @@ impl HttpConn for Http3Conn {
                     );
 
                     match self.h3_conn.send_response_with_priority(
-                        conn, stream_id, &headers, &priority, false,
+                        conn, stream_id, &headers, priority, false,
                     ) {
                         Ok(v) => v,
 
@@ -1630,7 +1630,7 @@ impl HttpConn for Http3Conn {
 
         if let (Some(headers), Some(priority)) = (&resp.headers, &resp.priority) {
             match self.h3_conn.send_response_with_priority(
-                conn, stream_id, headers, priority, false,
+                conn, stream_id, headers, *priority, false,
             ) {
                 Ok(_) => (),
 
