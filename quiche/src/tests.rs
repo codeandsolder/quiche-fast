@@ -75,6 +75,41 @@ fn stateless_reset_recognizes_rotated_peer_cid_tokens() {
 }
 
 #[test]
+fn retry_source_cid_transport_parameter_matches_retry_history() {
+    // The server must not invent a Retry identifier on a handshake that never
+    // involved Retry, and a real Retry requires the exact remembered ID.
+    for (observed_retry, advertised_retry, accepted) in [
+        (None, None, true),
+        (None, Some(b"retry".as_slice()), false),
+        (Some(b"retry".as_slice()), None, false),
+        (Some(b"retry".as_slice()), Some(b"wrong".as_slice()), false),
+        (Some(b"retry".as_slice()), Some(b"retry".as_slice()), true),
+    ] {
+        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        let client = &mut pipe.client;
+        let original_dcid = ConnectionId::from(b"original".to_vec());
+        client.odcid = Some(original_dcid.clone());
+        client.rscid = observed_retry.map(|id| ConnectionId::from(id.to_vec()));
+        let params = TransportParams {
+            initial_source_connection_id: Some(client.destination_id().clone()),
+            original_destination_connection_id: Some(original_dcid),
+            retry_source_connection_id: advertised_retry
+                .map(|id| ConnectionId::from(id.to_vec())),
+            ..Default::default()
+        };
+        let result = client.parse_peer_transport_params(params);
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "observed={observed_retry:?} advertised={advertised_retry:?}: {result:?}",
+        );
+        if !accepted {
+            assert_eq!(result, Err(Error::InvalidTransportParam));
+        }
+    }
+}
+
+#[test]
 fn transport_params() {
     // Server encodes, client decodes.
     let tp = TransportParams {
