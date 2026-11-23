@@ -338,8 +338,7 @@ mod tests {
         let expected = Frame::Data {
             payload: vec![1, 2, 3, 4, 5],
         };
-        s.send_frame_client(expected.clone(), 0, true)
-            .expect("first");
+        s.send_frame_client(&expected, 0, true).expect("first");
 
         let res = parser.try_parse_frame(&mut s.pipe.server).unwrap();
         assert_eq!(res, FrameParseResult::FrameParsed {
