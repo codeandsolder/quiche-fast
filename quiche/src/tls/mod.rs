@@ -474,7 +474,7 @@ impl Handshake {
     /// # Safety
     /// The pointer must be null or a live, exclusively owned SSL reference
     /// transferred to this Handshake. It must not be freed by the caller.
-    #[cfg(any(feature = "ffi", feature = "boringssl-btls-crate"))]
+    #[cfg(feature = "ffi")]
     pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Self> {
         let ptr = NonNull::new(ssl.cast()).ok_or(Error::TlsFail)?;
 
