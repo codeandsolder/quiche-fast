@@ -250,12 +250,12 @@ impl BBRv2NetworkModel {
     }
 
     #[cfg(feature = "qlog")]
-    pub(super) fn send_rate(&self) -> Option<Bandwidth> {
+    pub(super) const fn send_rate(&self) -> Option<Bandwidth> {
         self.latest_send_rate
     }
 
     #[cfg(feature = "qlog")]
-    pub(super) fn ack_rate(&self) -> Option<Bandwidth> {
+    pub(super) const fn ack_rate(&self) -> Option<Bandwidth> {
         self.latest_ack_rate
     }
 

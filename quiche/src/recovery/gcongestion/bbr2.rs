@@ -655,16 +655,16 @@ impl BBRv2 {
     }
 
     #[cfg(feature = "qlog")]
-    pub(crate) fn send_rate(&self) -> Option<Bandwidth> {
+    pub(crate) const fn send_rate(&self) -> Option<Bandwidth> {
         self.mode.network_model().send_rate()
     }
 
     #[cfg(feature = "qlog")]
-    pub(crate) fn ack_rate(&self) -> Option<Bandwidth> {
+    pub(crate) const fn ack_rate(&self) -> Option<Bandwidth> {
         self.mode.network_model().ack_rate()
     }
 
-    pub(crate) fn rtt_persistent_jump_count(&self) -> u64 {
+    pub(crate) const fn rtt_persistent_jump_count(&self) -> u64 {
         self.mode.network_model().rtt_persistent_jump_count()
     }
 }

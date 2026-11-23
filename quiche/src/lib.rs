@@ -1160,7 +1160,9 @@ impl Config {
     /// The default value is `None`.
     #[cfg(feature = "internal")]
     #[doc(hidden)]
-    pub fn set_custom_bbr_params(&mut self, custom_bbr_settings: BbrParams) {
+    pub const fn set_custom_bbr_params(
+        &mut self, custom_bbr_settings: BbrParams,
+    ) {
         self.custom_bbr_params = Some(custom_bbr_settings);
     }
 
@@ -2554,7 +2556,9 @@ impl<F: BufFactory> Connection<F> {
     /// Returns a mutable reference to the `QlogStreamer`, if it exists.
     #[cfg(feature = "qlog")]
     #[cfg_attr(docsrs, doc(cfg(feature = "qlog")))]
-    pub fn qlog_streamer(&mut self) -> Option<&mut qlog::streamer::QlogStreamer> {
+    pub const fn qlog_streamer(
+        &mut self,
+    ) -> Option<&mut qlog::streamer::QlogStreamer> {
         self.qlog.streamer.as_mut()
     }
 
@@ -7278,7 +7282,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the number of items in the DATAGRAM receive queue.
     #[inline]
     #[must_use = "the result describes the incoming datagram queue occupancy"]
-    pub fn dgram_recv_queue_len(&self) -> usize {
+    pub const fn dgram_recv_queue_len(&self) -> usize {
         self.dgram_recv_queue.len()
     }
 
@@ -7292,7 +7296,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the number of items in the DATAGRAM send queue.
     #[inline]
     #[must_use = "the result describes the outgoing datagram queue occupancy"]
-    pub fn dgram_send_queue_len(&self) -> usize {
+    pub const fn dgram_send_queue_len(&self) -> usize {
         self.dgram_send_queue.len()
     }
 
@@ -7306,14 +7310,14 @@ impl<F: BufFactory> Connection<F> {
     /// Returns whether or not the DATAGRAM send queue is full.
     #[inline]
     #[must_use = "the result determines whether more datagrams can be queued"]
-    pub fn is_dgram_send_queue_full(&self) -> bool {
+    pub const fn is_dgram_send_queue_full(&self) -> bool {
         self.dgram_send_queue.is_full()
     }
 
     /// Returns whether or not the DATAGRAM recv queue is full.
     #[inline]
     #[must_use = "the result indicates incoming datagram queue saturation"]
-    pub fn is_dgram_recv_queue_full(&self) -> bool {
+    pub const fn is_dgram_recv_queue_full(&self) -> bool {
         self.dgram_recv_queue.is_full()
     }
 
@@ -7819,7 +7823,7 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the number of source Connection IDs that are active. This is
     /// only meaningful if the host uses non-zero length Source Connection IDs.
     #[must_use = "the result counts active source connection IDs"]
-    pub fn active_scids(&self) -> usize {
+    pub const fn active_scids(&self) -> usize {
         self.ids.active_source_cids()
     }
 
@@ -7927,7 +7931,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Returns the number of source Connection IDs that are retired.
     #[must_use = "the result counts retired source connection IDs"]
-    pub fn retired_scids(&self) -> usize {
+    pub const fn retired_scids(&self) -> usize {
         self.ids.retired_source_cids()
     }
 

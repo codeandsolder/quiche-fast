@@ -652,7 +652,7 @@ impl<F: BufFactory> SendBuf<F> {
     }
 
     /// Returns true if there is no data.
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.data.is_empty()
     }
 
@@ -693,7 +693,7 @@ impl<F: BufFactory> SendBuf<F> {
             reason = "stream tests inspect buffer-count coalescing and retirement; production does not need this accessor"
         )
     )]
-    pub fn bufs_count(&self) -> usize {
+    pub const fn bufs_count(&self) -> usize {
         self.data.len()
     }
 

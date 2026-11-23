@@ -263,17 +263,17 @@ impl Pacer {
         self.sender.max_bandwidth()
     }
 
-    pub fn rtt_persistent_jump_count(&self) -> u64 {
+    pub const fn rtt_persistent_jump_count(&self) -> u64 {
         self.sender.rtt_persistent_jump_count()
     }
 
     #[cfg(feature = "qlog")]
-    pub fn send_rate(&self) -> Option<Bandwidth> {
+    pub const fn send_rate(&self) -> Option<Bandwidth> {
         self.sender.send_rate()
     }
 
     #[cfg(feature = "qlog")]
-    pub fn ack_rate(&self) -> Option<Bandwidth> {
+    pub const fn ack_rate(&self) -> Option<Bandwidth> {
         self.sender.ack_rate()
     }
 
