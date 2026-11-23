@@ -3386,6 +3386,35 @@ pub mod testing {
         pub server: Connection,
     }
 
+    #[cfg(test)]
+    mod frame_encoding_tests {
+        use super::*;
+
+        #[test]
+        fn test_frame_encoder_preserves_exact_65k_boundary() {
+            // DATA uses one type byte and four length bytes here. Preserve
+            // the old 65,535-byte test fixture bound without a stack array.
+            let data = vec![0xa5; 65_530];
+            let frame = frame::Frame::Data {
+                payload: data.clone(),
+            };
+            let wire = Session::encode_test_frame(&frame).unwrap();
+            assert_eq!(wire.len(), 65_535);
+            let mut reader = octets::Octets::with_slice(&wire);
+            assert_eq!(reader.get_varint().unwrap(), frame::DATA_FRAME_TYPE_ID);
+            assert_eq!(reader.get_varint().unwrap(), data.len() as u64);
+            assert_eq!(reader.get_bytes(data.len()).unwrap().as_ref(), data);
+
+            let too_big = frame::Frame::Data {
+                payload: vec![0; 65_531],
+            };
+            assert_eq!(
+                Session::encode_test_frame(&too_big),
+                Err(Error::BufferTooShort)
+            );
+        }
+    }
+
     impl Session {
         pub fn new() -> Result<Self> {
             Self::new_with_buf()
@@ -3416,6 +3445,17 @@ pub mod testing {
     }
 
     impl<F: BufFactory> Session<F> {
+        /// Serialize a test frame without placing a maximum-size HTTP/3
+        /// frame buffer on every caller's stack. Keep the existing fixture
+        /// limit, so oversized frames still fail with BufferTooShort.
+        fn encode_test_frame(frame: &frame::Frame) -> Result<Vec<u8>> {
+            let mut data = vec![0; 65_535];
+            let mut writer = octets::OctetsMut::with_slice(&mut data);
+            let written = frame.to_bytes(&mut writer)?;
+            data.truncate(written);
+            Ok(data)
+        }
+
         pub fn new_with_buf() -> Result<Self> {
             let (mut config, h3_config) = Session::default_configs()?;
             Self::with_configs_and_buf(&mut config, &h3_config)
@@ -3613,16 +3653,10 @@ pub mod testing {
 
         /// Sends a single HTTP/3 frame from the client.
         pub fn send_frame_client(
-            &mut self, frame: frame::Frame, stream_id: u64, fin: bool,
+            &mut self, frame: &frame::Frame, stream_id: u64, fin: bool,
         ) -> Result<()> {
-            let mut d = [42; 65535];
-
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-
-            frame.to_bytes(&mut b)?;
-
-            let off = b.off();
-            self.pipe.client.stream_send(stream_id, &d[..off], fin)?;
+            let data = Self::encode_test_frame(frame)?;
+            self.pipe.client.stream_send(stream_id, &data, fin)?;
 
             self.advance().ok();
 
@@ -3697,16 +3731,10 @@ pub mod testing {
 
         /// Sends a single HTTP/3 frame from the server.
         pub fn send_frame_server(
-            &mut self, frame: frame::Frame, stream_id: u64, fin: bool,
+            &mut self, frame: &frame::Frame, stream_id: u64, fin: bool,
         ) -> Result<()> {
-            let mut d = [42; 65535];
-
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-
-            frame.to_bytes(&mut b)?;
-
-            let off = b.off();
-            self.pipe.server.stream_send(stream_id, &d[..off], fin)?;
+            let data = Self::encode_test_frame(frame)?;
+            self.pipe.server.stream_send(stream_id, &data, fin)?;
 
             self.advance().ok();
 
@@ -4339,7 +4367,7 @@ mod tests {
         }
 
         s.send_frame_server(
-            frame::Frame::Data { payload: vec![1] },
+            &frame::Frame::Data { payload: vec![1] },
             stream,
             true,
         )
@@ -4384,7 +4412,7 @@ mod tests {
             }))
         );
         s.send_frame_server(
-            frame::Frame::Data { payload: vec![1] },
+            &frame::Frame::Data { payload: vec![1] },
             stream,
             true,
         )
@@ -4792,7 +4820,7 @@ mod tests {
         s.advance().ok();
 
         s.send_frame_client(
-            frame::Frame::Data {
+            &frame::Frame::Data {
                 payload: vec![1, 2, 3, 4],
             },
             stream,
@@ -4826,7 +4854,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 1 },
+            &frame::Frame::MaxPushId { push_id: 1 },
             s.client.control_stream_id.unwrap(),
             false,
         )
@@ -4844,7 +4872,7 @@ mod tests {
         let (stream, req) = s.send_request(false).unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 2 },
+            &frame::Frame::MaxPushId { push_id: 2 },
             stream,
             false,
         )
@@ -4867,14 +4895,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 2 },
+            &frame::Frame::MaxPushId { push_id: 2 },
             s.client.control_stream_id.unwrap(),
             false,
         )
         .unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 1 },
+            &frame::Frame::MaxPushId { push_id: 1 },
             s.client.control_stream_id.unwrap(),
             false,
         )
@@ -4890,7 +4918,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::MaxPushId { push_id: 1 },
+            &frame::Frame::MaxPushId { push_id: 1 },
             s.server.control_stream_id.unwrap(),
             false,
         )
@@ -4910,7 +4938,7 @@ mod tests {
         let header_block = qpack::encode(&req).unwrap();
 
         s.send_frame_client(
-            frame::Frame::PushPromise {
+            &frame::Frame::PushPromise {
                 push_id: 1,
                 header_block,
             },
@@ -4976,7 +5004,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::CancelPush { push_id: 1 },
+            &frame::Frame::CancelPush { push_id: 1 },
             s.client.control_stream_id.unwrap(),
             false,
         )
@@ -4994,7 +5022,7 @@ mod tests {
         let (stream, req) = s.send_request(false).unwrap();
 
         s.send_frame_client(
-            frame::Frame::CancelPush { push_id: 2 },
+            &frame::Frame::CancelPush { push_id: 2 },
             stream,
             false,
         )
@@ -5016,7 +5044,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::CancelPush { push_id: 1 },
+            &frame::Frame::CancelPush { push_id: 1 },
             s.server.control_stream_id.unwrap(),
             false,
         )
@@ -5074,7 +5102,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::GoAway { id: 1 },
+            &frame::Frame::GoAway { id: 1 },
             s.server.control_stream_id.unwrap(),
             false,
         )
@@ -5108,14 +5136,14 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::GoAway { id: 0 },
+            &frame::Frame::GoAway { id: 0 },
             s.server.control_stream_id.unwrap(),
             false,
         )
         .unwrap();
 
         s.send_frame_server(
-            frame::Frame::GoAway { id: 4 },
+            &frame::Frame::GoAway { id: 4 },
             s.server.control_stream_id.unwrap(),
             false,
         )
@@ -5605,7 +5633,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::PriorityUpdatePush {
+            &frame::Frame::PriorityUpdatePush {
                 prioritized_element_id: 3,
                 priority_field_value: b"u=3".to_vec(),
             },
@@ -5625,7 +5653,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::PriorityUpdateRequest {
+            &frame::Frame::PriorityUpdateRequest {
                 prioritized_element_id: 5,
                 priority_field_value: b"u=3".to_vec(),
             },
@@ -5645,7 +5673,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::PriorityUpdatePush {
+            &frame::Frame::PriorityUpdatePush {
                 prioritized_element_id: 5,
                 priority_field_value: b"u=3".to_vec(),
             },
@@ -5664,7 +5692,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::PriorityUpdateRequest {
+            &frame::Frame::PriorityUpdateRequest {
                 prioritized_element_id: 0,
                 priority_field_value: b"u=3".to_vec(),
             },
@@ -5683,7 +5711,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_server(
-            frame::Frame::PriorityUpdatePush {
+            &frame::Frame::PriorityUpdatePush {
                 prioritized_element_id: 0,
                 priority_field_value: b"u=3".to_vec(),
             },
@@ -5796,7 +5824,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 1 },
+            &frame::Frame::MaxPushId { push_id: 1 },
             s.client.control_stream_id.unwrap(),
             true,
         )
@@ -5841,7 +5869,7 @@ mod tests {
         s.handshake().unwrap();
 
         s.send_frame_client(
-            frame::Frame::MaxPushId { push_id: 1 },
+            &frame::Frame::MaxPushId { push_id: 1 },
             s.client.control_stream_id.unwrap(),
             false,
         )
@@ -7204,8 +7232,12 @@ mod tests {
             raw: Default::default(),
         };
 
-        s.send_frame_client(settings, s.client.control_stream_id.unwrap(), false)
-            .unwrap();
+        s.send_frame_client(
+            &settings,
+            s.client.control_stream_id.unwrap(),
+            false,
+        )
+        .unwrap();
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -7332,7 +7364,7 @@ mod tests {
             raw: Default::default(),
         };
 
-        s.send_frame_server(settings, stream, false).unwrap();
+        s.send_frame_server(&settings, stream, false).unwrap();
 
         // The client MUST treat this as H3_FRAME_UNEXPECTED.
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
@@ -7359,7 +7391,7 @@ mod tests {
 
         let (stream, _req) = s.send_request(true).unwrap();
         let cancel_push = frame::Frame::CancelPush { push_id: 0 };
-        s.send_frame_server(cancel_push, stream, false).unwrap();
+        s.send_frame_server(&cancel_push, stream, false).unwrap();
 
         // The client MUST treat this as H3_FRAME_UNEXPECTED.
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
@@ -7387,7 +7419,7 @@ mod tests {
         let (stream, _req) = s.send_request(true).unwrap();
         let goaway = frame::Frame::GoAway { id: 0 };
 
-        s.send_frame_server(goaway, stream, false).unwrap();
+        s.send_frame_server(&goaway, stream, false).unwrap();
 
         // The client MUST treat this as H3_FRAME_UNEXPECTED.
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
@@ -7415,7 +7447,7 @@ mod tests {
         let (stream, _req) = s.send_request(true).unwrap();
         let max_push_id = frame::Frame::MaxPushId { push_id: 0 };
 
-        s.send_frame_server(max_push_id, stream, false).unwrap();
+        s.send_frame_server(&max_push_id, stream, false).unwrap();
 
         // The client MUST treat this as H3_FRAME_UNEXPECTED.
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
