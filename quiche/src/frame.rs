@@ -878,7 +878,11 @@ impl Frame {
             } => QuicFrame::NewConnectionId {
                 sequence_number: *seq_num,
                 retire_prior_to: *retire_prior_to,
-                connection_id_length: Some(conn_id.len() as u8),
+                // Qlog's length field is u8. Do not silently wrap if a
+                // diagnostic frame contains an oversized identifier.
+                connection_id_length: Some(
+                    u8::try_from(conn_id.len()).unwrap_or(u8::MAX),
+                ),
                 connection_id: format!("{}", qlog::HexSlice::new(conn_id)),
                 stateless_reset_token: qlog::HexSlice::maybe_string(Some(
                     reset_token,
@@ -1838,6 +1842,26 @@ mod tests {
         };
 
         assert_roundtrip(&frame, &mut d, 41, &[packet::Type::ZeroRTT]);
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
+    fn qlog_connection_id_length_saturates_instead_of_truncating() {
+        for (length, reported) in [(20, 20), (256, u8::MAX as usize)] {
+            let frame = Frame::NewConnectionId {
+                seq_num: 1,
+                retire_prior_to: 0,
+                conn_id: packet::ConnectionId::copy_from_slice(&vec![7; length]),
+                reset_token: [0; 16],
+            };
+            assert!(matches!(
+                frame.to_qlog(3),
+                QuicFrame::NewConnectionId {
+                    connection_id_length: Some(n),
+                    ..
+                } if usize::from(n) == reported
+            ));
+        }
     }
 
     #[test]

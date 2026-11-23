@@ -544,6 +544,7 @@ pub enum Shutdown {
 #[repr(C)]
 #[cfg(feature = "qlog")]
 #[cfg_attr(docsrs, doc(cfg(feature = "qlog")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum QlogLevel {
     /// Logs any events of Core importance.
     Core  = 0,
@@ -2101,7 +2102,7 @@ struct QlogInfo {
 #[cfg(feature = "qlog")]
 impl Default for QlogInfo {
     fn default() -> Self {
-        QlogInfo {
+        Self {
             streamer: None,
             logged_peer_params: false,
             level: EventImportance::Base,
@@ -2332,7 +2333,7 @@ impl<F: BufFactory> Connection<F> {
             keylog: None,
 
             #[cfg(feature = "qlog")]
-            qlog: Default::default(),
+            qlog: QlogInfo::default(),
 
             dgram_recv_queue: dgram::DatagramQueue::new(
                 config.dgram_recv_max_queue_len,
@@ -2361,8 +2362,8 @@ impl<F: BufFactory> Connection<F> {
 
             amplification_limited_count: 0,
 
-            streams_blocked_bidi_state: Default::default(),
-            streams_blocked_uni_state: Default::default(),
+            streams_blocked_bidi_state: StreamsBlockedState::default(),
+            streams_blocked_uni_state: StreamsBlockedState::default(),
 
             max_amplification_factor: config.max_amplification_factor,
         };
@@ -2448,7 +2449,7 @@ impl<F: BufFactory> Connection<F> {
         &mut self, writer: Box<dyn std::io::Write + Send + Sync>, title: String,
         description: String,
     ) {
-        self.set_qlog_with_level(writer, title, description, QlogLevel::Base)
+        self.set_qlog_with_level(writer, title, description, QlogLevel::Base);
     }
 
     /// Sets qlog output to the designated [`Writer`].
@@ -2497,8 +2498,8 @@ impl<F: BufFactory> Connection<F> {
             ..Default::default()
         };
         let trace = qlog::TraceSeq::new(
-            Some(title.to_string()),
-            Some(description.to_string()),
+            Some(title.clone()),
+            Some(description.clone()),
             Some(common_fields),
             Some(qlog::VantagePoint {
                 name: None,
@@ -3882,10 +3883,14 @@ impl<F: BufFactory> Connection<F> {
                                         let pmtu_data = EventData::QuicMtuUpdated(
                                             qlog::events::quic::MtuUpdated {
                                                 old: Some(
-                                                    p.recovery.max_datagram_size()
-                                                        as u32,
+                                                    u32::try_from(
+                                                        p.recovery
+                                                            .max_datagram_size(),
+                                                    )
+                                                    .unwrap_or(u32::MAX),
                                                 ),
-                                                new: current_mtu as u32,
+                                                new: u32::try_from(current_mtu)
+                                                    .unwrap_or(u32::MAX),
                                                 done: Some(true),
                                             },
                                         );
