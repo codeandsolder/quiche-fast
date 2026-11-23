@@ -357,19 +357,11 @@ impl Stream {
 
             Some(Type::Push) => {
                 match ty {
-                    // Frames that can never be received on request streams.
-                    frame::CANCEL_PUSH_FRAME_TYPE_ID =>
-                        return Err(Error::FrameUnexpected),
-
-                    frame::SETTINGS_FRAME_TYPE_ID =>
-                        return Err(Error::FrameUnexpected),
-
-                    frame::PUSH_PROMISE_FRAME_TYPE_ID =>
-                        return Err(Error::FrameUnexpected),
-
-                    frame::GOAWAY_FRAME_TYPE_ID =>
-                        return Err(Error::FrameUnexpected),
-
+                    // Frames that can never be received on push streams.
+                    frame::CANCEL_PUSH_FRAME_TYPE_ID |
+                    frame::SETTINGS_FRAME_TYPE_ID |
+                    frame::PUSH_PROMISE_FRAME_TYPE_ID |
+                    frame::GOAWAY_FRAME_TYPE_ID |
                     frame::MAX_PUSH_FRAME_TYPE_ID =>
                         return Err(Error::FrameUnexpected),
 
