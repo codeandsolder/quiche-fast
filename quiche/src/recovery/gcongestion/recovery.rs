@@ -22,6 +22,7 @@ use crate::recovery::bytes_in_flight::BytesInFlight;
 use crate::recovery::gcongestion::Bandwidth;
 use crate::recovery::recovery_deadline;
 use crate::recovery::rtt::RttStats;
+use crate::recovery::spurious_packet_threshold;
 use crate::recovery::validate_ack_ranges;
 use crate::recovery::CongestionControlAlgorithm;
 use crate::recovery::EpochTiming;
@@ -240,20 +241,13 @@ impl RecoveryEpoch {
                         SentStatus::Lost => {
                             // An acked packet was already declared lost
                             spurious_losses += 1;
-                            let skipped_between = self
-                                .skipped_packet_numbers
-                                .iter()
-                                .filter(|&&pn| {
-                                    pn > *pkt_num && pn <= largest_acked
-                                })
-                                .count()
-                                as u64;
-                            spurious_pkt_thresh.get_or_insert(
-                                largest_acked
-                                    .saturating_sub(*pkt_num)
-                                    .saturating_sub(skipped_between) +
-                                    1,
-                            );
+                            spurious_pkt_thresh.get_or_insert_with(|| {
+                                spurious_packet_threshold(
+                                    largest_acked,
+                                    *pkt_num,
+                                    &self.skipped_packet_numbers,
+                                )
+                            });
                         },
                     }
                 } else {
