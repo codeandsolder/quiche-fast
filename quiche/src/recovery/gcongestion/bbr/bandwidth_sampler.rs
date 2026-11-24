@@ -101,6 +101,85 @@ impl<T> ConnectionStateMap<T> {
     }
 }
 
+/// An app-limited interval ends at the first sampled ACK beyond the
+/// recorded packet boundary. Initially the first sampled ACK ends it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AppLimitedPhase {
+    Initial,
+    Through(u64),
+    Saturated,
+}
+
+impl AppLimitedPhase {
+    const fn is_limited(self) -> bool {
+        !matches!(self, Self::Saturated)
+    }
+
+    const fn on_ack(&mut self, packet_number: u64) {
+        if matches!(*self, Self::Initial) ||
+            matches!(*self, Self::Through(end) if packet_number > end)
+        {
+            *self = Self::Saturated;
+        }
+    }
+}
+
+/// Selection policy for the optional, experimental A0 compensation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AckPointSelection {
+    Legacy,
+    Corrected,
+}
+
+/// Candidate history exists only when overestimation avoidance is enabled.
+/// Selection, epoch transitions and quiescence resets use the same history.
+#[derive(Debug)]
+struct AckAggregationCompensation {
+    recent: RecentAckPoints,
+    candidates: VecDeque<AckPoint>,
+    selection: AckPointSelection,
+}
+
+impl AckAggregationCompensation {
+    fn new(selection: AckPointSelection) -> Self {
+        Self {
+            recent: RecentAckPoints::default(),
+            candidates: VecDeque::new(),
+            selection,
+        }
+    }
+
+    fn reset(&mut self, now: Instant, acknowledged: u64) {
+        self.recent.clear();
+        let point = self.recent.update(now, acknowledged);
+        self.candidates.clear();
+        self.candidates.push_back(point);
+    }
+
+    fn record_ack(&mut self, now: Instant, acknowledged: u64) {
+        self.recent.update(now, acknowledged);
+    }
+
+    fn start_epoch(&mut self) {
+        if let Some(point) = self.recent.less_recent_point(self.selection) {
+            self.candidates.push_back(point);
+        }
+    }
+
+    fn select(&mut self, acknowledged: u64) -> Option<AckPoint> {
+        while let Some(candidate) = self.candidates.get(1) {
+            if candidate.total_bytes_acked > acknowledged {
+                if self.selection == AckPointSelection::Corrected {
+                    break;
+                }
+                return Some(*candidate);
+            }
+            self.candidates.pop_front();
+        }
+        self.candidates.front().copied()
+    }
+}
+
 #[derive(Debug)]
 pub struct BandwidthSampler {
     /// The total number of congestion controlled bytes sent during the
@@ -113,24 +192,13 @@ pub struct BandwidthSampler {
     total_bytes_neutered: u64,
     last_sent_packet: u64,
     last_acked_packet: u64,
-    is_app_limited: bool,
+    app_limited: AppLimitedPhase,
     last_acked_packet_ack_time: Instant,
     total_bytes_sent_at_last_acked_packet: u64,
     last_acked_packet_sent_time: Instant,
-    recent_ack_points: RecentAckPoints,
-    a0_candidates: VecDeque<AckPoint>,
+    compensation: Option<AckAggregationCompensation>,
     connection_state_map: ConnectionStateMap<ConnectionStateOnSentPacket>,
     max_ack_height_tracker: MaxAckHeightTracker,
-    /// The packet that will be acknowledged after this one will cause the
-    /// sampler to exit the app-limited phase.
-    end_of_app_limited_phase: Option<u64>,
-    overestimate_avoidance: bool,
-    // If true, apply the fix to A0 point selection logic so the
-    // implementation is consistent with the behavior of the
-    // google/quiche implementation.
-    choose_a0_point_fix: bool,
-    limit_max_ack_height_tracker_by_send_rate: bool,
-
     total_bytes_acked_after_last_ack_event: u64,
 }
 
@@ -252,8 +320,6 @@ struct MaxAckHeightTracker {
     /// one. Stats only.
     num_ack_aggregation_epochs: u64,
     ack_aggregation_bandwidth_threshold: f64,
-    start_new_aggregation_epoch_after_full_round: bool,
-    reduce_extra_acked_on_bandwidth_increase: bool,
 }
 
 /// Measurements collected from a congestion event, used for bandwidth
@@ -300,8 +366,6 @@ impl MaxAckHeightTracker {
             } else {
                 1.0
             },
-            start_new_aggregation_epoch_after_full_round: true,
-            reduce_extra_acked_on_bandwidth_increase: true,
         }
     }
 
@@ -314,9 +378,7 @@ impl MaxAckHeightTracker {
         round_trip_count: usize, last_sent_packet_number: u64,
         last_acked_packet_number: u64, ack_time: Instant, bytes_acked: u64,
     ) -> u64 {
-        let mut force_new_epoch = false;
-
-        if self.reduce_extra_acked_on_bandwidth_increase && is_new_max_bandwidth {
+        if is_new_max_bandwidth {
             self.max_ack_height_filter.recompute(|mut event| {
                 let expected =
                     bandwidth_estimate.to_bytes_per_period(event.time_delta);
@@ -328,13 +390,9 @@ impl MaxAckHeightTracker {
             });
         }
 
-        // Start a new epoch if this epoch includes any acknowledged packet.
-        if self.start_new_aggregation_epoch_after_full_round &&
-            last_acked_packet_number >
-                self.last_sent_packet_number_before_epoch
-        {
-            force_new_epoch = true;
-        }
+        // Start a new epoch once an ACK covers a packet sent after its start.
+        let force_new_epoch =
+            last_acked_packet_number > self.last_sent_packet_number_before_epoch;
 
         let epoch_start_time = match self.aggregation_epoch_start_time {
             Some(time) if !force_new_epoch => time,
@@ -412,7 +470,7 @@ impl From<(Instant, usize, usize, &BandwidthSampler)>
             last_acked_packet_ack_time: sampler.last_acked_packet_ack_time,
             send_time_state: SendTimeState {
                 is_valid: true,
-                is_app_limited: sampler.is_app_limited,
+                is_app_limited: sampler.is_app_limited(),
                 total_bytes_sent: sampler.total_bytes_sent,
                 total_bytes_acked: sampler.total_bytes_acked,
                 total_bytes_lost: sampler.total_bytes_lost,
@@ -442,8 +500,10 @@ impl RecentAckPoints {
         self.ack_points = Default::default();
     }
 
-    fn less_recent_point(&self, choose_a0_point_fix: bool) -> Option<AckPoint> {
-        if choose_a0_point_fix {
+    fn less_recent_point(
+        &self, selection: AckPointSelection,
+    ) -> Option<AckPoint> {
+        if selection == AckPointSelection::Corrected {
             self.ack_points[0]
                 .filter(|ack_point| ack_point.total_bytes_acked > 0)
                 .or(self.ack_points[1])
@@ -466,34 +526,29 @@ impl BandwidthSampler {
             total_bytes_sent_at_last_acked_packet: 0,
             last_acked_packet_sent_time: Instant::now(),
             last_acked_packet_ack_time: Instant::now(),
-            is_app_limited: true,
+            app_limited: AppLimitedPhase::Initial,
             connection_state_map: ConnectionStateMap::default(),
             max_ack_height_tracker: MaxAckHeightTracker::new(
                 max_height_tracker_window_length,
                 overestimate_avoidance,
             ),
             total_bytes_acked_after_last_ack_event: 0,
-            overestimate_avoidance,
-            choose_a0_point_fix,
-            limit_max_ack_height_tracker_by_send_rate: false,
 
             last_sent_packet: 0,
             last_acked_packet: 0,
-            recent_ack_points: RecentAckPoints::default(),
-            a0_candidates: VecDeque::new(),
-            end_of_app_limited_phase: None,
+            compensation: overestimate_avoidance.then(|| {
+                let selection = if choose_a0_point_fix {
+                    AckPointSelection::Corrected
+                } else {
+                    AckPointSelection::Legacy
+                };
+                AckAggregationCompensation::new(selection)
+            }),
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "BBR sampler tests inspect app-limited state through this accessor; production reads the state internally"
-        )
-    )]
     pub(crate) const fn is_app_limited(&self) -> bool {
-        self.is_app_limited
+        self.app_limited.is_limited()
     }
 
     pub(crate) fn on_packet_sent(
@@ -517,13 +572,8 @@ impl BandwidthSampler {
         // importantly at the beginning of the connection.
         if bytes_in_flight == 0 {
             self.last_acked_packet_ack_time = sent_time;
-            if self.overestimate_avoidance {
-                self.recent_ack_points.clear();
-                let point = self
-                    .recent_ack_points
-                    .update(sent_time, self.total_bytes_acked);
-                self.a0_candidates.clear();
-                self.a0_candidates.push_back(point);
+            if let Some(compensation) = self.compensation.as_mut() {
+                compensation.reset(sent_time, self.total_bytes_acked);
             }
 
             self.total_bytes_sent_at_last_acked_packet = self.total_bytes_sent;
@@ -630,10 +680,6 @@ impl BandwidthSampler {
             event_sample.sample_max_bandwidth > max_bandwidth;
         max_bandwidth = event_sample.sample_max_bandwidth.max(max_bandwidth);
 
-        if self.limit_max_ack_height_tracker_by_send_rate {
-            max_bandwidth = max_bandwidth.max(max_send_rate);
-        }
-
         let bandwidth_estimate = max_bandwidth
             .map_or(est_bandwidth_upper_bound, |bandwidth| {
                 bandwidth.min(est_bandwidth_upper_bound)
@@ -688,12 +734,9 @@ impl BandwidthSampler {
         );
         // If `extra_acked` is zero, this ACK starts a new aggregation epoch.
         // Save the previous epoch's last ACK point as an A0 candidate.
-        if self.overestimate_avoidance && extra_acked == 0 {
-            if let Some(point) = self
-                .recent_ack_points
-                .less_recent_point(self.choose_a0_point_fix)
-            {
-                self.a0_candidates.push_back(point);
+        if extra_acked == 0 {
+            if let Some(compensation) = self.compensation.as_mut() {
+                compensation.start_epoch();
             }
         }
 
@@ -711,20 +754,10 @@ impl BandwidthSampler {
             sent_packet.send_time_state.total_bytes_sent;
         self.last_acked_packet_sent_time = sent_packet.sent_time;
         self.last_acked_packet_ack_time = ack_time;
-        if self.overestimate_avoidance {
-            self.recent_ack_points
-                .update(ack_time, self.total_bytes_acked);
+        if let Some(compensation) = self.compensation.as_mut() {
+            compensation.record_ack(ack_time, self.total_bytes_acked);
         }
-
-        if self.is_app_limited {
-            // Exit the app-limited phase if no end packet was recorded, or if
-            // this acknowledged packet was sent after the recorded end packet.
-            if self.end_of_app_limited_phase.is_none() ||
-                Some(packet_number) > self.end_of_app_limited_phase
-            {
-                self.is_app_limited = false;
-            }
-        }
+        self.app_limited.on_ack(packet_number);
 
         // No send rate indicates that the sampler is supposed to discard the
         // current send rate sample and use only the ack rate.
@@ -740,20 +773,16 @@ impl BandwidthSampler {
             None
         };
 
-        let a0 = if self.overestimate_avoidance {
-            Self::choose_a0_point(
-                &mut self.a0_candidates,
-                sent_packet.send_time_state.total_bytes_acked,
-                self.choose_a0_point_fix,
-            )
-        } else {
-            None
-        };
-
-        let a0 = a0.unwrap_or(AckPoint {
-            ack_time: sent_packet.last_acked_packet_ack_time,
-            total_bytes_acked: sent_packet.send_time_state.total_bytes_acked,
-        });
+        let a0 = self
+            .compensation
+            .as_mut()
+            .and_then(|compensation| {
+                compensation.select(sent_packet.send_time_state.total_bytes_acked)
+            })
+            .unwrap_or(AckPoint {
+                ack_time: sent_packet.last_acked_packet_ack_time,
+                total_bytes_acked: sent_packet.send_time_state.total_bytes_acked,
+            });
 
         // During the slope calculation, ensure that ack time of the current
         // packet is always larger than the time of the previous packet,
@@ -786,23 +815,6 @@ impl BandwidthSampler {
         })
     }
 
-    fn choose_a0_point(
-        a0_candidates: &mut VecDeque<AckPoint>, total_bytes_acked: u64,
-        choose_a0_point_fix: bool,
-    ) -> Option<AckPoint> {
-        while let Some(candidate) = a0_candidates.get(1) {
-            if candidate.total_bytes_acked > total_bytes_acked {
-                if choose_a0_point_fix {
-                    break;
-                }
-                return Some(*candidate);
-            }
-            a0_candidates.pop_front();
-        }
-
-        a0_candidates.front().copied()
-    }
-
     pub(crate) const fn total_bytes_acked(&self) -> u64 {
         self.total_bytes_acked
     }
@@ -819,8 +831,7 @@ impl BandwidthSampler {
     }
 
     pub(crate) const fn on_app_limited(&mut self) {
-        self.is_app_limited = true;
-        self.end_of_app_limited_phase = Some(self.last_sent_packet);
+        self.app_limited = AppLimitedPhase::Through(self.last_sent_packet);
     }
 
     pub(crate) fn remove_obsolete_packets(&mut self, least_acked: u64) {
@@ -1766,26 +1777,81 @@ mod max_ack_height_tracker_tests {
     use super::*;
 
     #[test]
+    fn app_limited_phase_uses_strict_sampled_ack_boundary() {
+        let mut phase = AppLimitedPhase::Initial;
+        assert!(phase.is_limited());
+        phase.on_ack(0);
+        assert!(!phase.is_limited());
+
+        phase = AppLimitedPhase::Through(7);
+        for pn in [5, 7, 6] {
+            phase.on_ack(pn);
+            assert!(phase.is_limited());
+        }
+        phase.on_ack(8);
+        assert!(!phase.is_limited());
+        phase.on_ack(1);
+        assert!(!phase.is_limited());
+    }
+
+    #[rstest]
+    fn compensation_epoch_selection_and_quiescence_reset(
+        #[values(AckPointSelection::Legacy, AckPointSelection::Corrected)]
+        selection: AckPointSelection,
+    ) {
+        let mut state = AckAggregationCompensation::new(selection);
+        let now = Instant::now();
+        state.reset(now, 0);
+        state.record_ack(now + Duration::from_millis(1), 1200);
+        state.start_epoch();
+        let selected = state.select(0).unwrap();
+        assert_eq!(selected.total_bytes_acked, 0);
+        assert_eq!(
+            state.candidates.back().unwrap().total_bytes_acked,
+            if selection == AckPointSelection::Legacy {
+                0
+            } else {
+                1200
+            }
+        );
+        state.record_ack(now + Duration::from_millis(2), 2400);
+        state.start_epoch();
+        assert_eq!(state.select(2400).unwrap().total_bytes_acked, 1200);
+        state.reset(now + Duration::from_millis(3), 3600);
+        assert_eq!(state.candidates.len(), 1);
+        assert_eq!(state.select(3600).unwrap().total_bytes_acked, 3600);
+    }
+
+    #[test]
     fn recent_ack_points_record_and_select_without_reconstruction() {
         let mut recent = RecentAckPoints::default();
         let now = Instant::now();
-        assert!(recent.less_recent_point(false).is_none());
+        assert!(recent
+            .less_recent_point(AckPointSelection::Legacy)
+            .is_none());
         let first = recent.update(now, 0);
         assert_eq!(first.total_bytes_acked, 0);
         let second = recent.update(now + Duration::from_millis(1), 1200);
         assert_eq!(second.total_bytes_acked, 1200);
         assert_eq!(
-            recent.less_recent_point(false).map(|p| p.total_bytes_acked),
+            recent
+                .less_recent_point(AckPointSelection::Legacy)
+                .map(|p| p.total_bytes_acked),
             Some(0)
         );
         assert_eq!(
-            recent.less_recent_point(true).map(|p| p.total_bytes_acked),
+            recent
+                .less_recent_point(AckPointSelection::Corrected)
+                .map(|p| p.total_bytes_acked),
             Some(1200)
         );
         recent.clear();
-        assert!(recent.less_recent_point(true).is_none());
+        assert!(recent
+            .less_recent_point(AckPointSelection::Corrected)
+            .is_none());
         assert!(
-            BandwidthSampler::choose_a0_point(&mut VecDeque::new(), 0, true)
+            AckAggregationCompensation::new(AckPointSelection::Corrected)
+                .select(0)
                 .is_none()
         );
     }
@@ -1874,7 +1940,6 @@ mod max_ack_height_tracker_tests {
             let mut tracker =
                 MaxAckHeightTracker::new(10, overestimate_avoidance);
             tracker.ack_aggregation_bandwidth_threshold = 1.8;
-            tracker.start_new_aggregation_epoch_after_full_round = true;
             let start = Instant::now();
             TestTracker {
                 tracker,

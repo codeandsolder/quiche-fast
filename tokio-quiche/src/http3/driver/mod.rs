@@ -198,7 +198,7 @@ impl From<h3::Error> for H3ConnectionError {
 
 impl From<quiche::Error> for H3ConnectionError {
     fn from(err: quiche::Error) -> Self {
-        H3ConnectionError::H3(h3::Error::TransportError(err))
+        H3ConnectionError::H3(h3::Error::Transport(err))
     }
 }
 
@@ -628,9 +628,7 @@ impl<H: DriverHooks> H3Driver<H> {
                 },
                 Err(h3::Error::Done) =>
                     break StreamStatus::Done { close: false },
-                Err(h3::Error::TransportError(quiche::Error::StreamReset(
-                    code,
-                ))) => {
+                Err(h3::Error::Transport(quiche::Error::StreamReset(code))) => {
                     break StreamStatus::Reset {
                         wire_err_code: code,
                     };
@@ -894,7 +892,7 @@ impl<H: DriverHooks> H3Driver<H> {
             },
 
             Some(OutboundFrame::PeerStreamError) => {
-                return Err(h3::Error::MessageError);
+                return Err(h3::Error::MalformedMessage);
             },
 
             Some(OutboundFrame::FlowShutdown { .. }) => {
@@ -918,7 +916,7 @@ impl<H: DriverHooks> H3Driver<H> {
         if let Err(error @ quiche::Error::StreamStopped(_)) =
             qconn.stream_capacity(stream_id)
         {
-            return Err(h3::Error::TransportError(error));
+            return Err(h3::Error::Transport(error));
         }
 
         Ok(())
@@ -930,9 +928,9 @@ impl<H: DriverHooks> H3Driver<H> {
         ctx.audit_stats
             .set_sent_stream_fin(StreamClosureKind::Explicit);
         if ctx.fin_or_reset_recv {
-            // Return a TransportError to trigger stream cleanup
+            // Return a transport error to trigger stream cleanup
             // instead of h3::Error::Done
-            Err(h3::Error::TransportError(quiche::Error::Done))
+            Err(h3::Error::Transport(quiche::Error::Done))
         } else {
             Ok(())
         }
@@ -1053,7 +1051,7 @@ impl<H: DriverHooks> H3Driver<H> {
     /// this driver doesn't have an established HTTP/3 connection attached
     /// to it yet.
     const fn connection_not_present() -> H3ConnectionError {
-        H3ConnectionError::H3(h3::Error::TransportError(quiche::Error::TlsFail))
+        H3ConnectionError::H3(h3::Error::Transport(quiche::Error::TlsFail))
     }
 
     /// Cleans up internal state for the indicated HTTP/3 stream.
@@ -1231,7 +1229,7 @@ impl<H: DriverHooks> H3Driver<H> {
             match Self::process_write_frame(conn, qconn, ctx) {
                 Ok(()) => ctx.queued_frame = None,
                 Err(h3::Error::StreamBlocked | h3::Error::Done) => break,
-                Err(h3::Error::MessageError) => {
+                Err(h3::Error::MalformedMessage) => {
                     return self.shutdown_stream(
                         qconn,
                         stream_id,
@@ -1241,9 +1239,7 @@ impl<H: DriverHooks> H3Driver<H> {
                         },
                     );
                 },
-                Err(h3::Error::TransportError(quiche::Error::StreamStopped(
-                    e,
-                ))) => {
+                Err(h3::Error::Transport(quiche::Error::StreamStopped(e))) => {
                     ctx.handle_recvd_stop_sending(e);
 
                     // An idle stream's outbound receiver can be owned by a
@@ -1257,9 +1253,9 @@ impl<H: DriverHooks> H3Driver<H> {
                         return Ok(());
                     }
                 },
-                Err(h3::Error::TransportError(
-                    quiche::Error::InvalidStreamState(stream),
-                )) => {
+                Err(h3::Error::Transport(quiche::Error::InvalidStreamState(
+                    stream,
+                ))) => {
                     return self.cleanup_stream(qconn, stream);
                 },
                 Err(_) => {

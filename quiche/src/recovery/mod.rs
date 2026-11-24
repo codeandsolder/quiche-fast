@@ -32,6 +32,7 @@ use crate::frame;
 use crate::packet;
 use crate::ranges::RangeSet;
 pub use crate::recovery::bandwidth::Bandwidth;
+#[cfg(test)]
 use crate::Config;
 use crate::Error;
 use crate::Result;
@@ -236,20 +237,21 @@ pub struct RecoveryConfig {
     pub enable_relaxed_loss_threshold: bool,
 }
 
-impl RecoveryConfig {
-    pub const fn from_config(config: &Config) -> Self {
+impl Default for RecoveryConfig {
+    fn default() -> Self {
         Self {
-            initial_rtt: config.initial_rtt,
-            max_send_udp_payload_size: config.max_send_udp_payload_size,
+            initial_rtt: crate::DEFAULT_INITIAL_RTT,
+            max_send_udp_payload_size: crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE,
+            // Peer delay is not known until transport parameters are received.
             max_ack_delay: Duration::ZERO,
-            cc_algorithm: config.cc_algorithm,
-            custom_bbr_params: config.custom_bbr_params,
-            hystart: config.hystart,
-            pacing: config.pacing,
-            max_pacing_rate: config.max_pacing_rate,
-            initial_congestion_window_packets: config
-                .initial_congestion_window_packets,
-            enable_relaxed_loss_threshold: config.enable_relaxed_loss_threshold,
+            cc_algorithm: CongestionControlAlgorithm::Cubic,
+            custom_bbr_params: None,
+            hystart: true,
+            pacing: true,
+            max_pacing_rate: None,
+            initial_congestion_window_packets:
+                crate::DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
+            enable_relaxed_loss_threshold: false,
         }
     }
 }
@@ -477,7 +479,7 @@ impl Recovery {
 
     #[cfg(test)]
     pub fn new(config: &Config) -> Self {
-        Self::new_with_config(&RecoveryConfig::from_config(config))
+        Self::new_with_config(&config.recovery)
     }
 }
 
@@ -491,7 +493,7 @@ pub enum CongestionControlAlgorithm {
     /// Reno congestion control algorithm. `reno` in a string form.
     Reno            = 0,
     /// CUBIC congestion control algorithm (default). `cubic` in a string form.
-    CUBIC           = 1,
+    Cubic           = 1,
     /// `BBRv2` congestion control algorithm implementation from gcongestion
     /// branch. `bbr2_gcongestion` in a string form.
     Bbr2Gcongestion = 4,
@@ -506,11 +508,57 @@ impl FromStr for CongestionControlAlgorithm {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "reno" => Ok(Self::Reno),
-            "cubic" => Ok(Self::CUBIC),
-            "bbr" => Ok(Self::Bbr2Gcongestion),
-            "bbr2" => Ok(Self::Bbr2Gcongestion),
-            "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
+            "cubic" => Ok(Self::Cubic),
+            "bbr" | "bbr2" | "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
             _ => Err(Error::CongestionControl),
+        }
+    }
+}
+
+/// Packet classification shared by the packet writer and both recovery
+/// engines. ACK-only packets are not in flight; padding-only packets are in
+/// flight without eliciting ACKs. Data and dedicated PMTU probes are distinct
+/// kinds of ack-eliciting packet, with different recovery policies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PacketFlight {
+    #[default]
+    NotInFlight,
+    PaddingInFlight,
+    AckEliciting,
+    Data,
+    PmtuProbe,
+}
+
+impl PacketFlight {
+    #[must_use]
+    pub const fn in_flight(self) -> bool {
+        !matches!(self, Self::NotInFlight)
+    }
+
+    #[must_use]
+    pub const fn ack_eliciting(self) -> bool {
+        matches!(self, Self::AckEliciting | Self::Data | Self::PmtuProbe)
+    }
+
+    #[must_use]
+    pub const fn has_data(self) -> bool {
+        matches!(self, Self::Data)
+    }
+
+    #[must_use]
+    pub const fn is_pmtud_probe(self) -> bool {
+        matches!(self, Self::PmtuProbe)
+    }
+
+    pub(crate) const fn record_padding(&mut self) {
+        if !self.in_flight() {
+            *self = Self::PaddingInFlight;
+        }
+    }
+
+    pub(crate) const fn record_ack_eliciting(&mut self) {
+        if !self.ack_eliciting() {
+            *self = Self::AckEliciting;
         }
     }
 }
@@ -529,9 +577,7 @@ pub struct Sent {
 
     pub size: usize,
 
-    pub ack_eliciting: bool,
-
-    pub in_flight: bool,
+    pub flight: PacketFlight,
 
     pub delivered: u64,
 
@@ -544,10 +590,6 @@ pub struct Sent {
     pub tx_in_flight: usize,
 
     pub lost: u64,
-
-    pub has_data: bool,
-
-    pub is_pmtud_probe: bool,
 }
 
 impl std::fmt::Debug for Sent {
@@ -561,8 +603,8 @@ impl std::fmt::Debug for Sent {
         write!(f, "is_app_limited={} ", self.is_app_limited)?;
         write!(f, "tx_in_flight={} ", self.tx_in_flight)?;
         write!(f, "lost={} ", self.lost)?;
-        write!(f, "has_data={} ", self.has_data)?;
-        write!(f, "is_pmtud_probe={}", self.is_pmtud_probe)?;
+        write!(f, "has_data={} ", self.flight.has_data())?;
+        write!(f, "is_pmtud_probe={}", self.flight.is_pmtud_probe())?;
 
         Ok(())
     }
@@ -801,7 +843,7 @@ impl RecoveryStats {
 }
 
 /// Statistics from when a CCA first exited the startup phase.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartupExit {
     /// The `congestion_window` recorded at Startup exit.
     pub cwnd: usize,
@@ -865,6 +907,29 @@ mod tests {
     /// Sender-induced packet-number gaps are not reordering. The gap must
     /// remain excluded from packet-threshold distance even after a higher ACK
     /// has validated it and the optimistic-ACK marker itself is cleared.
+    #[test]
+    fn packet_flight_classification_preserves_probe_and_data_purpose() {
+        for (mut flight, in_flight, eliciting, data, probe) in [
+            (PacketFlight::NotInFlight, false, false, false, false),
+            (PacketFlight::PaddingInFlight, true, false, false, false),
+            (PacketFlight::AckEliciting, true, true, false, false),
+            (PacketFlight::Data, true, true, true, false),
+            (PacketFlight::PmtuProbe, true, true, false, true),
+        ] {
+            assert_eq!(flight.in_flight(), in_flight);
+            assert_eq!(flight.ack_eliciting(), eliciting);
+            assert_eq!(flight.has_data(), data);
+            assert_eq!(flight.is_pmtud_probe(), probe);
+            flight.record_padding();
+            assert!(flight.in_flight());
+            assert_eq!(flight.ack_eliciting(), eliciting);
+            flight.record_ack_eliciting();
+            assert!(flight.ack_eliciting());
+            assert_eq!(flight.has_data(), data);
+            assert_eq!(flight.is_pmtud_probe(), probe);
+        }
+    }
+
     #[rstest]
     fn sender_gap_does_not_shorten_packet_threshold(
         #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -1084,7 +1149,7 @@ mod tests {
         assert!(!recovery_for_alg(algo).gcongestion_enabled());
 
         let algo = CongestionControlAlgorithm::from_str("cubic").unwrap();
-        assert_eq!(algo, CongestionControlAlgorithm::CUBIC);
+        assert_eq!(algo, CongestionControlAlgorithm::Cubic);
         assert!(!recovery_for_alg(algo).gcongestion_enabled());
 
         let algo = CongestionControlAlgorithm::from_str("bbr").unwrap();
@@ -1109,141 +1174,45 @@ mod tests {
         );
     }
 
+    fn sent_fixture(
+        pn: u64, now: Instant, size: usize, flight: PacketFlight,
+    ) -> Sent {
+        Sent {
+            flight,
+            ..test_utils::helper_packet_sent(pn, now, size)
+        }
+    }
+
+    /// Identical initial send/flight observations for both timer scenarios.
+    fn recovery_with_four_sent_packets(
+        cc_algorithm_name: &str, now: Instant,
+    ) -> Recovery {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        assert_eq!(r.sent_packets_len(epoch), 0);
+        for pn in 0..4 {
+            r.on_packet_sent(
+                sent_fixture(pn, now, 1000, PacketFlight::AckEliciting),
+                epoch,
+                HandshakeStatus::default(),
+                now,
+                "",
+            );
+            assert_eq!(r.sent_packets_len(epoch), pn as usize + 1);
+            assert_eq!(r.bytes_in_flight(), (pn as usize + 1) * 1000);
+            assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        }
+        r
+    }
+
     #[rstest]
     fn loss_on_pto(
         #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
-        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-
-        let mut r = Recovery::new(&cfg);
-
         let mut now = Instant::now();
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-
-        // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 3,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 4000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        let mut r = recovery_with_four_sent_packets(cc_algorithm_name, now);
 
         // Wait for 10ms.
         now += Duration::from_millis(10);
@@ -1285,24 +1254,7 @@ mod tests {
         assert_eq!(r.lost_count(), 0);
         assert_eq!(r.pto_count(), 1);
 
-        let p = Sent {
-            pkt_num: 4,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(4, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -1315,24 +1267,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight(), 3000);
         assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(30));
 
-        let p = Sent {
-            pkt_num: 5,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(5, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -1449,135 +1384,8 @@ mod tests {
     fn loss_on_timer(
         #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
-        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-
-        let mut r = Recovery::new(&cfg);
-
         let mut now = Instant::now();
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-
-        // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 3,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 4000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        let mut r = recovery_with_four_sent_packets(cc_algorithm_name, now);
 
         // Wait for 10ms.
         now += Duration::from_millis(10);
@@ -1940,7 +1748,7 @@ mod tests {
         #[values("bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        cfg.enable_relaxed_loss_threshold = true;
+        cfg.set_enable_relaxed_loss_threshold(true);
         assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
 
         let mut now = Instant::now();
@@ -2159,16 +1967,13 @@ mod tests {
                 time_acked: None,
                 time_lost: None,
                 size: 1200,
-                ack_eliciting: true,
-                in_flight: true,
+                flight: PacketFlight::Data,
                 delivered: 0,
                 delivered_time: now,
                 first_sent_time: now,
                 is_app_limited: false,
                 tx_in_flight: 0,
                 lost: 0,
-                has_data: true,
-                is_pmtud_probe: false,
             };
 
             r.on_packet_sent(
@@ -2230,24 +2035,7 @@ mod tests {
         assert_eq!(r.cwnd(), 12000 + 1200 * 10);
 
         // Send the second packet burst.
-        let p = Sent {
-            pkt_num: 10,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 6000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(10, now, 6000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2270,24 +2058,7 @@ mod tests {
         }
 
         // Send the third and fourth packet bursts together.
-        let p = Sent {
-            pkt_num: 11,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 6000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(11, now, 6000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2302,24 +2073,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
 
         // Send the fourth packet burst.
-        let p = Sent {
-            pkt_num: 12,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(12, now, 1000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2728,24 +2482,7 @@ mod tests {
         assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
 
         // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(0, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -2760,24 +2497,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight(), 1000);
         assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
 
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: true,
-        };
+        let p = sent_fixture(1, now, 1000, PacketFlight::PmtuProbe);
 
         r.on_packet_sent(
             p,
@@ -2789,24 +2509,7 @@ mod tests {
 
         assert_eq!(r.in_flight_count(packet::Epoch::Application), 2);
 
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
-        };
+        let p = sent_fixture(2, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -3263,9 +2966,9 @@ mod tests {
         // Send some no "in_flight" packets
         for iter in 3..1000 {
             let mut p = test_utils::helper_packet_sent(next_packet, now, 1200);
-            // `in_flight = false` marks packets as if they only contained ACK
-            // frames.
-            p.in_flight = false;
+            // Model an ACK-only packet, which contributes no in-flight bytes.
+            p.flight = PacketFlight::NotInFlight;
+            p.size = 0;
             next_packet += 1;
             r.on_packet_sent(
                 p,
@@ -3375,7 +3078,7 @@ mod tests {
         let hs = HandshakeStatus::default();
 
         let mut sent = test_utils::helper_packet_sent(0, now, 1000);
-        sent.has_data = false;
+        sent.flight = PacketFlight::AckEliciting;
         sent.frames = smallvec![frame::Frame::ResetStream {
             stream_id: 0,
             error_code: 42,
@@ -3428,16 +3131,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
         r.on_packet_sent(
             p_initial,
@@ -3458,8 +3158,7 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
@@ -3467,8 +3166,6 @@ mod tests {
             tx_in_flight: 0,
 
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
         r.on_packet_sent(
             p_app,
@@ -3527,16 +3224,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(

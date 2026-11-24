@@ -155,10 +155,6 @@ pub(super) struct BBRv2NetworkModel {
 
     /// The minimum bytes in flight during this round.
     min_bytes_in_flight_in_round: usize,
-    /// True if sending was limited by `inflight_hi` anytime in the current
-    /// round.
-    inflight_hi_limited_in_round: bool,
-
     /// Max bandwidth in the current round. Updated once per congestion event.
     bandwidth_latest: Bandwidth,
     /// Max bandwidth of recent rounds. Updated once per round.
@@ -173,10 +169,6 @@ pub(super) struct BBRv2NetworkModel {
 
     cwnd_gain: f32,
     pacing_gain: f32,
-
-    /// Whether we are cwnd limited prior to the start of the current
-    /// aggregation epoch.
-    cwnd_limited_before_aggregation_epoch: bool,
 
     /// STARTUP-centric fields which experimentally used by `PROBE_UP`.
     full_bandwidth_reached: bool,
@@ -203,7 +195,6 @@ impl BBRv2NetworkModel {
     pub(super) fn new(params: &Params, initial_rtt: Duration) -> Self {
         Self {
             min_bytes_in_flight_in_round: usize::MAX,
-            inflight_hi_limited_in_round: false,
             bandwidth_sampler: BandwidthSampler::new(
                 params.initial_max_ack_height_filter_window,
                 params.enable_overestimate_avoidance,
@@ -221,7 +212,6 @@ impl BBRv2NetworkModel {
             max_bandwidth_filter: MaxBandwidthFilter {
                 max_bandwidth: [Bandwidth::zero(), Bandwidth::zero()],
             },
-            cwnd_limited_before_aggregation_epoch: false,
             cwnd_gain: params.startup_cwnd_gain,
             pacing_gain: params.startup_pacing_gain,
             full_bandwidth_reached: false,
@@ -304,9 +294,6 @@ impl BBRv2NetworkModel {
         self.min_bytes_in_flight_in_round =
             self.min_bytes_in_flight_in_round.min(bytes_in_flight);
 
-        if bytes_in_flight + bytes >= self.inflight_hi {
-            self.inflight_hi_limited_in_round = true;
-        }
         self.round_trip_counter.on_packet_sent(packet_number);
 
         self.bandwidth_sampler.on_packet_sent(
@@ -343,12 +330,6 @@ impl BBRv2NetworkModel {
             self.bandwidth_lo.unwrap_or(Bandwidth::infinite()),
             self.round_trip_count(),
         );
-
-        if sample.extra_acked == 0 {
-            self.cwnd_limited_before_aggregation_epoch = congestion_event
-                .prior_bytes_in_flight >=
-                congestion_event.prior_cwnd;
-        }
 
         if sample.last_packet_send_state.is_valid {
             congestion_event.last_packet_send_state =
@@ -646,7 +627,6 @@ impl BBRv2NetworkModel {
         self.loss_events_in_round = 0;
         self.max_bytes_delivered_in_round = 0;
         self.min_bytes_in_flight_in_round = usize::MAX;
-        self.inflight_hi_limited_in_round = false;
     }
 
     pub(super) fn has_bandwidth_growth(

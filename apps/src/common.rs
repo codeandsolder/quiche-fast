@@ -1147,9 +1147,7 @@ impl HttpConn for Http3Conn {
             ) {
                 Ok(v) => v,
 
-                Err(quiche::h3::Error::TransportError(
-                    quiche::Error::StreamLimit,
-                )) => {
+                Err(quiche::h3::Error::Transport(quiche::Error::StreamLimit)) => {
                     debug!("not enough stream credits, retry later...");
                     break;
                 },

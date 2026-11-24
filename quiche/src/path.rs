@@ -148,6 +148,134 @@ pub fn pmtu_event(
     })
 }
 
+/// Raw path selection is independent of reachability and CID availability.
+/// A migration awaiting validation is active, never superseded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathUsage {
+    Standby,
+    Active,
+    ActiveMigrationPending,
+    Superseded,
+}
+
+impl PathUsage {
+    const fn is_active(self) -> bool {
+        matches!(self, Self::Active | Self::ActiveMigrationPending)
+    }
+
+    const fn is_superseded(self) -> bool {
+        matches!(self, Self::Superseded)
+    }
+}
+
+/// State belonging to one address/MTU validation attempt. Abandoning the
+/// attempt invalidates its probe evidence, timers and pending challenges.
+#[derive(Debug)]
+struct PathValidation {
+    state: PathState,
+    challenge_requested: bool,
+    failure_reported: bool,
+    in_flight_challenges: VecDeque<([u8; 8], usize, Instant)>,
+    max_challenge_size: usize,
+    probing_lost: usize,
+    last_probe_lost_time: Option<Instant>,
+}
+
+impl PathValidation {
+    const fn new(state: PathState) -> Self {
+        Self {
+            state,
+            challenge_requested: false,
+            failure_reported: false,
+            in_flight_challenges: VecDeque::new(),
+            max_challenge_size: 0,
+            probing_lost: 0,
+            last_probe_lost_time: None,
+        }
+    }
+
+    fn promote_to(&mut self, state: PathState) {
+        if self.state < state {
+            self.state = state;
+        }
+    }
+
+    fn add_challenge_sent(
+        &mut self, data: [u8; 8], pkt_size: usize, sent_time: Instant,
+    ) {
+        self.promote_to(PathState::Validating);
+        self.challenge_requested = false;
+        self.in_flight_challenges
+            .push_back((data, pkt_size, sent_time));
+    }
+
+    /// An unmatched or abandoned challenge cannot change validation state.
+    /// Return whether a matching response completes the MTU validation.
+    fn accept_response(&mut self, data: [u8; 8]) -> Option<bool> {
+        let mut challenge_size = None;
+        self.in_flight_challenges.retain(|(d, size, _)| {
+            if *d == data {
+                challenge_size = Some(*size);
+                false
+            } else {
+                true
+            }
+        });
+        let challenge_size = challenge_size?;
+        self.probing_lost = 0;
+        self.last_probe_lost_time = None;
+
+        // The 4-tuple is reachable, but the path MTU may still be unknown.
+        self.promote_to(PathState::ValidatingMTU);
+        self.max_challenge_size = self.max_challenge_size.max(challenge_size);
+        if self.state == PathState::ValidatingMTU {
+            if self.max_challenge_size >= crate::MIN_CLIENT_INITIAL_LEN {
+                self.promote_to(PathState::Validated);
+                return Some(true);
+            }
+            self.challenge_requested = true;
+        }
+        Some(false)
+    }
+
+    /// Count consecutive probe losses spaced by at least one RTT.
+    fn record_lost_probes(&mut self, now: Instant, rtt: Duration) -> bool {
+        let mut lost_probe_time = None;
+        self.in_flight_challenges.retain(|(_, _, sent_time)| {
+            if *sent_time <= now {
+                lost_probe_time.get_or_insert(*sent_time);
+                false
+            } else {
+                true
+            }
+        });
+        let Some(lost_probe_time) = lost_probe_time else {
+            return false;
+        };
+        if self.last_probe_lost_time.is_none_or(|last| {
+            lost_probe_time.saturating_duration_since(last) >= rtt
+        }) {
+            self.probing_lost += 1;
+            self.last_probe_lost_time = Some(lost_probe_time);
+        }
+        true
+    }
+
+    fn abandon(&mut self) {
+        if self.state != PathState::Failed {
+            *self = Self::new(PathState::Failed);
+        }
+    }
+
+    fn take_failure_notification(&mut self) -> bool {
+        if self.state != PathState::Failed || self.failure_reported {
+            return false;
+        }
+        self.failure_reported = true;
+        true
+    }
+}
+
 /// A network path on which QUIC packets can be sent.
 #[derive(Debug)]
 pub struct Path {
@@ -163,30 +291,15 @@ pub struct Path {
     /// Destination CID sequence number used over that path.
     pub active_dcid_seq: Option<u64>,
 
-    /// The current validation state of the path.
-    state: PathState,
+    validation: PathValidation,
 
-    /// Is this path used to send non-probing packets.
-    active: bool,
+    usage: PathUsage,
 
     /// Loss recovery and congestion control state.
     pub recovery: recovery::Recovery,
 
     /// Path MTU discovery state. None if PMTUD is disabled on the path.
     pub pmtud: Option<pmtud::Pmtud>,
-
-    /// Pending challenge data with the size of the packet containing them and
-    /// when they were sent.
-    in_flight_challenges: VecDeque<([u8; 8], usize, Instant)>,
-
-    /// The maximum challenge size that got acknowledged.
-    max_challenge_size: usize,
-
-    /// Number of consecutive (spaced by at least 1 RTT) probing packets lost.
-    probing_lost: usize,
-
-    /// Last instant when a probing packet got lost.
-    last_probe_lost_time: Option<Instant>,
 
     /// Received challenge data.
     received_challenges: VecDeque<[u8; 8]>,
@@ -237,23 +350,6 @@ pub struct Path {
     /// Whether the peer's address has been verified.
     pub verified_peer_address: bool,
 
-    /// Whether the peer has verified our address.
-    pub peer_verified_local_address: bool,
-
-    /// Does it requires sending `PATH_CHALLENGE`?
-    challenge_requested: bool,
-
-    /// Whether the failure of this path was notified.
-    failure_notified: bool,
-
-    /// Whether the connection tries to migrate to this path, but it still needs
-    /// to be validated.
-    migrating: bool,
-
-    /// Whether the connection was using this path before switching to another
-    /// one.
-    superseded: bool,
-
     /// Whether or not we should force eliciting of an ACK (e.g. via PING frame)
     pub needs_ack_eliciting: bool,
 }
@@ -274,21 +370,10 @@ impl Path {
         };
 
         let pmtud = config.and_then(|c| {
-            if c.pmtud {
-                let maximum_supported_mtu: usize = std::cmp::min(
-                    // if the max_udp_payload_size doesn't fit into a usize,
-                    // then max_send_udp_payload_size must be smaller so use
-                    // that
-                    c.local_transport_params
-                        .max_udp_payload_size
-                        .try_into()
-                        .unwrap_or(c.max_send_udp_payload_size),
-                    c.max_send_udp_payload_size,
-                );
-                Some(pmtud::Pmtud::new(maximum_supported_mtu, c.pmtud_max_probes))
-            } else {
-                None
-            }
+            c.pmtud.create(
+                recovery_config.max_send_udp_payload_size,
+                c.local_transport_params.max_udp_payload_size,
+            )
         });
 
         Self {
@@ -296,14 +381,10 @@ impl Path {
             peer_addr,
             active_scid_seq: source_sequence,
             active_dcid_seq: destination_sequence,
-            state,
-            active: false,
+            validation: PathValidation::new(state),
+            usage: PathUsage::Standby,
             recovery: recovery::Recovery::new_with_config(recovery_config),
             pmtud,
-            in_flight_challenges: VecDeque::new(),
-            max_challenge_size: 0,
-            probing_lost: 0,
-            last_probe_lost_time: None,
             received_challenges: VecDeque::with_capacity(
                 path_challenge_recv_max_queue_len,
             ),
@@ -320,11 +401,6 @@ impl Path {
             stream_retrans_bytes: 0,
             max_send_bytes: 0,
             verified_peer_address: false,
-            peer_verified_local_address: false,
-            challenge_requested: false,
-            failure_notified: false,
-            migrating: false,
-            superseded: false,
             needs_ack_eliciting: false,
         }
     }
@@ -357,20 +433,20 @@ impl Path {
     /// Returns whether the path is working (i.e., not failed).
     #[inline]
     fn working(&self) -> bool {
-        self.state > PathState::Failed
+        self.validation.state > PathState::Failed
     }
 
     /// Returns whether the path is active.
     #[inline]
     pub fn active(&self) -> bool {
-        self.active && self.working() && self.active_dcid_seq.is_some()
+        self.usage.is_active() && self.working() && self.active_dcid_seq.is_some()
     }
 
     /// Returns whether the path can be used to send non-probing packets.
     #[inline]
     pub fn usable(&self) -> bool {
         self.active() ||
-            (self.state == PathState::Validated &&
+            (self.validation.state == PathState::Validated &&
                 self.active_dcid_seq.is_some())
     }
 
@@ -389,42 +465,31 @@ impl Path {
         !self.received_challenges.is_empty() || self.validation_requested()
     }
 
-    /// Promotes the path to the provided state only if the new state is greater
-    /// than the current one.
-    fn promote_to(&mut self, state: PathState) {
-        if self.state < state {
-            self.state = state;
-        }
-    }
-
     /// Returns whether the path is validated.
     #[inline]
     pub fn validated(&self) -> bool {
-        self.state == PathState::Validated
-    }
-
-    /// Returns whether this path failed its validation.
-    #[inline]
-    fn validation_failed(&self) -> bool {
-        self.state == PathState::Failed
+        self.validation.state == PathState::Validated
     }
 
     // Returns whether this path is under path validation process.
     #[inline]
     pub const fn under_validation(&self) -> bool {
-        matches!(self.state, PathState::Validating | PathState::ValidatingMTU)
+        matches!(
+            self.validation.state,
+            PathState::Validating | PathState::ValidatingMTU
+        )
     }
 
     /// Requests path validation.
     #[inline]
     pub const fn request_validation(&mut self) {
-        self.challenge_requested = true;
+        self.validation.challenge_requested = true;
     }
 
     /// Returns whether a validation is requested.
     #[inline]
     pub const fn validation_requested(&self) -> bool {
-        self.challenge_requested
+        self.validation.challenge_requested
     }
 
     /// Returns the eligible probe size for this path, not the active path.
@@ -444,18 +509,26 @@ impl Path {
             .then_some(size)
     }
 
-    pub fn on_challenge_sent(&mut self) {
-        self.promote_to(PathState::Validating);
-        self.challenge_requested = false;
+    /// A failed MTU probe can invalidate previously confirmed MTU evidence.
+    /// Keep recovery's datagram limit synchronized and publish the change.
+    pub(crate) fn on_pmtu_probe_lost(
+        &mut self, size: usize,
+    ) -> Option<PathEvent> {
+        let pmtud = self.pmtud.as_mut()?;
+        let old = pmtud.get_current_mtu();
+        pmtud.failed_probe(size);
+        let new = pmtud.get_current_mtu();
+        let event = pmtu_event(self.local_addr, self.peer_addr, old, new)?;
+        self.recovery.pmtud_update_max_datagram_size(new);
+        Some(event)
     }
 
     /// Handles the sending of `PATH_CHALLENGE`.
     pub fn add_challenge_sent(
         &mut self, data: [u8; 8], pkt_size: usize, sent_time: Instant,
     ) {
-        self.on_challenge_sent();
-        self.in_flight_challenges
-            .push_back((data, pkt_size, sent_time));
+        self.validation
+            .add_challenge_sent(data, pkt_size, sent_time);
     }
 
     pub fn on_challenge_received(&mut self, data: [u8; 8]) {
@@ -463,53 +536,24 @@ impl Path {
         if self.received_challenges.len() == self.received_challenges_max_len {
             return;
         }
-
         self.received_challenges.push_back(data);
-        self.peer_verified_local_address = true;
     }
 
-    pub fn has_pending_challenge(&self, data: [u8; 8]) -> bool {
-        self.in_flight_challenges.iter().any(|(d, ..)| *d == data)
-    }
-
-    /// Returns whether the path is now validated.
-    pub fn on_response_received(&mut self, data: [u8; 8]) -> bool {
+    /// Only a response to a pending challenge establishes address proof.
+    fn on_response_received(&mut self, data: [u8; 8]) -> Option<bool> {
+        let validated = self.validation.accept_response(data)?;
         self.verified_peer_address = true;
-        self.probing_lost = 0;
-
-        let mut challenge_size = 0;
-        self.in_flight_challenges.retain(|(d, s, _)| {
-            if *d == data {
-                challenge_size = *s;
-                false
-            } else {
-                true
-            }
-        });
-
-        // The 4-tuple is reachable, but we didn't check Path MTU yet.
-        self.promote_to(PathState::ValidatingMTU);
-
-        self.max_challenge_size =
-            std::cmp::max(self.max_challenge_size, challenge_size);
-
-        if self.state == PathState::ValidatingMTU {
-            if self.max_challenge_size >= crate::MIN_CLIENT_INITIAL_LEN {
-                // Path MTU is sufficient for QUIC traffic.
-                self.promote_to(PathState::Validated);
-                return true;
-            }
-
-            // If the MTU was not validated, probe again.
-            self.request_validation();
-        }
-
-        false
+        Some(validated)
     }
 
-    const fn on_failed_validation(&mut self) {
-        self.state = PathState::Failed;
-        self.active = false;
+    fn on_failed_validation(&mut self) {
+        // Address proof is separate from the path MTU (RFC 9000 section 8.2.3).
+        // A subsequent attempt must establish fresh MTU evidence; prior
+        // address verification remains valid for this same address tuple.
+        self.validation.abandon();
+        if self.usage.is_active() {
+            self.usage = PathUsage::Standby;
+        }
     }
 
     /// Examine the next response obligation without consuming it.
@@ -533,39 +577,13 @@ impl Path {
             trace_id,
         );
 
-        let mut lost_probe_time = None;
-        self.in_flight_challenges.retain(|(_, _, sent_time)| {
-            if *sent_time <= now {
-                if lost_probe_time.is_none() {
-                    lost_probe_time = Some(*sent_time);
-                }
-                false
-            } else {
-                true
-            }
-        });
-
-        // If we lost probing packets, check if the path failed
-        // validation.
-        if let Some(lost_probe_time) = lost_probe_time {
-            self.last_probe_lost_time =
-                if let Some(last) = self.last_probe_lost_time {
-                    // Count a loss if at least 1-RTT happened.
-                    if lost_probe_time - last >= self.recovery.rtt() {
-                        self.probing_lost += 1;
-                        Some(lost_probe_time)
-                    } else {
-                        Some(last)
-                    }
-                } else {
-                    self.probing_lost += 1;
-                    Some(lost_probe_time)
-                };
-            // As a server, if requesting a challenge is not
-            // possible due to the amplification attack, declare the
-            // validation as failed.
-            if self.probing_lost >= crate::MAX_PROBING_TIMEOUTS ||
-                (is_server && self.max_send_bytes < crate::MIN_PROBING_SIZE)
+        if self.validation.record_lost_probes(now, self.recovery.rtt()) {
+            // A verified address is no longer amplification limited, even
+            // when a small successful probe did not validate the path MTU.
+            if self.validation.probing_lost >= crate::MAX_PROBING_TIMEOUTS ||
+                (is_server &&
+                    !self.verified_peer_address &&
+                    self.max_send_bytes < crate::MIN_PROBING_SIZE)
             {
                 self.on_failed_validation();
             } else {
@@ -607,8 +625,8 @@ impl Path {
         PathStats {
             local_addr: self.local_addr,
             peer_addr: self.peer_addr,
-            validation_state: self.state,
-            active: self.active,
+            validation_state: self.validation.state,
+            active: self.usage.is_active(),
             recv: self.recv_count,
             sent: self.sent_count,
             lost: self.recovery.lost_count(),
@@ -701,7 +719,7 @@ impl PathMap {
         let peer_addr = initial_path.peer_addr;
 
         // As it is the first path, it is active by default.
-        initial_path.active = true;
+        initial_path.usage = PathUsage::Active;
 
         let active_path_id = paths.insert(initial_path);
         addrs_to_paths.insert((local_addr, peer_addr), active_path_id);
@@ -833,7 +851,7 @@ impl PathMap {
             .filter(|(_, path)| {
                 path.unused() ||
                     (active_validated &&
-                        path.superseded &&
+                        path.usage.is_superseded() &&
                         !path.recovery.has_pending_recovery_work())
             })
             // Prefer a path with no pending probe or response work. If every
@@ -894,18 +912,13 @@ impl PathMap {
 
     /// Notifies all failed validations to the application.
     pub fn notify_failed_validations(&mut self) {
-        let validation_failed = self
-            .paths
-            .iter_mut()
-            .filter(|(_, p)| p.validation_failed() && !p.failure_notified);
-
-        for (_, p) in validation_failed {
-            self.events.push_back(PathEvent::FailedValidation(
-                p.local_addr,
-                p.peer_addr,
-            ));
-
-            p.failure_notified = true;
+        for (_, p) in &mut self.paths {
+            if p.validation.take_failure_notification() {
+                self.events.push_back(PathEvent::FailedValidation(
+                    p.local_addr,
+                    p.peer_addr,
+                ));
+            }
         }
     }
 
@@ -922,27 +935,22 @@ impl PathMap {
     pub fn on_response_received(&mut self, data: [u8; 8]) -> Result<()> {
         let active_pid = self.get_active_path_id()?;
 
-        let challenge_pending =
-            self.iter_mut().find(|(_, p)| p.has_pending_challenge(data));
+        let matched = self.iter_mut().find_map(|(pid, p)| {
+            p.on_response_received(data)
+                .map(|validated| (pid, p, validated))
+        });
 
-        if let Some((pid, p)) = challenge_pending {
-            if p.on_response_received(data) {
-                let local_addr = p.local_addr;
-                let peer_addr = p.peer_addr;
-                let was_migrating = p.migrating;
+        if let Some((pid, p, true)) = matched {
+            let local_addr = p.local_addr;
+            let peer_addr = p.peer_addr;
+            let was_migrating = p.usage == PathUsage::ActiveMigrationPending;
+            if was_migrating {
+                p.usage = PathUsage::Active;
+            }
 
-                p.migrating = false;
-
-                // Notifies the application.
-                self.notify_event(PathEvent::Validated(local_addr, peer_addr));
-
-                // If this path was the candidate for migration, notifies the
-                // application.
-                if pid == active_pid && was_migrating {
-                    self.notify_event(PathEvent::PeerMigrated(
-                        local_addr, peer_addr,
-                    ));
-                }
+            self.notify_event(PathEvent::Validated(local_addr, peer_addr));
+            if pid == active_pid && was_migrating {
+                self.notify_event(PathEvent::PeerMigrated(local_addr, peer_addr));
             }
         }
         Ok(())
@@ -959,7 +967,7 @@ impl PathMap {
         if !target.working() {
             return Err(Error::InvalidState);
         }
-        Ok(target.active)
+        Ok(target.usage.is_active())
     }
 
     /// Sets the path with identifier '`path_id`' to be active.
@@ -984,15 +992,13 @@ impl PathMap {
         // Check the raw active flag instead of Path::active(), which can be
         // false for a failed path or before its DCID has been assigned.
         for (_, old_active_path) in &mut self.paths {
-            if old_active_path.active {
-                old_active_path.active = false;
-                old_active_path.superseded = true;
+            if old_active_path.usage.is_active() {
+                old_active_path.usage = PathUsage::Superseded;
             }
         }
 
         let new_active_path = self.get_mut(path_id)?;
-        new_active_path.active = true;
-        new_active_path.superseded = false;
+        new_active_path.usage = PathUsage::Active;
 
         if is_server {
             if new_active_path.validated() {
@@ -1001,7 +1007,7 @@ impl PathMap {
 
                 self.notify_event(PathEvent::PeerMigrated(local_addr, peer_addr));
             } else {
-                new_active_path.migrating = true;
+                new_active_path.usage = PathUsage::ActiveMigrationPending;
 
                 // Requests path validation if needed.
                 if !new_active_path.under_validation() {
@@ -1194,17 +1200,108 @@ mod tests {
     use crate::test_utils;
     use crate::MIN_CLIENT_INITIAL_LEN;
 
-    use crate::recovery::RecoveryConfig;
     use crate::Config;
 
     use super::*;
+
+    #[test]
+    fn validation_attempt_abandonment_discards_probe_history_and_rearms_event() {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery = config.recovery;
+        let local = "127.0.0.1:1234".parse().unwrap();
+        let old_peer = "127.0.0.1:4321".parse().unwrap();
+        let peer = "127.0.0.1:4322".parse().unwrap();
+        let now = Instant::now();
+
+        let initial = Path::new(local, old_peer, &recovery, 4, true, None);
+        let mut paths = PathMap::new(initial, 2, false);
+        let (pid, _) = paths
+            .insert_path(Path::new(local, peer, &recovery, 4, false, None), false)
+            .unwrap();
+
+        // A previously validated path can later fail a fresh probe.
+        let path = paths.get_mut(pid).unwrap();
+        path.add_challenge_sent([1; 8], MIN_CLIENT_INITIAL_LEN, now);
+        paths.on_response_received([1; 8]).unwrap();
+        assert_eq!(paths.pop_event(), Some(PathEvent::Validated(local, peer)));
+
+        let path = paths.get_mut(pid).unwrap();
+        path.add_challenge_sent([2; 8], MIN_CLIENT_INITIAL_LEN, now);
+        path.on_failed_validation();
+        paths.notify_failed_validations();
+        assert_eq!(
+            paths.pop_event(),
+            Some(PathEvent::FailedValidation(local, peer))
+        );
+        paths.notify_failed_validations();
+        assert_eq!(paths.pop_event(), None);
+
+        // Responses to abandoned probes must not validate a later attempt.
+        paths.on_response_received([2; 8]).unwrap();
+        assert_eq!(paths.get(pid).unwrap().validation.state, PathState::Failed);
+        assert_eq!(paths.pop_event(), None);
+
+        // A new small probe proves the address, not the old path MTU.
+        let path = paths.get_mut(pid).unwrap();
+        path.request_validation();
+        path.add_challenge_sent([3; 8], MIN_CLIENT_INITIAL_LEN - 1, now);
+        paths.on_response_received([3; 8]).unwrap();
+        let path = paths.get_mut(pid).unwrap();
+        assert!(path.under_validation());
+        assert!(!path.validated());
+        assert!(path.validation_requested());
+        assert_eq!(paths.pop_event(), None);
+
+        // The next failure is a distinct event, not suppressed by the first.
+        paths.get_mut(pid).unwrap().on_failed_validation();
+        paths.notify_failed_validations();
+        assert_eq!(
+            paths.pop_event(),
+            Some(PathEvent::FailedValidation(local, peer))
+        );
+        paths.notify_failed_validations();
+        assert_eq!(paths.pop_event(), None);
+    }
+
+    #[test]
+    fn validation_attempt_verified_address_is_not_amplification_limited() {
+        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let recovery = config.recovery;
+        let local = "127.0.0.1:1234".parse().unwrap();
+        let peer = "127.0.0.1:4321".parse().unwrap();
+        let now = Instant::now();
+        let mut path = Path::new(local, peer, &recovery, 4, false, None);
+
+        path.add_challenge_sent([1; 8], MIN_CLIENT_INITIAL_LEN - 1, now);
+        assert_eq!(path.on_response_received([1; 8]), Some(false));
+        assert!(path.verified_peer_address);
+        assert!(!path.validated());
+        assert_eq!(path.max_send_bytes, 0);
+
+        path.add_challenge_sent([2; 8], MIN_CLIENT_INITIAL_LEN, now);
+        let handshake = HandshakeStatus {
+            has_handshake_keys: false,
+            peer_verified_address: true,
+            completed: true,
+        };
+        path.on_loss_detection_timeout(
+            handshake,
+            now + Duration::from_secs(1),
+            true,
+            "",
+        );
+        // The server is free to retry MTU validation after address proof.
+        assert!(path.under_validation());
+        assert!(path.validation_requested());
+        assert_ne!(path.validation.state, PathState::Failed);
+    }
 
     #[rstest::rstest]
     fn activate_invalid_or_failed_path_preserves_current_path(
         #[values(false, true)] is_server: bool,
     ) {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let first: SocketAddr = "127.0.0.1:4321".parse().unwrap();
         let second: SocketAddr = "127.0.0.1:4322".parse().unwrap();
@@ -1219,13 +1316,13 @@ mod tests {
         let mut paths = PathMap::new(first_path, 2, is_server);
         assert_eq!(paths.set_active_path(usize::MAX), Err(Error::InvalidState));
         assert_eq!(paths.get_active_path_id(), Ok(0));
-        assert!(!paths.get(0).unwrap().superseded);
+        assert!(!paths.get(0).unwrap().usage.is_superseded());
         assert_eq!(paths.pop_event(), None);
 
         // Re-selecting the current path is a no-op, not another migration.
         assert_eq!(paths.set_active_path(0), Ok(()));
         assert_eq!(paths.get_active_path_id(), Ok(0));
-        assert!(!paths.get(0).unwrap().superseded);
+        assert!(!paths.get(0).unwrap().usage.is_superseded());
         assert_eq!(paths.pop_event(), None);
 
         let mut failed = Path::new(
@@ -1236,7 +1333,7 @@ mod tests {
             false,
             None,
         );
-        failed.state = PathState::Failed;
+        failed.validation.state = PathState::Failed;
         failed.active_dcid_seq = Some(1);
         let (failed_id, _) = paths.insert_path(failed, is_server).unwrap();
         // A failed path exists in the slab but cannot become active.
@@ -1245,20 +1342,20 @@ mod tests {
         }
         assert_eq!(paths.set_active_path(failed_id), Err(Error::InvalidState));
         assert_eq!(paths.get_active_path_id(), Ok(0));
-        assert!(!paths.get(0).unwrap().superseded);
-        assert!(!paths.get(failed_id).unwrap().active);
+        assert!(!paths.get(0).unwrap().usage.is_superseded());
+        assert!(!paths.get(failed_id).unwrap().usage.is_active());
         assert_eq!(paths.pop_event(), None);
 
         // A client can select a new path before receiving a spare DCID. The
         // raw active flag, not Path::active(), determines whether another
         // transition is necessary while that identifier is pending.
         let target = paths.get_mut(failed_id).unwrap();
-        target.state = PathState::Validated;
+        target.validation.state = PathState::Validated;
         target.active_dcid_seq = None;
         assert_eq!(paths.set_active_path(failed_id), Ok(()));
-        assert!(!paths.get(0).unwrap().active);
-        assert!(paths.get(0).unwrap().superseded);
-        assert!(paths.get(failed_id).unwrap().active);
+        assert!(!paths.get(0).unwrap().usage.is_active());
+        assert!(paths.get(0).unwrap().usage.is_superseded());
+        assert!(paths.get(failed_id).unwrap().usage.is_active());
         if is_server {
             assert_eq!(
                 paths.pop_event(),
@@ -1271,8 +1368,8 @@ mod tests {
         // Switching back must also clear the raw active bit of the DCID-less
         // path, so the map has exactly one active path again.
         assert_eq!(paths.set_active_path(0), Ok(()));
-        assert!(paths.get(0).unwrap().active);
-        assert!(!paths.get(failed_id).unwrap().active);
+        assert!(paths.get(0).unwrap().usage.is_active());
+        assert!(!paths.get(failed_id).unwrap().usage.is_active());
         assert_eq!(paths.get_active_path_id(), Ok(0));
         if is_server {
             assert_eq!(
@@ -1295,7 +1392,7 @@ mod tests {
         #[case] superseded: bool, #[case] both_busy: bool,
     ) {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let peers = [4321, 4322, 4323, 4324]
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)));
@@ -1307,7 +1404,7 @@ mod tests {
 
         let mut second = Path::new(local, peers[1], &recovery, 4, false, None);
         if superseded {
-            second.state = PathState::Validated;
+            second.validation.state = PathState::Validated;
             second.active_dcid_seq = Some(1);
         } else {
             second.on_challenge_received([0x11; 8]);
@@ -1319,7 +1416,7 @@ mod tests {
 
         let mut third = Path::new(local, peers[2], &recovery, 4, false, None);
         if superseded {
-            third.state = PathState::Validated;
+            third.validation.state = PathState::Validated;
             third.active_dcid_seq = Some(2);
         } else if both_busy {
             third.on_challenge_received([0x33; 8]);
@@ -1368,7 +1465,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let old_peer: SocketAddr = "127.0.0.1:4321".parse().unwrap();
         let new_peer: SocketAddr = "127.0.0.1:4322".parse().unwrap();
@@ -1409,7 +1506,7 @@ mod tests {
             false,
             None,
         );
-        second.state = PathState::Validated;
+        second.validation.state = PathState::Validated;
         second.active_dcid_seq = Some(1);
         let (second_pid, _) = paths.insert_path(second, false).unwrap();
         paths.set_active_path(second_pid).unwrap();
@@ -1469,9 +1566,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
-        let mut recovery = recovery::Recovery::new_with_config(
-            &RecoveryConfig::from_config(&config),
-        );
+        let mut recovery = recovery::Recovery::new_with_config(&config.recovery);
         let now = Instant::now();
         let handshake = HandshakeStatus {
             has_handshake_keys: true,
@@ -1530,7 +1625,7 @@ mod tests {
             "",
         );
         let mut ping_packet = test_utils::helper_packet_sent(4, now, 1200);
-        ping_packet.has_data = false;
+        ping_packet.flight = recovery::PacketFlight::AckEliciting;
         ping_packet.frames.push(Frame::Ping { mtu_probe: None });
         recovery.on_packet_sent(
             ping_packet,
@@ -1571,10 +1666,15 @@ mod tests {
         // ACK-only packets are not themselves acknowledged and must not keep
         // a superseded path alive indefinitely.
         let mut ack_only = test_utils::helper_packet_sent(5, now, 40);
-        ack_only.ack_eliciting = false;
-        ack_only.in_flight = false;
-        ack_only.has_data = false;
-        ack_only.frames.push(Frame::Padding { len: 1 });
+        ack_only.flight = recovery::PacketFlight::NotInFlight;
+        ack_only.size = 0;
+        let mut ranges = RangeSet::default();
+        ranges.push_item(0);
+        ack_only.frames.push(Frame::Ack {
+            ack_delay: 0,
+            ranges,
+            ecn_counts: None,
+        });
         recovery.on_packet_sent(ack_only, Epoch::Application, handshake, now, "");
         assert!(!recovery.has_pending_recovery_work());
     }
@@ -1582,7 +1682,7 @@ mod tests {
     #[test]
     fn amplification_credit_saturates_product_and_accumulation() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             "127.0.0.1:1234".parse().unwrap(),
             "127.0.0.1:4321".parse().unwrap(),
@@ -1611,7 +1711,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1622,7 +1722,7 @@ mod tests {
         );
 
         assert_eq!(path.pmtu_probe_size(true, 1400, false), None);
-        path.state = PathState::Validated;
+        path.validation.state = PathState::Validated;
         assert_eq!(path.pmtu_probe_size(true, 1400, false), Some(1400));
         path.request_validation();
         assert_eq!(path.pmtu_probe_size(true, 1400, false), None);
@@ -1635,7 +1735,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1672,7 +1772,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1705,7 +1805,7 @@ mod tests {
         let server_addr = "127.0.0.1:4321".parse().unwrap();
 
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
 
         let path = Path::new(
             client_addr,
@@ -1746,7 +1846,10 @@ mod tests {
         assert!(!path_mgr.get_mut(pid).unwrap().probing_required());
         assert!(path_mgr.get_mut(pid).unwrap().under_validation());
         assert!(!path_mgr.get_mut(pid).unwrap().validated());
-        assert_eq!(path_mgr.get_mut(pid).unwrap().state, PathState::Validating);
+        assert_eq!(
+            path_mgr.get_mut(pid).unwrap().validation.state,
+            PathState::Validating
+        );
         assert_eq!(path_mgr.pop_event(), None);
 
         // Receives the response. The path is reachable, but the MTU is not
@@ -1758,7 +1861,7 @@ mod tests {
         assert!(path_mgr.get_mut(pid).unwrap().under_validation());
         assert!(!path_mgr.get_mut(pid).unwrap().validated());
         assert_eq!(
-            path_mgr.get_mut(pid).unwrap().state,
+            path_mgr.get_mut(pid).unwrap().validation.state,
             PathState::ValidatingMTU
         );
         assert_eq!(path_mgr.pop_event(), None);
@@ -1778,227 +1881,86 @@ mod tests {
         assert!(!path_mgr.get_mut(pid).unwrap().probing_required());
         assert!(!path_mgr.get_mut(pid).unwrap().under_validation());
         assert!(path_mgr.get_mut(pid).unwrap().validated());
-        assert_eq!(path_mgr.get_mut(pid).unwrap().state, PathState::Validated);
+        assert_eq!(
+            path_mgr.get_mut(pid).unwrap().validation.state,
+            PathState::Validated
+        );
         assert_eq!(
             path_mgr.pop_event(),
             Some(PathEvent::Validated(client_addr_2, server_addr))
         );
     }
 
-    #[test]
-    fn multiple_probes() {
+    #[rstest::rstest]
+    fn challenge_queue_bounds_and_response_retirement(
+        #[values(2, 4)] sent_count: usize,
+    ) {
         let client_addr = "127.0.0.1:1234".parse().unwrap();
         let server_addr = "127.0.0.1:4321".parse().unwrap();
-
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
-
+        let queue_limit = config.path_challenge_recv_max_queue_len;
         let path = Path::new(
             client_addr,
             server_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            &config.recovery,
+            queue_limit,
             true,
             None,
         );
-        let mut client_path_mgr = PathMap::new(path, 2, false);
-        let mut server_path = Path::new(
+        let mut paths = PathMap::new(path, 2, false);
+        let mut peer = Path::new(
             server_addr,
             client_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            &config.recovery,
+            queue_limit,
             false,
             None,
         );
-
-        let client_pid = client_path_mgr
+        let pid = paths
             .path_id_from_addrs(&(client_addr, server_addr))
             .unwrap();
-
-        // First probe.
-        let data = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
-
-        // Second probe.
-        let data_2 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let challenges: Vec<_> =
+            (0..sent_count).map(|i| (i as u64).to_be_bytes()).collect();
+        let now = Instant::now();
+        for (i, &data) in challenges.iter().enumerate() {
+            paths.get_mut(pid).unwrap().add_challenge_sent(
+                data,
+                MIN_CLIENT_INITIAL_LEN,
+                now,
+            );
+            assert_eq!(
+                paths
+                    .get(pid)
+                    .unwrap()
+                    .validation
+                    .in_flight_challenges
+                    .len(),
+                i + 1
+            );
+            peer.on_challenge_received(data);
+            assert_eq!(peer.received_challenges.len(), (i + 1).min(queue_limit));
+        }
+        // A challenge dropped by the bounded receive queue is never answered.
+        for (i, &data) in challenges.iter().take(queue_limit).enumerate() {
+            paths.on_response_received(data).unwrap();
+            assert_eq!(
+                paths
+                    .get(pid)
+                    .unwrap()
+                    .validation
+                    .in_flight_challenges
+                    .len(),
+                sent_count - i - 1
+            );
+        }
         assert_eq!(
-            client_path_mgr
-                .get(client_pid)
+            paths
+                .get(pid)
                 .unwrap()
+                .validation
                 .in_flight_challenges
                 .len(),
-            2
+            sent_count.saturating_sub(queue_limit)
         );
-
-        // If we receive multiple challenges, we can store them.
-        server_path.on_challenge_received(data);
-        assert_eq!(server_path.received_challenges.len(), 1);
-        server_path.on_challenge_received(data_2);
-        assert_eq!(server_path.received_challenges.len(), 2);
-
-        // Response for first probe.
-        client_path_mgr.on_response_received(data).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            1
-        );
-
-        // Response for second probe.
-        client_path_mgr.on_response_received(data_2).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn too_many_probes() {
-        let client_addr = "127.0.0.1:1234".parse().unwrap();
-        let server_addr = "127.0.0.1:4321".parse().unwrap();
-
-        // Default to DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN
-        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
-
-        let path = Path::new(
-            client_addr,
-            server_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
-            true,
-            None,
-        );
-        let mut client_path_mgr = PathMap::new(path, 2, false);
-        let mut server_path = Path::new(
-            server_addr,
-            client_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
-            false,
-            None,
-        );
-
-        let client_pid = client_path_mgr
-            .path_id_from_addrs(&(client_addr, server_addr))
-            .unwrap();
-
-        // First probe.
-        let data = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
-
-        // Second probe.
-        let data_2 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            2
-        );
-
-        // Third probe.
-        let data_3 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_3, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            3
-        );
-
-        // Fourth probe.
-        let data_4 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_4, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            4
-        );
-
-        // If we receive multiple challenges, we can store them up to our queue
-        // size.
-        server_path.on_challenge_received(data);
-        assert_eq!(server_path.received_challenges.len(), 1);
-        server_path.on_challenge_received(data_2);
-        assert_eq!(server_path.received_challenges.len(), 2);
-        server_path.on_challenge_received(data_3);
-        assert_eq!(server_path.received_challenges.len(), 3);
-        server_path.on_challenge_received(data_4);
-        assert_eq!(server_path.received_challenges.len(), 3);
-
-        // Response for first probe.
-        client_path_mgr.on_response_received(data).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            3
-        );
-
-        // Response for second probe.
-        client_path_mgr.on_response_received(data_2).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            2
-        );
-
-        // Response for third probe.
-        client_path_mgr.on_response_received(data_3).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .in_flight_challenges
-                .len(),
-            1
-        );
-
-        // There will never be a response for fourth probe...
     }
 }

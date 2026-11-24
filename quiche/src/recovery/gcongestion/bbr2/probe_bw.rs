@@ -419,13 +419,14 @@ impl ProbeBW<'_> {
         }
 
         // TODO(vlad): use BytesInFlight?
-        let mut inflight_at_send = send_state.bytes_in_flight;
-        if params.use_bytes_delivered_for_inflight_hi {
-            inflight_at_send = usize::try_from(
+        let inflight_at_send = if params.use_bytes_delivered_for_inflight_hi {
+            usize::try_from(
                 self.model.total_bytes_acked() - send_state.total_bytes_acked,
             )
-            .unwrap_or(usize::MAX);
-        }
+            .unwrap_or(usize::MAX)
+        } else {
+            send_state.bytes_in_flight
+        };
 
         if self.cycle.is_sample_from_probing {
             if self.model.is_inflight_too_high(

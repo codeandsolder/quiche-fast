@@ -30,6 +30,7 @@ use crate::recovery::EpochTiming;
 use crate::recovery::HandshakeStatus;
 use crate::recovery::LossDetectionTimer;
 use crate::recovery::OnAckReceivedOutcome;
+use crate::recovery::PacketFlight;
 use crate::recovery::RangeSet;
 use crate::recovery::RecoveryConfig;
 use crate::recovery::RecoveryDeadline;
@@ -63,10 +64,7 @@ struct SentPacket {
 enum SentStatus {
     Sent {
         time_sent: Instant,
-        ack_eliciting: bool,
-        in_flight: bool,
-        has_data: bool,
-        is_pmtud_probe: bool,
+        flight: PacketFlight,
         sent_bytes: usize,
         frames: SmallVec<[frame::Frame; 1]>,
     },
@@ -149,15 +147,13 @@ impl RecoveryEpoch {
                 if let SentPacket {
                     status:
                         SentStatus::Sent {
-                            in_flight,
-                            sent_bytes,
-                            ..
+                            flight, sent_bytes, ..
                         },
                     pkt_num,
                 } = p
                 {
                     cc.on_packet_neutered(pkt_num);
-                    if in_flight {
+                    if flight.in_flight() {
                         return sent_bytes;
                     }
                 }
@@ -215,13 +211,12 @@ impl RecoveryEpoch {
                     match status.ack() {
                         SentStatus::Sent {
                             time_sent,
-                            in_flight,
+                            flight,
                             sent_bytes,
                             frames,
-                            ack_eliciting,
                             ..
                         } => {
-                            if in_flight {
+                            if flight.in_flight() {
                                 self.timing.in_flight_count -= 1;
                                 acked_bytes += sent_bytes;
                             }
@@ -232,7 +227,7 @@ impl RecoveryEpoch {
 
                             self.acked_frames.extend(frames);
 
-                            has_ack_eliciting |= ack_eliciting;
+                            has_ack_eliciting |= flight.ack_eliciting();
 
                             trace!("{trace_id} packet newly acked {pkt_num}");
                         },
@@ -305,19 +300,18 @@ impl RecoveryEpoch {
 
                 if loss_by_time || loss_by_pkt {
                     if let SentStatus::Sent {
-                        in_flight,
+                        flight,
                         sent_bytes,
                         frames,
-                        is_pmtud_probe,
                         ..
                     } = status.lose()
                     {
                         self.pending_lost_frames.queue_ack(frames);
 
-                        if in_flight {
+                        if flight.in_flight() {
                             self.timing.in_flight_count -= 1;
 
-                            if is_pmtud_probe {
+                            if flight.is_pmtud_probe() {
                                 pmtud_lost_bytes += sent_bytes;
                                 pmtud_lost_packets.push(*pkt_num);
                                 // Do not track PMTUD probes losses
@@ -651,9 +645,7 @@ impl RecoveryOps for GRecovery {
 
         let epoch = &mut self.epochs[epoch];
 
-        let ack_eliciting = pkt.ack_eliciting;
-        let in_flight = pkt.in_flight;
-        let is_pmtud_probe = pkt.is_pmtud_probe;
+        let flight = pkt.flight;
         let pkt_num = pkt.pkt_num;
         let sent_bytes = pkt.size;
 
@@ -663,10 +655,7 @@ impl RecoveryOps for GRecovery {
 
         let status = SentStatus::Sent {
             time_sent,
-            ack_eliciting,
-            in_flight,
-            is_pmtud_probe,
-            has_data: pkt.has_data,
+            flight,
             sent_bytes,
             frames: pkt.frames,
         };
@@ -680,20 +669,20 @@ impl RecoveryOps for GRecovery {
 
         epoch.sent_packets.push_back(SentPacket { pkt_num, status });
 
-        if ack_eliciting {
+        if flight.ack_eliciting() {
             epoch.timing.last_ack_eliciting = Some(time_sent);
             self.outstanding_non_ack_eliciting = 0;
         } else {
             self.outstanding_non_ack_eliciting += 1;
         }
 
-        if in_flight {
+        if flight.in_flight() {
             self.pacer.on_packet_sent(
                 time_sent,
                 self.bytes_in_flight.get(),
                 pkt_num,
                 sent_bytes,
-                pkt.has_data,
+                flight.has_data(),
                 &self.rtt_stats,
             );
 
@@ -886,7 +875,7 @@ impl RecoveryOps for GRecovery {
             .take(sent_packets_iter_limit)
             .filter_map(|p| {
                 if let SentStatus::Sent {
-                    has_data: true,
+                    flight: PacketFlight::Data,
                     frames,
                     ..
                 } = &p.status
@@ -1027,10 +1016,7 @@ impl RecoveryOps for GRecovery {
     fn has_pending_recovery_work(&self) -> bool {
         self.epochs.iter().any(|epoch| {
             epoch.sent_packets.iter().any(|pkt| {
-                matches!(pkt.status, SentStatus::Sent {
-                    ack_eliciting: true,
-                    ..
-                })
+                matches!(pkt.status, SentStatus::Sent { flight, .. } if flight.ack_eliciting())
             }) || !epoch.acked_frames.is_empty() ||
                 epoch.pending_lost_frames.has_pending() ||
                 epoch.loss_probes != 0
@@ -1191,7 +1177,7 @@ mod tests {
     #[test]
     fn loss_threshold() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         assert!(!recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
@@ -1251,7 +1237,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_enable_relaxed_loss_threshold(true);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         assert!(recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
@@ -1290,7 +1276,7 @@ mod tests {
     fn test_high_pto_count_no_panic() {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut r = GRecovery::new(&recovery_config).unwrap();
 
         r.pto_count = 99999;

@@ -56,7 +56,7 @@ pub enum InterruptCause {
 pub enum FrameParseResult {
     /// The frame was unable to be parsed at the current moment. This signifies
     /// that the stream is retryable without another I/O cycle. If another
-    /// I/O cycle is needed, a [`quiche::h3::Error::TransportError`]
+    /// I/O cycle is needed, a [`quiche::h3::Error::Transport`]
     /// containing [`quiche::Error::Done`] will be returned.
     Retry,
     /// A frame has been successfully parsed. `fin` denotes if the FIN bit was
@@ -108,7 +108,7 @@ impl FrameParser {
     /// executing another I/O cycle.
     ///
     /// If the available stream data does not provide a complete frame, a
-    /// [`quiche::h3::Error::TransportError`] containing [`quiche::Error::Done`]
+    /// [`quiche::h3::Error::Transport`] containing [`quiche::Error::Done`]
     /// is returned. Callers should execute an I/O cycle before calling
     /// try_parse_frame() again.
     ///
@@ -121,7 +121,7 @@ impl FrameParser {
         loop {
             let (len, fin) = match self.try_fill_buffer(qconn, self.stream_id) {
                 Ok((l, f)) => (l, f),
-                Err(H3Error::TransportError(quiche::Error::StreamReset(err))) =>
+                Err(H3Error::Transport(quiche::Error::StreamReset(err))) =>
                     return Ok(FrameParseResult::Interrupted(
                         InterruptCause::ResetStream(err),
                     )),
@@ -195,7 +195,7 @@ impl FrameParser {
                     // No need to map to Retry here since we've exhausted the
                     // received bytes and must try another I/O
                     // cycle
-                    return Err(H3Error::TransportError(quiche::Error::Done));
+                    return Err(H3Error::Transport(quiche::Error::Done));
                 },
             }
         }
@@ -218,7 +218,7 @@ impl FrameParser {
                 self.state_offset += len;
                 Ok((len, fin))
             },
-            Err(e) => Err(H3Error::TransportError(e)),
+            Err(e) => Err(H3Error::Transport(e)),
         }
     }
 
@@ -229,7 +229,7 @@ impl FrameParser {
         }
 
         if !self.state_buffer_complete() {
-            return Err(H3Error::TransportError(quiche::Error::Done));
+            return Err(H3Error::Transport(quiche::Error::Done));
         }
 
         let varint = octets::Octets::with_slice(&self.state_buf).get_varint()?;
@@ -359,7 +359,7 @@ mod tests {
         s.send_arbitrary_stream_data_client(&[0], 0, false)
             .expect("first");
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[10; 11], 0, true)
             .expect("second");
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(res, FrameParseResult::Retry);
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[64, 5, 1, 2, 3, 4, 5], 0, true)
             .expect("second");
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(res, FrameParseResult::Retry);
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[5, 1, 2, 3, 4, 5], 0, false)
             .expect("second");
@@ -462,7 +462,7 @@ mod tests {
         s.send_arbitrary_stream_data_client(&[0, 10], 0, false)
             .expect("first");
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[57; 10], 0, true)
             .expect("second");
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(res, FrameParseResult::Retry);
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[64; 65], 0, true)
             .expect("second");
@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(res, FrameParseResult::Retry);
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[0; 64], 0, true)
             .expect("second");
@@ -597,7 +597,7 @@ mod tests {
         s.send_arbitrary_stream_data_client(&[0, 5, 1], 0, false)
             .expect("first");
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
 
         s.send_arbitrary_stream_data_client(&[2, 3, 4, 5], 0, false)
             .expect("second");
@@ -627,7 +627,7 @@ mod tests {
         });
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
         assert_eq!(parser.ty, Some(0));
         assert_eq!(parser.curr_state, FrameState::Len);
     }
@@ -697,7 +697,7 @@ mod tests {
         });
 
         let res = parser.try_parse_frame(&mut s.pipe.server);
-        assert_eq!(res, Err(H3Error::TransportError(quiche::Error::Done)));
+        assert_eq!(res, Err(H3Error::Transport(quiche::Error::Done)));
         assert_eq!(parser.ty, Some(0));
         assert_eq!(parser.len, Some(3));
         assert_eq!(parser.state_buf, vec![1, 0, 0]);

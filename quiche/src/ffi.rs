@@ -25,6 +25,7 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::ffi;
+use std::mem::offset_of;
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::slice;
@@ -59,21 +60,6 @@ use libc::AF_INET6;
 use windows_sys::Win32::Networking::WinSock::AF_INET6;
 
 #[cfg(not(windows))]
-use libc::in_addr;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN_ADDR as in_addr;
-
-#[cfg(not(windows))]
-use libc::in6_addr;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN6_ADDR as in6_addr;
-
-#[cfg(not(windows))]
-use libc::sa_family_t;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::ADDRESS_FAMILY as sa_family_t;
-
-#[cfg(not(windows))]
 use libc::sockaddr_in;
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN as sockaddr_in;
@@ -93,13 +79,6 @@ use libc::c_int as socklen_t;
 #[cfg(not(windows))]
 use libc::socklen_t;
 
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN6_ADDR_0;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN_ADDR_0;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6_0;
-
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -113,6 +92,7 @@ use crate::CongestionControlAlgorithm;
 use crate::Connection;
 use crate::ConnectionError;
 use crate::ConnectionId;
+use crate::ConnectionStart;
 use crate::Error;
 use crate::Header;
 use crate::PathEvent;
@@ -123,6 +103,26 @@ use crate::SocketAddrIter;
 use crate::StreamIter;
 use crate::TxBufferTrackingState;
 use crate::Type;
+
+// Both socket2 and libc/windows-sys describe the target socket ABI.
+const _: () = {
+    assert!(
+        size_of::<socket2::SockAddrStorage>() == size_of::<sockaddr_storage>()
+    );
+    assert!(
+        align_of::<socket2::SockAddrStorage>() == align_of::<sockaddr_storage>()
+    );
+    assert!(size_of::<sockaddr_in>() <= size_of::<sockaddr_storage>());
+    assert!(size_of::<sockaddr_in6>() <= size_of::<sockaddr_storage>());
+    assert!(align_of::<sockaddr_in>() <= align_of::<sockaddr_storage>());
+    assert!(align_of::<sockaddr_in6>() <= align_of::<sockaddr_storage>());
+    assert!(
+        offset_of!(sockaddr, sa_family) == offset_of!(sockaddr_in, sin_family)
+    );
+    assert!(
+        offset_of!(sockaddr, sa_family) == offset_of!(sockaddr_in6, sin6_family)
+    );
+};
 
 const FFI_ERR_INVALID_ARGUMENT: i16 = -24;
 
@@ -718,8 +718,8 @@ pub extern "C" fn quiche_config_set_cc_algorithm(
     let algorithm = match algo {
         v if v == CongestionControlAlgorithm::Reno as c_int =>
             CongestionControlAlgorithm::Reno,
-        v if v == CongestionControlAlgorithm::CUBIC as c_int =>
-            CongestionControlAlgorithm::CUBIC,
+        v if v == CongestionControlAlgorithm::Cubic as c_int =>
+            CongestionControlAlgorithm::Cubic,
         v if v == CongestionControlAlgorithm::Bbr2Gcongestion as c_int =>
             CongestionControlAlgorithm::Bbr2Gcongestion,
         _ => return c_int::from(FFI_ERR_INVALID_ARGUMENT),
@@ -1058,13 +1058,13 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 
         into_raw_or_null(Connection::with_tls(
             &scid,
-            None, // retry_cids
-            dcid.as_ref(),
+            ConnectionStart::Client {
+                dcid: dcid.as_ref(),
+            },
             local,
             peer,
             config,
             tls,
-            false,
         ))
     }
 }
@@ -1116,9 +1116,13 @@ pub extern "C" fn quiche_conn_new_with_tls(
         return ptr::null_mut();
     };
 
-    into_raw_or_null(Connection::with_tls(
-        &scid, retry_cids, None, local, peer, config, tls, is_server,
-    ))
+    let start = match (is_server, retry_cids) {
+        (true, retry) => ConnectionStart::Server { retry },
+        (false, None) => ConnectionStart::Client { dcid: None },
+        (false, Some(_)) => return ptr::null_mut(),
+    };
+
+    into_raw_or_null(Connection::with_tls(&scid, start, local, peer, config, tls))
 }
 
 #[no_mangle]
@@ -2731,9 +2735,6 @@ unsafe fn std_addr_from_c(
     // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
     // the caller guarantees the corresponding field is readable.
     let family = unsafe { (&raw const (*addr).sa_family).read() };
-    // `AF_INET` is a c_int on Unix but an ADDRESS_FAMILY (u16) on Windows.
-    // Normalize both the incoming family and the platform constants before
-    // comparing; no lossy narrowing or inferred match-pattern types.
     match c_int::from(family) {
         found if found == c_int::from(AF_INET) => {
             let in4 = addr.cast::<sockaddr_in>();
@@ -2817,107 +2818,13 @@ unsafe fn std_addr_from_c(
 }
 
 fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
-    // SAFETY: the platform sockaddr_storage type consists of integer/byte
-    // fields, all of which admit zero initialization.
-    let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
-    let sin_port = addr.port().to_be();
-
-    let len = match addr {
-        SocketAddr::V4(addr) => {
-            let sa_len = size_of::<sockaddr_in>();
-            let out_in = (&raw mut out).cast::<sockaddr_in>();
-
-            let s_addr = u32::from_ne_bytes(addr.ip().octets());
-
-            #[cfg(not(windows))]
-            let sin_addr = in_addr { s_addr };
-            #[cfg(windows)]
-            let sin_addr = in_addr {
-                S_un: IN_ADDR_0 { S_addr: s_addr },
-            };
-
-            let address = sockaddr_in {
-                sin_family: sa_family_t::try_from(AF_INET)
-                    .expect("IPv4 family fits sa_family_t"),
-
-                sin_addr,
-
-                #[cfg(any(
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                    target_os = "openbsd",
-                    target_os = "netbsd"
-                ))]
-                sin_len: u8::try_from(sa_len)
-                    .expect("sockaddr_in size fits in u8"),
-
-                sin_port,
-
-                sin_zero: [0; 8],
-            };
-
-            // SAFETY: sockaddr_storage has sufficient size and alignment
-            // for sockaddr_in; the raw pointer comes from this local object.
-            unsafe { out_in.write(address) };
-            socklen_t::try_from(sa_len)
-                .expect("socket address size fits socklen_t")
-        },
-
-        SocketAddr::V6(addr) => {
-            let sa_len = size_of::<sockaddr_in6>();
-            let out_in6 = (&raw mut out).cast::<sockaddr_in6>();
-
-            #[cfg(not(windows))]
-            let sin6_addr = in6_addr {
-                s6_addr: addr.ip().octets(),
-            };
-            #[cfg(windows)]
-            let sin6_addr = in6_addr {
-                u: IN6_ADDR_0 {
-                    Byte: addr.ip().octets(),
-                },
-            };
-
-            let address = sockaddr_in6 {
-                sin6_family: sa_family_t::try_from(AF_INET6)
-                    .expect("IPv6 family fits sa_family_t"),
-
-                sin6_addr,
-
-                #[cfg(any(
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                    target_os = "openbsd",
-                    target_os = "netbsd"
-                ))]
-                sin6_len: u8::try_from(sa_len)
-                    .expect("sockaddr_in6 size fits in u8"),
-
-                sin6_port: sin_port,
-
-                sin6_flowinfo: addr.flowinfo(),
-
-                #[cfg(not(windows))]
-                sin6_scope_id: addr.scope_id(),
-                #[cfg(windows)]
-                Anonymous: SOCKADDR_IN6_0 {
-                    sin6_scope_id: addr.scope_id(),
-                },
-            };
-
-            // SAFETY: sockaddr_storage has sufficient size and alignment
-            // for sockaddr_in6; the raw pointer comes from this local object.
-            unsafe { out_in6.write(address) };
-            socklen_t::try_from(sa_len)
-                .expect("socket address size fits socklen_t")
-        },
-    };
+    let address = socket2::SockAddr::from(*addr);
+    let len = address.len();
+    let mut storage = address.as_storage();
+    // SAFETY: socket2 exposes view_as for platform sockaddr types. Size
+    // and alignment equality with our target ABI type are checked above.
+    // The address was fully initialized by the SocketAddr conversion.
+    let out = unsafe { *storage.view_as::<sockaddr_storage>() };
     (out, len)
 }
 
@@ -3226,20 +3133,26 @@ mod tests {
     fn c_algorithm_discriminants_are_checked_before_configuration() {
         let mut config = Config::new(PROTOCOL_VERSION).unwrap();
         assert_eq!(quiche_config_set_cc_algorithm(&mut config, 0), 0);
-        assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+        assert_eq!(
+            config.recovery.cc_algorithm,
+            CongestionControlAlgorithm::Reno
+        );
         for invalid in [-1, 2, 3, 5, c_int::MAX] {
             assert_eq!(
                 quiche_config_set_cc_algorithm(&mut config, invalid),
                 c_int::from(FFI_ERR_INVALID_ARGUMENT)
             );
-            assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+            assert_eq!(
+                config.recovery.cc_algorithm,
+                CongestionControlAlgorithm::Reno
+            );
         }
         for (value, algorithm) in [
-            (1, CongestionControlAlgorithm::CUBIC),
+            (1, CongestionControlAlgorithm::Cubic),
             (4, CongestionControlAlgorithm::Bbr2Gcongestion),
         ] {
             assert_eq!(quiche_config_set_cc_algorithm(&mut config, value), 0);
-            assert_eq!(config.cc_algorithm, algorithm);
+            assert_eq!(config.recovery.cc_algorithm, algorithm);
         }
     }
 
@@ -3542,6 +3455,41 @@ mod tests {
     }
 
     #[test]
+    fn socket_address_layout_roundtrips_both_families() {
+        let cases = [
+            (
+                SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 0, 2, 1),
+                    65535,
+                )),
+                c_int::from(AF_INET),
+                size_of::<sockaddr_in>(),
+            ),
+            (
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    12345,
+                    0x12345678,
+                    42,
+                )),
+                c_int::from(AF_INET6),
+                size_of::<sockaddr_in6>(),
+            ),
+        ];
+        for (address, family, expected_len) in cases {
+            let (storage, len) = std_addr_to_c(&address);
+            assert_eq!(usize::try_from(len).unwrap(), expected_len);
+            let ptr = (&raw const storage).cast::<sockaddr>();
+            // SAFETY: std_addr_to_c initialized this supported sockaddr layout.
+            assert_eq!(
+                c_int::from(unsafe { (&raw const (*ptr).sa_family).read() }),
+                family
+            );
+            assert_eq!(unsafe { std_addr_from_c(ptr, len) }, Ok(address));
+        }
+    }
+
+    #[test]
     fn address_decoder_checks_length_before_reading_memory() {
         // SAFETY: invalid lengths and nulls are rejected before reading.
         let dangling = ptr::NonNull::<sockaddr>::dangling().as_ptr();
@@ -3562,7 +3510,7 @@ mod tests {
     #[test]
     fn malformed_sockaddr_is_rejected() {
         let mut addr: sockaddr = unsafe { std::mem::zeroed() };
-        addr.sa_family = AF_INET as sa_family_t;
+        addr.sa_family = AF_INET.try_into().unwrap();
 
         assert_eq!(unsafe { std_addr_from_c(&addr, 0) }, Err(()));
 

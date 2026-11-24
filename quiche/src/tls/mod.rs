@@ -1439,7 +1439,17 @@ extern "C" {
 }
 
 mod boringssl;
-use boringssl::*;
+use boringssl::get_session_bytes;
+use boringssl::SSL_CTX_set1_groups_list;
+use boringssl::SSL_CTX_set_session_cache_mode;
+use boringssl::SSL_CTX_set_tlsext_ticket_keys;
+use boringssl::SSL_get_ex_new_index;
+use boringssl::SSL_set_max_proto_version;
+use boringssl::SSL_set_min_proto_version;
+use boringssl::SSL_set_tlsext_host_name;
+use boringssl::QUICHE_STREAM_METHOD;
+use boringssl::SSL_QUIC_METHOD;
+use boringssl::TLS_ERROR;
 
 #[cfg(test)]
 mod tests {

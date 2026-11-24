@@ -48,7 +48,7 @@ pub static RENO: CongestionControlOps = CongestionControlOps {
     rollback,
     #[cfg(feature = "qlog")]
     state_str,
-    debug_fmt,
+    debug_fmt: None,
 };
 
 pub const fn on_init(_r: &mut Congestion) {}
@@ -83,28 +83,27 @@ fn on_packet_acked(
         return;
     }
 
-    if r.congestion_window < r.ssthresh.get() {
+    if r.cwnd < r.ssthresh.get() {
         if r.hystart.in_css() {
-            r.congestion_window = r
-                .congestion_window
-                .saturating_add(r.hystart.css_cwnd_inc(r.max_datagram_size));
+            r.cwnd = r.cwnd.saturating_add(
+                super::hystart::Hystart::css_cwnd_inc(r.max_datagram_size),
+            );
         } else {
             // RFC 9002, Section 7.3.1: while a sender is in slow start, the
             // congestion window increases by the number of bytes acknowledged.
-            r.congestion_window = r.congestion_window.saturating_add(packet.size);
+            r.cwnd = r.cwnd.saturating_add(packet.size);
         }
 
         if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
             // Exit to congestion avoidance if CSS ends.
-            r.ssthresh.update(r.congestion_window, true);
+            r.ssthresh.update(r.cwnd, true);
         }
     } else {
         // Congestion avoidance.
         let acked = r.bytes_acked_ca as u128 + packet.size as u128;
-        let remainder = if acked >= r.congestion_window as u128 {
-            let remainder = acked - r.congestion_window as u128;
-            r.congestion_window =
-                r.congestion_window.saturating_add(r.max_datagram_size);
+        let remainder = if acked >= r.cwnd as u128 {
+            let remainder = acked - r.cwnd as u128;
+            r.cwnd = r.cwnd.saturating_add(r.max_datagram_size);
             remainder
         } else {
             acked
@@ -122,18 +121,18 @@ fn congestion_event(
     let time_sent = largest_lost_pkt.time_sent;
 
     if !r.in_congestion_recovery(time_sent) {
-        r.congestion_recovery_start_time = Some(now);
+        r.recovery_started_at = Some(now);
 
-        r.congestion_window /= 2;
+        r.cwnd /= 2;
 
-        r.congestion_window = cmp::max(
-            r.congestion_window,
+        r.cwnd = cmp::max(
+            r.cwnd,
             r.max_datagram_size.saturating_mul(MINIMUM_WINDOW_PACKETS),
         );
 
-        r.bytes_acked_ca = r.congestion_window / 2;
+        r.bytes_acked_ca = r.cwnd / 2;
 
-        r.ssthresh.update(r.congestion_window, r.hystart.in_css());
+        r.ssthresh.update(r.cwnd, r.hystart.in_css());
 
         if r.hystart.in_css() {
             r.hystart.congestion_event();
@@ -151,19 +150,13 @@ const fn rollback(_r: &mut Congestion) -> bool {
 pub fn state_str(r: &Congestion, now: Instant) -> &'static str {
     if r.hystart.in_css() {
         "conservative_slow_start"
-    } else if r.congestion_window < r.ssthresh.get() {
+    } else if r.cwnd < r.ssthresh.get() {
         "slow_start"
     } else if r.in_congestion_recovery(now) {
         "recovery"
     } else {
         "congestion_avoidance"
     }
-}
-
-const fn debug_fmt(
-    _r: &Congestion, _f: &mut std::fmt::Formatter,
-) -> std::fmt::Result {
-    Ok(())
 }
 
 #[cfg(test)]
@@ -187,14 +180,14 @@ mod tests {
         let mut sender = test_sender();
         let mss = sender.max_datagram_size;
         let cwnd = usize::MAX - mss / 2;
-        sender.congestion_window = cwnd;
+        sender.cwnd = cwnd;
         sender.ssthresh.update(cwnd, false);
         sender.bytes_acked_ca = cwnd - 1;
         sender.send_packet(mss);
         sender.update_app_limited(false);
         sender.advance_time(Duration::from_millis(100));
         sender.ack_n_packets(1, mss);
-        assert_eq!(sender.congestion_window, usize::MAX);
+        assert_eq!(sender.cwnd, usize::MAX);
         assert_eq!(sender.bytes_acked_ca, mss - 1);
     }
 
@@ -219,12 +212,12 @@ mod tests {
             sender.send_packet(size);
         }
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
 
         sender.ack_n_packets(1, size);
 
         // Check if cwnd increased by packet size (slow start).
-        assert_eq!(sender.congestion_window, cwnd_prev + size);
+        assert_eq!(sender.cwnd, cwnd_prev + size);
     }
 
     #[test]
@@ -240,10 +233,10 @@ mod tests {
         sender.send_packet(partial);
         sender.ack_n_packets(sender.initial_congestion_window_packets, size);
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
         sender.ack_n_packets(1, partial);
 
-        assert_eq!(sender.congestion_window, cwnd_prev + partial);
+        assert_eq!(sender.cwnd, cwnd_prev + partial);
     }
 
     #[test]
@@ -256,12 +249,12 @@ mod tests {
             sender.send_packet(size);
         }
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
 
         sender.ack_n_packets(3, size);
 
         // Acked 3 packets.
-        assert_eq!(sender.congestion_window, cwnd_prev + size * 3);
+        assert_eq!(sender.cwnd, cwnd_prev + size * 3);
     }
 
     #[test]
@@ -273,7 +266,7 @@ mod tests {
             sender.send_packet(size);
         }
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
         let now = sender.time;
 
         sender.inject_ack(
@@ -291,7 +284,7 @@ mod tests {
             now,
         );
 
-        assert_eq!(sender.congestion_window, cwnd_prev);
+        assert_eq!(sender.cwnd, cwnd_prev);
     }
 
     #[test]
@@ -299,23 +292,23 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
-        let prev_cwnd = sender.congestion_window;
+        let prev_cwnd = sender.cwnd;
 
         sender.send_packet(size);
         sender.lose_n_packets(1, size, None);
 
         // In Reno, after congestion event, cwnd will be cut in half.
-        assert_eq!(prev_cwnd / 2, sender.congestion_window);
+        assert_eq!(prev_cwnd / 2, sender.cwnd);
     }
 
     #[test]
     fn reno_loss_reduction_is_exact_at_width_limit() {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
-        sender.congestion_window = usize::MAX;
+        sender.cwnd = usize::MAX;
         sender.send_packet(size);
         sender.lose_n_packets(1, size, None);
-        assert_eq!(sender.congestion_window, usize::MAX / 2);
+        assert_eq!(sender.cwnd, usize::MAX / 2);
         assert_eq!(sender.bytes_acked_ca, usize::MAX / 4);
     }
 
@@ -330,14 +323,14 @@ mod tests {
         }
 
         let rtt = Duration::from_millis(100);
-        let prev_cwnd = sender.congestion_window;
+        let prev_cwnd = sender.cwnd;
 
         sender.advance_time(rtt);
         sender.lose_n_packets(1, size, None);
 
         // After congestion event, cwnd will be reduced.
         let cur_cwnd = prev_cwnd / 2;
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         sender.update_rtt(rtt);
         sender.advance_time(2 * rtt);
@@ -345,7 +338,7 @@ mod tests {
         sender.ack_n_packets(13, size);
         // Acked packets were sent before the loss event, window does not
         // increase.
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         for _ in 0..7 {
             sender.send_packet(size);
@@ -353,11 +346,11 @@ mod tests {
         sender.advance_time(rtt);
         sender.ack_n_packets(2, size);
         // Not enough ACKed, window does not increase.
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         sender.ack_n_packets(1, size);
         // Expect cwnd increased by MSS
-        assert_eq!(sender.congestion_window, cur_cwnd + size);
+        assert_eq!(sender.cwnd, cur_cwnd + size);
 
         for _ in 0..7 {
             sender.send_packet(size);
@@ -366,9 +359,9 @@ mod tests {
         // Expect a second window increase after a cwnd's worth of ACKs.
         sender.ack_n_packets(5, size);
         // Not yet, one more ACK needed.
-        assert_eq!(sender.congestion_window, cur_cwnd + size);
+        assert_eq!(sender.cwnd, cur_cwnd + size);
         sender.ack_n_packets(1, size);
         // Expect cwnd increased by MSS
-        assert_eq!(sender.congestion_window, cur_cwnd + 2 * size);
+        assert_eq!(sender.cwnd, cur_cwnd + 2 * size);
     }
 }

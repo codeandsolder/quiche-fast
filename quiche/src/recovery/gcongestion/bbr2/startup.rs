@@ -38,7 +38,7 @@ use super::BBRv2CongestionEvent;
 
 /// Returns whether startup has reached full bandwidth and should drain.
 pub(super) fn on_congestion_event(
-    model: &mut BBRv2NetworkModel, congestion_event: &mut BBRv2CongestionEvent,
+    model: &mut BBRv2NetworkModel, congestion_event: &BBRv2CongestionEvent,
     params: &Params, recovery_stats: &mut RecoveryStats,
 ) -> bool {
     if model.full_bandwidth_reached() {

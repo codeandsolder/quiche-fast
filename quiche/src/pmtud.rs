@@ -26,6 +26,33 @@ pub const MAX_PROBES_DEFAULT: u8 = 3;
 /// For QUIC, this is 1200 bytes per <https://datatracker.ietf.org/doc/html/rfc9000#section-14.1>
 const MIN_PLPMTU: usize = crate::MIN_CLIENT_INITIAL_LEN;
 
+/// PMTU discovery settings retained even when discovery is disabled.
+pub(super) struct Config {
+    pub(crate) enabled: bool,
+    pub(crate) max_probes: u8,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            max_probes: MAX_PROBES_DEFAULT,
+        }
+    }
+}
+
+impl Config {
+    pub(crate) fn create(
+        &self, send_limit: usize, receive_limit: u64,
+    ) -> Option<Pmtud> {
+        self.enabled.then(|| {
+            let limit = send_limit
+                .min(usize::try_from(receive_limit).unwrap_or(usize::MAX));
+            Pmtud::new(limit, self.max_probes)
+        })
+    }
+}
+
 #[derive(Default)]
 pub struct Pmtud {
     /// The PMTU after the completion of PMTUD.
@@ -279,6 +306,26 @@ impl std::fmt::Debug for Pmtud {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configuration_retains_probe_policy_and_bounds_by_both_limits() {
+        let mut config = Config::default();
+        assert!(config.create(1500, 1450).is_none());
+        config.max_probes = 7;
+        config.enabled = true;
+
+        for (send, recv, expected) in [(1500, 1450, 1450), (1400, u64::MAX, 1400)]
+        {
+            let pmtud = config.create(send, recv).unwrap();
+            assert_eq!(pmtud.get_probe_size(), expected);
+            assert_eq!(pmtud.max_probes, 7);
+        }
+
+        config.enabled = false;
+        assert!(config.create(1500, 1450).is_none());
+        config.enabled = true;
+        assert_eq!(config.create(1500, 1450).unwrap().max_probes, 7);
+    }
 
     #[test]
     fn pmtud_initial_state() {

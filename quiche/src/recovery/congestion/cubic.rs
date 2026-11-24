@@ -54,7 +54,7 @@ pub static CUBIC: CongestionControlOps = CongestionControlOps {
     rollback,
     #[cfg(feature = "qlog")]
     state_str,
-    debug_fmt,
+    debug_fmt: Some(debug_fmt),
 };
 
 // RFC 9438 specifies beta = 0.7. Byte counts use the rational 7/10
@@ -207,7 +207,7 @@ struct CurveState {
 /// <https://tools.ietf.org/id/draft-ietf-tcpm-rfc8312bis-00.html#section-4.9>
 #[derive(Debug)]
 struct PriorState {
-    congestion_window: usize,
+    cwnd: usize,
     ssthresh: usize,
     curve: CurveState,
     recovery_start: Option<Instant>,
@@ -323,7 +323,7 @@ fn on_packet_acked(
         let new_lost = r.lost_count.saturating_sub(prior.lost_count);
 
         let rollback_threshold = crate::scale::scale_ratio_usize(
-            r.congestion_window / r.max_datagram_size,
+            r.cwnd / r.max_datagram_size,
             ROLLBACK_THRESHOLD_PERCENT as u64,
             100,
             crate::scale::Rounding::Down,
@@ -331,9 +331,7 @@ fn on_packet_acked(
 
         let rollback_threshold = rollback_threshold.max(MIN_ROLLBACK_THRESHOLD);
 
-        if r.congestion_recovery_start_time.is_some() &&
-            new_lost < rollback_threshold
-        {
+        if r.recovery_started_at.is_some() && new_lost < rollback_threshold {
             let did_rollback = rollback(r);
             if did_rollback {
                 return;
@@ -341,7 +339,7 @@ fn on_packet_acked(
         }
     }
 
-    if r.congestion_window < r.ssthresh.get() {
+    if r.cwnd < r.ssthresh.get() {
         slow_start_ack(r, packet, now, rtt_stats);
     } else {
         congestion_avoidance_ack(r, packet, now, rtt_stats);
@@ -356,11 +354,11 @@ fn slow_start_ack(
     let acked = r.bytes_acked_sl as u128 + packet.size as u128;
     let remainder = if acked >= r.max_datagram_size as u128 {
         let increase = if r.hystart.in_css() {
-            r.hystart.css_cwnd_inc(r.max_datagram_size)
+            super::hystart::Hystart::css_cwnd_inc(r.max_datagram_size)
         } else {
             r.max_datagram_size
         };
-        r.congestion_window = r.congestion_window.saturating_add(increase);
+        r.cwnd = r.cwnd.saturating_add(increase);
 
         acked - r.max_datagram_size as u128
     } else {
@@ -370,7 +368,7 @@ fn slow_start_ack(
 
     if r.hystart.on_packet_acked(packet, rtt_stats.latest_rtt, now) {
         // Exit to congestion avoidance if CSS ends.
-        r.ssthresh.update(r.congestion_window, true);
+        r.ssthresh.update(r.cwnd, true);
     }
 }
 
@@ -379,9 +377,9 @@ fn congestion_avoidance_ack(
 ) {
     let curve = &mut r.cubic_state.curve;
     let ca_start_time = *curve.epoch_start.get_or_insert_with(|| {
-        curve.w_max = Window::bytes(r.congestion_window);
+        curve.w_max = Window::bytes(r.cwnd);
         curve.k = 0.0;
-        curve.w_est = Window::bytes(r.congestion_window);
+        curve.w_est = Window::bytes(r.cwnd);
         curve.reno_gain = RenoGain::Reduced;
         r.hystart.css_start_time().unwrap_or(now)
     });
@@ -395,18 +393,17 @@ fn congestion_avoidance_ack(
         .w_cubic(t.saturating_add(*rtt_stats.min_rtt), r.max_datagram_size);
 
     // Clip to [cwnd, 1.5 * cwnd] in the exact integer byte domain.
-    let target = target.whole().clamp(
-        r.congestion_window,
-        r.congestion_window.saturating_add(r.congestion_window / 2),
-    );
+    let target = target
+        .whole()
+        .clamp(r.cwnd, r.cwnd.saturating_add(r.cwnd / 2));
 
     r.cubic_state.curve.update_reno_estimate(
         packet.size,
-        r.congestion_window,
+        r.cwnd,
         r.max_datagram_size,
     );
 
-    let mut cubic_cwnd = r.congestion_window;
+    let mut cubic_cwnd = r.cwnd;
 
     if r.cubic_state.curve.w_cubic(t, r.max_datagram_size) <
         r.cubic_state.curve.w_est
@@ -433,11 +430,10 @@ fn congestion_avoidance_ack(
     }
 
     // Update the increment and increase cwnd by MSS.
-    let increment = r.cubic_state.curve.cwnd_inc as u128 +
-        (cubic_cwnd - r.congestion_window) as u128;
+    let increment =
+        r.cubic_state.curve.cwnd_inc as u128 + (cubic_cwnd - r.cwnd) as u128;
     let remainder = if increment >= r.max_datagram_size as u128 {
-        r.congestion_window =
-            r.congestion_window.saturating_add(r.max_datagram_size);
+        r.cwnd = r.cwnd.saturating_add(r.max_datagram_size);
         increment - r.max_datagram_size as u128
     } else {
         increment
@@ -456,37 +452,35 @@ fn congestion_event(
     // Start a new congestion event if packet was sent after the
     // start of the previous congestion recovery period.
     if !in_congestion_recovery {
-        r.congestion_recovery_start_time = Some(now);
+        r.recovery_started_at = Some(now);
         r.cubic_state.curve.epoch_start = Some(now);
 
         // Fast convergence uses the exact rational (1 + beta) / 2 = 17/20.
-        let window = Window::bytes(r.congestion_window);
+        let window = Window::bytes(r.cwnd);
         r.cubic_state.curve.w_max = if window < r.cubic_state.curve.w_max {
             Window(window.0 * 17 / 20)
         } else {
             window
         };
 
-        let ssthresh = beta_reduce(r.congestion_window);
+        let ssthresh = beta_reduce(r.cwnd);
         let ssthresh = cmp::max(
             ssthresh,
             r.max_datagram_size.saturating_mul(MINIMUM_WINDOW_PACKETS),
         );
         r.ssthresh.update(ssthresh, r.hystart.in_css());
-        r.congestion_window = ssthresh;
+        r.cwnd = ssthresh;
 
         r.cubic_state.curve.k =
-            if r.cubic_state.curve.w_max < Window::bytes(r.congestion_window) {
+            if r.cubic_state.curve.w_max < Window::bytes(r.cwnd) {
                 0.0
             } else {
-                r.cubic_state
-                    .curve
-                    .cubic_k(r.congestion_window, r.max_datagram_size)
+                r.cubic_state.curve.cubic_k(r.cwnd, r.max_datagram_size)
             };
 
         r.cubic_state.curve.cwnd_inc = beta_reduce(r.cubic_state.curve.cwnd_inc);
 
-        r.cubic_state.curve.w_est = Window::bytes(r.congestion_window);
+        r.cubic_state.curve.w_est = Window::bytes(r.cwnd);
         r.cubic_state.curve.reno_gain = RenoGain::Reduced;
 
         if r.hystart.in_css() {
@@ -499,10 +493,10 @@ fn congestion_event(
 
 const fn checkpoint(r: &mut Congestion) {
     r.cubic_state.prior = Some(PriorState {
-        congestion_window: r.congestion_window,
+        cwnd: r.cwnd,
         ssthresh: r.ssthresh.get(),
         curve: r.cubic_state.curve,
-        recovery_start: r.congestion_recovery_start_time,
+        recovery_start: r.recovery_started_at,
         lost_count: r.lost_count,
     });
 }
@@ -513,16 +507,14 @@ fn rollback(r: &mut Congestion) -> bool {
     };
 
     // Don't go back to slow start or decrease the window.
-    if prior.congestion_window < prior.ssthresh ||
-        r.congestion_window >= prior.congestion_window
-    {
+    if prior.cwnd < prior.ssthresh || r.cwnd >= prior.cwnd {
         return false;
     }
 
-    r.congestion_window = prior.congestion_window;
+    r.cwnd = prior.cwnd;
     r.ssthresh.update(prior.ssthresh, false);
     r.cubic_state.curve = prior.curve;
-    r.congestion_recovery_start_time = prior.recovery_start;
+    r.recovery_started_at = prior.recovery_start;
     r.prr = super::prr::PRR::default();
     r.cubic_state.prior = None;
 
@@ -555,11 +547,11 @@ mod tests {
     use crate::recovery::RecoveryOps;
 
     fn test_sender() -> TestSender {
-        TestSender::new(CongestionControlAlgorithm::CUBIC, false)
+        TestSender::new(CongestionControlAlgorithm::Cubic, false)
     }
 
     fn hystart_test_sender() -> TestSender {
-        TestSender::new(CongestionControlAlgorithm::CUBIC, true)
+        TestSender::new(CongestionControlAlgorithm::Cubic, true)
     }
 
     #[test]
@@ -622,11 +614,11 @@ mod tests {
         }
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
-        sender.congestion_window = usize::MAX;
+        sender.cwnd = usize::MAX;
         sender.cubic_state.curve.cwnd_inc = usize::MAX - 1;
         sender.send_packet(size);
         sender.lose_n_packets(1, size, None);
-        assert_eq!(sender.congestion_window, beta_reduce(usize::MAX));
+        assert_eq!(sender.cwnd, beta_reduce(usize::MAX));
         assert_eq!(
             sender.cubic_state.curve.cwnd_inc,
             beta_reduce(usize::MAX - 1)
@@ -638,7 +630,7 @@ mod tests {
         let mut sender = test_sender();
         let mss = sender.max_datagram_size;
         let cwnd = 8 * 1024 * 1024;
-        sender.congestion_window = cwnd;
+        sender.cwnd = cwnd;
         sender.ssthresh.update(cwnd, false);
         sender.cubic_state.curve.w_max = Window::bytes(cwnd);
         sender.cubic_state.curve.w_est = Window::bytes(cwnd);
@@ -654,15 +646,15 @@ mod tests {
         // The target is clipped at 1.5*cwnd; the exact increment
         // is half an MSS despite the intermediate product exceeding u32.
         assert_eq!(sender.cubic_state.curve.cwnd_inc, mss / 2);
-        assert_eq!(sender.congestion_window, cwnd);
+        assert_eq!(sender.cwnd, cwnd);
         sender.ack_n_packets(1, mss);
-        assert_eq!(sender.congestion_window, cwnd + mss);
+        assert_eq!(sender.cwnd, cwnd + mss);
     }
 
     #[test]
     fn cubic_init() {
         let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        cfg.set_cc_algorithm(CongestionControlAlgorithm::CUBIC);
+        cfg.set_cc_algorithm(CongestionControlAlgorithm::Cubic);
 
         let r = LegacyRecovery::new(&cfg);
 
@@ -680,12 +672,12 @@ mod tests {
             sender.send_packet(size);
         }
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
 
         sender.ack_n_packets(1, size);
 
         // Check if cwnd increased by packet size (slow start)
-        assert_eq!(sender.congestion_window, cwnd_prev + size);
+        assert_eq!(sender.cwnd, cwnd_prev + size);
     }
 
     #[test]
@@ -698,12 +690,12 @@ mod tests {
             sender.send_packet(size);
         }
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
 
         sender.ack_n_packets(3, size);
 
         // Acked 3 packets.
-        assert_eq!(sender.congestion_window, cwnd_prev + size * 3);
+        assert_eq!(sender.cwnd, cwnd_prev + size * 3);
     }
 
     #[test]
@@ -713,13 +705,13 @@ mod tests {
 
         sender.send_packet(size);
 
-        let cwnd_prev = sender.congestion_window;
+        let cwnd_prev = sender.cwnd;
 
         sender.lose_n_packets(1, size, None);
 
         // In CUBIC, after congestion event, cwnd will be reduced by (1 -
         // CUBIC_BETA)
-        assert_eq!(beta_reduce(cwnd_prev), sender.congestion_window);
+        assert_eq!(beta_reduce(cwnd_prev), sender.cwnd);
     }
 
     #[test]
@@ -727,7 +719,7 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
-        let prev_cwnd = sender.congestion_window;
+        let prev_cwnd = sender.cwnd;
 
         // Send initcwnd full MSS packets to become no longer app limited
         for _ in 0..sender.initial_congestion_window_packets {
@@ -741,7 +733,7 @@ mod tests {
 
         // After congestion event, cwnd will be reduced.
         let cur_cwnd = beta_reduce(prev_cwnd);
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         // Shift current time by 1 RTT.
         sender.update_rtt(rtt);
@@ -750,7 +742,7 @@ mod tests {
 
         sender.ack_n_packets(sender.initial_congestion_window_packets - 2, size);
         // Only packets sent after exit recovery can increase cwnd.
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         for _ in 0..8 {
             sender.send_packet(size);
@@ -759,7 +751,7 @@ mod tests {
 
         sender.ack_n_packets(1, size);
         // Only packets sent after exit recovery can increase cwnd.
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         // During Congestion Avoidance, it will take
         // 6 ACKs to increase cwnd by 1 MSS.
@@ -768,7 +760,7 @@ mod tests {
             sender.advance_time(rtt);
         }
 
-        assert_eq!(sender.congestion_window, cur_cwnd + size);
+        assert_eq!(sender.cwnd, cur_cwnd + size);
     }
 
     #[test]
@@ -812,10 +804,10 @@ mod tests {
 
         // Receiving Acks.
         // Last ack will cause to exit to CSS.
-        let mut cwnd_prev = sender.congestion_window();
+        let mut cwnd_prev = sender.window();
 
         for _ in 0..n_rtt_sample {
-            cwnd_prev = sender.congestion_window();
+            cwnd_prev = sender.window();
             sender.update_rtt(rtt_2nd);
             sender.ack_n_packets(1, size);
             // Keep increasing RTT so that hystart exits to CSS.
@@ -824,13 +816,13 @@ mod tests {
 
         // Now we are in CSS.
         assert!(sender.hystart.css_start_time().is_some());
-        assert_eq!(sender.congestion_window(), cwnd_prev + size);
+        assert_eq!(sender.window(), cwnd_prev + size);
 
         // 3rd round, which RTT is less than previous round to
         // trigger back to Slow Start.
         let rtt_3rd = Duration::from_millis(80);
         sender.advance_time(rtt_3rd);
-        cwnd_prev = sender.congestion_window();
+        cwnd_prev = sender.window();
 
         let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
         sender.hystart.start_round(next_rnd);
@@ -848,7 +840,7 @@ mod tests {
         // Now we are back in Slow Start.
         assert!(sender.hystart.css_start_time().is_none());
         assert_eq!(
-            sender.congestion_window(),
+            sender.window(),
             cwnd_prev +
                 size / hystart::CSS_GROWTH_DIVISOR * hystart::N_RTT_SAMPLE
         );
@@ -893,10 +885,10 @@ mod tests {
 
         // Receiving Acks.
         // Last ack will cause to exit to CSS.
-        let mut cwnd_prev = sender.congestion_window();
+        let mut cwnd_prev = sender.window();
 
         for _ in 0..n_rtt_sample {
-            cwnd_prev = sender.congestion_window();
+            cwnd_prev = sender.window();
             sender.update_rtt(rtt_2nd);
             sender.ack_n_packets(1, size);
             // Keep increasing RTT so that hystart exits to CSS.
@@ -905,7 +897,7 @@ mod tests {
 
         // Now we are in CSS.
         assert!(sender.hystart.css_start_time().is_some());
-        assert_eq!(sender.congestion_window(), cwnd_prev + size);
+        assert_eq!(sender.window(), cwnd_prev + size);
 
         // Run 5 (CSS_ROUNDS) in CSS, to exit to congestion avoidance.
         let rtt_css = Duration::from_millis(100);
@@ -925,7 +917,7 @@ mod tests {
             sender.ack_n_packets(n_rtt_sample, size);
         }
         // Now we are in congestion avoidance.
-        assert_eq!(sender.congestion_window(), sender.ssthresh.get());
+        assert_eq!(sender.window(), sender.ssthresh.get());
     }
 
     #[test]
@@ -933,7 +925,7 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
-        let prev_cwnd = sender.congestion_window();
+        let prev_cwnd = sender.window();
 
         // Send initcwnd full MSS packets to become no longer app limited
         for _ in 0..sender.initial_congestion_window_packets {
@@ -943,7 +935,7 @@ mod tests {
 
         // After congestion event, cwnd will be reduced.
         let cur_cwnd = beta_reduce(prev_cwnd);
-        assert_eq!(sender.congestion_window(), cur_cwnd);
+        assert_eq!(sender.window(), cur_cwnd);
 
         // Ack more than cwnd bytes with rtt=100ms
         let rtt = Duration::from_millis(100);
@@ -966,17 +958,17 @@ mod tests {
         sender.inject_ack(acked, sender.time + rtt + Duration::from_millis(5));
 
         // This is from slow start, no rollback.
-        assert_eq!(sender.congestion_window(), cur_cwnd);
+        assert_eq!(sender.window(), cur_cwnd);
 
         sender.advance_time(rtt);
 
-        let prev_cwnd = sender.congestion_window();
+        let prev_cwnd = sender.window();
 
         sender.lose_n_packets(1, size, Some(sender.time));
 
         // After congestion event, cwnd will be reduced.
         let cur_cwnd = beta_reduce(cur_cwnd);
-        assert_eq!(sender.congestion_window(), cur_cwnd);
+        assert_eq!(sender.window(), cur_cwnd);
 
         sender.advance_time(rtt + Duration::from_millis(5));
 
@@ -997,7 +989,7 @@ mod tests {
         sender.inject_ack(acked, sender.time + rtt + Duration::from_millis(5));
 
         // cwnd is rolled back to the previous one.
-        assert_eq!(sender.congestion_window(), prev_cwnd);
+        assert_eq!(sender.window(), prev_cwnd);
     }
 
     #[test]
@@ -1005,7 +997,7 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         let cwnd = 20 * size;
-        sender.congestion_window = cwnd;
+        sender.cwnd = cwnd;
         sender.ssthresh.update(cwnd, false);
         sender.cubic_state.curve = CurveState {
             epoch_start: Some(sender.time - Duration::from_secs(2)),
@@ -1017,20 +1009,19 @@ mod tests {
         };
         let prior = sender.cubic_state.curve;
         let epoch = sender.time;
-        sender.congestion_recovery_start_time = Some(epoch);
+        sender.recovery_started_at = Some(epoch);
         checkpoint(&mut sender);
-        sender.congestion_window = beta_reduce(cwnd);
+        sender.cwnd = beta_reduce(cwnd);
         sender.ssthresh.update(beta_reduce(cwnd), false);
         sender.cubic_state.curve = CurveState::default();
-        sender.congestion_recovery_start_time =
-            Some(epoch + Duration::from_secs(1));
+        sender.recovery_started_at = Some(epoch + Duration::from_secs(1));
         let last_ack = epoch + Duration::from_secs(2);
         sender.cubic_state.last_ack_time = Some(last_ack);
 
         assert!(rollback(&mut sender));
-        assert_eq!(sender.congestion_window, cwnd);
+        assert_eq!(sender.cwnd, cwnd);
         assert_eq!(sender.ssthresh.get(), cwnd);
-        assert_eq!(sender.congestion_recovery_start_time, Some(epoch));
+        assert_eq!(sender.recovery_started_at, Some(epoch));
         assert_eq!(sender.cubic_state.curve.epoch_start, prior.epoch_start);
         assert_eq!(sender.cubic_state.curve.k.to_bits(), prior.k.to_bits());
         assert_eq!(sender.cubic_state.curve.w_max, prior.w_max);
@@ -1038,7 +1029,7 @@ mod tests {
         assert_eq!(sender.cubic_state.curve.reno_gain, prior.reno_gain);
         assert_eq!(sender.cubic_state.curve.cwnd_inc, prior.cwnd_inc);
         assert_eq!(sender.cubic_state.last_ack_time, Some(last_ack));
-        sender.congestion_window = beta_reduce(cwnd);
+        sender.cwnd = beta_reduce(cwnd);
         assert!(!rollback(&mut sender));
     }
 
@@ -1047,7 +1038,7 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
-        let prev_cwnd = sender.congestion_window;
+        let prev_cwnd = sender.cwnd;
 
         // Send initcwnd full MSS packets to become no longer app limited
         for _ in 0..sender.initial_congestion_window_packets {
@@ -1059,7 +1050,7 @@ mod tests {
 
         // After 1st congestion event, cwnd will be reduced.
         let cur_cwnd = beta_reduce(prev_cwnd);
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         // Shift current time by 1 RTT.
         let rtt = Duration::from_millis(100);
@@ -1084,9 +1075,9 @@ mod tests {
             sender.ack_n_packets(1, size);
         }
 
-        assert_eq!(sender.congestion_window, cur_cwnd + size);
+        assert_eq!(sender.cwnd, cur_cwnd + size);
 
-        let prev_cwnd = sender.congestion_window;
+        let prev_cwnd = sender.cwnd;
 
         // Fast convergence: now there is 2nd congestion event and
         // cwnd is not fully recovered to w_max, w_max will be
@@ -1095,7 +1086,7 @@ mod tests {
 
         // After 2nd congestion event, cwnd will be reduced.
         let cur_cwnd = beta_reduce(prev_cwnd);
-        assert_eq!(sender.congestion_window, cur_cwnd);
+        assert_eq!(sender.cwnd, cur_cwnd);
 
         // w_max will be further reduced, not prev_cwnd
         assert_eq!(
@@ -1108,7 +1099,7 @@ mod tests {
     fn cubic_perpetual_recovery_trap() {
         // Reproduces the bug where cwnd stays pinned at minimum after a
         // loss event because the idle-time epoch shift pushes
-        // congestion_recovery_start_time into the future on every
+        // recovery_started_at into the future on every
         // send -> ACK -> send cycle when bif transiently hits 0.
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -1123,12 +1114,11 @@ mod tests {
         sender.advance_time(rtt);
 
         // Trigger a loss to enter recovery and reduce cwnd.
-        let initial_cwnd = sender.congestion_window;
+        let initial_cwnd = sender.cwnd;
         sender.lose_n_packets(1, size, None);
-        let post_loss_cwnd = sender.congestion_window;
+        let post_loss_cwnd = sender.cwnd;
         assert_eq!(post_loss_cwnd, beta_reduce(initial_cwnd));
-        let initial_recovery_start_time =
-            sender.congestion_recovery_start_time.unwrap();
+        let initial_recovery_start_time = sender.recovery_started_at.unwrap();
         assert_eq!(initial_recovery_start_time, sender.time);
 
         // ACK remaining in-flight packets to exit recovery.
@@ -1139,7 +1129,7 @@ mod tests {
         // minimum cwnd, ACK it (bif drops to 0), advance one RTT, repeat.
         // With the bug, recovery_start_time would advance on every
         // cycle, trapping cwnd.  With the fix, cwnd must grow.
-        let packets_per_burst = cmp::max(1, sender.congestion_window / size);
+        let packets_per_burst = cmp::max(1, sender.cwnd / size);
 
         for _ in 0..20 {
             for _ in 0..packets_per_burst {
@@ -1153,15 +1143,14 @@ mod tests {
 
         // cwnd must have grown beyond the post-loss value.
         assert!(
-            sender.congestion_window > post_loss_cwnd,
+            sender.cwnd > post_loss_cwnd,
             "cwnd stuck at {} (post-loss {}): perpetual recovery trap",
-            sender.congestion_window,
+            sender.cwnd,
             post_loss_cwnd,
         );
         // Recovery start hasn't changed.
         assert_eq!(
-            sender.congestion_recovery_start_time.unwrap() -
-                initial_recovery_start_time,
+            sender.recovery_started_at.unwrap() - initial_recovery_start_time,
             Duration::ZERO,
             "epoch should not have shifted without idle gap",
         );
@@ -1181,29 +1170,29 @@ mod tests {
         sender.advance_time(rtt);
         sender.lose_n_packets(1, size, None);
         let loss_time = sender.time;
-        let post_loss_cwnd = sender.congestion_window;
+        let post_loss_cwnd = sender.cwnd;
         sender.ack_n_packets(sender.initial_congestion_window_packets - 1, size);
 
         let idle = Duration::from_secs(5);
         sender.advance_time(idle);
         sender.send_packet(size);
         assert_eq!(sender.cubic_state.curve.epoch_start, Some(loss_time + idle));
-        assert_eq!(sender.congestion_recovery_start_time, Some(loss_time));
+        assert_eq!(sender.recovery_started_at, Some(loss_time));
         assert!(!sender.in_congestion_recovery(sender.time));
 
         if lose_after_idle {
             sender.advance_time(rtt);
             // A loss on the first post-idle packet is a new congestion event.
             sender.lose_n_packets(1, size, None);
-            assert_eq!(sender.congestion_window, beta_reduce(post_loss_cwnd));
-            assert_eq!(sender.congestion_recovery_start_time, Some(sender.time));
+            assert_eq!(sender.cwnd, beta_reduce(post_loss_cwnd));
+            assert_eq!(sender.recovery_started_at, Some(sender.time));
         } else {
             sender.update_app_limited(false);
             sender.advance_time(rtt);
             sender.ack_n_packets(1, size);
-            assert!(sender.congestion_window >= post_loss_cwnd);
-            assert!(sender.congestion_window <= post_loss_cwnd + size);
-            assert_eq!(sender.congestion_recovery_start_time, Some(loss_time));
+            assert!(sender.cwnd >= post_loss_cwnd);
+            assert!(sender.cwnd <= post_loss_cwnd + size);
+            assert_eq!(sender.recovery_started_at, Some(loss_time));
         }
     }
 
@@ -1212,7 +1201,7 @@ mod tests {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         let cwnd = 20 * size;
-        sender.congestion_window = cwnd;
+        sender.cwnd = cwnd;
         sender.ssthresh.update(cwnd, false);
         sender.cubic_state.curve = CurveState {
             epoch_start: Some(sender.time),
@@ -1225,24 +1214,24 @@ mod tests {
         checkpoint(&mut sender);
         sender.prr.snd_cnt = size;
         sender.on_persistent_congestion();
-        assert_eq!(sender.congestion_window, size * MINIMUM_WINDOW_PACKETS);
+        assert_eq!(sender.cwnd, size * MINIMUM_WINDOW_PACKETS);
         assert!(sender.cubic_state.curve.epoch_start.is_none());
         assert!(sender.cubic_state.prior.is_none());
         assert_eq!(sender.cubic_state.curve.cwnd_inc, 0);
         assert_eq!(sender.prr.snd_cnt, 0);
         assert!(!rollback(&mut sender));
-        assert_eq!(sender.congestion_window, size * MINIMUM_WINDOW_PACKETS);
+        assert_eq!(sender.cwnd, size * MINIMUM_WINDOW_PACKETS);
     }
 
     #[test]
     fn cubic_zero_bytes_sent_no_epoch_shift() {
         // A zero-byte packet (e.g. PADDING-only) must NOT shift
-        // congestion_recovery_start_time or update last_sent_time.
+        // recovery_started_at or update last_sent_time.
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         let rtt = Duration::from_millis(100);
 
-        // Fill pipe, trigger loss to set congestion_recovery_start_time.
+        // Fill pipe, trigger loss to set recovery_started_at.
         for _ in 0..sender.initial_congestion_window_packets {
             sender.send_packet(size);
         }
@@ -1255,7 +1244,7 @@ mod tests {
         assert_eq!(sender.bytes_in_flight, 0);
 
         // Record state before zero-byte send.
-        let recovery_start_before = sender.congestion_recovery_start_time;
+        let recovery_start_before = sender.recovery_started_at;
         let curve_epoch_before = sender.cubic_state.curve.epoch_start;
         let last_sent_before = sender.cubic_state.last_sent_time;
 
@@ -1267,7 +1256,7 @@ mod tests {
 
         // Neither recovery_start_time nor last_sent_time should change.
         assert_eq!(
-            sender.congestion_recovery_start_time, recovery_start_before,
+            sender.recovery_started_at, recovery_start_before,
             "recovery_start_time must not shift on zero-byte send",
         );
         assert_eq!(sender.cubic_state.curve.epoch_start, curve_epoch_before);

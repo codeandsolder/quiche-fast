@@ -32,6 +32,7 @@ use crate::Result;
 use crate::packet;
 use crate::range_buf::RangeBuf;
 use crate::ranges;
+use crate::stream::StreamDirection;
 
 #[cfg(feature = "qlog")]
 use qlog::events::quic::AckRange;
@@ -114,11 +115,7 @@ pub enum Frame {
         mtu_probe: Option<usize>,
     },
 
-    #[expect(
-        clippy::upper_case_acronyms,
-        reason = "ACK is the standardized QUIC frame name"
-    )]
-    ACK {
+    Ack {
         ack_delay: u64,
         ranges: ranges::RangeSet,
         ecn_counts: Option<EcnCounts>,
@@ -169,11 +166,8 @@ pub enum Frame {
         max: u64,
     },
 
-    MaxStreamsBidi {
-        max: u64,
-    },
-
-    MaxStreamsUni {
+    MaxStreams {
+        direction: StreamDirection,
         max: u64,
     },
 
@@ -186,11 +180,8 @@ pub enum Frame {
         limit: u64,
     },
 
-    StreamsBlockedBidi {
-        limit: u64,
-    },
-
-    StreamsBlockedUni {
+    StreamsBlocked {
+        direction: StreamDirection,
         limit: u64,
     },
 
@@ -309,17 +300,7 @@ impl Frame {
                 Self::Crypto { data }
             },
 
-            0x07 => {
-                let len = usize::try_from(b.get_varint()?)
-                    .map_err(|_| Error::BufferTooShort)?;
-                if len == 0 {
-                    return Err(Error::InvalidFrame);
-                }
-
-                Self::NewToken {
-                    token: b.get_bytes(len)?.to_vec(),
-                }
-            },
+            0x07 => parse_new_token(b)?,
 
             0x08..=0x0f => parse_stream_frame(frame_type, b)?,
 
@@ -332,11 +313,8 @@ impl Frame {
                 max: b.get_varint()?,
             },
 
-            0x12 => Self::MaxStreamsBidi {
-                max: b.get_varint()?,
-            },
-
-            0x13 => Self::MaxStreamsUni {
+            0x12..=0x13 => Self::MaxStreams {
+                direction: StreamDirection::from_uni(frame_type & 1 != 0),
                 max: b.get_varint()?,
             },
 
@@ -349,36 +327,12 @@ impl Frame {
                 limit: b.get_varint()?,
             },
 
-            0x16 => Self::StreamsBlockedBidi {
+            0x16..=0x17 => Self::StreamsBlocked {
+                direction: StreamDirection::from_uni(frame_type & 1 != 0),
                 limit: b.get_varint()?,
             },
 
-            0x17 => Self::StreamsBlockedUni {
-                limit: b.get_varint()?,
-            },
-
-            0x18 => {
-                let seq_num = b.get_varint()?;
-                let retire_prior_to = b.get_varint()?;
-                let conn_id_len = b.get_u8()?;
-
-                if !(1..=packet::MAX_CID_LEN).contains(&conn_id_len) {
-                    return Err(Error::InvalidFrame);
-                }
-
-                Self::NewConnectionId {
-                    seq_num,
-                    retire_prior_to,
-                    conn_id: packet::ConnectionId::copy_from_slice(
-                        b.get_bytes(usize::from(conn_id_len))?.as_ref(),
-                    ),
-                    reset_token: b
-                        .get_bytes(16)?
-                        .buf()
-                        .try_into()
-                        .map_err(|_| Error::BufferTooShort)?,
-                }
-            },
+            0x18 => parse_new_connection_id(b)?,
 
             0x19 => Self::RetireConnectionId {
                 seq_num: b.get_varint()?,
@@ -436,71 +390,26 @@ impl Frame {
 
     pub(crate) fn encode(&self, b: &mut impl FrameSink) -> Result<()> {
         match self {
-            Self::Padding { len } => b.put_padding(*len)?,
+            Self::Padding { len } => b.put_padding(*len),
 
-            Self::Ping { .. } => {
-                b.put_varint(0x01)?;
-            },
+            Self::Ping { .. } => b.put_varint(0x01),
 
-            Self::ACK {
+            Self::Ack {
                 ack_delay,
                 ranges,
                 ecn_counts,
-            } => {
-                let mut it = ranges.iter().rev();
-                let first = it.next().ok_or(Error::InvalidFrame)?;
-
-                b.put_varint(if ecn_counts.is_some() { 0x03 } else { 0x02 })?;
-                let ack_block = (first.end - 1) - first.start;
-
-                b.put_varint(first.end - 1)?;
-                b.put_varint(*ack_delay)?;
-                b.put_varint(it.len() as u64)?;
-                b.put_varint(ack_block)?;
-
-                let mut smallest_ack = first.start;
-
-                for block in it {
-                    let gap = smallest_ack
-                        .checked_sub(block.end)
-                        .and_then(|gap| gap.checked_sub(1))
-                        .ok_or(Error::InvalidFrame)?;
-                    let ack_block = (block.end - 1) - block.start;
-
-                    b.put_varint(gap)?;
-                    b.put_varint(ack_block)?;
-
-                    smallest_ack = block.start;
-                }
-
-                if let Some(ecn) = ecn_counts {
-                    b.put_varint(ecn.ect0)?;
-                    b.put_varint(ecn.ect1)?;
-                    b.put_varint(ecn.ce)?;
-                }
-            },
+            } => encode_ack_frame(*ack_delay, ranges, ecn_counts.as_ref(), b),
 
             Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
-            } => {
-                b.put_varint(0x04)?;
-
-                b.put_varint(*stream_id)?;
-                b.put_varint(*error_code)?;
-                b.put_varint(*final_size)?;
-            },
+            } => encode_varints(b, [0x04, *stream_id, *error_code, *final_size]),
 
             Self::StopSending {
                 stream_id,
                 error_code,
-            } => {
-                b.put_varint(0x05)?;
-
-                b.put_varint(*stream_id)?;
-                b.put_varint(*error_code)?;
-            },
+            } => encode_varints(b, [0x05, *stream_id, *error_code]),
 
             Self::Crypto { data } => {
                 encode_crypto_header(
@@ -510,14 +419,12 @@ impl Frame {
                     b,
                 )?;
 
-                b.put_bytes(data)?;
+                b.put_bytes(data)
             },
 
             Self::NewToken { token } => {
-                b.put_varint(0x07)?;
-
-                b.put_varint(token.len() as u64)?;
-                b.put_bytes(token)?;
+                encode_varints(b, [0x07, token.len() as u64])?;
+                b.put_bytes(token)
             },
 
             Self::Stream { stream_id, data } => {
@@ -530,95 +437,51 @@ impl Frame {
                     b,
                 )?;
 
-                b.put_bytes(data)?;
+                b.put_bytes(data)
             },
 
-            Self::MaxData { max } => {
-                b.put_varint(0x10)?;
+            Self::MaxData { max } => encode_varints(b, [0x10, *max]),
 
-                b.put_varint(*max)?;
-            },
+            Self::MaxStreamData { stream_id, max } =>
+                encode_varints(b, [0x11, *stream_id, *max]),
 
-            Self::MaxStreamData { stream_id, max } => {
-                b.put_varint(0x11)?;
+            Self::MaxStreams { direction, max } =>
+                encode_varints(b, [0x12 | direction.wire_bit(), *max]),
 
-                b.put_varint(*stream_id)?;
-                b.put_varint(*max)?;
-            },
+            Self::DataBlocked { limit } => encode_varints(b, [0x14, *limit]),
 
-            Self::MaxStreamsBidi { max } => {
-                b.put_varint(0x12)?;
+            Self::StreamDataBlocked { stream_id, limit } =>
+                encode_varints(b, [0x15, *stream_id, *limit]),
 
-                b.put_varint(*max)?;
-            },
-
-            Self::MaxStreamsUni { max } => {
-                b.put_varint(0x13)?;
-
-                b.put_varint(*max)?;
-            },
-
-            Self::DataBlocked { limit } => {
-                b.put_varint(0x14)?;
-
-                b.put_varint(*limit)?;
-            },
-
-            Self::StreamDataBlocked { stream_id, limit } => {
-                b.put_varint(0x15)?;
-
-                b.put_varint(*stream_id)?;
-                b.put_varint(*limit)?;
-            },
-
-            Self::StreamsBlockedBidi { limit } => {
-                b.put_varint(0x16)?;
-
-                b.put_varint(*limit)?;
-            },
-
-            Self::StreamsBlockedUni { limit } => {
-                b.put_varint(0x17)?;
-
-                b.put_varint(*limit)?;
-            },
+            Self::StreamsBlocked { direction, limit } =>
+                encode_varints(b, [0x16 | direction.wire_bit(), *limit]),
 
             Self::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
                 reset_token,
-            } => {
-                let len = u8::try_from(conn_id.len())
-                    .map_err(|_| Error::InvalidFrame)?;
-                if !(1..=packet::MAX_CID_LEN).contains(&len) {
-                    return Err(Error::InvalidFrame);
-                }
-                b.put_varint(0x18)?;
+            } => encode_new_connection_id(
+                *seq_num,
+                *retire_prior_to,
+                conn_id,
+                reset_token,
+                b,
+            ),
 
-                b.put_varint(*seq_num)?;
-                b.put_varint(*retire_prior_to)?;
-                b.put_bytes(&[len])?;
-                b.put_bytes(conn_id.as_ref())?;
-                b.put_bytes(reset_token.as_ref())?;
-            },
-
-            Self::RetireConnectionId { seq_num } => {
-                b.put_varint(0x19)?;
-
-                b.put_varint(*seq_num)?;
-            },
+            Self::RetireConnectionId { seq_num } =>
+                encode_varints(b, [0x19, *seq_num]),
 
             Self::PathChallenge { data } => {
                 b.put_varint(0x1a)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             Self::PathResponse { data } => {
                 b.put_varint(0x1b)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             Self::ConnectionClose {
@@ -626,39 +489,34 @@ impl Frame {
                 frame_type,
                 reason,
             } => {
-                b.put_varint(0x1c)?;
-
-                b.put_varint(*error_code)?;
-                b.put_varint(*frame_type)?;
-                b.put_varint(reason.len() as u64)?;
-                b.put_bytes(reason.as_ref())?;
+                encode_varints(b, [
+                    0x1c,
+                    *error_code,
+                    *frame_type,
+                    reason.len() as u64,
+                ])?;
+                b.put_bytes(reason.as_ref())
             },
 
             Self::ApplicationClose { error_code, reason } => {
-                b.put_varint(0x1d)?;
-
-                b.put_varint(*error_code)?;
-                b.put_varint(reason.len() as u64)?;
-                b.put_bytes(reason.as_ref())?;
+                encode_varints(b, [0x1d, *error_code, reason.len() as u64])?;
+                b.put_bytes(reason.as_ref())
             },
 
-            Self::HandshakeDone => {
-                b.put_varint(0x1e)?;
-            },
+            Self::HandshakeDone => b.put_varint(0x1e),
 
             Self::Datagram { data } => {
                 encode_dgram_header(data.len() as u64, b)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             // These variants only describe frames already encoded directly
             // into the packet. They do not own a serializable payload.
             Self::CryptoHeader { .. } |
             Self::StreamHeader { .. } |
-            Self::DatagramHeader { .. } => return Err(Error::InvalidState),
+            Self::DatagramHeader { .. } => Err(Error::InvalidState),
         }
-        Ok(())
     }
 
     pub const fn ack_eliciting(&self) -> bool {
@@ -666,7 +524,7 @@ impl Frame {
         !matches!(
             self,
             Self::Padding { .. } |
-                Self::ACK { .. } |
+                Self::Ack { .. } |
                 Self::ApplicationClose { .. } |
                 Self::ConnectionClose { .. }
         )
@@ -684,55 +542,25 @@ impl Frame {
 
     #[cfg(feature = "qlog")]
     pub fn to_qlog(&self, ack_delay_exponent: u64) -> QuicFrame {
-        use qlog::events::ConnectionClosedFrameError;
         use qlog::events::RawInfo;
 
         match self {
             Self::Padding { len } => QuicFrame::Padding {
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(*len as u64),
-                    data: None,
-                })),
+                raw: Some(Box::new(qlog_payload(*len as u64))),
             },
 
             Self::Ping { .. } => QuicFrame::Ping { raw: None },
 
-            Self::ACK {
+            Self::Ack {
                 ack_delay,
                 ranges,
                 ecn_counts,
-            } => {
-                let ack_ranges = ranges
-                    .iter()
-                    .map(|r| AckRange::new(r.start, r.end - 1))
-                    .collect();
-
-                let (ect0, ect1, ce) =
-                    ecn_counts.as_ref().map_or((None, None, None), |ecn| {
-                        (Some(ecn.ect0), Some(ecn.ect1), Some(ecn.ce))
-                    });
-
-                QuicFrame::Ack {
-                    // The ACK frame stores wire units; qlog uses milliseconds.
-                    // Omit unrepresentable delays rather than logging a
-                    // misleading value for a frame recovery will reject.
-                    ack_delay: crate::decode_ack_delay(
-                        *ack_delay,
-                        ack_delay_exponent,
-                    )
-                    .ok()
-                    .map(|micros| {
-                        std::time::Duration::from_micros(micros).as_secs_f32() *
-                            1000.0
-                    }),
-                    acked_ranges: Some(ack_ranges),
-                    ect1,
-                    ect0,
-                    ce,
-                    raw: None,
-                }
-            },
+            } => qlog_ack(
+                *ack_delay,
+                ranges,
+                ecn_counts.as_ref(),
+                ack_delay_exponent,
+            ),
 
             Self::ResetStream {
                 stream_id,
@@ -756,23 +584,9 @@ impl Frame {
                 raw: None,
             },
 
-            Self::Crypto { data } => QuicFrame::Crypto {
-                offset: data.off(),
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(data.len() as u64),
-                    data: None,
-                })),
-            },
-
-            Self::CryptoHeader { offset, length } => QuicFrame::Crypto {
-                offset: *offset,
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(*length as u64),
-                    data: None,
-                })),
-            },
+            Self::Crypto { data } => qlog_crypto(data.off(), data.len()),
+            Self::CryptoHeader { offset, length } =>
+                qlog_crypto(*offset, *length),
 
             Self::NewToken { token } => QuicFrame::NewToken {
                 token: qlog::Token {
@@ -789,32 +603,14 @@ impl Frame {
                 raw: None,
             },
 
-            Self::Stream { stream_id, data } => QuicFrame::Stream {
-                stream_id: *stream_id,
-                offset: Some(data.off()),
-                fin: data.fin().then_some(true),
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(data.len() as u64),
-                    data: None,
-                })),
-            },
-
+            Self::Stream { stream_id, data } =>
+                qlog_stream(*stream_id, data.off(), data.len(), data.fin()),
             Self::StreamHeader {
                 stream_id,
                 offset,
                 length,
                 fin,
-            } => QuicFrame::Stream {
-                stream_id: *stream_id,
-                offset: Some(*offset),
-                fin: fin.then(|| true),
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(*length as u64),
-                    data: None,
-                })),
-            },
+            } => qlog_stream(*stream_id, *offset, *length, *fin),
 
             Self::MaxData { max } => QuicFrame::MaxData {
                 maximum: *max,
@@ -827,14 +623,8 @@ impl Frame {
                 raw: None,
             },
 
-            Self::MaxStreamsBidi { max } => QuicFrame::MaxStreams {
-                stream_type: StreamType::Bidirectional,
-                maximum: *max,
-                raw: None,
-            },
-
-            Self::MaxStreamsUni { max } => QuicFrame::MaxStreams {
-                stream_type: StreamType::Unidirectional,
+            Self::MaxStreams { direction, max } => QuicFrame::MaxStreams {
+                stream_type: qlog_stream_type(*direction),
                 maximum: *max,
                 raw: None,
             },
@@ -851,17 +641,12 @@ impl Frame {
                     raw: None,
                 },
 
-            Self::StreamsBlockedBidi { limit } => QuicFrame::StreamsBlocked {
-                stream_type: StreamType::Bidirectional,
-                limit: *limit,
-                raw: None,
-            },
-
-            Self::StreamsBlockedUni { limit } => QuicFrame::StreamsBlocked {
-                stream_type: StreamType::Unidirectional,
-                limit: *limit,
-                raw: None,
-            },
+            Self::StreamsBlocked { direction, limit } =>
+                QuicFrame::StreamsBlocked {
+                    stream_type: qlog_stream_type(*direction),
+                    limit: *limit,
+                    raw: None,
+                },
 
             Self::NewConnectionId {
                 seq_num,
@@ -901,218 +686,315 @@ impl Frame {
 
             Self::ConnectionClose {
                 error_code, reason, ..
-            } => QuicFrame::ConnectionClose {
-                // TODO: use actual variant not unknown
-                error: Some(ConnectionClosedFrameError::TransportError(
-                    qlog::events::quic::TransportError::Unknown,
-                )),
-                error_space: Some(ErrorSpace::Transport),
-                error_code: Some(*error_code),
-                reason: Some(String::from_utf8_lossy(reason).into_owned()),
-                reason_bytes: None,
-                trigger_frame_type: None, // don't know trigger type
-            },
-
-            Self::ApplicationClose { error_code, reason } => {
-                QuicFrame::ConnectionClose {
-                    error: Some(ConnectionClosedFrameError::ApplicationError(
-                        qlog::events::ApplicationError::Unknown,
-                    )),
-                    error_space: Some(ErrorSpace::Application),
-                    error_code: Some(*error_code),
-                    reason: Some(String::from_utf8_lossy(reason).into_owned()),
-                    reason_bytes: None,
-                    trigger_frame_type: None, // don't know trigger type
-                }
-            },
+            } => qlog_close(ErrorSpace::Transport, *error_code, reason),
+            Self::ApplicationClose { error_code, reason } =>
+                qlog_close(ErrorSpace::Application, *error_code, reason),
 
             Self::HandshakeDone => QuicFrame::HandshakeDone { raw: None },
 
             Self::Datagram { data } => QuicFrame::Datagram {
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(data.len() as u64),
-                    data: None,
-                })),
+                raw: Some(Box::new(qlog_payload(data.len() as u64))),
             },
 
             Self::DatagramHeader { length } => QuicFrame::Datagram {
-                raw: Some(Box::new(RawInfo {
-                    length: None,
-                    payload_length: Some(*length as u64),
-                    data: None,
-                })),
+                raw: Some(Box::new(qlog_payload(*length as u64))),
             },
         }
+    }
+}
+
+#[cfg(feature = "qlog")]
+const fn qlog_stream_type(direction: StreamDirection) -> StreamType {
+    match direction {
+        StreamDirection::Bidirectional => StreamType::Bidirectional,
+        StreamDirection::Unidirectional => StreamType::Unidirectional,
+    }
+}
+
+#[cfg(feature = "qlog")]
+const fn qlog_payload(length: u64) -> qlog::events::RawInfo {
+    qlog::events::RawInfo {
+        length: None,
+        payload_length: Some(length),
+        data: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_crypto(offset: u64, length: usize) -> QuicFrame {
+    QuicFrame::Crypto {
+        offset,
+        raw: Some(Box::new(qlog_payload(length as u64))),
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_stream(
+    stream_id: u64, offset: u64, length: usize, fin: bool,
+) -> QuicFrame {
+    QuicFrame::Stream {
+        stream_id,
+        offset: Some(offset),
+        fin: fin.then_some(true),
+        raw: Some(Box::new(qlog_payload(length as u64))),
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_close(space: ErrorSpace, error_code: u64, reason: &[u8]) -> QuicFrame {
+    use qlog::events::ConnectionClosedFrameError;
+    let error = match space {
+        ErrorSpace::Transport => ConnectionClosedFrameError::TransportError(
+            qlog::events::quic::TransportError::Unknown,
+        ),
+        ErrorSpace::Application => ConnectionClosedFrameError::ApplicationError(
+            qlog::events::ApplicationError::Unknown,
+        ),
+    };
+    QuicFrame::ConnectionClose {
+        error: Some(error),
+        error_space: Some(space),
+        error_code: Some(error_code),
+        reason: Some(String::from_utf8_lossy(reason).into_owned()),
+        reason_bytes: None,
+        trigger_frame_type: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_ack(
+    ack_delay: u64, ranges: &ranges::RangeSet, ecn_counts: Option<&EcnCounts>,
+    ack_delay_exponent: u64,
+) -> QuicFrame {
+    let ack_ranges = ranges
+        .iter()
+        .map(|r| AckRange::new(r.start, r.end - 1))
+        .collect();
+
+    let (ect0, ect1, ce) = ecn_counts.map_or((None, None, None), |ecn| {
+        (Some(ecn.ect0), Some(ecn.ect1), Some(ecn.ce))
+    });
+
+    QuicFrame::Ack {
+        // The ACK frame stores wire units; qlog uses milliseconds.
+        // Omit unrepresentable delays rather than logging a
+        // misleading value for a frame recovery will reject.
+        ack_delay: crate::decode_ack_delay(ack_delay, ack_delay_exponent)
+            .ok()
+            .map(|micros| {
+                std::time::Duration::from_micros(micros).as_secs_f32() * 1000.0
+            }),
+        acked_ranges: Some(ack_ranges),
+        ect1,
+        ect0,
+        ce,
+        raw: None,
     }
 }
 
 impl std::fmt::Debug for Frame {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
-            Self::Padding { len } => {
-                write!(f, "PADDING len={len}")?;
-            },
+            Self::Padding { len } => write!(f, "PADDING len={len}"),
 
-            Self::Ping { mtu_probe } => {
-                write!(f, "PING mtu_probe={mtu_probe:?}")?;
-            },
+            Self::Ping { mtu_probe } => write!(f, "PING mtu_probe={mtu_probe:?}"),
 
-            Self::ACK {
+            Self::Ack {
                 ack_delay,
                 ranges,
                 ecn_counts,
-            } => {
-                write!(
+            } => write!(
                     f,
                     "ACK delay={ack_delay} blocks={ranges:?} ecn_counts={ecn_counts:?}"
-                )?;
-            },
+                ),
 
             Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
-            } => {
-                write!(
+            } => write!(
                     f,
                     "RESET_STREAM stream={stream_id} err={error_code:x} size={final_size}"
-                )?;
-            },
+                ),
 
             Self::StopSending {
                 stream_id,
                 error_code,
-            } => {
-                write!(f, "STOP_SENDING stream={stream_id} err={error_code:x}")?;
-            },
+            } => write!(f, "STOP_SENDING stream={stream_id} err={error_code:x}"),
 
-            Self::Crypto { data } => {
-                write!(f, "CRYPTO off={} len={}", data.off(), data.len())?;
-            },
+            Self::Crypto { data } => write!(f, "CRYPTO off={} len={}", data.off(), data.len()),
 
-            Self::CryptoHeader { offset, length } => {
-                write!(f, "CRYPTO off={offset} len={length}")?;
-            },
+            Self::CryptoHeader { offset, length } => write!(f, "CRYPTO off={offset} len={length}"),
 
-            Self::NewToken { token } => {
-                write!(f, "NEW_TOKEN len={}", token.len())?;
-            },
+            Self::NewToken { token } => write!(f, "NEW_TOKEN len={}", token.len()),
 
-            Self::Stream { stream_id, data } => {
-                write!(
+            Self::Stream { stream_id, data } => write!(
                     f,
                     "STREAM id={stream_id} off={} len={} fin={}",
                     data.off(),
                     data.len(),
                     data.fin()
-                )?;
-            },
+                ),
 
             Self::StreamHeader {
                 stream_id,
                 offset,
                 length,
                 fin,
-            } => {
-                write!(
+            } => write!(
                     f,
                     "STREAM id={stream_id} off={offset} len={length} fin={fin}"
-                )?;
-            },
+                ),
 
-            Self::MaxData { max } => {
-                write!(f, "MAX_DATA max={max}")?;
-            },
+            Self::MaxData { max } => write!(f, "MAX_DATA max={max}"),
 
-            Self::MaxStreamData { stream_id, max } => {
-                write!(f, "MAX_STREAM_DATA stream={stream_id} max={max}")?;
-            },
+            Self::MaxStreamData { stream_id, max } => write!(f, "MAX_STREAM_DATA stream={stream_id} max={max}"),
 
-            Self::MaxStreamsBidi { max } => {
-                write!(f, "MAX_STREAMS type=bidi max={max}")?;
-            },
+            Self::MaxStreams { direction, max } => write!(f, "MAX_STREAMS type={} max={max}", direction.label()),
 
-            Self::MaxStreamsUni { max } => {
-                write!(f, "MAX_STREAMS type=uni max={max}")?;
-            },
+            Self::DataBlocked { limit } => write!(f, "DATA_BLOCKED limit={limit}"),
 
-            Self::DataBlocked { limit } => {
-                write!(f, "DATA_BLOCKED limit={limit}")?;
-            },
-
-            Self::StreamDataBlocked { stream_id, limit } => {
-                write!(
+            Self::StreamDataBlocked { stream_id, limit } => write!(
                     f,
                     "STREAM_DATA_BLOCKED stream={stream_id} limit={limit}"
-                )?;
-            },
+                ),
 
-            Self::StreamsBlockedBidi { limit } => {
-                write!(f, "STREAMS_BLOCKED type=bidi limit={limit}")?;
-            },
-
-            Self::StreamsBlockedUni { limit } => {
-                write!(f, "STREAMS_BLOCKED type=uni limit={limit}")?;
-            },
+            Self::StreamsBlocked { direction, limit } => write!(f, "STREAMS_BLOCKED type={} limit={limit}", direction.label()),
 
             Self::NewConnectionId {
                 seq_num,
                 retire_prior_to,
                 conn_id,
                 reset_token,
-            } => {
-                write!(
+            } => write!(
                     f,
                     "NEW_CONNECTION_ID seq_num={seq_num} retire_prior_to={retire_prior_to} conn_id={conn_id:02x?} reset_token={reset_token:02x?}",
-                )?;
-            },
+                ),
 
-            Self::RetireConnectionId { seq_num } => {
-                write!(f, "RETIRE_CONNECTION_ID seq_num={seq_num}")?;
-            },
+            Self::RetireConnectionId { seq_num } => write!(f, "RETIRE_CONNECTION_ID seq_num={seq_num}"),
 
-            Self::PathChallenge { data } => {
-                write!(f, "PATH_CHALLENGE data={data:02x?}")?;
-            },
+            Self::PathChallenge { data } => write!(f, "PATH_CHALLENGE data={data:02x?}"),
 
-            Self::PathResponse { data } => {
-                write!(f, "PATH_RESPONSE data={data:02x?}")?;
-            },
+            Self::PathResponse { data } => write!(f, "PATH_RESPONSE data={data:02x?}"),
 
             Self::ConnectionClose {
                 error_code,
                 frame_type,
                 reason,
-            } => {
-                write!(
+            } => write!(
                     f,
                     "CONNECTION_CLOSE err={error_code:x} frame={frame_type:x} reason={reason:x?}"
-                )?;
-            },
+                ),
 
-            Self::ApplicationClose { error_code, reason } => {
-                write!(
+            Self::ApplicationClose { error_code, reason } => write!(
                     f,
                     "APPLICATION_CLOSE err={error_code:x} reason={reason:x?}"
-                )?;
-            },
+                ),
 
-            Self::HandshakeDone => {
-                write!(f, "HANDSHAKE_DONE")?;
-            },
+            Self::HandshakeDone => write!(f, "HANDSHAKE_DONE"),
 
-            Self::Datagram { data } => {
-                write!(f, "DATAGRAM len={}", data.len())?;
-            },
+            Self::Datagram { data } => write!(f, "DATAGRAM len={}", data.len()),
 
-            Self::DatagramHeader { length } => {
-                write!(f, "DATAGRAM len={length}")?;
-            },
+            Self::DatagramHeader { length } => write!(f, "DATAGRAM len={length}"),
         }
-
-        Ok(())
     }
+}
+
+fn parse_new_token(b: &mut octets::Octets) -> Result<Frame> {
+    let len =
+        usize::try_from(b.get_varint()?).map_err(|_| Error::BufferTooShort)?;
+    if len == 0 {
+        return Err(Error::InvalidFrame);
+    }
+
+    Ok(Frame::NewToken {
+        token: b.get_bytes(len)?.to_vec(),
+    })
+}
+
+fn encode_varints<const N: usize>(
+    b: &mut impl FrameSink, values: [u64; N],
+) -> Result<()> {
+    for value in values {
+        b.put_varint(value)?;
+    }
+    Ok(())
+}
+
+fn validate_connection_id_length(len: usize) -> Result<u8> {
+    let len = u8::try_from(len).map_err(|_| Error::InvalidFrame)?;
+    if !(1..=packet::MAX_CID_LEN).contains(&len) {
+        return Err(Error::InvalidFrame);
+    }
+    Ok(len)
+}
+
+fn encode_new_connection_id(
+    seq_num: u64, retire_prior_to: u64, conn_id: &packet::ConnectionId<'_>,
+    reset_token: &[u8; 16], b: &mut impl FrameSink,
+) -> Result<()> {
+    let len = validate_connection_id_length(conn_id.len())?;
+    encode_varints(b, [0x18, seq_num, retire_prior_to])?;
+    b.put_bytes(&[len])?;
+    b.put_bytes(conn_id.as_ref())?;
+    b.put_bytes(reset_token)
+}
+
+fn parse_new_connection_id(b: &mut octets::Octets) -> Result<Frame> {
+    let seq_num = b.get_varint()?;
+    let retire_prior_to = b.get_varint()?;
+    let conn_id_len = validate_connection_id_length(usize::from(b.get_u8()?))?;
+
+    Ok(Frame::NewConnectionId {
+        seq_num,
+        retire_prior_to,
+        conn_id: packet::ConnectionId::copy_from_slice(
+            b.get_bytes(usize::from(conn_id_len))?.as_ref(),
+        ),
+        reset_token: b
+            .get_bytes(16)?
+            .buf()
+            .try_into()
+            .map_err(|_| Error::BufferTooShort)?,
+    })
+}
+
+fn encode_ack_frame(
+    ack_delay: u64, ranges: &ranges::RangeSet, ecn_counts: Option<&EcnCounts>,
+    b: &mut impl FrameSink,
+) -> Result<()> {
+    let mut it = ranges.iter().rev();
+    let first = it.next().ok_or(Error::InvalidFrame)?;
+
+    b.put_varint(if ecn_counts.is_some() { 0x03 } else { 0x02 })?;
+    let ack_block = (first.end - 1) - first.start;
+
+    b.put_varint(first.end - 1)?;
+    b.put_varint(ack_delay)?;
+    b.put_varint(it.len() as u64)?;
+    b.put_varint(ack_block)?;
+
+    let mut smallest_ack = first.start;
+
+    for block in it {
+        let gap = smallest_ack
+            .checked_sub(block.end)
+            .and_then(|gap| gap.checked_sub(1))
+            .ok_or(Error::InvalidFrame)?;
+        let ack_block = (block.end - 1) - block.start;
+
+        b.put_varint(gap)?;
+        b.put_varint(ack_block)?;
+
+        smallest_ack = block.start;
+    }
+
+    if let Some(ecn) = ecn_counts {
+        b.put_varint(ecn.ect0)?;
+        b.put_varint(ecn.ect1)?;
+        b.put_varint(ecn.ce)?;
+    }
+    Ok(())
 }
 
 fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
@@ -1162,7 +1044,7 @@ fn parse_ack_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
         None
     };
 
-    Ok(Frame::ACK {
+    Ok(Frame::Ack {
         ack_delay,
         ranges,
         ecn_counts,
@@ -1325,10 +1207,49 @@ mod tests {
 
     #[cfg(feature = "qlog")]
     #[test]
+    fn payload_and_encoded_header_have_identical_diagnostics() {
+        let data = b"abc";
+        let cases = [
+            (
+                Frame::Crypto {
+                    data: <RangeBuf>::from(data, 42, false),
+                },
+                Frame::CryptoHeader {
+                    offset: 42,
+                    length: 3,
+                },
+            ),
+            (
+                Frame::Stream {
+                    stream_id: 4,
+                    data: <RangeBuf>::from(data, 42, true),
+                },
+                Frame::StreamHeader {
+                    stream_id: 4,
+                    offset: 42,
+                    length: 3,
+                    fin: true,
+                },
+            ),
+            (
+                Frame::Datagram {
+                    data: data.to_vec(),
+                },
+                Frame::DatagramHeader { length: 3 },
+            ),
+        ];
+        for (payload, header) in cases {
+            assert_eq!(payload.to_qlog(3), header.to_qlog(3));
+            assert_eq!(format!("{payload:?}"), format!("{header:?}"));
+        }
+    }
+
+    #[cfg(feature = "qlog")]
+    #[test]
     fn qlog_ack_preserves_all_ecn_counters() {
         let mut ranges = ranges::RangeSet::default();
         ranges.insert(12..15);
-        let frame = Frame::ACK {
+        let frame = Frame::Ack {
             ack_delay: 0,
             ranges,
             ecn_counts: Some(EcnCounts {
@@ -1344,7 +1265,7 @@ mod tests {
             ..
         }));
 
-        let frame = Frame::ACK {
+        let frame = Frame::Ack {
             ack_delay: 0,
             ranges: ranges::RangeSet::default(),
             ecn_counts: None,
@@ -1370,7 +1291,7 @@ mod tests {
             (125, 20, 131_072.0),
             (0, 20, 0.0),
         ] {
-            let frame = Frame::ACK {
+            let frame = Frame::Ack {
                 ack_delay: encoded,
                 ranges: ranges.clone(),
                 ecn_counts: None,
@@ -1382,7 +1303,7 @@ mod tests {
             assert!((delay - expected).abs() <= expected * f32::EPSILON);
         }
 
-        let frame = Frame::ACK {
+        let frame = Frame::Ack {
             ack_delay: octets::MAX_VAR_INT,
             ranges,
             ecn_counts: None,
@@ -1463,7 +1384,7 @@ mod tests {
         ranges.insert(octets::MAX_VAR_INT + 1..octets::MAX_VAR_INT + 2);
         let cases = [
             (
-                Frame::ACK {
+                Frame::Ack {
                     ack_delay: 0,
                     ranges: ranges::RangeSet::default(),
                     ecn_counts: None,
@@ -1471,7 +1392,7 @@ mod tests {
                 Error::InvalidFrame,
             ),
             (
-                Frame::ACK {
+                Frame::Ack {
                     ack_delay: 0,
                     ranges,
                     ecn_counts: None,
@@ -1626,7 +1547,7 @@ mod tests {
         ranges.insert(15..19);
         ranges.insert(3000..5000);
 
-        let frame = Frame::ACK {
+        let frame = Frame::Ack {
             ack_delay: 874_656_534,
             ranges,
             ecn_counts: None,
@@ -1654,7 +1575,7 @@ mod tests {
             ce: 300,
         });
 
-        let frame = Frame::ACK {
+        let frame = Frame::Ack {
             ack_delay: 874_656_534,
             ranges,
             ecn_counts,
@@ -1799,10 +1720,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_count_direction_keeps_exact_wire_types() {
+        for (direction, max_ty, blocked_ty) in [
+            (StreamDirection::Bidirectional, 0x12, 0x16),
+            (StreamDirection::Unidirectional, 0x13, 0x17),
+        ] {
+            for (frame, ty) in [
+                (Frame::MaxStreams { direction, max: 17 }, max_ty),
+                (
+                    Frame::StreamsBlocked {
+                        direction,
+                        limit: 17,
+                    },
+                    blocked_ty,
+                ),
+            ] {
+                let mut bytes = [0; 2];
+                assert_eq!(encode_checked(&frame, &mut bytes), 2);
+                assert_eq!(bytes, [ty, 17]);
+                let mut reader = octets::Octets::with_slice(&bytes);
+                assert_eq!(
+                    Frame::from_bytes(&mut reader, packet::Type::Short),
+                    Ok(frame)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn max_streams_bidi() {
         let mut d = [42; 128];
 
-        let frame = Frame::MaxStreamsBidi { max: 128_318_273 };
+        let frame = Frame::MaxStreams {
+            direction: StreamDirection::Bidirectional,
+            max: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1811,7 +1763,10 @@ mod tests {
     fn max_streams_uni() {
         let mut d = [42; 128];
 
-        let frame = Frame::MaxStreamsUni { max: 128_318_273 };
+        let frame = Frame::MaxStreams {
+            direction: StreamDirection::Unidirectional,
+            max: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1841,7 +1796,10 @@ mod tests {
     fn streams_blocked_bidi() {
         let mut d = [42; 128];
 
-        let frame = Frame::StreamsBlockedBidi { limit: 128_318_273 };
+        let frame = Frame::StreamsBlocked {
+            direction: StreamDirection::Bidirectional,
+            limit: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1850,7 +1808,10 @@ mod tests {
     fn streams_blocked_uni() {
         let mut d = [42; 128];
 
-        let frame = Frame::StreamsBlockedUni { limit: 128_318_273 };
+        let frame = Frame::StreamsBlocked {
+            direction: StreamDirection::Unidirectional,
+            limit: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }

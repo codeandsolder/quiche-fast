@@ -46,6 +46,7 @@ use std::time::Instant;
 
 use smallvec::smallvec;
 
+use crate::recovery::PacketFlight;
 #[cfg(test)]
 use crate::recovery::RecoveryOps as _;
 use crate::recovery::Sent;
@@ -620,16 +621,13 @@ pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
         time_acked: None,
         time_lost: None,
         size,
-        ack_eliciting: true,
-        in_flight: true,
+        flight: PacketFlight::Data,
         delivered: 0,
         delivered_time: now,
         first_sent_time: now,
         is_app_limited: false,
         tx_in_flight: 0,
         lost: 0,
-        has_data: true,
-        is_pmtud_probe: false,
     }
 }
 
