@@ -445,7 +445,7 @@ impl Stream {
 
         // Only expect frames on Control, Request and Push streams.
         if !matches!(self.ty, Some(Type::Control | Type::Request | Type::Push)) {
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
 
         let state = match self.frame_type {
@@ -467,7 +467,7 @@ impl Stream {
                 frame::MAX_PUSH_FRAME_TYPE_ID,
             ) => {
                 if !(1..=8).contains(&len) {
-                    return Err(Error::FrameError);
+                    return Err(Error::MalformedFrame);
                 }
 
                 State::FramePayload
@@ -475,7 +475,7 @@ impl Stream {
 
             Some(frame::SETTINGS_FRAME_TYPE_ID) => {
                 if len > frame::MAX_SETTINGS_PAYLOAD_SIZE as u64 {
-                    return Err(Error::FrameError);
+                    return Err(Error::MalformedFrame);
                 }
 
                 State::FramePayload
@@ -487,7 +487,7 @@ impl Stream {
                     self.max_encoded_headers_payload_size.saturating_add(8);
 
                 if len == 0 {
-                    return Err(Error::FrameError);
+                    return Err(Error::MalformedFrame);
                 }
 
                 if len > max_push_promise_size {
@@ -502,7 +502,7 @@ impl Stream {
                 frame::PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
             ) => {
                 if len == 0 {
-                    return Err(Error::FrameError);
+                    return Err(Error::MalformedFrame);
                 }
 
                 if len > self.max_priority_update_size {
@@ -532,7 +532,7 @@ impl Stream {
     /// writes through `BufMut`, which advances the initialized length itself.
     fn state_buf_read_limit(&mut self) -> Result<usize> {
         if !self.state.buffers_input() {
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
         debug_assert_eq!(self.state_off, self.state_buf.len() as u64);
         let need = self.addressable_remaining();
@@ -743,8 +743,7 @@ impl Stream {
         loop {
             use std::io::BufRead as _;
             let spare_len = self.state_buf_read_limit()?;
-            let available =
-                stream.fill_buf().map_err(|_| Error::InternalError)?;
+            let available = stream.fill_buf().map_err(|_| Error::Internal)?;
             let read = available.len().min(spare_len);
             self.state_buf.extend_from_slice(&available[..read]);
             stream.consume(read);
@@ -802,13 +801,13 @@ impl Stream {
     /// If successful, returns the `frame::Frame` and the payload length.
     pub fn try_consume_frame(&mut self) -> Result<(frame::Frame, u64)> {
         if self.state != State::FramePayload {
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
         if !self.state_buffer_complete() {
             return Err(Error::Done);
         }
         let payload_len = self.state_len;
-        let ty = self.frame_type.ok_or(Error::InternalError)?;
+        let ty = self.frame_type.ok_or(Error::Internal)?;
         let frame = frame::Frame::from_bytes(ty, payload_len, &self.state_buf)?;
 
         self.state_transition(State::FrameType, 1)?;
@@ -2162,7 +2161,7 @@ mod tests {
                 stream.try_fill_buffer_for_tests(&mut cursor).unwrap();
                 let frame_payload_len = stream.try_consume_varint().unwrap();
                 assert_eq!(
-                    Err(Error::FrameError),
+                    Err(Error::MalformedFrame),
                     stream.set_frame_payload_len(frame_payload_len)
                 );
             }
@@ -2197,7 +2196,7 @@ mod tests {
         stream.try_fill_buffer_for_tests(&mut cursor).unwrap();
         let frame_payload_len = stream.try_consume_varint().unwrap();
         assert_eq!(
-            Err(Error::FrameError),
+            Err(Error::MalformedFrame),
             stream.set_frame_payload_len(frame_payload_len)
         );
     }

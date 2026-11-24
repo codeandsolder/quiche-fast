@@ -92,7 +92,7 @@ impl WaitingStreams {
             );
             debug_assert!(false, "{}", msg);
             log::error!(ratelimit=60/m; "{}", msg);
-            return Err(H3ConnectionError::H3(h3::Error::InternalError));
+            return Err(H3ConnectionError::H3(h3::Error::Internal));
         }
 
         self.waits.push(Abortable::new(wait, registration));

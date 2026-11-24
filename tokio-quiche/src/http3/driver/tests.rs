@@ -18,7 +18,7 @@ fn wrapped_http3_and_quic_errors_expose_their_sources() {
     let h3_error = h3_source
         .downcast_ref::<h3::Error>()
         .expect("wrapped HTTP/3 error");
-    assert_eq!(h3_error, &h3::Error::TransportError(transport));
+    assert_eq!(h3_error, &h3::Error::Transport(transport));
     assert_eq!(
         h3_error
             .source()
@@ -1431,7 +1431,7 @@ mod server_side_driver {
 
         assert_eq!(
             helper.peer_client_send_body(stream_id, b"body", false),
-            Err(h3::Error::TransportError(quiche::Error::StreamStopped(
+            Err(h3::Error::Transport(quiche::Error::StreamStopped(
                 h3::WireErrorCode::MessageError as u64,
             )))
         );
@@ -1967,7 +1967,7 @@ mod server_side_driver {
     /// If `process_reads()` is called first, it will get the Reset event.
     /// If `upstream_ready()` is called first, it will attempt to read from
     /// the h3::Connection and will get a
-    /// `TransportError(StreamReset(code))`
+    /// `Transport(StreamReset(code))`
     #[test]
     fn client_sends_reset_stream_while_reading_wait_for_data() {
         let mut helper = DriverTestHelper::<ServerHooks>::new().unwrap();
@@ -2274,7 +2274,7 @@ mod server_side_driver {
         // Make sure the peer has received our STOP_SENDING frame
         assert_eq!(
             helper.peer_client_send_body(0, &[1; 7], false),
-            Err(h3::Error::TransportError(quiche::Error::StreamStopped(
+            Err(h3::Error::Transport(quiche::Error::StreamStopped(
                 REQUEST_CANCELED_ERR
             )))
         );
@@ -2569,7 +2569,7 @@ mod server_side_driver {
         helper.advance_and_run_loop().unwrap();
 
         // Client should receive the RESET_STREAM
-        // Note: quiche::h3 reports RESET_STREAM via a TransportError when
+        // Note: quiche::h3 reports RESET_STREAM via a transport error when
         // trying to read from the stream
         assert_eq!(
             helper.peer_client_poll(),
@@ -2621,7 +2621,7 @@ mod server_side_driver {
         // Client tries to send body - should get StreamStopped error
         assert_eq!(
             helper.peer_client_send_body(0, &[1, 2, 3], false),
-            Err(h3::Error::TransportError(quiche::Error::StreamStopped(
+            Err(h3::Error::Transport(quiche::Error::StreamStopped(
                 CUSTOM_ERROR_CODE
             )))
         );
@@ -2674,7 +2674,7 @@ mod server_side_driver {
         // Client should see STOP_SENDING when trying to send
         assert_eq!(
             helper.peer_client_send_body(0, &[1, 2, 3], false),
-            Err(h3::Error::TransportError(quiche::Error::StreamStopped(
+            Err(h3::Error::Transport(quiche::Error::StreamStopped(
                 READ_ERROR_CODE
             )))
         );

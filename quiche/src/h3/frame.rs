@@ -140,7 +140,7 @@ impl FramePayload<'_> {
                     .try_fold(0_usize, |len, (id, value)| {
                         if id > octets::MAX_VAR_INT || value > octets::MAX_VAR_INT
                         {
-                            return Err(super::Error::SettingsError);
+                            return Err(super::Error::InvalidSettings);
                         }
                         let len = len
                             .checked_add(octets::varint_len(id))
@@ -577,7 +577,7 @@ fn parse_settings_frame(b: &mut octets::Octets) -> Result<Frame> {
         // MAX_SETTINGS_PAYLOAD_SIZE protects us from storing too many raw
         // settings.
         if raw.iter().any(|&(id, _)| id == identifier) {
-            return Err(super::Error::SettingsError);
+            return Err(super::Error::InvalidSettings);
         }
         raw.push((identifier, value));
 
@@ -596,7 +596,7 @@ fn parse_settings_frame(b: &mut octets::Octets) -> Result<Frame> {
 
             SETTINGS_ENABLE_CONNECT_PROTOCOL => {
                 if value > 1 {
-                    return Err(super::Error::SettingsError);
+                    return Err(super::Error::InvalidSettings);
                 }
 
                 connect_protocol_enabled = Some(value);
@@ -604,7 +604,7 @@ fn parse_settings_frame(b: &mut octets::Octets) -> Result<Frame> {
 
             SETTINGS_H3_DATAGRAM_00 | SETTINGS_H3_DATAGRAM => {
                 if value > 1 {
-                    return Err(super::Error::SettingsError);
+                    return Err(super::Error::InvalidSettings);
                 }
 
                 if identifier == SETTINGS_H3_DATAGRAM {
@@ -616,7 +616,7 @@ fn parse_settings_frame(b: &mut octets::Octets) -> Result<Frame> {
 
             // Reserved values overlap with HTTP/2 and MUST be rejected
             0x0 | 0x2 | 0x3 | 0x4 | 0x5 =>
-                return Err(super::Error::SettingsError),
+                return Err(super::Error::InvalidSettings),
 
             // Unknown Settings parameters go into additional_settings.
             _ => {
@@ -648,7 +648,7 @@ fn parse_single_varint(
     let v = b.get_varint()?;
 
     if b.off() - before != payload_length {
-        return Err(super::Error::FrameError);
+        return Err(super::Error::MalformedFrame);
     }
 
     Ok(v)
@@ -663,7 +663,7 @@ fn parse_id_and_payload(
     let id = b.get_varint()?;
     let remaining = payload_length
         .checked_sub(b.off() - before)
-        .ok_or(super::Error::FrameError)?;
+        .ok_or(super::Error::MalformedFrame)?;
     Ok((id, b.get_bytes(remaining)?.to_vec()))
 }
 
@@ -976,7 +976,7 @@ mod tests {
                     len as u64,
                     &bytes[..len]
                 ),
-                Err(crate::h3::Error::SettingsError),
+                Err(crate::h3::Error::InvalidSettings),
                 "duplicate {id}"
             );
         }
@@ -1218,7 +1218,7 @@ mod tests {
                 frame_payload_len as u64,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
                 frame_payload_len as u64,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
     }
 
@@ -1356,7 +1356,7 @@ mod tests {
                 frame_payload_len,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
 
         d[frame_header_len] = 0x2;
@@ -1367,7 +1367,7 @@ mod tests {
                 frame_payload_len,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
 
         d[frame_header_len] = 0x3;
@@ -1378,7 +1378,7 @@ mod tests {
                 frame_payload_len,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
 
         d[frame_header_len] = 0x4;
@@ -1389,7 +1389,7 @@ mod tests {
                 frame_payload_len,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
 
         d[frame_header_len] = 0x5;
@@ -1400,7 +1400,7 @@ mod tests {
                 frame_payload_len,
                 &d[frame_header_len..]
             ),
-            Err(crate::h3::Error::SettingsError)
+            Err(crate::h3::Error::InvalidSettings)
         );
     }
 
@@ -1548,7 +1548,7 @@ mod tests {
         ] {
             assert_eq!(
                 Frame::from_bytes(frame_type, d.len() as u64, &d),
-                Err(crate::h3::Error::FrameError)
+                Err(crate::h3::Error::MalformedFrame)
             );
         }
     }
