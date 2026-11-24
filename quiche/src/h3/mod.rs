@@ -7508,6 +7508,32 @@ mod tests {
         Ok(())
     }
 
+    struct DatagramExchange {
+        send_body: fn(&mut Session, u64, bool) -> Result<Vec<u8>>,
+        send_datagram: fn(&mut Session, u64) -> Result<Vec<u8>>,
+        poll: fn(&mut Session) -> Result<(u64, Event)>,
+        receive_datagram:
+            fn(&mut Session, &mut [u8]) -> Result<(usize, u64, usize)>,
+        receive_body: fn(&mut Session, u64, &mut [u8]) -> Result<usize>,
+    }
+
+    impl DatagramExchange {
+        const REQUEST: Self = Self {
+            send_body: Session::send_body_client,
+            send_datagram: Session::send_dgram_client,
+            poll: Session::poll_server,
+            receive_datagram: Session::recv_dgram_server,
+            receive_body: Session::recv_body_server,
+        };
+        const RESPONSE: Self = Self {
+            send_body: Session::send_body_server,
+            send_datagram: Session::send_dgram_server,
+            poll: Session::poll_client,
+            receive_datagram: Session::recv_dgram_client,
+            receive_body: Session::recv_body_client,
+        };
+    }
+
     #[rstest::rstest]
     fn poll_datagrams(#[values(false, true)] multiple: bool) -> TestResult {
         let mut s = datagram_session()?;
@@ -7525,54 +7551,45 @@ mod tests {
             if response {
                 headers = s.send_response(stream, false)?;
             }
-            let (send_body, send_dgram, poll, recv_dgram, recv_body): (
-                fn(&mut Session, u64, bool) -> Result<Vec<u8>>,
-                fn(&mut Session, u64) -> Result<Vec<u8>>,
-                fn(&mut Session) -> Result<(u64, Event)>,
-                fn(&mut Session, &mut [u8]) -> Result<(usize, u64, usize)>,
-                fn(&mut Session, u64, &mut [u8]) -> Result<usize>,
-            ) = if response {
-                (
-                    Session::send_body_server,
-                    Session::send_dgram_server,
-                    Session::poll_client,
-                    Session::recv_dgram_client,
-                    Session::recv_body_client,
-                )
+            let exchange = if response {
+                DatagramExchange::RESPONSE
             } else {
-                (
-                    Session::send_body_client,
-                    Session::send_dgram_client,
-                    Session::poll_server,
-                    Session::recv_dgram_server,
-                    Session::recv_body_server,
-                )
+                DatagramExchange::REQUEST
             };
-            let body = send_body(&mut s, stream, true)?;
+            let body = (exchange.send_body)(&mut s, stream, true)?;
             for &id in flow_ids {
-                send_dgram(&mut s, id)?;
+                (exchange.send_datagram)(&mut s, id)?;
             }
             assert_eq!(
-                poll(&mut s),
+                (exchange.poll)(&mut s),
                 Ok((stream, Event::Headers {
                     list: std::mem::take(&mut headers),
                     more_frames: true,
                 }))
             );
-            assert_eq!(poll(&mut s), Ok((stream, Event::Data)));
-            assert_eq!(poll(&mut s), Err(Error::Done));
+            assert_eq!((exchange.poll)(&mut s), Ok((stream, Event::Data)));
+            assert_eq!((exchange.poll)(&mut s), Err(Error::Done));
             for &id in &flow_ids[..before_body] {
-                assert_eq!(recv_dgram(&mut s, &mut buf), Ok((11, id, 1)));
-                assert_eq!(poll(&mut s), Err(Error::Done));
+                assert_eq!(
+                    (exchange.receive_datagram)(&mut s, &mut buf),
+                    Ok((11, id, 1))
+                );
+                assert_eq!((exchange.poll)(&mut s), Err(Error::Done));
             }
             let mut received = vec![0; body.len()];
-            assert_eq!(recv_body(&mut s, stream, &mut received), Ok(body.len()));
+            assert_eq!(
+                (exchange.receive_body)(&mut s, stream, &mut received),
+                Ok(body.len())
+            );
             assert_eq!(received, body);
-            assert_eq!(poll(&mut s), Ok((stream, Event::Finished)));
-            assert_eq!(poll(&mut s), Err(Error::Done));
+            assert_eq!((exchange.poll)(&mut s), Ok((stream, Event::Finished)));
+            assert_eq!((exchange.poll)(&mut s), Err(Error::Done));
             for &id in &flow_ids[before_body..] {
-                assert_eq!(recv_dgram(&mut s, &mut buf), Ok((11, id, 1)));
-                assert_eq!(poll(&mut s), Err(Error::Done));
+                assert_eq!(
+                    (exchange.receive_datagram)(&mut s, &mut buf),
+                    Ok((11, id, 1))
+                );
+                assert_eq!((exchange.poll)(&mut s), Err(Error::Done));
             }
         }
         Ok(())

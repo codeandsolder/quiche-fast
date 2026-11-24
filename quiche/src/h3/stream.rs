@@ -1809,7 +1809,7 @@ mod tests {
         stream.set_frame_payload_len(payload_len)?;
         assert_eq!(stream.state, State::FramePayload);
         assert_eq!(stream.state_buf.capacity(), MAX_STATE_BUF_ALLOC_SIZE);
-        assert!(stream.state_buf.is_empty());
+        assert_eq!(stream.state_buf, [] as [u8; 0]);
         let offset =
             usize::try_from(cursor.position()).map_err(|_| Error::Internal)?;
         assert_eq!(offset, 5);
@@ -1897,11 +1897,9 @@ mod tests {
                 assert!(
                     stream.state_buf.capacity() <=
                         (fed + MAX_STATE_BUF_ALLOC_SIZE) * 2,
-                    "capacity {} grew too far ahead of bytes read {} \
-                     (max alloc size {})",
+                    "capacity {} grew too far ahead of bytes read {fed} \
+                     (max alloc size {MAX_STATE_BUF_ALLOC_SIZE})",
                     stream.state_buf.capacity(),
-                    fed,
-                    MAX_STATE_BUF_ALLOC_SIZE,
                 );
             } else {
                 assert_eq!(result, Ok(()));
