@@ -32,7 +32,7 @@ use mio::Interest;
 use mio::Registry;
 use mio::Token;
 
-/// Contiguous datagrams with identical route, pacing deadline and GSO stride.
+/// Contiguous datagrams with a compatible route, deadline and GSO stride.
 /// Every segment except the last must have exactly that stride.
 #[derive(Clone, Debug)]
 pub struct DatagramBatch {
@@ -56,13 +56,18 @@ impl DatagramBatch {
             if batch.info.from == info.from &&
                 batch.info.to == info.to &&
                 batch.pacing == pacing &&
-                (!pacing || batch.info.at == info.at) &&
+                (!pacing ||
+                    batch.info.at == info.at ||
+                    batch.info.at.max(info.at) <= std::time::Instant::now()) &&
                 batch.bytes.end == bytes.start &&
                 batch.bytes.len().is_multiple_of(batch.segment_size) &&
                 batch.bytes.len() / batch.segment_size < 64 &&
                 len <= batch.segment_size
             {
                 batch.bytes.end = bytes.end;
+                // Distinct deadlines may share a GSO operation only when both
+                // are already due. Retain the later deadline for submission.
+                batch.info.at = batch.info.at.max(info.at);
                 return;
             }
         }
@@ -466,6 +471,36 @@ mod pacing_tests {
         Ok(())
     }
 
+    #[test]
+    fn gso_combines_distinct_due_deadlines_but_not_future_deadlines(
+    ) -> io::Result<()> {
+        let (_, info) = addresses()?;
+        let earlier = quiche::SendInfo {
+            at: info
+                .at
+                .checked_sub(std::time::Duration::from_secs(1))
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            ..info
+        };
+        let future = quiche::SendInfo {
+            at: info
+                .at
+                .checked_add(std::time::Duration::from_secs(3600))
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            ..info
+        };
+        let mut batches = Vec::new();
+        for (range, route) in [(0..2, earlier), (2..4, info), (4..6, future)] {
+            DatagramBatch::push(&mut batches, range, route, true);
+        }
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].bytes, 0..4);
+        assert_eq!(batches[0].info.at, info.at);
+        assert_eq!(batches[1].bytes, 4..6);
+        assert_eq!(batches[1].info.at, future.at);
+        Ok(())
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn gso_preserves_routes_and_pacing_deadlines_across_blocking(
@@ -474,7 +509,7 @@ mod pacing_tests {
         let later = quiche::SendInfo {
             at: info
                 .at
-                .checked_add(std::time::Duration::from_millis(1))
+                .checked_add(std::time::Duration::from_secs(3600))
                 .ok_or(io::ErrorKind::InvalidInput)?,
             ..info
         };
