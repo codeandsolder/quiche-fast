@@ -273,7 +273,7 @@ fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
 #[test]
 fn queued_path_responses_are_consumed_only_when_encoded() {
     let config = Config::new(PROTOCOL_VERSION).unwrap();
-    let recovery = recovery::RecoveryConfig::from_config(&config);
+    let recovery = config.recovery;
     let local = "127.0.0.1:1234".parse().unwrap();
     let peer = "127.0.0.1:4321".parse().unwrap();
     let first = [0x11; 8];
@@ -771,6 +771,42 @@ fn unknown_version() {
 
     let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
     assert_eq!(pipe.handshake(), Err(Error::UnknownVersion));
+}
+
+#[test]
+fn recovery_configuration_is_snapshotted_at_connection_creation() {
+    let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    let initial_rtt = Duration::from_millis(73);
+    config.set_initial_rtt(initial_rtt);
+    config.set_initial_congestion_window_packets(17);
+    config.set_max_send_udp_payload_size(1400);
+    config.set_max_pacing_rate(123456);
+    config.enable_pacing(false);
+    config.enable_hystart(false);
+    config.set_enable_relaxed_loss_threshold(true);
+    config.set_max_ack_delay(42);
+    let expected = config.recovery;
+
+    let pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    for conn in [&pipe.client, &pipe.server] {
+        assert!(conn.recovery_config == expected);
+        assert_eq!(conn.recovery_config.max_ack_delay, Duration::ZERO);
+        assert_eq!(conn.local_transport_params.max_ack_delay, 42);
+        assert_eq!(conn.paths.get_active().unwrap().recovery.rtt(), initial_rtt);
+        assert_eq!(
+            conn.paths
+                .get_active()
+                .unwrap()
+                .recovery
+                .max_datagram_size(),
+            1400
+        );
+    }
+
+    config.set_initial_rtt(Duration::from_millis(200));
+    config.set_cc_algorithm(CongestionControlAlgorithm::Reno);
+    assert!(pipe.client.recovery_config == expected);
+    assert!(pipe.server.recovery_config == expected);
 }
 
 #[test]
@@ -10051,7 +10087,7 @@ fn outbound_udp_size_configuration_stays_within_udp_limits() {
         (usize::MAX, MAX_SEND_UDP_PAYLOAD_SIZE),
     ] {
         config.set_max_send_udp_payload_size(requested);
-        assert_eq!(config.max_send_udp_payload_size, expected);
+        assert_eq!(config.recovery.max_send_udp_payload_size, expected);
     }
 }
 

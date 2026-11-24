@@ -33,7 +33,6 @@ use std::time::Instant;
 use super::rtt::RttStats;
 use super::Acked;
 use super::Congestion;
-use super::RecoveryConfig;
 use super::Sent;
 use crate::recovery::PacketFlight;
 use crate::CongestionControlAlgorithm;
@@ -64,7 +63,7 @@ impl TestSender {
                 DEFAULT_INITIAL_RTT,
                 Duration::from_micros(0),
             ),
-            cc: Congestion::from_config(&RecoveryConfig::from_config(&cfg)),
+            cc: Congestion::from_config(&cfg.recovery),
             sent_packets: VecDeque::new(),
         }
     }

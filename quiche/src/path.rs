@@ -370,21 +370,10 @@ impl Path {
         };
 
         let pmtud = config.and_then(|c| {
-            if c.pmtud {
-                let maximum_supported_mtu: usize = std::cmp::min(
-                    // if the max_udp_payload_size doesn't fit into a usize,
-                    // then max_send_udp_payload_size must be smaller so use
-                    // that
-                    c.local_transport_params
-                        .max_udp_payload_size
-                        .try_into()
-                        .unwrap_or(c.max_send_udp_payload_size),
-                    c.max_send_udp_payload_size,
-                );
-                Some(pmtud::Pmtud::new(maximum_supported_mtu, c.pmtud_max_probes))
-            } else {
-                None
-            }
+            c.pmtud.create(
+                recovery_config.max_send_udp_payload_size,
+                c.local_transport_params.max_udp_payload_size,
+            )
         });
 
         Self {
@@ -1211,7 +1200,6 @@ mod tests {
     use crate::test_utils;
     use crate::MIN_CLIENT_INITIAL_LEN;
 
-    use crate::recovery::RecoveryConfig;
     use crate::Config;
 
     use super::*;
@@ -1219,7 +1207,7 @@ mod tests {
     #[test]
     fn validation_attempt_abandonment_discards_probe_history_and_rearms_event() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local = "127.0.0.1:1234".parse().unwrap();
         let old_peer = "127.0.0.1:4321".parse().unwrap();
         let peer = "127.0.0.1:4322".parse().unwrap();
@@ -1278,7 +1266,7 @@ mod tests {
     #[test]
     fn validation_attempt_verified_address_is_not_amplification_limited() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local = "127.0.0.1:1234".parse().unwrap();
         let peer = "127.0.0.1:4321".parse().unwrap();
         let now = Instant::now();
@@ -1313,7 +1301,7 @@ mod tests {
         #[values(false, true)] is_server: bool,
     ) {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let first: SocketAddr = "127.0.0.1:4321".parse().unwrap();
         let second: SocketAddr = "127.0.0.1:4322".parse().unwrap();
@@ -1404,7 +1392,7 @@ mod tests {
         #[case] superseded: bool, #[case] both_busy: bool,
     ) {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery = RecoveryConfig::from_config(&config);
+        let recovery = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let peers = [4321, 4322, 4323, 4324]
             .map(|port| SocketAddr::from(([127, 0, 0, 1], port)));
@@ -1477,7 +1465,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let local: SocketAddr = "127.0.0.1:1234".parse().unwrap();
         let old_peer: SocketAddr = "127.0.0.1:4321".parse().unwrap();
         let new_peer: SocketAddr = "127.0.0.1:4322".parse().unwrap();
@@ -1578,9 +1566,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm_name(cc_algorithm_name).unwrap();
-        let mut recovery = recovery::Recovery::new_with_config(
-            &RecoveryConfig::from_config(&config),
-        );
+        let mut recovery = recovery::Recovery::new_with_config(&config.recovery);
         let now = Instant::now();
         let handshake = HandshakeStatus {
             has_handshake_keys: true,
@@ -1696,7 +1682,7 @@ mod tests {
     #[test]
     fn amplification_credit_saturates_product_and_accumulation() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             "127.0.0.1:1234".parse().unwrap(),
             "127.0.0.1:4321".parse().unwrap(),
@@ -1725,7 +1711,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1749,7 +1735,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1786,7 +1772,7 @@ mod tests {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.discover_pmtu(true);
         config.set_max_send_udp_payload_size(1400);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut path = Path::new(
             local,
             peer,
@@ -1819,7 +1805,7 @@ mod tests {
         let server_addr = "127.0.0.1:4321".parse().unwrap();
 
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
 
         let path = Path::new(
             client_addr,
@@ -1911,7 +1897,7 @@ mod tests {
         let server_addr = "127.0.0.1:4321".parse().unwrap();
 
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
 
         let path = Path::new(
             client_addr,
@@ -1998,7 +1984,7 @@ mod tests {
 
         // Default to DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
 
         let path = Path::new(
             client_addr,

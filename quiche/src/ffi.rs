@@ -3128,20 +3128,26 @@ mod tests {
     fn c_algorithm_discriminants_are_checked_before_configuration() {
         let mut config = Config::new(PROTOCOL_VERSION).unwrap();
         assert_eq!(quiche_config_set_cc_algorithm(&mut config, 0), 0);
-        assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+        assert_eq!(
+            config.recovery.cc_algorithm,
+            CongestionControlAlgorithm::Reno
+        );
         for invalid in [-1, 2, 3, 5, c_int::MAX] {
             assert_eq!(
                 quiche_config_set_cc_algorithm(&mut config, invalid),
                 c_int::from(FFI_ERR_INVALID_ARGUMENT)
             );
-            assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
+            assert_eq!(
+                config.recovery.cc_algorithm,
+                CongestionControlAlgorithm::Reno
+            );
         }
         for (value, algorithm) in [
             (1, CongestionControlAlgorithm::Cubic),
             (4, CongestionControlAlgorithm::Bbr2Gcongestion),
         ] {
             assert_eq!(quiche_config_set_cc_algorithm(&mut config, value), 0);
-            assert_eq!(config.cc_algorithm, algorithm);
+            assert_eq!(config.recovery.cc_algorithm, algorithm);
         }
     }
 

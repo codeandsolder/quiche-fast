@@ -32,6 +32,7 @@ use crate::frame;
 use crate::packet;
 use crate::ranges::RangeSet;
 pub use crate::recovery::bandwidth::Bandwidth;
+#[cfg(test)]
 use crate::Config;
 use crate::Error;
 use crate::Result;
@@ -236,20 +237,21 @@ pub struct RecoveryConfig {
     pub enable_relaxed_loss_threshold: bool,
 }
 
-impl RecoveryConfig {
-    pub const fn from_config(config: &Config) -> Self {
+impl Default for RecoveryConfig {
+    fn default() -> Self {
         Self {
-            initial_rtt: config.initial_rtt,
-            max_send_udp_payload_size: config.max_send_udp_payload_size,
+            initial_rtt: crate::DEFAULT_INITIAL_RTT,
+            max_send_udp_payload_size: crate::DEFAULT_SEND_UDP_PAYLOAD_SIZE,
+            // Peer delay is not known until transport parameters are received.
             max_ack_delay: Duration::ZERO,
-            cc_algorithm: config.cc_algorithm,
-            custom_bbr_params: config.custom_bbr_params,
-            hystart: config.hystart,
-            pacing: config.pacing,
-            max_pacing_rate: config.max_pacing_rate,
-            initial_congestion_window_packets: config
-                .initial_congestion_window_packets,
-            enable_relaxed_loss_threshold: config.enable_relaxed_loss_threshold,
+            cc_algorithm: CongestionControlAlgorithm::Cubic,
+            custom_bbr_params: None,
+            hystart: true,
+            pacing: true,
+            max_pacing_rate: None,
+            initial_congestion_window_packets:
+                crate::DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
+            enable_relaxed_loss_threshold: false,
         }
     }
 }
@@ -477,7 +479,7 @@ impl Recovery {
 
     #[cfg(test)]
     pub fn new(config: &Config) -> Self {
-        Self::new_with_config(&RecoveryConfig::from_config(config))
+        Self::new_with_config(&config.recovery)
     }
 }
 
@@ -1973,7 +1975,7 @@ mod tests {
         #[values("bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
         let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        cfg.enable_relaxed_loss_threshold = true;
+        cfg.set_enable_relaxed_loss_threshold(true);
         assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
 
         let mut now = Instant::now();

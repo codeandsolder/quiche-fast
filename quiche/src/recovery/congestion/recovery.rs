@@ -440,7 +440,7 @@ impl LegacyRecovery {
 
     #[cfg(test)]
     pub fn new(config: &crate::Config) -> Self {
-        Self::new_with_config(&RecoveryConfig::from_config(config))
+        Self::new_with_config(&config.recovery)
     }
 
     fn deadline(
@@ -1189,7 +1189,6 @@ pub struct Acked {
 mod tests {
     use super::*;
     use crate::recovery::HandshakeStatus;
-    use crate::recovery::RecoveryConfig;
     use std::time::Instant;
 
     #[rstest::rstest]
@@ -1222,7 +1221,7 @@ mod tests {
     #[test]
     fn test_high_pto_count_no_panic() {
         let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut r = LegacyRecovery::new_with_config(&recovery_config);
 
         r.pto_count = 99999;

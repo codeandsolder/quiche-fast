@@ -1177,7 +1177,7 @@ mod tests {
     #[test]
     fn loss_threshold() {
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         assert!(!recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
@@ -1237,7 +1237,7 @@ mod tests {
 
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_enable_relaxed_loss_threshold(true);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         assert!(recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
@@ -1276,7 +1276,7 @@ mod tests {
     fn test_high_pto_count_no_panic() {
         let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
         config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
-        let recovery_config = RecoveryConfig::from_config(&config);
+        let recovery_config = config.recovery;
         let mut r = GRecovery::new(&recovery_config).unwrap();
 
         r.pto_count = 99999;

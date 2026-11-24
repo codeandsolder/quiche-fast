@@ -568,20 +568,11 @@ pub struct Config {
 
     grease: bool,
 
-    cc_algorithm: CongestionControlAlgorithm,
-    custom_bbr_params: Option<BbrParams>,
-    initial_congestion_window_packets: usize,
-    enable_relaxed_loss_threshold: bool,
+    recovery: recovery::RecoveryConfig,
+
     enable_send_streams_blocked: bool,
 
-    pmtud: bool,
-    pmtud_max_probes: u8,
-
-    hystart: bool,
-
-    pacing: bool,
-    /// Send rate limit in Mbps
-    max_pacing_rate: Option<u64>,
+    pmtud: pmtud::Config,
 
     tx_cap_factor: f64,
 
@@ -589,8 +580,6 @@ pub struct Config {
     dgram_send_max_queue_len: usize,
 
     path_challenge_recv_max_queue_len: usize,
-
-    max_send_udp_payload_size: usize,
 
     max_connection_window: u64,
     max_stream_window: u64,
@@ -600,8 +589,6 @@ pub struct Config {
     disable_dcid_reuse: bool,
 
     track_unknown_transport_params: Option<usize>,
-
-    initial_rtt: Duration,
 }
 
 // See https://quicwg.org/base-drafts/rfc9000.html#section-15
@@ -658,17 +645,9 @@ impl Config {
             tls_ctx,
             application_protos: Vec::new(),
             grease: true,
-            cc_algorithm: CongestionControlAlgorithm::Cubic,
-            custom_bbr_params: None,
-            initial_congestion_window_packets:
-                DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
-            enable_relaxed_loss_threshold: false,
+            recovery: recovery::RecoveryConfig::default(),
             enable_send_streams_blocked: false,
-            pmtud: false,
-            pmtud_max_probes: pmtud::MAX_PROBES_DEFAULT,
-            hystart: true,
-            pacing: true,
-            max_pacing_rate: None,
+            pmtud: pmtud::Config::default(),
 
             tx_cap_factor: TX_CAP_FACTOR,
 
@@ -678,8 +657,6 @@ impl Config {
             path_challenge_recv_max_queue_len:
                 DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN,
 
-            max_send_udp_payload_size: DEFAULT_SEND_UDP_PAYLOAD_SIZE,
-
             max_connection_window: MAX_CONNECTION_WINDOW,
             max_stream_window: stream::MAX_STREAM_WINDOW,
 
@@ -688,7 +665,6 @@ impl Config {
             disable_dcid_reuse: false,
 
             track_unknown_transport_params: None,
-            initial_rtt: DEFAULT_INITIAL_RTT,
         })
     }
 
@@ -818,7 +794,7 @@ impl Config {
     ///
     /// The default value is `false`.
     pub const fn discover_pmtu(&mut self, discover: bool) {
-        self.pmtud = discover;
+        self.pmtud.enabled = discover;
     }
 
     /// Configures the maximum number of PMTUD probe attempts before treating
@@ -827,7 +803,7 @@ impl Config {
     /// Defaults to 3 per [RFC 8899 Section 5.1.2](https://datatracker.ietf.org/doc/html/rfc8899#section-5.1.2).
     /// If 0 is passed, the default value is used.
     pub const fn set_pmtud_max_probes(&mut self, max_probes: u8) {
-        self.pmtud_max_probes = max_probes;
+        self.pmtud.max_probes = max_probes;
     }
 
     /// Configures whether to send GREASE values.
@@ -963,7 +939,7 @@ impl Config {
     ///
     /// The default value is `333`.
     pub const fn set_initial_rtt(&mut self, v: Duration) {
-        self.initial_rtt = v;
+        self.recovery.initial_rtt = v;
     }
 
     /// Sets the `max_idle_timeout` transport parameter, in milliseconds.
@@ -987,7 +963,7 @@ impl Config {
     ///
     /// The default and minimum value is `1200`; the maximum is `65527`.
     pub fn set_max_send_udp_payload_size(&mut self, v: usize) {
-        self.max_send_udp_payload_size =
+        self.recovery.max_send_udp_payload_size =
             v.clamp(MIN_CLIENT_INITIAL_LEN, MAX_SEND_UDP_PAYLOAD_SIZE);
     }
 
@@ -1147,7 +1123,7 @@ impl Config {
     ///
     /// The default value is `CongestionControlAlgorithm::Cubic`.
     pub const fn set_cc_algorithm(&mut self, algo: CongestionControlAlgorithm) {
-        self.cc_algorithm = algo;
+        self.recovery.cc_algorithm = algo;
     }
 
     /// Sets custom BBR settings.
@@ -1163,7 +1139,7 @@ impl Config {
     pub const fn set_custom_bbr_params(
         &mut self, custom_bbr_settings: BbrParams,
     ) {
-        self.custom_bbr_params = Some(custom_bbr_settings);
+        self.recovery.custom_bbr_params = Some(custom_bbr_settings);
     }
 
     /// Sets the congestion control algorithm used by string.
@@ -1183,7 +1159,7 @@ impl Config {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     pub fn set_cc_algorithm_name(&mut self, name: &str) -> Result<()> {
-        self.cc_algorithm = CongestionControlAlgorithm::from_str(name)?;
+        self.recovery.cc_algorithm = CongestionControlAlgorithm::from_str(name)?;
 
         Ok(())
     }
@@ -1194,14 +1170,14 @@ impl Config {
     pub const fn set_initial_congestion_window_packets(
         &mut self, packets: usize,
     ) {
-        self.initial_congestion_window_packets = packets;
+        self.recovery.initial_congestion_window_packets = packets;
     }
 
     /// Configure whether to enable relaxed loss detection on spurious loss.
     ///
     /// The default value is false.
     pub const fn set_enable_relaxed_loss_threshold(&mut self, enable: bool) {
-        self.enable_relaxed_loss_threshold = enable;
+        self.recovery.enable_relaxed_loss_threshold = enable;
     }
 
     /// Configure whether to enable sending `STREAMS_BLOCKED` frames.
@@ -1219,21 +1195,21 @@ impl Config {
     ///
     /// The default value is `true`.
     pub const fn enable_hystart(&mut self, v: bool) {
-        self.hystart = v;
+        self.recovery.hystart = v;
     }
 
     /// Configures whether to enable pacing.
     ///
     /// The default value is `true`.
     pub const fn enable_pacing(&mut self, v: bool) {
-        self.pacing = v;
+        self.recovery.pacing = v;
     }
 
     /// Sets the max value for pacing rate.
     ///
     /// By default pacing rate is not limited.
     pub const fn set_max_pacing_rate(&mut self, v: u64) {
-        self.max_pacing_rate = Some(v);
+        self.recovery.max_pacing_rate = Some(v);
     }
 
     /// Configures whether to enable receiving DATAGRAM frames.
@@ -2299,7 +2275,7 @@ impl<F: BufFactory> Connection<F> {
             None
         };
 
-        let recovery_config = recovery::RecoveryConfig::from_config(config);
+        let recovery_config = config.recovery;
 
         let mut path = path::Path::new(
             local,
