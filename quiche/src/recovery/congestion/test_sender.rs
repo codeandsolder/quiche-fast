@@ -158,17 +158,11 @@ impl TestSender {
             return Err("loss requires a nonempty batch of outstanding packets");
         }
 
-        let lost_bytes = self
-            .sent_packets
-            .iter()
-            .take(n)
-            .map(|packet| packet.size)
-            .sum::<usize>();
-        let mut unacked = self
-            .sent_packets
-            .drain(..n)
-            .last()
-            .ok_or("loss batch has no final packet")?;
+        let mut lost = self.sent_packets.drain(..n);
+        let mut unacked =
+            lost.next_back().ok_or("loss batch has no final packet")?;
+        let lost_bytes =
+            unacked.size + lost.map(|packet| packet.size).sum::<usize>();
         if let Some(time) = transmitted_at {
             unacked.transmitted_at = time;
         }
