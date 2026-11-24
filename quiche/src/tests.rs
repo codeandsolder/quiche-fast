@@ -1083,6 +1083,10 @@ fn handshake_confirmation(
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
+    assert_handshake_confirmation(&mut pipe);
+}
+
+fn assert_handshake_confirmation(pipe: &mut test_utils::Pipe) {
     // Server sends initial flight.
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
@@ -14448,55 +14452,7 @@ fn connect_custom_client_dcid() {
 
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
-    // Server sends initial flight.
-    let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
-
-    assert!(!pipe.client.is_established());
-    assert!(!pipe.client.handshake_progress.confirmed());
-
-    assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_progress.confirmed());
-
-    test_utils::process_flight(&mut pipe.client, flight).unwrap();
-
-    // Client sends Handshake packet and completes handshake.
-    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
-
-    assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_progress.confirmed());
-
-    assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_progress.confirmed());
-
-    test_utils::process_flight(&mut pipe.server, flight).unwrap();
-
-    // Server completes and confirms handshake, and sends HANDSHAKE_DONE.
-    let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
-
-    assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_progress.confirmed());
-
-    assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_progress.confirmed());
-
-    test_utils::process_flight(&mut pipe.client, flight).unwrap();
-
-    // Client acks 1-RTT packet, and confirms handshake.
-    let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
-
-    assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_progress.confirmed());
-
-    assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_progress.confirmed());
-
-    test_utils::process_flight(&mut pipe.server, flight).unwrap();
-
-    assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_progress.confirmed());
-
-    assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_progress.confirmed());
+    assert_handshake_confirmation(&mut pipe);
 }
 
 #[rstest]

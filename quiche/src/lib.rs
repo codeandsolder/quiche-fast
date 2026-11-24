@@ -1776,7 +1776,7 @@ where
 /// let conn = quiche::accept(&scid, None, local, peer, &mut config)?;
 /// # Ok::<(), quiche::Error>(())
 /// ```
-#[inline(always)]
+#[inline]
 pub fn accept(
     scid: &ConnectionId, odcid: Option<&ConnectionId>, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
