@@ -475,7 +475,7 @@ const MAX_DGRAM_FRAME_SIZE: u64 = 65536;
 // The number of undecryptable that can be buffered.
 const MAX_UNDECRYPTABLE_PACKETS: usize = 10;
 
-const RESERVED_VERSION_MASK: u32 = 0xfafafafa;
+const RESERVED_VERSION_MASK: u32 = 0xfafa_fafa;
 
 // The maximum size of the receiver connection flow control window.
 const MAX_CONNECTION_WINDOW: u64 = 24 * 1024 * 1024;
@@ -5450,7 +5450,9 @@ impl<F: BufFactory> Connection<F> {
                         deadline: now + (path.recovery.pto() * 3),
                         origin: CloseOrigin::Local,
                     };
-                    assembly.flight.record_ack_eliciting();
+                    // CONNECTION_CLOSE does not elicit an ACK. Leave any
+                    // existing flight classification intact; padding, if
+                    // needed, is accounted for during frame completion.
                 }
             }
         }
@@ -8950,6 +8952,52 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
+    /// Discard remembered application state once TLS rejects early data.
+    fn rollback_rejected_early_data(&mut self, now: Instant) {
+        // Rejected 0-RTT shares the Application packet-number space with
+        // 1-RTT, so discard recovery state without rewinding packet
+        // numbers. No 1-RTT application packets can have been sent yet.
+        let status = self.handshake_status();
+        for (_, path) in self.paths.iter_mut() {
+            path.recovery.on_pkt_num_space_discarded(
+                packet::Epoch::Application,
+                status,
+                now,
+            );
+        }
+
+        // State created using remembered transport/application parameters
+        // must not leak into the negotiated 1-RTT connection.
+        self.streams.reset_for_early_data_rejection();
+        self.tx_data = 0;
+        self.last_tx_data = 0;
+        self.blocked_limit = None;
+        self.streams_blocked_bidi_state = StreamsBlockedState::default();
+        self.streams_blocked_uni_state = StreamsBlockedState::default();
+        self.dgram_send_queue.purge(|_| true);
+        self.update_tx_cap();
+        self.early_data_rejection_handled = true;
+    }
+
+    /// Decode and apply peer parameters once TLS makes them available.
+    fn parse_available_peer_transport_params(&mut self) -> Result<()> {
+        if self.parsed_peer_transport_params {
+            return Ok(());
+        }
+
+        let raw_params = self.handshake.quic_transport_params();
+        if raw_params.is_empty() {
+            return Ok(());
+        }
+
+        let peer_params = TransportParams::decode(
+            raw_params,
+            self.is_server,
+            self.peer_transport_params_track_unknown,
+        )?;
+        self.parse_peer_transport_params(peer_params)
+    }
+
     /// Continues the handshake.
     ///
     /// If the connection is already established, it does nothing.
@@ -9031,68 +9079,19 @@ impl<F: BufFactory> Connection<F> {
         if self.handshake.early_data_rejected() &&
             !self.early_data_rejection_handled
         {
-            // Rejected 0-RTT shares the Application packet-number space with
-            // 1-RTT, so discard recovery state without rewinding packet
-            // numbers. No 1-RTT application packets can have been sent yet.
-            let status = self.handshake_status();
-            for (_, path) in self.paths.iter_mut() {
-                path.recovery.on_pkt_num_space_discarded(
-                    packet::Epoch::Application,
-                    status,
-                    now,
-                );
-            }
-
-            // State created using remembered transport/application parameters
-            // must not leak into the negotiated 1-RTT connection.
-            self.streams.reset_for_early_data_rejection();
-            self.tx_data = 0;
-            self.last_tx_data = 0;
-            self.blocked_limit = None;
-            self.streams_blocked_bidi_state = StreamsBlockedState::default();
-            self.streams_blocked_uni_state = StreamsBlockedState::default();
-            self.dgram_send_queue.purge(|_| true);
-            self.update_tx_cap();
-            self.early_data_rejection_handled = true;
+            self.rollback_rejected_early_data(now);
         }
 
         if handshake_needs_retry {
-            // Try to parse transport parameters as soon as the first flight of
-            // handshake data is processed.
-            //
-            // This is potentially dangerous as the handshake hasn't been
-            // completed yet, though it's required to be able to send data in
-            // 0.5 RTT.
-            let raw_params = self.handshake.quic_transport_params();
-
-            if !self.parsed_peer_transport_params && !raw_params.is_empty() {
-                let peer_params = TransportParams::decode(
-                    raw_params,
-                    self.is_server,
-                    self.peer_transport_params_track_unknown,
-                )?;
-
-                self.parse_peer_transport_params(peer_params)?;
-            }
-
+            // Parse transport parameters as soon as the first handshake flight
+            // supplies them: half-RTT transmission needs the negotiated limits.
+            self.parse_available_peer_transport_params()?;
             return Ok(());
         }
 
         self.handshake_completed = self.handshake.is_completed();
-
         self.alpn = self.handshake.alpn_protocol().to_vec();
-
-        let raw_params = self.handshake.quic_transport_params();
-
-        if !self.parsed_peer_transport_params && !raw_params.is_empty() {
-            let peer_params = TransportParams::decode(
-                raw_params,
-                self.is_server,
-                self.peer_transport_params_track_unknown,
-            )?;
-
-            self.parse_peer_transport_params(peer_params)?;
-        }
+        self.parse_available_peer_transport_params()?;
 
         if self.handshake_completed {
             // The handshake is considered confirmed at the server when the

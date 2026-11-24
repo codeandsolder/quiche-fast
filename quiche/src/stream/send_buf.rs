@@ -52,7 +52,7 @@ struct SendReserve<'a, F: BufFactory> {
 impl<F: BufFactory> SendReserve<'_, F> {
     fn append_buf(&mut self, buf: F::Buf) -> Result<()> {
         let len = buf.as_ref().len();
-        let inner = &mut self.inner;
+        let inner = &mut *self.inner;
 
         if len > self.reserved {
             return Err(Error::BufferTooShort);

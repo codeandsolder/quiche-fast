@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 /// A trait for providing internal storage buffers for streams,
 /// enabling zero-copy operations.
+///
 /// The associated type `Buf` can be any type that dereferences to
 /// a slice, but should be fast to clone, eg. by wrapping it with an
 /// [`Arc`].
@@ -50,13 +51,16 @@ pub trait BufFactory: Clone + Default + Debug {
     fn dgram_buf_from_slice(buf: &[u8]) -> Self::DgramBuf;
 }
 
-/// A trait that enables zero-copy sends to quiche. When buffers produced
-/// by the `BufFactory` implement this trait, quiche and h3 can supply the
+/// A trait that enables zero-copy sends to quiche.
+///
+/// When buffers produced by the `BufFactory` implement this trait, quiche
+/// and h3 can supply the
 /// raw buffers to be sent, instead of slices that must be copied first.
 pub trait BufSplit {
     /// Split the buffer at a given point, after the split the old buffer
     /// must only contain the first `at` bytes, while the newly produced
-    /// buffer must containt the remaining bytes.
+    /// buffer must contain the remaining bytes.
+    #[must_use = "the returned buffer owns the remaining bytes"]
     fn split_at(&mut self, at: usize) -> Self;
 
     /// Try to prepend a prefix to the buffer, return true if succeeded.
