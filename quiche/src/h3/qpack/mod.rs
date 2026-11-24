@@ -119,22 +119,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn owned_and_fixed_output_agree() {
+    fn owned_and_fixed_output_agree() -> Result<()> {
         let fields = [
             h3::Header::new(b":method", b"GET"),
             h3::Header::new(b"X-Custom", b"Mixed case value"),
         ];
-        let owned = encode(&fields).unwrap();
+        let owned = encode(&fields)?;
         let mut fixed = vec![0; owned.len()];
         assert_eq!(encode_into(&fields, &mut fixed), Ok(owned.len()));
         assert_eq!(fixed, owned);
         let short = &mut fixed[..owned.len() - 1];
         assert_eq!(encode_into(&fields, short), Err(Error::BufferTooShort));
-        assert_eq!(decode(&owned, u64::MAX).unwrap()[1].name(), b"x-custom");
-        assert_eq!(
-            decode(&encode_literal(&fields).unwrap(), u64::MAX).unwrap(),
-            fields
-        );
+        assert_eq!(decode(&owned, u64::MAX)?[1].name(), b"x-custom");
+        assert_eq!(decode(&encode_literal(&fields)?, u64::MAX)?, fields);
+        Ok(())
     }
 
     #[test]
@@ -168,9 +166,8 @@ mod tests {
 
     #[test]
     fn encode_decode_small_max_field_section_size() {
-        let mut encoded = [0u8; 102];
-
         const NUM_HDRS: usize = 10;
+        let mut encoded = [0u8; 102];
 
         let headers = vec![h3::Header::new(b"hello", b"world"); NUM_HDRS];
 
@@ -205,7 +202,7 @@ mod tests {
     }
 
     #[test]
-    fn lower_case() {
+    fn lower_case() -> Result<()> {
         let mut encoded = [0u8; 35];
 
         let headers_expected = vec![
@@ -227,7 +224,7 @@ mod tests {
 
         assert_eq!(encode_into(&headers_in, &mut encoded), Ok(35));
 
-        let headers_out = decode(&encoded, u64::MAX).unwrap();
+        let headers_out = decode(&encoded, u64::MAX)?;
 
         assert_eq!(headers_expected, headers_out);
 
@@ -242,9 +239,10 @@ mod tests {
 
         assert_eq!(encode_into(&headers_in, &mut encoded), Ok(35));
 
-        let headers_out = decode(&encoded, u64::MAX).unwrap();
+        let headers_out = decode(&encoded, u64::MAX)?;
 
         assert_eq!(headers_expected, headers_out);
+        Ok(())
     }
 
     #[test]

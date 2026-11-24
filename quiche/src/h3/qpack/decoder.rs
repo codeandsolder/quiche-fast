@@ -329,7 +329,7 @@ mod tests {
 
     #[test]
     fn decode_int2() {
-        let encoded = [0b11111, 0b10011010, 0b00001010];
+        let encoded = [0b11111, 0b1001_1010, 0b0000_1010];
         let mut b = octets::Octets::with_slice(&encoded);
 
         assert_eq!(decode_int(&mut b, 5), Ok(1337));
@@ -337,18 +337,18 @@ mod tests {
 
     #[test]
     fn decode_int3() {
-        let encoded = [0b101010];
+        let encoded = [0b10_1010];
         let mut b = octets::Octets::with_slice(&encoded);
 
         assert_eq!(decode_int(&mut b, 8), Ok(42));
     }
 
     #[test]
-    fn prefixed_integer_boundaries() {
+    fn prefixed_integer_boundaries() -> Result<()> {
         for prefix in 1..=8 {
             let mut storage = [0_u8; 16];
             let mut writer = octets::OctetsMut::with_slice(&mut storage);
-            super::super::encode_int(u64::MAX, 0, prefix, &mut writer).unwrap();
+            super::super::encode_int(u64::MAX, 0, prefix, &mut writer)?;
             let used = writer.off();
             let mut reader = octets::Octets::with_slice(&storage[..used]);
             assert_eq!(decode_int(&mut reader, prefix), Ok(u64::MAX));
@@ -369,12 +369,13 @@ mod tests {
         wire[10] = 1;
         let mut reader = octets::Octets::with_slice(&wire);
         assert_eq!(decode_int(&mut reader, 8), Err(Error::BufferTooShort));
+        Ok(())
     }
 
     #[test]
-    fn integer_prefix_flags_and_widths() {
+    fn integer_prefix_flags_and_widths() -> Result<()> {
         for prefix in 1..=8 {
-            let mask = prefix_mask(prefix).unwrap();
+            let mask = prefix_mask(prefix)?;
             let first = !mask;
             let boundary = u64::from(mask);
             for value in
@@ -382,8 +383,7 @@ mod tests {
             {
                 let mut storage = [0; 16];
                 let mut writer = octets::OctetsMut::with_slice(&mut storage);
-                super::super::encode_int(value, first, prefix, &mut writer)
-                    .unwrap();
+                super::super::encode_int(value, first, prefix, &mut writer)?;
                 let len = writer.off();
                 assert_eq!(storage[0] & !mask, first);
                 let mut reader = octets::Octets::with_slice(&storage[..len]);
@@ -413,6 +413,7 @@ mod tests {
             );
             assert_eq!(reader.off(), 0);
         }
+        Ok(())
     }
 
     #[test]
@@ -439,13 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn oversized_literal_string_lengths_cannot_wrap() {
+    fn oversized_literal_string_lengths_cannot_wrap() -> Result<()> {
         // Exercise both length-prefix widths, Huffman and plain literals.
         for (prefix, first) in [(3, 0x20), (3, 0x28), (7, 0), (7, 0x80)] {
             let mut storage = [0_u8; 16];
             let mut writer = octets::OctetsMut::with_slice(&mut storage);
-            super::super::encode_int(1_u64 << 32, first, prefix, &mut writer)
-                .unwrap();
+            super::super::encode_int(1_u64 << 32, first, prefix, &mut writer)?;
             let used = writer.off();
             let mut reader = octets::Octets::with_slice(&storage[..used]);
             assert_eq!(
@@ -453,6 +453,7 @@ mod tests {
                 Err(Error::BufferTooShort)
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -493,7 +494,7 @@ mod tests {
         assert_eq!(decode(&wire, u64::MAX), Ok(vec![Header::new(b"x", b"y")]));
     }
 
-    /// LiteralWithNameRef with the dynamic table flag (S=0) must be
+    /// `LiteralWithNameRef` with the dynamic table flag (S=0) must be
     /// rejected since the dynamic table is not implemented.
     #[test]
     fn literal_with_name_ref_dynamic_table_rejected() {
@@ -507,10 +508,10 @@ mod tests {
         assert_eq!(decode(&encoded, u64::MAX), Err(Error::InvalidHeaderValue),);
     }
 
-    /// Non-Huffman value in decode_str must be rejected before allocation
-    /// when it exceeds the remaining budget (max_len).
+    /// Non-Huffman value in `decode_str` must be rejected before allocation
+    /// when it exceeds the remaining budget (`max_len`).
     ///
-    /// Uses a LiteralWithNameRef with static `:authority` (index 0, 10
+    /// Uses a `LiteralWithNameRef` with static `:authority` (index 0, 10
     /// bytes) and a non-Huffman value of 5 bytes. Budget is set so only
     /// 4 bytes remain for the value after the name is charged.
     #[test]
@@ -563,11 +564,11 @@ mod tests {
         assert_eq!(decode(&encoded, 41), Err(Error::HeaderListTooLarge),);
     }
 
-    /// Verify that both Literal and LiteralWithNameRef charge the name to
-    /// the budget *before* Huffman-decoding the value, so the max_len
+    /// Verify that both `Literal` and `LiteralWithNameRef` charge the name to
+    /// the budget *before* Huffman-decoding the value, so the `max_len`
     /// passed to the Huffman decoder is equally strict in both paths.
     #[test]
-    fn literal_with_name_ref_value_budget_ordering() {
+    fn literal_with_name_ref_value_budget_ordering() -> Result<()> {
         use crate::h3::qpack;
 
         // Static table index 0 = `:authority` (10 bytes).
@@ -583,14 +584,14 @@ mod tests {
         let headers_nameref = vec![Header::new(b":authority", value)];
         let mut buf = [0u8; 64];
 
-        let nameref_len = qpack::encode_into(&headers_nameref, &mut buf).unwrap();
+        let nameref_len = qpack::encode_into(&headers_nameref, &mut buf)?;
         let encoded_nameref = buf[..nameref_len].to_vec();
 
         // -- Encode as Literal (name not in static table) --
         let headers_literal = vec![Header::new(b"x-custom99", value)];
         let mut buf = [0u8; 64];
 
-        let literal_len = qpack::encode_into(&headers_literal, &mut buf).unwrap();
+        let literal_len = qpack::encode_into(&headers_literal, &mut buf)?;
         let encoded_literal = buf[..literal_len].to_vec();
 
         // Exact budget: 32 (overhead) + 10 (name) + 16 (value) = 58.
@@ -608,5 +609,6 @@ mod tests {
         //   3. Huffman decode produces 16 bytes > 15 → rejected
         assert_eq!(decode(&encoded_nameref, 57), Err(Error::HeaderListTooLarge),);
         assert_eq!(decode(&encoded_literal, 57), Err(Error::HeaderListTooLarge),);
+        Ok(())
     }
 }

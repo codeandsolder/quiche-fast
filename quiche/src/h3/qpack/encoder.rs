@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn encode_int2() {
-        let expected = [0b11111, 0b10011010, 0b00001010];
+        let expected = [0b11111, 0b1001_1010, 0b0000_1010];
         let mut encoded = [0; 3];
         let mut b = octets::OctetsMut::with_slice(&mut encoded);
 
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn encode_int3() {
-        let expected = [0b101010];
+        let expected = [0b10_1010];
         let mut encoded = [0; 1];
         let mut b = octets::OctetsMut::with_slice(&mut encoded);
 
@@ -214,23 +214,25 @@ mod tests {
     }
 
     #[test]
-    fn encode_static_header() {
+    fn encode_static_header() -> Result<()> {
         let mut encoded = [0; 3];
-        encode_into(&[(b":method", b"GET")], &mut encoded).unwrap();
-        assert_eq!(encoded, [0, 0, INDEXED | 0x40 | 17]);
+        encode_into(&[(b":method", b"GET")], &mut encoded)?;
+        assert_eq!(encoded, [0, 0, INDEXED | 0x40 | 0x11]);
+        Ok(())
     }
 
     #[test]
-    fn encode_static_header_name_only() {
+    fn encode_static_header_name_only() -> Result<()> {
         let mut encoded = [0; 11];
         let mut expected = [0; 11];
         let mut buf = octets::OctetsMut::with_slice(&mut expected[..]);
-        buf.put_u16(0).unwrap();
-        buf.put_u8(LITERAL_WITH_NAME_REF | 0x10 | 15).unwrap();
-        buf.put_u8(0).unwrap();
-        encode_str::<false>(b"FORGET", 0, 7, &mut buf).unwrap();
+        buf.put_u16(0)?;
+        buf.put_u8(LITERAL_WITH_NAME_REF | 0x10 | 0x0f)?;
+        buf.put_u8(0)?;
+        encode_str::<false>(b"FORGET", 0, 7, &mut buf)?;
 
-        encode_into(&[(b":method", b"FORGET")], &mut encoded).unwrap();
+        encode_into(&[(b":method", b"FORGET")], &mut encoded)?;
         assert_eq!(encoded, expected);
+        Ok(())
     }
 }
