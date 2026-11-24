@@ -252,13 +252,58 @@ fn main() {
                     continue 'read;
                 }
 
-                if !quiche::version_is_supported(hdr.version) {
+                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
+                scid.copy_from_slice(&conn_id);
+                let mut odcid = None;
+
+                // Both stateless responses use the same queued send path.
+                let reply = if !quiche::version_is_supported(hdr.version) {
                     warn!("Doing version negotiation");
-
-                    let len =
-                        quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out)
-                            .unwrap();
-
+                    Some(quiche::negotiate_version(
+                        &hdr.scid, &hdr.dcid, &mut out,
+                    ))
+                } else if !args.no_retry {
+                    let Some(token) = hdr.token.as_deref() else {
+                        error!("Initial packet has no token field");
+                        continue 'read;
+                    };
+                    if token.is_empty() {
+                        warn!("Doing stateless retry");
+                        let scid = quiche::ConnectionId::from_ref(&scid);
+                        let new_token = mint_token(&hdr, &from);
+                        Some(quiche::retry(
+                            &hdr.scid,
+                            &hdr.dcid,
+                            &scid,
+                            &new_token,
+                            hdr.version,
+                            &mut out,
+                        ))
+                    } else {
+                        odcid = validate_token(&from, token);
+                        if odcid.is_none() {
+                            error!("Invalid address validation token");
+                            continue 'read;
+                        }
+                        if scid.len() != hdr.dcid.len() {
+                            error!("Invalid destination connection ID");
+                            continue 'read;
+                        }
+                        // Reuse the source connection ID sent in the Retry.
+                        scid.copy_from_slice(&hdr.dcid);
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(reply) = reply {
+                    let len = match reply {
+                        Ok(len) => len,
+                        Err(error) => {
+                            error!("Failed to generate stateless reply: {error}");
+                            continue 'read;
+                        },
+                    };
                     let info = quiche::SendInfo {
                         from: local_addr,
                         to: from,
@@ -277,71 +322,6 @@ fn main() {
                         std::process::exit(1);
                     });
                     continue 'read;
-                }
-
-                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                scid.copy_from_slice(&conn_id);
-
-                let mut odcid = None;
-
-                if !args.no_retry {
-                    // Token is always present in Initial packets.
-                    let token = hdr.token.as_ref().unwrap();
-
-                    // Do stateless retry if the client didn't send a token.
-                    if token.is_empty() {
-                        warn!("Doing stateless retry");
-
-                        let scid = quiche::ConnectionId::from_ref(&scid);
-                        let new_token = mint_token(&hdr, &from);
-
-                        let len = quiche::retry(
-                            &hdr.scid,
-                            &hdr.dcid,
-                            &scid,
-                            &new_token,
-                            hdr.version,
-                            &mut out,
-                        )
-                        .unwrap();
-
-                        let info = quiche::SendInfo {
-                            from: local_addr,
-                            to: from,
-                            at: std::time::Instant::now(),
-                        };
-                        DatagramBatch::push(&mut batches, 0..len, info, false);
-                        tx.submit(
-                            &mut out,
-                            &mut batches,
-                            &mut socket,
-                            poll.registry(),
-                            mio::Token(0),
-                        )
-                        .unwrap_or_else(|error| {
-                            error!("UDP stateless reply failed: {error}");
-                            std::process::exit(1);
-                        });
-                        continue 'read;
-                    }
-
-                    odcid = validate_token(&from, token);
-
-                    // The token was not valid, meaning the retry failed, so
-                    // drop the packet.
-                    if odcid.is_none() {
-                        error!("Invalid address validation token");
-                        continue;
-                    }
-
-                    if scid.len() != hdr.dcid.len() {
-                        error!("Invalid destination connection ID");
-                        continue 'read;
-                    }
-
-                    // Reuse the source connection ID we sent in the Retry
-                    // packet, instead of changing it again.
-                    scid.copy_from_slice(&hdr.dcid);
                 }
 
                 let scid = quiche::ConnectionId::from_vec(scid.to_vec());
