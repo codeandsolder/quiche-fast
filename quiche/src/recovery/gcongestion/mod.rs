@@ -167,13 +167,8 @@ pub struct BbrParams {
     /// Controls if BBR should respect Reno coexistence.
     pub enable_reno_coexistence: Option<bool>,
 
-    /// Controls if BBR should enable code in Bandwidth Sampler that
-    /// attempts to avoid overestimating bandwidth on ack compression.
-    pub enable_overestimate_avoidance: Option<bool>,
-
-    /// Controls if BBR should enable a possible fix in Bandwidth
-    /// Sampler that attempts to bandwidth over estimation avoidance.
-    pub choose_a0_point_fix: Option<bool>,
+    /// Optional experimental compensation for ACK aggregation.
+    pub ack_compensation: Option<BbrAckCompensation>,
 
     /// Controls the BBR bandwidth probe up pacing gain.
     pub probe_bw_probe_up_pacing_gain: Option<f32>,
@@ -240,6 +235,17 @@ pub struct BbrParams {
     /// Selects the RTT jump detector implementation.
     #[cfg(feature = "internal")]
     pub rtt_jump_detector: Option<BbrRttJumpDetector>,
+}
+
+/// Experimental ACK aggregation compensation. No policy means the
+/// standard bandwidth sampler; the original and corrected A0 selection
+/// algorithms are distinct enabled modes.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[repr(C)]
+#[doc(hidden)]
+pub enum BbrAckCompensation {
+    Legacy,
+    Corrected,
 }
 
 /// Selects which RTT jump detector BBR uses.

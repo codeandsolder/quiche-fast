@@ -44,6 +44,7 @@ use smallvec::SmallVec;
 
 use self::congestion::recovery::LegacyRecovery;
 use self::gcongestion::GRecovery;
+pub use gcongestion::BbrAckCompensation;
 pub use gcongestion::BbrBwLoReductionStrategy;
 pub use gcongestion::BbrParams;
 #[cfg(feature = "internal")]

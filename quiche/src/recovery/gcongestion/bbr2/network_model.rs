@@ -197,8 +197,7 @@ impl BBRv2NetworkModel {
             min_bytes_in_flight_in_round: usize::MAX,
             bandwidth_sampler: BandwidthSampler::new(
                 params.initial_max_ack_height_filter_window,
-                params.enable_overestimate_avoidance,
-                params.choose_a0_point_fix,
+                params.ack_compensation,
             ),
             round_trip_counter: RoundTripCounter {
                 round_trip_count: 0,
@@ -212,8 +211,8 @@ impl BBRv2NetworkModel {
             max_bandwidth_filter: MaxBandwidthFilter {
                 max_bandwidth: [Bandwidth::zero(), Bandwidth::zero()],
             },
-            cwnd_gain: params.startup_cwnd_gain,
-            pacing_gain: params.startup_pacing_gain,
+            cwnd_gain: params.startup.cwnd_gain,
+            pacing_gain: params.startup.pacing_gain,
             full_bandwidth_reached: false,
             bytes_lost_in_round: 0,
             loss_events_in_round: 0,
@@ -230,7 +229,8 @@ impl BBRv2NetworkModel {
             rounds_with_queueing: 0,
 
             ignore_app_limited_for_no_bandwidth_growth: params
-                .ignore_app_limited_for_no_bandwidth_growth,
+                .startup
+                .ignore_app_limited_rounds,
 
             latest_send_rate: None,
             latest_ack_rate: None,
@@ -654,7 +654,7 @@ impl BBRv2NetworkModel {
         }
 
         // full_bandwidth_reached is only set to true when not app-limited
-        if self.rounds_without_bandwidth_growth >= params.startup_full_bw_rounds &&
+        if self.rounds_without_bandwidth_growth >= params.startup.full_bw_rounds &&
             !congestion_event.last_packet_send_state.is_app_limited
         {
             self.full_bandwidth_reached = true;
@@ -676,8 +676,8 @@ impl BBRv2NetworkModel {
         }
 
         self.rounds_with_queueing += 1;
-        if params.max_startup_queue_rounds > 0 &&
-            self.rounds_with_queueing >= params.max_startup_queue_rounds
+        if params.startup.max_queue_rounds > 0 &&
+            self.rounds_with_queueing >= params.startup.max_queue_rounds
         {
             self.full_bandwidth_reached = true;
         }

@@ -34,6 +34,7 @@ use std::time::Instant;
 
 use super::Acked;
 use crate::recovery::gcongestion::Bandwidth;
+use crate::recovery::gcongestion::BbrAckCompensation;
 use crate::recovery::gcongestion::Lost;
 
 use super::windowed_filter::WindowedFilter;
@@ -124,24 +125,17 @@ impl AppLimitedPhase {
     }
 }
 
-/// Selection policy for the optional, experimental A0 compensation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AckPointSelection {
-    Legacy,
-    Corrected,
-}
-
 /// Candidate history exists only when overestimation avoidance is enabled.
 /// Selection, epoch transitions and quiescence resets use the same history.
 #[derive(Debug)]
 struct AckAggregationCompensation {
     recent: RecentAckPoints,
     candidates: VecDeque<AckPoint>,
-    selection: AckPointSelection,
+    selection: BbrAckCompensation,
 }
 
 impl AckAggregationCompensation {
-    fn new(selection: AckPointSelection) -> Self {
+    fn new(selection: BbrAckCompensation) -> Self {
         Self {
             recent: RecentAckPoints::default(),
             candidates: VecDeque::new(),
@@ -169,7 +163,7 @@ impl AckAggregationCompensation {
     fn select(&mut self, acknowledged: u64) -> Option<AckPoint> {
         while let Some(candidate) = self.candidates.get(1) {
             if candidate.total_bytes_acked > acknowledged {
-                if self.selection == AckPointSelection::Corrected {
+                if self.selection == BbrAckCompensation::Corrected {
                     break;
                 }
                 return Some(*candidate);
@@ -501,9 +495,9 @@ impl RecentAckPoints {
     }
 
     fn less_recent_point(
-        &self, selection: AckPointSelection,
+        &self, selection: BbrAckCompensation,
     ) -> Option<AckPoint> {
-        if selection == AckPointSelection::Corrected {
+        if selection == BbrAckCompensation::Corrected {
             self.ack_points[0]
                 .filter(|ack_point| ack_point.total_bytes_acked > 0)
                 .or(self.ack_points[1])
@@ -515,8 +509,8 @@ impl RecentAckPoints {
 
 impl BandwidthSampler {
     pub(crate) fn new(
-        max_height_tracker_window_length: usize, overestimate_avoidance: bool,
-        choose_a0_point_fix: bool,
+        max_height_tracker_window_length: usize,
+        compensation: Option<BbrAckCompensation>,
     ) -> Self {
         Self {
             total_bytes_sent: 0,
@@ -530,20 +524,13 @@ impl BandwidthSampler {
             connection_state_map: ConnectionStateMap::default(),
             max_ack_height_tracker: MaxAckHeightTracker::new(
                 max_height_tracker_window_length,
-                overestimate_avoidance,
+                compensation.is_some(),
             ),
             total_bytes_acked_after_last_ack_event: 0,
 
             last_sent_packet: 0,
             last_acked_packet: 0,
-            compensation: overestimate_avoidance.then(|| {
-                let selection = if choose_a0_point_fix {
-                    AckPointSelection::Corrected
-                } else {
-                    AckPointSelection::Legacy
-                };
-                AckAggregationCompensation::new(selection)
-            }),
+            compensation: compensation.map(AckAggregationCompensation::new),
         }
     }
 
@@ -865,12 +852,8 @@ mod bandwidth_sampler_tests {
     }
 
     impl TestSender {
-        fn new(overestimate_avoidance: bool, choose_a0_point_fix: bool) -> Self {
-            let sampler = BandwidthSampler::new(
-                0,
-                overestimate_avoidance,
-                choose_a0_point_fix,
-            );
+        fn new(compensation: Option<BbrAckCompensation>) -> Self {
+            let sampler = BandwidthSampler::new(0, compensation);
             TestSender {
                 sampler_app_limited_at_start: sampler.is_app_limited(),
                 sampler,
@@ -1041,11 +1024,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn send_and_wait(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let mut time_between_packets = Duration::from_millis(10);
         let mut expected_bandwidth =
             Bandwidth::from_bytes_per_second(REGULAR_PACKET_SIZE as u64 * 100);
@@ -1076,11 +1062,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn lifetime_counters_cross_four_gib(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut sender = TestSender::new(compensation);
         let baseline = u64::from(u32::MAX) - 99;
         sender.sampler.total_bytes_sent = 3 * baseline;
         sender.sampler.total_bytes_acked = baseline;
@@ -1130,11 +1119,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn send_time_state(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(10);
 
         // Send packets 1-5.
@@ -1241,11 +1233,14 @@ mod bandwidth_sampler_tests {
     /// of 20.
     #[rstest]
     fn send_paced(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 * 8);
@@ -1267,11 +1262,14 @@ mod bandwidth_sampler_tests {
     /// lost.
     #[rstest]
     fn send_with_losses(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 / 2 * 8);
@@ -1315,11 +1313,14 @@ mod bandwidth_sampler_tests {
     /// with the [`send_with_losses`] test.
     #[rstest]
     fn not_congestion_controlled(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 / 2 * 8);
@@ -1374,11 +1375,14 @@ mod bandwidth_sampler_tests {
     /// thus producing an ACK rate which is higher than the original send rate.
     #[rstest]
     fn compressed_ack(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 * 8);
@@ -1407,11 +1411,14 @@ mod bandwidth_sampler_tests {
     /// Tests receiving ACK packets in the reverse order.
     #[rstest]
     fn reordered_ack(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 * 8);
@@ -1442,11 +1449,14 @@ mod bandwidth_sampler_tests {
     /// Test the app-limited logic.
     #[rstest]
     fn app_limited(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let expected_bandwidth =
             Bandwidth::from_kbits_per_second(REGULAR_PACKET_SIZE as u64 * 8);
@@ -1491,7 +1501,7 @@ mod bandwidth_sampler_tests {
         for i in 41..=60 {
             let sample = test_sender.ack_packet(i);
             assert!(sample.state_at_send.is_app_limited, "{i}");
-            if !overestimate_avoidance || choose_a0_point_fix || i < 43 {
+            if compensation != Some(BbrAckCompensation::Legacy) || i < 43 {
                 assert!(
                     sample.bandwidth < expected_bandwidth * 0.7,
                     "{} {:?} vs {:?}",
@@ -1525,11 +1535,14 @@ mod bandwidth_sampler_tests {
     /// Test the samples taken at the first flight of packets sent.
     #[rstest]
     fn first_round_trip(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(1);
         let rtt = Duration::from_millis(800);
         let num_packets = 10;
@@ -1563,11 +1576,14 @@ mod bandwidth_sampler_tests {
     /// Test sampler's ability to remove obsolete packets.
     #[rstest]
     fn remove_obsolete_packets(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
 
         for i in 1..=5 {
             test_sender.send_packet(i, REGULAR_PACKET_SIZE, true);
@@ -1586,11 +1602,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn neuter_packet(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         test_sender.send_packet(1, REGULAR_PACKET_SIZE, true);
         assert_eq!(test_sender.sampler.total_bytes_neutered, 0);
         test_sender.advance_time(Duration::from_millis(10));
@@ -1637,11 +1656,14 @@ mod bandwidth_sampler_tests {
     /// 1) Send 2 packets, 2) Ack both in 1 event, 3) Repeat.
     #[rstest]
     fn two_acked_packets_per_event(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(10);
         let sending_rate = Bandwidth::from_bytes_and_time_delta(
             REGULAR_PACKET_SIZE as u64,
@@ -1679,11 +1701,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn lose_every_other_packet(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(10);
         let sending_rate = Bandwidth::from_bytes_and_time_delta(
             REGULAR_PACKET_SIZE as u64,
@@ -1726,11 +1751,14 @@ mod bandwidth_sampler_tests {
 
     #[rstest]
     fn ack_height_respect_bandwidth_estimate_upper_bound(
-        #[values(false, true)] overestimate_avoidance: bool,
-        #[values(false, true)] choose_a0_point_fix: bool,
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
     ) {
-        let mut test_sender =
-            TestSender::new(overestimate_avoidance, choose_a0_point_fix);
+        let mut test_sender = TestSender::new(compensation);
         let time_between_packets = Duration::from_millis(10);
         let first_packet_sending_rate = Bandwidth::from_bytes_and_time_delta(
             REGULAR_PACKET_SIZE as u64,
@@ -1796,8 +1824,8 @@ mod max_ack_height_tracker_tests {
 
     #[rstest]
     fn compensation_epoch_selection_and_quiescence_reset(
-        #[values(AckPointSelection::Legacy, AckPointSelection::Corrected)]
-        selection: AckPointSelection,
+        #[values(BbrAckCompensation::Legacy, BbrAckCompensation::Corrected)]
+        selection: BbrAckCompensation,
     ) {
         let mut state = AckAggregationCompensation::new(selection);
         let now = Instant::now();
@@ -1808,7 +1836,7 @@ mod max_ack_height_tracker_tests {
         assert_eq!(selected.total_bytes_acked, 0);
         assert_eq!(
             state.candidates.back().unwrap().total_bytes_acked,
-            if selection == AckPointSelection::Legacy {
+            if selection == BbrAckCompensation::Legacy {
                 0
             } else {
                 1200
@@ -1827,7 +1855,7 @@ mod max_ack_height_tracker_tests {
         let mut recent = RecentAckPoints::default();
         let now = Instant::now();
         assert!(recent
-            .less_recent_point(AckPointSelection::Legacy)
+            .less_recent_point(BbrAckCompensation::Legacy)
             .is_none());
         let first = recent.update(now, 0);
         assert_eq!(first.total_bytes_acked, 0);
@@ -1835,22 +1863,22 @@ mod max_ack_height_tracker_tests {
         assert_eq!(second.total_bytes_acked, 1200);
         assert_eq!(
             recent
-                .less_recent_point(AckPointSelection::Legacy)
+                .less_recent_point(BbrAckCompensation::Legacy)
                 .map(|p| p.total_bytes_acked),
             Some(0)
         );
         assert_eq!(
             recent
-                .less_recent_point(AckPointSelection::Corrected)
+                .less_recent_point(BbrAckCompensation::Corrected)
                 .map(|p| p.total_bytes_acked),
             Some(1200)
         );
         recent.clear();
         assert!(recent
-            .less_recent_point(AckPointSelection::Corrected)
+            .less_recent_point(BbrAckCompensation::Corrected)
             .is_none());
         assert!(
-            AckAggregationCompensation::new(AckPointSelection::Corrected)
+            AckAggregationCompensation::new(BbrAckCompensation::Corrected)
                 .select(0)
                 .is_none()
         );
@@ -2055,7 +2083,7 @@ mod max_ack_height_tracker_tests {
 
     #[test]
     fn aggregation_keeps_full_width_byte_counts() {
-        let mut sampler = BandwidthSampler::new(10, false, false);
+        let mut sampler = BandwidthSampler::new(10, None);
         let tracker = &mut sampler.max_ack_height_tracker;
         let start = Instant::now();
         let four_gib = 1_u64 << 32;
