@@ -6194,6 +6194,23 @@ mod tests {
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::ExcessiveLoad));
     }
 
+    /// A single client-originated blocked notice is reflected at both ends
+    /// without attributing it to the wrong flow-control scope or direction.
+    fn assert_client_blocked(s: &Session, connection_limit: bool) {
+        let client = s.pipe.client.stats();
+        let server = s.pipe.server.stats();
+        let connection = u64::from(connection_limit);
+        let stream = u64::from(!connection_limit);
+        assert_eq!(client.data_blocked_sent_count, connection);
+        assert_eq!(client.stream_data_blocked_sent_count, stream);
+        assert_eq!(client.data_blocked_recv_count, 0);
+        assert_eq!(client.stream_data_blocked_recv_count, 0);
+        assert_eq!(server.data_blocked_sent_count, 0);
+        assert_eq!(server.stream_data_blocked_sent_count, 0);
+        assert_eq!(server.data_blocked_recv_count, connection);
+        assert_eq!(server.stream_data_blocked_recv_count, stream);
+    }
+
     #[test]
     /// Tests that DATA frames are properly truncated depending on the request
     /// stream's outgoing flow control capacity.
@@ -6251,15 +6268,7 @@ mod tests {
         // only partially written.
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 1);
-
-        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
+        assert_client_blocked(&s, false);
     }
 
     #[test]
@@ -6517,9 +6526,7 @@ mod tests {
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
     }
 
-    #[test]
-    /// Tests that we limit sending HEADERS based on the stream capacity.
-    fn headers_blocked() {
+    fn headers_blocked_session() -> Session {
         let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
         config
             .load_cert_chain_from_pem_file("examples/cert.crt")
@@ -6541,6 +6548,13 @@ mod tests {
         let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
 
         s.handshake().unwrap();
+        s
+    }
+
+    #[test]
+    /// Tests that we limit sending HEADERS based on the stream capacity.
+    fn headers_blocked() {
+        let mut s = headers_blocked_session();
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6569,41 +6583,13 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(4));
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(4));
 
-        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 1);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 0);
-
-        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
+        assert_client_blocked(&s, true);
     }
 
     #[test]
     /// Ensure StreamBlocked when connection flow control prevents headers.
     fn headers_blocked_on_conn() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
-        config.set_initial_max_data(75);
-        config.set_initial_max_stream_data_bidi_local(150);
-        config.set_initial_max_stream_data_bidi_remote(150);
-        config.set_initial_max_stream_data_uni(150);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
-
-        let h3_config = Config::new();
-
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-
-        s.handshake().unwrap();
+        let mut s = headers_blocked_session();
 
         // After the HTTP handshake, some bytes of connection flow control have
         // been consumed. Fill the connection with more grease data on the
@@ -6637,15 +6623,7 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(6));
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(0));
 
-        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 1);
-        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 0);
-
-        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
+        assert_client_blocked(&s, true);
     }
 
     #[test]
