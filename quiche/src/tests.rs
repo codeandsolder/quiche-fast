@@ -6806,6 +6806,11 @@ fn client_sent_new_token(
 
     let pkt_type = Type::Short;
 
+    let pn = pipe.client.next_pkt_num;
+    let epoch = packet::Epoch::Application;
+    let largest_rx = pipe.server.pkt_num_spaces[epoch].largest_rx_pkt_num;
+    let recv_count = pipe.server.recv_count;
+    let recv_bytes = pipe.server.recv_bytes;
     let written =
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
@@ -6814,6 +6819,15 @@ fn client_sent_new_token(
         pipe.server_recv(&mut buf[..written]),
         Err(Error::InvalidPacket)
     );
+    // An authenticated but semantically invalid frame closes the connection,
+    // without publishing this packet as successfully received or ackable.
+    let space = &pipe.server.pkt_num_spaces[epoch];
+    assert_eq!(space.largest_rx_pkt_num, largest_rx);
+    assert!(!space.recv_pkt_num.contains(pn));
+    assert!(!space.recv_pkt_need_ack.contains(pn));
+    assert_eq!(pipe.server.recv_count, recv_count);
+    assert_eq!(pipe.server.recv_bytes, recv_bytes);
+    assert!(pipe.server.local_error.is_some());
 }
 
 fn check_send(_: &mut impl Send) {}
