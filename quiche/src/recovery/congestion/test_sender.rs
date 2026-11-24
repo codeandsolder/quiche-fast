@@ -35,6 +35,7 @@ use super::Acked;
 use super::Congestion;
 use super::RecoveryConfig;
 use super::Sent;
+use crate::recovery::PacketFlight;
 use crate::CongestionControlAlgorithm;
 use crate::DEFAULT_INITIAL_RTT;
 
@@ -76,16 +77,13 @@ impl TestSender {
             time_acked: None,
             time_lost: None,
             size: bytes,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: self.time,
             first_sent_time: self.time,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         self.cc.on_packet_sent(
@@ -124,7 +122,7 @@ impl TestSender {
                 pkt_num: unacked.pkt_num,
                 time_sent: unacked.time_sent,
                 size: unacked.size,
-                in_flight: unacked.in_flight,
+                in_flight: unacked.flight.in_flight(),
 
                 rtt: self.time.saturating_duration_since(unacked.time_sent),
                 delivered: unacked.delivered,

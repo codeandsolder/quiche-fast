@@ -1466,35 +1466,8 @@ impl TxPacketHeader {
     }
 }
 
-/// Congestion accounting of a packet under construction. Padding can put an
-/// otherwise non-ack-eliciting packet in flight.
-#[derive(Clone, Copy, Default)]
-enum PacketFlight {
-    #[default]
-    NotInFlight,
-    PaddingInFlight,
-    AckEliciting,
-}
-
-impl PacketFlight {
-    const fn in_flight(self) -> bool {
-        !matches!(self, Self::NotInFlight)
-    }
-
-    const fn ack_eliciting(self) -> bool {
-        matches!(self, Self::AckEliciting)
-    }
-
-    const fn record_padding(&mut self) {
-        if !self.in_flight() {
-            *self = Self::PaddingInFlight;
-        }
-    }
-}
-
 #[derive(Default)]
 struct TxPathProbes {
-    pmtud: bool,
     has_path_frame: bool,
     challenge: Option<[u8; 8]>,
 }
@@ -1503,7 +1476,7 @@ struct TxPathProbes {
 struct TxPacketAssembly {
     frames: SmallVec<[frame::Frame; 1]>,
     left: usize,
-    flight: PacketFlight,
+    flight: recovery::PacketFlight,
     probes: TxPathProbes,
     data: PacketDataEmission,
 }
@@ -4888,7 +4861,7 @@ impl<F: BufFactory> Connection<F> {
                     now,
                 )?;
                 if assembly.frames.len() != frame_count {
-                    assembly.flight = PacketFlight::AckEliciting;
+                    assembly.flight.record_ack_eliciting();
                 }
             }
         }
@@ -4902,8 +4875,17 @@ impl<F: BufFactory> Connection<F> {
             pkt_type,
             max_dgram_len,
         )?;
-        if assembly.data.has_data() || assembly.data.datagram_emitted {
-            assembly.flight = PacketFlight::AckEliciting;
+        // Legacy recovery does not count DATAGRAM-only traffic as data;
+        // gcongestion does. Preserve that backend policy in the one packet
+        // classification carried through protection, ACK and loss processing.
+        if assembly.data.has_data() ||
+            (assembly.data.datagram_emitted &&
+                self.paths.get(send_pid)?.recovery.gcongestion_enabled())
+        {
+            debug_assert!(!assembly.flight.is_pmtud_probe());
+            assembly.flight = recovery::PacketFlight::Data;
+        } else if assembly.data.datagram_emitted {
+            assembly.flight.record_ack_eliciting();
         }
 
         Self::complete_tx_frames(
@@ -5201,8 +5183,7 @@ impl<F: BufFactory> Connection<F> {
                 return Err(Error::Done);
             }
 
-            assembly.flight = PacketFlight::AckEliciting;
-            assembly.probes.pmtud = true;
+            assembly.flight = recovery::PacketFlight::PmtuProbe;
         }
 
         // Create PATH_RESPONSE frames while space permits.
@@ -5213,7 +5194,7 @@ impl<F: BufFactory> Connection<F> {
             &mut assembly.left,
         )? {
             assembly.probes.has_path_frame = true;
-            assembly.flight = PacketFlight::AckEliciting;
+            assembly.flight.record_ack_eliciting();
         }
 
         // Create PATH_CHALLENGE frame if needed.
@@ -5233,7 +5214,7 @@ impl<F: BufFactory> Connection<F> {
                 assembly.probes.challenge = Some(data);
                 assembly.probes.has_path_frame = true;
 
-                assembly.flight = PacketFlight::AckEliciting;
+                assembly.flight.record_ack_eliciting();
             }
         }
 
@@ -5282,7 +5263,7 @@ impl<F: BufFactory> Connection<F> {
                         deadline: now + (path.recovery.pto() * 3),
                         origin: CloseOrigin::Local,
                     };
-                    assembly.flight = PacketFlight::AckEliciting;
+                    assembly.flight.record_ack_eliciting();
                 }
             }
         }
@@ -5314,11 +5295,11 @@ impl<F: BufFactory> Connection<F> {
                 frame,
                 &mut assembly.left,
             )? {
-                assembly.flight = PacketFlight::AckEliciting;
+                assembly.flight.record_ack_eliciting();
             }
         }
 
-        if assembly.flight.ack_eliciting() && !assembly.probes.pmtud {
+        if assembly.flight.ack_eliciting() && !assembly.flight.is_pmtud_probe() {
             path.needs_ack_eliciting = false;
             path.recovery.ping_sent(header.epoch);
         }
@@ -5500,14 +5481,7 @@ impl<F: BufFactory> Connection<F> {
         let written =
             self.seal_tx_packet(b, header, &assembly.frames, send_pid, now)?;
         let path = self.paths.get_mut(send_pid)?;
-        let ack_eliciting = assembly.flight.ack_eliciting();
         let in_flight = assembly.flight.in_flight();
-
-        let sent_pkt_has_data = if path.recovery.gcongestion_enabled() {
-            assembly.data.has_data() || assembly.data.datagram_emitted
-        } else {
-            assembly.data.has_data()
-        };
 
         let sent_pkt = recovery::Sent {
             pkt_num: pn,
@@ -5519,16 +5493,13 @@ impl<F: BufFactory> Connection<F> {
             // counted toward bytes in flight even though it is not
             // ack-eliciting, so record the size of every in-flight packet.
             size: if in_flight { written } else { 0 },
-            ack_eliciting,
-            in_flight,
+            flight: assembly.flight,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: sent_pkt_has_data,
-            is_pmtud_probe: assembly.probes.pmtud,
         };
 
         if in_flight && is_app_limited {
@@ -5557,7 +5528,7 @@ impl<F: BufFactory> Connection<F> {
         assembly: &TxPacketAssembly,
     ) -> Result<()> {
         let path = self.paths.get_mut(send_pid)?;
-        if assembly.probes.pmtud {
+        if assembly.flight.is_pmtud_probe() {
             if let Some(pmtud) = path.pmtud.as_mut() {
                 pmtud.set_in_flight(true);
             }

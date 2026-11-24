@@ -515,6 +515,54 @@ impl FromStr for CongestionControlAlgorithm {
     }
 }
 
+/// Packet classification shared by the packet writer and both recovery
+/// engines. ACK-only packets are not in flight; padding-only packets are in
+/// flight without eliciting ACKs. Data and dedicated PMTU probes are distinct
+/// kinds of ack-eliciting packet, with different recovery policies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PacketFlight {
+    #[default]
+    NotInFlight,
+    PaddingInFlight,
+    AckEliciting,
+    Data,
+    PmtuProbe,
+}
+
+impl PacketFlight {
+    #[must_use]
+    pub const fn in_flight(self) -> bool {
+        !matches!(self, Self::NotInFlight)
+    }
+
+    #[must_use]
+    pub const fn ack_eliciting(self) -> bool {
+        matches!(self, Self::AckEliciting | Self::Data | Self::PmtuProbe)
+    }
+
+    #[must_use]
+    pub const fn has_data(self) -> bool {
+        matches!(self, Self::Data)
+    }
+
+    #[must_use]
+    pub const fn is_pmtud_probe(self) -> bool {
+        matches!(self, Self::PmtuProbe)
+    }
+
+    pub(crate) const fn record_padding(&mut self) {
+        if !self.in_flight() {
+            *self = Self::PaddingInFlight;
+        }
+    }
+
+    pub(crate) const fn record_ack_eliciting(&mut self) {
+        if !self.ack_eliciting() {
+            *self = Self::AckEliciting;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Sent {
     pub pkt_num: u64,
@@ -529,9 +577,7 @@ pub struct Sent {
 
     pub size: usize,
 
-    pub ack_eliciting: bool,
-
-    pub in_flight: bool,
+    pub flight: PacketFlight,
 
     pub delivered: u64,
 
@@ -544,10 +590,6 @@ pub struct Sent {
     pub tx_in_flight: usize,
 
     pub lost: u64,
-
-    pub has_data: bool,
-
-    pub is_pmtud_probe: bool,
 }
 
 impl std::fmt::Debug for Sent {
@@ -561,8 +603,8 @@ impl std::fmt::Debug for Sent {
         write!(f, "is_app_limited={} ", self.is_app_limited)?;
         write!(f, "tx_in_flight={} ", self.tx_in_flight)?;
         write!(f, "lost={} ", self.lost)?;
-        write!(f, "has_data={} ", self.has_data)?;
-        write!(f, "is_pmtud_probe={}", self.is_pmtud_probe)?;
+        write!(f, "has_data={} ", self.flight.has_data())?;
+        write!(f, "is_pmtud_probe={}", self.flight.is_pmtud_probe())?;
 
         Ok(())
     }
@@ -865,6 +907,29 @@ mod tests {
     /// Sender-induced packet-number gaps are not reordering. The gap must
     /// remain excluded from packet-threshold distance even after a higher ACK
     /// has validated it and the optimistic-ACK marker itself is cleared.
+    #[test]
+    fn packet_flight_classification_preserves_probe_and_data_purpose() {
+        for (mut flight, in_flight, eliciting, data, probe) in [
+            (PacketFlight::NotInFlight, false, false, false, false),
+            (PacketFlight::PaddingInFlight, true, false, false, false),
+            (PacketFlight::AckEliciting, true, true, false, false),
+            (PacketFlight::Data, true, true, true, false),
+            (PacketFlight::PmtuProbe, true, true, false, true),
+        ] {
+            assert_eq!(flight.in_flight(), in_flight);
+            assert_eq!(flight.ack_eliciting(), eliciting);
+            assert_eq!(flight.has_data(), data);
+            assert_eq!(flight.is_pmtud_probe(), probe);
+            flight.record_padding();
+            assert!(flight.in_flight());
+            assert_eq!(flight.ack_eliciting(), eliciting);
+            flight.record_ack_eliciting();
+            assert!(flight.ack_eliciting());
+            assert_eq!(flight.has_data(), data);
+            assert_eq!(flight.is_pmtud_probe(), probe);
+        }
+    }
+
     #[rstest]
     fn sender_gap_does_not_shorten_packet_threshold(
         #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
@@ -1130,16 +1195,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1161,16 +1223,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1192,16 +1251,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1222,16 +1278,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1292,16 +1345,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1322,16 +1372,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1466,16 +1513,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1496,16 +1540,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1526,16 +1567,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -1556,16 +1594,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -2159,16 +2194,13 @@ mod tests {
                 time_acked: None,
                 time_lost: None,
                 size: 1200,
-                ack_eliciting: true,
-                in_flight: true,
+                flight: PacketFlight::Data,
                 delivered: 0,
                 delivered_time: now,
                 first_sent_time: now,
                 is_app_limited: false,
                 tx_in_flight: 0,
                 lost: 0,
-                has_data: true,
-                is_pmtud_probe: false,
             };
 
             r.on_packet_sent(
@@ -2237,16 +2269,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 6000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -2277,16 +2306,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 6000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -2309,16 +2335,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -2735,16 +2758,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -2767,16 +2787,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::PmtuProbe,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: true,
         };
 
         r.on_packet_sent(
@@ -2796,16 +2813,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(
@@ -3263,9 +3277,9 @@ mod tests {
         // Send some no "in_flight" packets
         for iter in 3..1000 {
             let mut p = test_utils::helper_packet_sent(next_packet, now, 1200);
-            // `in_flight = false` marks packets as if they only contained ACK
-            // frames.
-            p.in_flight = false;
+            // Model an ACK-only packet, which contributes no in-flight bytes.
+            p.flight = PacketFlight::NotInFlight;
+            p.size = 0;
             next_packet += 1;
             r.on_packet_sent(
                 p,
@@ -3375,7 +3389,7 @@ mod tests {
         let hs = HandshakeStatus::default();
 
         let mut sent = test_utils::helper_packet_sent(0, now, 1000);
-        sent.has_data = false;
+        sent.flight = PacketFlight::AckEliciting;
         sent.frames = smallvec![frame::Frame::ResetStream {
             stream_id: 0,
             error_code: 42,
@@ -3428,16 +3442,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::AckEliciting,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: false,
-            is_pmtud_probe: false,
         };
         r.on_packet_sent(
             p_initial,
@@ -3458,8 +3469,7 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
@@ -3467,8 +3477,6 @@ mod tests {
             tx_in_flight: 0,
 
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
         r.on_packet_sent(
             p_app,
@@ -3527,16 +3535,13 @@ mod tests {
             time_acked: None,
             time_lost: None,
             size: 1000,
-            ack_eliciting: true,
-            in_flight: true,
+            flight: PacketFlight::Data,
             delivered: 0,
             delivered_time: now,
             first_sent_time: now,
             is_app_limited: false,
             tx_in_flight: 0,
             lost: 0,
-            has_data: true,
-            is_pmtud_probe: false,
         };
 
         r.on_packet_sent(

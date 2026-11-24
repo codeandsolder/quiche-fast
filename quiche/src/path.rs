@@ -1530,7 +1530,7 @@ mod tests {
             "",
         );
         let mut ping_packet = test_utils::helper_packet_sent(4, now, 1200);
-        ping_packet.has_data = false;
+        ping_packet.flight = recovery::PacketFlight::AckEliciting;
         ping_packet.frames.push(Frame::Ping { mtu_probe: None });
         recovery.on_packet_sent(
             ping_packet,
@@ -1571,10 +1571,15 @@ mod tests {
         // ACK-only packets are not themselves acknowledged and must not keep
         // a superseded path alive indefinitely.
         let mut ack_only = test_utils::helper_packet_sent(5, now, 40);
-        ack_only.ack_eliciting = false;
-        ack_only.in_flight = false;
-        ack_only.has_data = false;
-        ack_only.frames.push(Frame::Padding { len: 1 });
+        ack_only.flight = recovery::PacketFlight::NotInFlight;
+        ack_only.size = 0;
+        let mut ranges = crate::ranges::RangeSet::default();
+        ranges.push_item(0);
+        ack_only.frames.push(Frame::ACK {
+            ack_delay: 0,
+            ranges,
+            ecn_counts: None,
+        });
         recovery.on_packet_sent(ack_only, Epoch::Application, handshake, now, "");
         assert!(!recovery.has_pending_recovery_work());
     }

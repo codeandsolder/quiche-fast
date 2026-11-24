@@ -187,11 +187,11 @@ impl RecoveryEpoch {
                     unacked.time_acked = Some(now);
                     self.newly_acked_send_times.push(unacked.time_sent);
 
-                    if unacked.in_flight {
+                    if unacked.flight.in_flight() {
                         has_in_flight_spurious_loss = true;
                     }
                 } else {
-                    if unacked.in_flight {
+                    if unacked.flight.in_flight() {
                         self.timing.in_flight_count -= 1;
                         acked_bytes += unacked.size;
                     }
@@ -200,7 +200,7 @@ impl RecoveryEpoch {
                         pkt_num: unacked.pkt_num,
                         time_sent: unacked.time_sent,
                         size: unacked.size,
-                        in_flight: unacked.in_flight,
+                        in_flight: unacked.flight.in_flight(),
 
                         rtt: now.saturating_duration_since(unacked.time_sent),
                         delivered: unacked.delivered,
@@ -214,7 +214,7 @@ impl RecoveryEpoch {
                     self.acked_frames
                         .extend(std::mem::take(&mut unacked.frames));
 
-                    has_ack_eliciting |= unacked.ack_eliciting;
+                    has_ack_eliciting |= unacked.flight.ack_eliciting();
                     unacked.time_acked = Some(now);
                     self.newly_acked_send_times.push(unacked.time_sent);
                 }
@@ -283,7 +283,7 @@ impl RecoveryEpoch {
 
                 unacked.time_lost = Some(now);
 
-                if unacked.is_pmtud_probe {
+                if unacked.flight.is_pmtud_probe() {
                     pmtud_lost_bytes += unacked.size;
                     self.timing.in_flight_count -= 1;
 
@@ -291,10 +291,10 @@ impl RecoveryEpoch {
                     continue;
                 }
 
-                if unacked.in_flight {
+                if unacked.flight.in_flight() {
                     lost_bytes += unacked.size;
 
-                    if unacked.ack_eliciting &&
+                    if unacked.flight.ack_eliciting() &&
                         first_rtt_sample_time.is_some_and(|first_rtt| {
                             unacked.time_sent > first_rtt
                         })
@@ -621,8 +621,8 @@ impl RecoveryOps for LegacyRecovery {
         &mut self, mut pkt: Sent, epoch: Epoch,
         handshake_status: HandshakeStatus, now: Instant, trace_id: &str,
     ) {
-        let ack_eliciting = pkt.ack_eliciting;
-        let in_flight = pkt.in_flight;
+        let ack_eliciting = pkt.flight.ack_eliciting();
+        let in_flight = pkt.flight.in_flight();
         let sent_bytes = pkt.size;
 
         if ack_eliciting {
@@ -826,7 +826,9 @@ impl RecoveryOps for LegacyRecovery {
             // Skip packets that have already been acked or lost, and packets
             // that don't contain either CRYPTO or STREAM frames.
             .filter(|p| {
-                p.has_data && p.time_acked.is_none() && p.time_lost.is_none()
+                p.flight.has_data() &&
+                    p.time_acked.is_none() &&
+                    p.time_lost.is_none()
             })
             // Only return as many packets as the number of probe packets that
             // will be sent.
@@ -864,7 +866,9 @@ impl RecoveryOps for LegacyRecovery {
             .sent_packets
             .iter()
             .filter(|p| {
-                p.in_flight && p.time_acked.is_none() && p.time_lost.is_none()
+                p.flight.in_flight() &&
+                    p.time_acked.is_none() &&
+                    p.time_lost.is_none()
             })
             .fold(0, |acc, p| acc + p.size);
 
@@ -994,7 +998,7 @@ impl RecoveryOps for LegacyRecovery {
             epoch.sent_packets.iter().any(|pkt| {
                 pkt.time_acked.is_none() &&
                     pkt.time_lost.is_none() &&
-                    pkt.ack_eliciting
+                    pkt.flight.ack_eliciting()
             }) || !epoch.acked_frames.is_empty() ||
                 epoch.pending_lost_frames.has_pending() ||
                 epoch.loss_probes != 0
