@@ -6698,14 +6698,14 @@ mod tests {
                 .unwrap();
         assert!(
             response.iter().any(|frame| matches!(frame,
-                crate::frame::Frame::ACK { ranges, .. } if ranges.contains(packet_number)
+                crate::frame::Frame::Ack { ranges, .. } if ranges.contains(packet_number)
             )),
             "server did not acknowledge packet {packet_number}: {response:?}",
         );
         assert!(
             response.iter().all(|frame| matches!(
                 frame,
-                crate::frame::Frame::ACK { .. } |
+                crate::frame::Frame::Ack { .. } |
                     crate::frame::Frame::Padding { .. }
             )),
             "unexpected non-ACK response: {response:?}"
