@@ -513,14 +513,14 @@ impl Header<'_> {
     /// # Ok::<(), quiche::Error>(())
     /// ```
     #[inline]
-    pub fn from_slice(buf: &[u8], dcid_len: usize) -> Result<Self> {
+    pub fn from_slice(buf: &[u8], dcid_len: usize) -> Result<Header<'static>> {
         let mut b = octets::Octets::with_slice(buf);
         Header::from_bytes(&mut b, dcid_len)
     }
 
     pub(crate) fn from_mutable_cursor(
         b: &mut octets::OctetsMut, dcid_len: usize,
-    ) -> Result<Self> {
+    ) -> Result<Header<'static>> {
         let mut reader = octets::Octets::with_slice(b.as_ref());
         let header = Self::from_bytes(&mut reader, dcid_len)?;
         b.skip(reader.off())?;
@@ -529,7 +529,7 @@ impl Header<'_> {
 
     pub(crate) fn from_bytes(
         b: &mut octets::Octets, dcid_len: usize,
-    ) -> Result<Self> {
+    ) -> Result<Header<'static>> {
         let first = b.get_u8()?;
 
         if !Header::is_long(first) {
