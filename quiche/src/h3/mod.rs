@@ -7508,12 +7508,13 @@ mod tests {
         Ok(())
     }
 
+    type DatagramRead = (usize, u64, usize);
+
     struct DatagramExchange {
         send_body: fn(&mut Session, u64, bool) -> Result<Vec<u8>>,
         send_datagram: fn(&mut Session, u64) -> Result<Vec<u8>>,
         poll: fn(&mut Session) -> Result<(u64, Event)>,
-        receive_datagram:
-            fn(&mut Session, &mut [u8]) -> Result<(usize, u64, usize)>,
+        receive_datagram: fn(&mut Session, &mut [u8]) -> Result<DatagramRead>,
         receive_body: fn(&mut Session, u64, &mut [u8]) -> Result<usize>,
     }
 
