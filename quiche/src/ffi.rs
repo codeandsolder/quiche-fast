@@ -718,8 +718,8 @@ pub extern "C" fn quiche_config_set_cc_algorithm(
     let algorithm = match algo {
         v if v == CongestionControlAlgorithm::Reno as c_int =>
             CongestionControlAlgorithm::Reno,
-        v if v == CongestionControlAlgorithm::CUBIC as c_int =>
-            CongestionControlAlgorithm::CUBIC,
+        v if v == CongestionControlAlgorithm::Cubic as c_int =>
+            CongestionControlAlgorithm::Cubic,
         v if v == CongestionControlAlgorithm::Bbr2Gcongestion as c_int =>
             CongestionControlAlgorithm::Bbr2Gcongestion,
         _ => return c_int::from(FFI_ERR_INVALID_ARGUMENT),
@@ -3235,7 +3235,7 @@ mod tests {
             assert_eq!(config.cc_algorithm, CongestionControlAlgorithm::Reno);
         }
         for (value, algorithm) in [
-            (1, CongestionControlAlgorithm::CUBIC),
+            (1, CongestionControlAlgorithm::Cubic),
             (4, CongestionControlAlgorithm::Bbr2Gcongestion),
         ] {
             assert_eq!(quiche_config_set_cc_algorithm(&mut config, value), 0);

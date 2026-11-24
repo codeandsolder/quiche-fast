@@ -55,7 +55,7 @@ pub struct Rate {
     largest_acked: u64,
 
     // Sample of rate estimation.
-    rate_sample: RateSample,
+    sample: RateSample,
 }
 
 impl Default for Rate {
@@ -75,7 +75,7 @@ impl Default for Rate {
 
             largest_acked: 0,
 
-            rate_sample: RateSample::new(),
+            sample: RateSample::new(),
         }
     }
 }
@@ -105,18 +105,18 @@ impl Rate {
         self.delivered = self.delivered.saturating_add(pkt.size as u64);
         self.delivered_time = now;
 
-        // Update info using the newest packet. If rate_sample is not yet
+        // Update info using the newest packet. If sample is not yet
         // initialized, initialize with the first packet.
-        if self.rate_sample.prior_time.is_none() ||
-            pkt.delivered >= self.rate_sample.prior_delivered
+        if self.sample.prior_time.is_none() ||
+            pkt.delivered >= self.sample.prior_delivered
         {
-            self.rate_sample.prior_delivered = pkt.delivered;
-            self.rate_sample.prior_time = Some(pkt.delivered_time);
-            self.rate_sample.is_app_limited = pkt.is_app_limited;
-            self.rate_sample.send_elapsed =
+            self.sample.prior_delivered = pkt.delivered;
+            self.sample.prior_time = Some(pkt.delivered_time);
+            self.sample.is_app_limited = pkt.is_app_limited;
+            self.sample.send_elapsed =
                 pkt.time_sent.saturating_duration_since(pkt.first_sent_time);
-            self.rate_sample.rtt = pkt.rtt;
-            self.rate_sample.ack_elapsed = self
+            self.sample.rtt = pkt.rtt;
+            self.sample.ack_elapsed = self
                 .delivered_time
                 .saturating_duration_since(pkt.delivered_time);
 
@@ -132,18 +132,14 @@ impl Rate {
             self.update_app_limited(false);
         }
 
-        if self.rate_sample.prior_time.is_some() {
-            let interval = self
-                .rate_sample
-                .send_elapsed
-                .max(self.rate_sample.ack_elapsed);
+        if self.sample.prior_time.is_some() {
+            let interval = self.sample.send_elapsed.max(self.sample.ack_elapsed);
 
-            self.rate_sample.delivered =
-                self.delivered - self.rate_sample.prior_delivered;
-            self.rate_sample.interval = interval;
+            self.sample.delivered = self.delivered - self.sample.prior_delivered;
+            self.sample.interval = interval;
 
             if interval < min_rtt {
-                self.rate_sample.interval = Duration::ZERO;
+                self.sample.interval = Duration::ZERO;
 
                 // No reliable sample.
                 return;
@@ -151,7 +147,7 @@ impl Rate {
 
             if !interval.is_zero() {
                 let rate_sample_bandwidth = Bandwidth::from_bytes_and_time_delta(
-                    self.rate_sample.delivered,
+                    self.sample.delivered,
                     interval,
                 );
 
@@ -161,8 +157,8 @@ impl Rate {
                 // - the new rate is higher than the previous value
                 //
                 // [linux] https://github.com/torvalds/linux/commit/eb8329e0a04db0061f714f033b4454326ba147f4
-                if !self.rate_sample.is_app_limited ||
-                    rate_sample_bandwidth > self.rate_sample.bandwidth
+                if !self.sample.is_app_limited ||
+                    rate_sample_bandwidth > self.sample.bandwidth
                 {
                     self.update_delivery_rate(rate_sample_bandwidth);
                 }
@@ -171,7 +167,7 @@ impl Rate {
     }
 
     const fn update_delivery_rate(&mut self, bandwidth: Bandwidth) {
-        self.rate_sample.bandwidth = bandwidth;
+        self.sample.bandwidth = bandwidth;
     }
 
     pub fn update_app_limited(&mut self, v: bool) {
@@ -189,12 +185,12 @@ impl Rate {
     }
 
     pub const fn sample_delivery_rate(&self) -> Bandwidth {
-        self.rate_sample.bandwidth
+        self.sample.bandwidth
     }
 
     #[cfg(test)]
     pub fn sample_is_app_limited(&self) -> bool {
-        self.rate_sample.is_app_limited
+        self.sample.is_app_limited
     }
 }
 

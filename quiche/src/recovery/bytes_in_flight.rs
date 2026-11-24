@@ -37,12 +37,12 @@ use std::time::Instant;
 #[derive(Default)]
 pub struct BytesInFlight {
     // Current bytes in flight.
-    bytes_in_flight: usize,
+    current: usize,
 
     // Instant at which bytes_in_flight transitioned from 0 to >0.
     // Set if bytes_in_flight is currently >0 which indicates that
     // the bytes in flight interval is currently "open".
-    bytes_in_flight_interval_start: Option<Instant>,
+    interval_start: Option<Instant>,
 
     // Duration of the current open interval.
     open_interval_duration: Duration,
@@ -59,30 +59,30 @@ impl BytesInFlight {
             return;
         }
 
-        self.bytes_in_flight += delta;
+        self.current += delta;
 
-        if self.bytes_in_flight_interval_start.is_some() {
+        if self.interval_start.is_some() {
             self.update_in_flight_duration(now);
         } else {
-            self.bytes_in_flight_interval_start = Some(now);
+            self.interval_start = Some(now);
         }
     }
 
     /// Substract from bytes in flight.  If `bytes_in_flight` drops to 0,
     /// end the current `bytes_in_flight` >0 interval.
     pub(crate) fn saturating_subtract(&mut self, delta: usize, now: Instant) {
-        self.bytes_in_flight = self.bytes_in_flight.saturating_sub(delta);
+        self.current = self.current.saturating_sub(delta);
         self.update_in_flight_duration(now);
     }
 
     /// Current bytes in flight.
     pub(crate) const fn get(&self) -> usize {
-        self.bytes_in_flight
+        self.current
     }
 
     /// Returns true if there are 0 bytes in flight.
     pub(crate) const fn is_zero(&self) -> bool {
-        self.bytes_in_flight == 0
+        self.current == 0
     }
 
     /// Total time during which `bytes_in_flight` was > 0.
@@ -92,18 +92,18 @@ impl BytesInFlight {
     }
 
     fn update_in_flight_duration(&mut self, now: Instant) {
-        if let Some(start) = self.bytes_in_flight_interval_start {
+        if let Some(start) = self.interval_start {
             // Event times can arrive out of order. Duration already observed
             // for an open interval must never decrease, and an observation
             // earlier than the interval start adds no elapsed time.
             let observed = self
                 .open_interval_duration
                 .max(now.saturating_duration_since(start));
-            if self.bytes_in_flight == 0 {
+            if self.current == 0 {
                 self.open_interval_duration = Duration::ZERO;
                 self.closed_interval_duration =
                     self.closed_interval_duration.saturating_add(observed);
-                self.bytes_in_flight_interval_start = None;
+                self.interval_start = None;
             } else {
                 self.open_interval_duration = observed;
             }
@@ -167,7 +167,7 @@ mod tests {
         assert_eq!(bytes_in_flight.get(), 0);
         assert_eq!(bytes_in_flight.get_duration(), Duration::ZERO);
 
-        // bytes_in_flight_interval_start is initialized when bytes > 0.
+        // interval_start is initialized when bytes > 0.
         bytes_in_flight.add(1, start);
         assert_eq!(bytes_in_flight.get(), 1);
         assert_eq!(bytes_in_flight.get_duration(), Duration::ZERO);

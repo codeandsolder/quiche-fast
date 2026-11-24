@@ -491,7 +491,7 @@ pub enum CongestionControlAlgorithm {
     /// Reno congestion control algorithm. `reno` in a string form.
     Reno            = 0,
     /// CUBIC congestion control algorithm (default). `cubic` in a string form.
-    CUBIC           = 1,
+    Cubic           = 1,
     /// `BBRv2` congestion control algorithm implementation from gcongestion
     /// branch. `bbr2_gcongestion` in a string form.
     Bbr2Gcongestion = 4,
@@ -506,10 +506,8 @@ impl FromStr for CongestionControlAlgorithm {
     fn from_str(name: &str) -> std::result::Result<Self, Self::Err> {
         match name {
             "reno" => Ok(Self::Reno),
-            "cubic" => Ok(Self::CUBIC),
-            "bbr" => Ok(Self::Bbr2Gcongestion),
-            "bbr2" => Ok(Self::Bbr2Gcongestion),
-            "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
+            "cubic" => Ok(Self::Cubic),
+            "bbr" | "bbr2" | "bbr2_gcongestion" => Ok(Self::Bbr2Gcongestion),
             _ => Err(Error::CongestionControl),
         }
     }
@@ -843,7 +841,7 @@ impl RecoveryStats {
 }
 
 /// Statistics from when a CCA first exited the startup phase.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartupExit {
     /// The `congestion_window` recorded at Startup exit.
     pub cwnd: usize,
@@ -1149,7 +1147,7 @@ mod tests {
         assert!(!recovery_for_alg(algo).gcongestion_enabled());
 
         let algo = CongestionControlAlgorithm::from_str("cubic").unwrap();
-        assert_eq!(algo, CongestionControlAlgorithm::CUBIC);
+        assert_eq!(algo, CongestionControlAlgorithm::Cubic);
         assert!(!recovery_for_alg(algo).gcongestion_enabled());
 
         let algo = CongestionControlAlgorithm::from_str("bbr").unwrap();

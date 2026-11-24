@@ -658,7 +658,7 @@ impl Config {
             tls_ctx,
             application_protos: Vec::new(),
             grease: true,
-            cc_algorithm: CongestionControlAlgorithm::CUBIC,
+            cc_algorithm: CongestionControlAlgorithm::Cubic,
             custom_bbr_params: None,
             initial_congestion_window_packets:
                 DEFAULT_INITIAL_CONGESTION_WINDOW_PACKETS,
@@ -1145,7 +1145,7 @@ impl Config {
 
     /// Sets the congestion control algorithm used.
     ///
-    /// The default value is `CongestionControlAlgorithm::CUBIC`.
+    /// The default value is `CongestionControlAlgorithm::Cubic`.
     pub const fn set_cc_algorithm(&mut self, algo: CongestionControlAlgorithm) {
         self.cc_algorithm = algo;
     }
