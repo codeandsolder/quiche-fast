@@ -688,7 +688,7 @@ fn peer_transport_params_wire_preserves_original_encoding() -> TestResult {
         let raw = conn
             .peer_transport_params_wire()
             .ok_or("validated raw QUIC parameters")?;
-        assert_ne!(raw, []);
+        assert_ne!(raw, [] as [u8; 0]);
         let parsed = TransportParams::decode(raw, conn.is_server(), None)?;
         assert_eq!(
             &parsed,
