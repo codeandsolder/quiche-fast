@@ -1340,13 +1340,27 @@ mod tests {
     /// The default size of the receiver stream flow control window.
     const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
 
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    fn collected_ranges(
+        collected: &CollectedStreams, stream_type: u64,
+    ) -> TestResult<&RangeSet> {
+        let ranges = collected
+            .ranges
+            .as_ref()
+            .ok_or("missing collected stream ranges")?;
+        ranges
+            .get(usize::try_from(stream_type)?)
+            .ok_or_else(|| "invalid stream type".into())
+    }
+
     fn test_stream(
-        max_rx_data: u64, max_tx_data: u64, initial_window: u64, max_window: u64,
+        receive_limit: u64, send_limit: u64, initial_window: u64, max_window: u64,
     ) -> Stream {
         Stream::new(
             StreamPriorityKey::default(),
-            max_rx_data,
-            max_tx_data,
+            receive_limit,
+            send_limit,
             true,
             initial_window,
             max_window,
@@ -1532,7 +1546,9 @@ mod tests {
     }
 
     #[rstest]
-    fn collected_streams_per_type(#[values(0, 1, 2, 3)] stream_type: u64) {
+    fn collected_streams_per_type(
+        #[values(0, 1, 2, 3)] stream_type: u64,
+    ) -> TestResult {
         let mut collected = CollectedStreams::default();
         assert!(collected.ranges.is_none());
 
@@ -1550,25 +1566,20 @@ mod tests {
 
         collected.insert(8 | stream_type);
         assert!(!collected.contains(4 | stream_type));
-        assert_eq!(
-            collected.ranges.as_ref().unwrap()[stream_type as usize].len(),
-            2
-        );
+        assert_eq!(collected_ranges(&collected, stream_type)?.len(), 2);
 
         collected.insert(4 | stream_type);
         collected.insert(4 | stream_type);
-        assert_eq!(
-            collected.ranges.as_ref().unwrap()[stream_type as usize],
-            0..3
-        );
+        assert_eq!(*collected_ranges(&collected, stream_type)?, 0..3);
 
         for id in 0..12 {
             assert_eq!(collected.contains(id), id & 0x3 == stream_type);
         }
+        Ok(())
     }
 
     #[test]
-    fn collected_streams_preserve_fragmented_and_large_ids() {
+    fn collected_streams_preserve_fragmented_and_large_ids() -> TestResult {
         let mut collected = CollectedStreams::default();
 
         for sequence in (0..2048).step_by(2) {
@@ -1587,10 +1598,7 @@ mod tests {
         }
 
         for stream_type in 0..4 {
-            assert_eq!(
-                collected.ranges.as_ref().unwrap()[stream_type as usize].len(),
-                1024
-            );
+            assert_eq!(collected_ranges(&collected, stream_type)?.len(), 1024);
 
             let stream_id = ((1u64 << 62) - 4) | stream_type;
             assert!(!collected.contains(stream_id));
@@ -1599,6 +1607,7 @@ mod tests {
             assert!(!collected.contains(stream_id - 4));
             assert!(!collected.contains((1u64 << 40) | stream_type));
         }
+        Ok(())
     }
 
     /// Completes a client-initiated stream and processes returned stream
@@ -1626,8 +1635,8 @@ mod tests {
     fn collected_streams_out_of_order(
         #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
         #[values(0, 2)] stream_type: u64,
-    ) {
-        let mut pipe = Pipe::new(cc_algorithm_name).unwrap();
+    ) -> TestResult {
+        let mut pipe = Pipe::new(cc_algorithm_name)?;
         assert_eq!(pipe.handshake(), Ok(()));
 
         for sequence in [2, 0, 1] {
@@ -1654,8 +1663,7 @@ mod tests {
         }
 
         assert_eq!(
-            pipe.server.streams.collected.ranges.as_ref().unwrap()
-                [stream_type as usize],
+            *collected_ranges(&pipe.server.streams.collected, stream_type)?,
             0..3
         );
 
@@ -1668,18 +1676,19 @@ mod tests {
             .send_pkt_to_server(crate::Type::Short, &frames, &mut [0; 1280])
             .is_ok());
         assert_eq!(pipe.server.streams.len(), 0);
+        Ok(())
     }
 
     #[rstest]
     fn collected_streams_sparse_peer_credit(
         #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
         #[values(0, 2)] stream_type: u64, #[values(1, 8)] initial_limit: u64,
-    ) {
-        let mut config = Pipe::default_config(cc_algorithm_name).unwrap();
+    ) -> TestResult {
+        let mut config = Pipe::default_config(cc_algorithm_name)?;
         config.set_initial_max_streams_bidi(initial_limit);
         config.set_initial_max_streams_uni(initial_limit);
 
-        let mut pipe = Pipe::with_config(&mut config).unwrap();
+        let mut pipe = Pipe::with_config(&mut config)?;
         assert_eq!(pipe.handshake(), Ok(()));
 
         for index in 0..initial_limit {
@@ -1687,10 +1696,9 @@ mod tests {
             collect_pipe_stream(&mut pipe, stream_id);
 
             assert_eq!(
-                pipe.server.streams.collected.ranges.as_ref().unwrap()
-                    [stream_type as usize]
+                collected_ranges(&pipe.server.streams.collected, stream_type)?
                     .len(),
-                index as usize + 1
+                usize::try_from(index)? + 1
             );
             assert!(pipe.server.stream_closed(stream_id));
             assert!(pipe.client.stream_closed(stream_id));
@@ -1721,30 +1729,29 @@ mod tests {
         }
 
         assert_eq!(
-            pipe.server.streams.collected.ranges.as_ref().unwrap()
-                [stream_type as usize],
+            *collected_ranges(&pipe.server.streams.collected, stream_type)?,
             0..2 * initial_limit - 1
         );
+        Ok(())
     }
 
     #[rstest]
     fn collected_streams_fragmented_local(
         #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
         #[values(0, 2)] stream_type: u64,
-    ) {
-        let mut client_config = Pipe::default_config(cc_algorithm_name).unwrap();
+    ) -> TestResult {
+        let mut client_config = Pipe::default_config(cc_algorithm_name)?;
         client_config.set_initial_max_streams_bidi(1);
         client_config.set_initial_max_streams_uni(1);
 
-        let mut server_config = Pipe::default_config(cc_algorithm_name).unwrap();
+        let mut server_config = Pipe::default_config(cc_algorithm_name)?;
         server_config.set_initial_max_streams_bidi(32);
         server_config.set_initial_max_streams_uni(32);
 
         let mut pipe = Pipe::with_client_and_server_config(
             &mut client_config,
             &mut server_config,
-        )
-        .unwrap();
+        )?;
         assert_eq!(pipe.handshake(), Ok(()));
 
         // Local fragmentation follows the peer's allowance and application
@@ -1752,32 +1759,30 @@ mod tests {
         for index in 0..32 {
             collect_pipe_stream(&mut pipe, (index << 3) | stream_type);
             assert_eq!(
-                pipe.client.streams.collected.ranges.as_ref().unwrap()
-                    [stream_type as usize]
+                collected_ranges(&pipe.client.streams.collected, stream_type)?
                     .len(),
-                index as usize + 1
+                usize::try_from(index)? + 1
             );
             assert_eq!(pipe.client.streams.len(), 0);
         }
+        Ok(())
     }
 
     #[rstest]
     fn returning_stream_credit_at_protocol_limit_does_not_overflow(
         #[values(0, 1, 2, 3)] stream_type: u64,
-    ) {
+    ) -> TestResult {
         let max = crate::MAX_STREAM_COUNT;
         let params = crate::TransportParams::default();
         let mut streams = <StreamMap>::new(max, max, DEFAULT_STREAM_WINDOW);
         let is_server = stream_type & 1 == 0;
-        streams
-            .get_or_create(
-                stream_type,
-                &params,
-                &params,
-                StreamOpenIntent::Peer,
-                is_server,
-            )
-            .unwrap();
+        streams.get_or_create(
+            stream_type,
+            &params,
+            &params,
+            StreamOpenIntent::Peer,
+            is_server,
+        )?;
         // Collect one peer-created stream. No additional stream ID in this
         // type exists once the maximum has already been advertised.
         streams.collect(stream_type);
@@ -1785,28 +1790,27 @@ mod tests {
         assert_eq!(streams.quota(Unidirectional).next_local_limit(), max);
         assert!(!streams.quota(Bidirectional).needs_credit());
         assert!(!streams.quota(Unidirectional).needs_credit());
+        Ok(())
     }
 
     #[rstest]
     fn stream_collection_returns_credit_only_once(
         #[values(0, 1, 2, 3)] stream_type: u64,
         #[values(true, false)] local: bool,
-    ) {
+    ) -> TestResult {
         let params = crate::TransportParams::default();
         let mut streams = <StreamMap>::new(1, 1, DEFAULT_STREAM_WINDOW);
         streams.quota_mut(Bidirectional).update_peer_limit(1);
         streams.quota_mut(Unidirectional).update_peer_limit(1);
         let is_server = (stream_type & 1 != 0) == local;
         streams.collect(stream_type);
-        streams
-            .get_or_create(
-                stream_type,
-                &params,
-                &params,
-                StreamOpenIntent::from_local(local),
-                is_server,
-            )
-            .unwrap();
+        streams.get_or_create(
+            stream_type,
+            &params,
+            &params,
+            StreamOpenIntent::from_local(local),
+            is_server,
+        )?;
         streams.collect(stream_type);
         streams.collect(stream_type);
         assert_eq!(streams.len(), 0);
@@ -1819,6 +1823,7 @@ mod tests {
             streams.quota(Unidirectional).next_local_limit(),
             1 + u64::from(!local && !is_bidi(stream_type))
         );
+        Ok(())
     }
 
     #[rstest]
@@ -1872,7 +1877,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_flow_control() {
+    fn recv_flow_control() -> TestResult {
         let mut stream = test_stream(15, 0, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
@@ -1888,7 +1893,7 @@ mod tests {
 
         assert_eq!(stream.recv.write(third), Err(Error::FlowControl));
 
-        let (len, fin) = stream.recv.emit(&mut buf).unwrap();
+        let (len, fin) = stream.recv.emit(&mut buf)?;
         assert_eq!(&buf[..len], b"helloworld");
         assert!(!fin);
 
@@ -1900,6 +1905,7 @@ mod tests {
 
         let third = RangeBuf::from(b"something", 10, false);
         assert_eq!(stream.recv.write(third), Ok(()));
+        Ok(())
     }
 
     #[test]
@@ -1915,7 +1921,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_fin_dup() {
+    fn recv_fin_dup() -> TestResult {
         let mut stream = test_stream(15, 0, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
@@ -1927,9 +1933,10 @@ mod tests {
 
         let mut buf = [0; 32];
 
-        let (len, fin) = stream.recv.emit(&mut buf).unwrap();
+        let (len, fin) = stream.recv.emit(&mut buf)?;
         assert_eq!(&buf[..len], b"hello");
         assert!(fin);
+        Ok(())
     }
 
     #[test]
@@ -1957,7 +1964,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_fin_flow_control() {
+    fn recv_fin_flow_control() -> TestResult {
         let mut stream = test_stream(15, 0, 15, DEFAULT_STREAM_WINDOW);
         assert!(!stream.recv.almost_full());
 
@@ -1969,11 +1976,12 @@ mod tests {
         assert_eq!(stream.recv.write(first), Ok(()));
         assert_eq!(stream.recv.write(second), Ok(()));
 
-        let (len, fin) = stream.recv.emit(&mut buf).unwrap();
+        let (len, fin) = stream.recv.emit(&mut buf)?;
         assert_eq!(&buf[..len], b"helloworld");
         assert!(fin);
 
         assert!(!stream.recv.almost_full());
+        Ok(())
     }
 
     #[test]
@@ -2180,7 +2188,7 @@ mod tests {
     }
 
     #[test]
-    fn recv_data_below_off() {
+    fn recv_data_below_off() -> TestResult {
         let mut stream = test_stream(15, 0, 15, DEFAULT_STREAM_WINDOW);
 
         let first = RangeBuf::from(b"hello", 0, false);
@@ -2189,16 +2197,17 @@ mod tests {
 
         let mut buf = [0; 10];
 
-        let (len, fin) = stream.recv.emit(&mut buf).unwrap();
+        let (len, fin) = stream.recv.emit(&mut buf)?;
         assert_eq!(&buf[..len], b"hello");
         assert!(!fin);
 
         let first = RangeBuf::from(b"elloworld", 1, true);
         assert_eq!(stream.recv.write(first), Ok(()));
 
-        let (len, fin) = stream.recv.emit(&mut buf).unwrap();
+        let (len, fin) = stream.recv.emit(&mut buf)?;
         assert_eq!(&buf[..len], b"world");
         assert!(fin);
+        Ok(())
     }
 
     #[test]
@@ -2497,10 +2506,17 @@ mod tests {
         );
     }
 
-    fn cycle_stream_priority(stream_id: u64, streams: &mut StreamMap) {
-        let key = streams.get(stream_id).unwrap().priority_key.clone();
+    fn cycle_stream_priority(
+        stream_id: u64, streams: &mut StreamMap,
+    ) -> TestResult {
+        let key = streams
+            .get(stream_id)
+            .ok_or("expected open stream")?
+            .priority_key
+            .clone();
         streams.remove_writable(&key);
         streams.enqueue(&key, PriorityQueue::Writable);
+        Ok(())
     }
 
     fn writable_priority_fixture(
@@ -2519,36 +2535,46 @@ mod tests {
     #[rstest]
     #[case([0, 4, 8, 12])]
     #[case([12, 4, 8, 0])]
-    fn writable_prioritized_fifo(#[case] order: [u64; 4]) {
+    fn writable_prioritized_fifo(#[case] order: [u64; 4]) -> TestResult {
         let (mut streams, local, peer) = writable_priority_fixture();
         for id in order {
-            streams
-                .get_or_create(id, &local, &peer, StreamOpenIntent::Peer, true)
-                .unwrap();
+            streams.get_or_create(
+                id,
+                &local,
+                &peer,
+                StreamOpenIntent::Peer,
+                true,
+            )?;
         }
         let mut expected = order;
         for _ in 0..order.len() {
             assert_eq!(streams.writable().collect::<Vec<_>>(), expected);
-            cycle_stream_priority(expected[0], &mut streams);
+            cycle_stream_priority(expected[0], &mut streams)?;
             expected.rotate_left(1);
         }
         assert_eq!(streams.writable().collect::<Vec<_>>(), order);
+        Ok(())
     }
 
     fn open_prioritized_streams(
         streams: &mut StreamMap, local: &crate::TransportParams,
         peer: &crate::TransportParams, input: &[(u64, u8)],
-    ) {
+    ) -> TestResult {
         for &(id, urgency) in input {
-            streams
-                .get_or_create(id, local, peer, StreamOpenIntent::Peer, true)
-                .unwrap();
+            streams.get_or_create(
+                id,
+                local,
+                peer,
+                StreamOpenIntent::Peer,
+                true,
+            )?;
             streams.set_priority(id, urgency, true);
         }
+        Ok(())
     }
 
     #[test]
-    fn writable_prioritized_mixed_urgency() {
+    fn writable_prioritized_mixed_urgency() -> TestResult {
         let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams where the urgency descends (becomes more important). No
@@ -2567,13 +2593,13 @@ mod tests {
             (40, 0),
         ];
 
-        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input)?;
 
         let walk_1: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_1, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
 
         // Re-applying priority to a stream does not cause duplication.
-        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input)?;
 
         let walk_2: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_2, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
@@ -2591,16 +2617,21 @@ mod tests {
         assert_eq!(walk_4, vec![36, 32, 28, 20, 16, 12, 8, 4]);
 
         // Adding streams doesn't break expected ordering.
-        streams
-            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
-            .unwrap();
+        streams.get_or_create(
+            44,
+            &local_tp,
+            &peer_tp,
+            StreamOpenIntent::Peer,
+            true,
+        )?;
 
         let walk_5: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_5, vec![36, 32, 28, 20, 16, 12, 8, 4, 44]);
+        Ok(())
     }
 
     #[test]
-    fn writable_prioritized_mixed_urgencies_incrementals() {
+    fn writable_prioritized_mixed_urgencies_incrementals() -> TestResult {
         let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams that share some urgency level
@@ -2618,54 +2649,24 @@ mod tests {
             (40, 0),
         ];
 
-        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input)?;
 
-        let walk_1: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(4, &mut streams);
-        cycle_stream_priority(16, &mut streams);
-        cycle_stream_priority(0, &mut streams);
-        let walk_2: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(12, &mut streams);
-        cycle_stream_priority(24, &mut streams);
-        cycle_stream_priority(8, &mut streams);
-        let walk_3: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(36, &mut streams);
-        cycle_stream_priority(16, &mut streams);
-        cycle_stream_priority(0, &mut streams);
-        let walk_4: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(4, &mut streams);
-        cycle_stream_priority(24, &mut streams);
-        cycle_stream_priority(8, &mut streams);
-        let walk_5: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(12, &mut streams);
-        cycle_stream_priority(16, &mut streams);
-        cycle_stream_priority(0, &mut streams);
-        let walk_6: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(36, &mut streams);
-        cycle_stream_priority(24, &mut streams);
-        cycle_stream_priority(8, &mut streams);
-        let walk_7: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(4, &mut streams);
-        cycle_stream_priority(16, &mut streams);
-        cycle_stream_priority(0, &mut streams);
-        let walk_8: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(12, &mut streams);
-        cycle_stream_priority(24, &mut streams);
-        cycle_stream_priority(8, &mut streams);
-        let walk_9: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(36, &mut streams);
-        cycle_stream_priority(16, &mut streams);
-        cycle_stream_priority(0, &mut streams);
-
-        assert_eq!(walk_1, vec![40, 4, 12, 36, 20, 28, 32, 16, 24, 0, 8]);
-        assert_eq!(walk_2, vec![40, 12, 36, 4, 20, 28, 32, 24, 16, 8, 0]);
-        assert_eq!(walk_3, vec![40, 36, 4, 12, 20, 28, 32, 16, 24, 0, 8]);
-        assert_eq!(walk_4, vec![40, 4, 12, 36, 20, 28, 32, 24, 16, 8, 0]);
-        assert_eq!(walk_5, vec![40, 12, 36, 4, 20, 28, 32, 16, 24, 0, 8]);
-        assert_eq!(walk_6, vec![40, 36, 4, 12, 20, 28, 32, 24, 16, 8, 0]);
-        assert_eq!(walk_7, vec![40, 4, 12, 36, 20, 28, 32, 16, 24, 0, 8]);
-        assert_eq!(walk_8, vec![40, 12, 36, 4, 20, 28, 32, 24, 16, 8, 0]);
-        assert_eq!(walk_9, vec![40, 36, 4, 12, 20, 28, 32, 16, 24, 0, 8]);
+        for (rotation, expected) in [
+            ([4, 16, 0], [40, 4, 12, 36, 20, 28, 32, 16, 24, 0, 8]),
+            ([12, 24, 8], [40, 12, 36, 4, 20, 28, 32, 24, 16, 8, 0]),
+            ([36, 16, 0], [40, 36, 4, 12, 20, 28, 32, 16, 24, 0, 8]),
+            ([4, 24, 8], [40, 4, 12, 36, 20, 28, 32, 24, 16, 8, 0]),
+            ([12, 16, 0], [40, 12, 36, 4, 20, 28, 32, 16, 24, 0, 8]),
+            ([36, 24, 8], [40, 36, 4, 12, 20, 28, 32, 24, 16, 8, 0]),
+            ([4, 16, 0], [40, 4, 12, 36, 20, 28, 32, 16, 24, 0, 8]),
+            ([12, 24, 8], [40, 12, 36, 4, 20, 28, 32, 24, 16, 8, 0]),
+            ([36, 16, 0], [40, 36, 4, 12, 20, 28, 32, 16, 24, 0, 8]),
+        ] {
+            assert_eq!(streams.writable().collect::<Vec<_>>(), expected);
+            for id in rotation {
+                cycle_stream_priority(id, &mut streams)?;
+            }
+        }
 
         // Removing streams doesn't break expected ordering.
         streams.collect(20);
@@ -2674,17 +2675,22 @@ mod tests {
         assert_eq!(walk_10, vec![40, 4, 12, 36, 28, 32, 24, 16, 8, 0]);
 
         // Adding streams doesn't break expected ordering.
-        streams
-            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
-            .unwrap();
+        streams.get_or_create(
+            44,
+            &local_tp,
+            &peer_tp,
+            StreamOpenIntent::Peer,
+            true,
+        )?;
         streams.set_priority(44, 20, true);
 
         let walk_11: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_11, vec![40, 4, 12, 36, 44, 28, 32, 24, 16, 8, 0]);
+        Ok(())
     }
 
     #[test]
-    fn priority_queues_reject_foreign_and_retired_keys() {
+    fn priority_queues_reject_foreign_and_retired_keys() -> TestResult {
         let local_tp = crate::TransportParams::default();
         let peer_tp = crate::TransportParams {
             initial_max_stream_data_bidi_local: 100,
@@ -2692,21 +2698,20 @@ mod tests {
         };
         let mut left = StreamMap::<DefaultBufFactory>::new(100, 100, 100);
         let mut right = StreamMap::<DefaultBufFactory>::new(100, 100, 100);
-        let key = |map: &mut StreamMap| {
-            Arc::clone(
+        let key = |map: &mut StreamMap| -> Result<Arc<StreamPriorityKey>> {
+            Ok(Arc::clone(
                 map.get_or_create(
                     0,
                     &local_tp,
                     &peer_tp,
                     StreamOpenIntent::Peer,
                     true,
-                )
-                .unwrap()
+                )?
                 .priority_key(),
-            )
+            ))
         };
-        let left_key = key(&mut left);
-        let foreign = key(&mut right);
+        let left_key = key(&mut left)?;
+        let foreign = key(&mut right)?;
         assert!(!left.owns_priority_key(&foreign));
         assert!(!right.owns_priority_key(&left_key));
         right.enqueue(&foreign, PriorityQueue::Readable);
@@ -2742,7 +2747,9 @@ mod tests {
         assert!(!foreign.writable.is_linked());
         assert!(!foreign.flushable.is_linked());
 
-        let current = Arc::clone(right.get(0).unwrap().priority_key());
+        let current = Arc::clone(
+            right.get(0).ok_or("expected open stream")?.priority_key(),
+        );
         right.collect(0);
         right.enqueue(&current, PriorityQueue::Readable);
         right.enqueue(&current, PriorityQueue::StoppedWritable);
@@ -2751,10 +2758,11 @@ mod tests {
         assert_eq!(right.writable().count(), 0);
         assert_eq!(right.stopped_writable().count(), 0);
         assert!(right.peek_flushable().is_none());
+        Ok(())
     }
 
     #[test]
-    fn incremental_fifo_order_is_independent_per_queue() {
+    fn incremental_fifo_order_is_independent_per_queue() -> TestResult {
         let local_tp = crate::TransportParams::default();
         let peer_tp = crate::TransportParams {
             initial_max_stream_data_bidi_local: 100,
@@ -2770,14 +2778,18 @@ mod tests {
                         &peer_tp,
                         StreamOpenIntent::Peer,
                         true,
-                    )
-                    .unwrap()
+                    )?
                     .priority_key(),
             );
             streams.enqueue(&key, PriorityQueue::Readable);
             streams.enqueue(&key, PriorityQueue::Flushable);
         }
-        let key = Arc::clone(streams.get(12).unwrap().priority_key());
+        let key = Arc::clone(
+            streams
+                .get(12)
+                .ok_or("expected open stream")?
+                .priority_key(),
+        );
         streams.remove_readable(&key);
         streams.enqueue(&key, PriorityQueue::Readable);
         assert_eq!(streams.readable().collect::<Vec<_>>(), vec![4, 8, 0, 12]);
@@ -2787,6 +2799,7 @@ mod tests {
         assert_eq!(streams.readable().collect::<Vec<_>>(), vec![8, 4, 0, 12]);
         assert_eq!(streams.writable().collect::<Vec<_>>(), vec![8, 12, 4, 0]);
         assert_eq!(streams.peek_flushable().map(|key| key.id), Some(8));
+        Ok(())
     }
 
     #[test]
@@ -2833,8 +2846,8 @@ mod tests {
 
     #[test]
     fn priority_tree_dupes() {
-        let mut prioritized_writable: RBTree<StreamWritablePriorityAdapter> =
-            Default::default();
+        let mut prioritized_writable =
+            RBTree::<StreamWritablePriorityAdapter>::default();
 
         for id in [0, 4, 8, 12] {
             let s = Arc::new(StreamPriorityKey {
@@ -2939,7 +2952,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_consistency_through_full_lifecycle() {
+    fn cache_consistency_through_full_lifecycle() -> TestResult {
         // This test verifies that StreamMap.tx_buffered stays in sync with
         // actual buffered data through a full lifecycle: write → emit →
         // retransmit → ack.
@@ -2965,39 +2978,59 @@ mod tests {
 
         // Writing raises `stream.send.buffered_bytes()` and `tx_buffered`.
         {
-            let stream = streams
-                .get_or_create(
-                    stream_id,
-                    &local_params,
-                    &peer_params,
-                    StreamOpenIntent::Local,
-                    false,
-                )
-                .unwrap();
+            let stream = streams.get_or_create(
+                stream_id,
+                &local_params,
+                &peer_params,
+                StreamOpenIntent::Local,
+                false,
+            )?;
             assert_eq!(stream.send.write(b"hello", false), Ok(5));
         }
         streams.add_tx_buffered(5);
-        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(
+            streams
+                .get(stream_id)
+                .ok_or("expected open stream")?
+                .send
+                .buffered_bytes(),
+            5
+        );
         assert_eq!(streams.tx_buffered(), 5);
         assert!(streams.tx_buffered_is_consistent());
 
         // Emitting lowers `stream.send.buffered_bytes()` and `tx_buffered`.
         let mut buf = [0; 10];
         let written = {
-            let stream = streams.get_mut(stream_id).unwrap();
+            let stream =
+                streams.get_mut(stream_id).ok_or("expected open stream")?;
             let Emission { len: written, .. } = stream.send.emit(&mut buf[..]);
             written
         };
         assert_eq!(written, 5);
         streams.sub_tx_buffered(5);
-        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(
+            streams
+                .get(stream_id)
+                .ok_or("expected open stream")?
+                .send
+                .buffered_bytes(),
+            0
+        );
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
 
         // Duplicate loss notifications must not increase aggregate bytes twice.
         assert!(streams.requeue_sent_range(stream_id, 0, 5, false));
         assert!(streams.requeue_sent_range(stream_id, 0, 5, false));
-        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
+        assert_eq!(
+            streams
+                .get(stream_id)
+                .ok_or("expected open stream")?
+                .send
+                .buffered_bytes(),
+            5
+        );
         assert_eq!(streams.tx_buffered(), 5);
         assert!(streams.tx_buffered_is_consistent());
 
@@ -3007,9 +3040,17 @@ mod tests {
         streams.acknowledge_sent_range(stream_id, 1, 2, false);
         assert_eq!(streams.tx_buffered(), 3);
         streams.acknowledge_sent_range(stream_id, 0, 5, false);
-        assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
+        assert_eq!(
+            streams
+                .get(stream_id)
+                .ok_or("expected open stream")?
+                .send
+                .buffered_bytes(),
+            0
+        );
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
+        Ok(())
     }
 }
 
