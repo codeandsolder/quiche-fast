@@ -598,7 +598,7 @@ mod tests {
             more_frames: false,
         };
         assert_eq!(
-            quiche_h3_event_for_each_header(&ev, None, ptr::null_mut()),
+            quiche_h3_event_for_each_header(&raw const ev, None, ptr::null_mut()),
             c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert_eq!(
@@ -622,13 +622,13 @@ mod tests {
 
         assert_eq!(
             quiche_h3_event_for_each_header(
-                &ev,
+                &raw const ev,
                 Some(count_header),
                 ptr::null_mut(),
             ),
             c_int::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
-        assert!(!quiche_h3_event_headers_has_more_frames(&ev));
+        assert!(!quiche_h3_event_headers_has_more_frames(&raw const ev));
     }
 
     #[test]
@@ -647,7 +647,7 @@ mod tests {
         // code without touching caller-owned outputs.
         let mut ev: *const h3::Event = ptr::null();
         assert_eq!(
-            quiche_h3_conn_poll(ptr::null_mut(), ptr::null_mut(), &mut ev),
+            quiche_h3_conn_poll(ptr::null_mut(), ptr::null_mut(), &raw mut ev),
             i64::from(H3_FFI_ERR_INVALID_ARGUMENT)
         );
         assert!(ev.is_null());
@@ -681,28 +681,24 @@ mod tests {
         let mut config = h3::Config::new();
         let original = config.max_field_section_size;
         assert!(align_of::<h3::Config>() > 1);
-        let ptr = (&raw mut config)
-            .cast::<u8>()
-            .wrapping_add(1)
-            .cast::<h3::Config>();
+        let ptr = &raw mut config;
+        let ptr = ptr.with_addr(ptr.addr() + 1);
         quiche_h3_config_set_max_field_section_size(ptr, 42);
         assert_eq!(config.max_field_section_size, original);
 
         let ev = h3::Event::Data;
         assert!(align_of::<h3::Event>() > 1);
-        let ptr = (&raw const ev)
-            .cast::<u8>()
-            .wrapping_add(1)
-            .cast::<h3::Event>();
+        let ptr = &raw const ev;
+        let ptr = ptr.with_addr(ptr.addr() + 1);
         assert_eq!(quiche_h3_event_type(ptr), u32::MAX);
     }
 
     #[test]
-    fn h3_header_slices_accept_null_zero_and_reject_bad_parts() {
-        // SAFETY: valid local storage or null inputs rejected on validation.
-        assert!(unsafe { headers_from_ptr(ptr::null(), 0) }
-            .unwrap()
-            .is_empty());
+    fn h3_header_slices_accept_null_zero_and_reject_bad_parts() -> Result<(), ()>
+    {
+        // SAFETY: a null pointer with length zero does not access memory.
+        let headers = unsafe { headers_from_ptr(ptr::null(), 0) }?;
+        assert_eq!(headers, [] as [h3::HeaderRef<'_>; 0]);
         // SAFETY: valid local storage or null inputs rejected on validation.
         assert!(unsafe { headers_from_ptr(ptr::null(), 1) }.is_err());
 
@@ -713,10 +709,10 @@ mod tests {
             value_len: 0,
         };
         // SAFETY: valid local storage or null inputs rejected on validation.
-        let headers = unsafe { headers_from_ptr(&empty, 1) }.unwrap();
+        let headers = unsafe { headers_from_ptr(&raw const empty, 1) }?;
         assert_eq!(headers.len(), 1);
-        assert!(headers[0].name().is_empty());
-        assert!(headers[0].value().is_empty());
+        assert_eq!(headers[0].name(), [] as [u8; 0]);
+        assert_eq!(headers[0].value(), [] as [u8; 0]);
 
         let bad_name = Header {
             name: ptr::null_mut(),
@@ -725,7 +721,7 @@ mod tests {
             value_len: 0,
         };
         // SAFETY: valid local storage or null inputs rejected on validation.
-        assert!(unsafe { headers_from_ptr(&bad_name, 1) }.is_err());
+        assert!(unsafe { headers_from_ptr(&raw const bad_name, 1) }.is_err());
 
         let bad_value = Header {
             name: ptr::null_mut(),
@@ -734,6 +730,7 @@ mod tests {
             value_len: 1,
         };
         // SAFETY: valid local storage or null inputs rejected on validation.
-        assert!(unsafe { headers_from_ptr(&bad_value, 1) }.is_err());
+        assert!(unsafe { headers_from_ptr(&raw const bad_value, 1) }.is_err());
+        Ok(())
     }
 }
