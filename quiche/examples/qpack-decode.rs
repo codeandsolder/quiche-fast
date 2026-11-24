@@ -41,7 +41,7 @@ use quiche::h3::qpack;
 use quiche::h3::NameValue;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut file = BufReader::new(File::open(input::input_path()?)?);
+    let mut file = BufReader::new(File::open(input::one_argument("FILE")?)?);
     decode_records(&mut file, &mut io::stdout().lock())
 }
 

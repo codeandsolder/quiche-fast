@@ -42,7 +42,7 @@ use quiche::h3::{
 };
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let file = BufReader::new(File::open(input::input_path()?)?);
+    let file = BufReader::new(File::open(input::one_argument("FILE")?)?);
     encode_records(file, &mut io::stdout().lock())
 }
 

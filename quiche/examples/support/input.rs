@@ -24,19 +24,19 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::ffi::OsString;
 use std::io;
-use std::path::PathBuf;
 
-/// Read exactly one input path without requiring Unicode file names.
-pub fn input_path() -> io::Result<PathBuf> {
+/// Read exactly one argument without requiring Unicode.
+pub fn one_argument(usage: &str) -> io::Result<OsString> {
     let mut args = std::env::args_os();
     let command = args.next().unwrap_or_default();
     let path = args.next();
     match path {
-        Some(path) if args.next().is_none() => Ok(PathBuf::from(path)),
+        Some(path) if args.next().is_none() => Ok(path),
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("Usage: {} FILE", command.to_string_lossy()),
+            format!("Usage: {} {usage}", command.to_string_lossy()),
         )),
     }
 }
