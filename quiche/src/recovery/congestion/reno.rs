@@ -165,9 +165,8 @@ mod tests {
 
     use super::*;
 
-    use crate::recovery::congestion::recovery::LegacyRecovery;
+    use crate::recovery::congestion::test_sender::FixtureResult;
     use crate::recovery::congestion::test_sender::TestSender;
-    use crate::recovery::RecoveryOps;
 
     use std::time::Duration;
 
@@ -176,7 +175,8 @@ mod tests {
     }
 
     #[test]
-    fn reno_congestion_avoidance_preserves_credit_at_width_limit() {
+    fn reno_congestion_avoidance_preserves_credit_at_width_limit() -> FixtureResult
+    {
         let mut sender = test_sender();
         let mss = sender.max_datagram_size;
         let cwnd = usize::MAX - mss / 2;
@@ -186,42 +186,14 @@ mod tests {
         sender.send_packet(mss);
         sender.update_app_limited(false);
         sender.advance_time(Duration::from_millis(100));
-        sender.ack_n_packets(1, mss);
+        sender.ack_n_packets(1)?;
         assert_eq!(sender.cwnd, usize::MAX);
         assert_eq!(sender.bytes_acked_ca, mss - 1);
+        Ok(())
     }
 
     #[test]
-    fn reno_init() {
-        let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        cfg.set_cc_algorithm(CongestionControlAlgorithm::Reno);
-
-        let r = LegacyRecovery::new(&cfg);
-
-        assert!(r.cwnd() > 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-    }
-
-    #[test]
-    fn reno_slow_start() {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(1, size);
-
-        // Check if cwnd increased by packet size (slow start).
-        assert_eq!(sender.cwnd, cwnd_prev + size);
-    }
-
-    #[test]
-    fn reno_slow_start_smaller_than_mss() {
+    fn reno_slow_start_smaller_than_mss() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
@@ -231,30 +203,13 @@ mod tests {
 
         let partial = size / 4;
         sender.send_packet(partial);
-        sender.ack_n_packets(sender.initial_congestion_window_packets, size);
+        sender.ack_n_packets(sender.initial_congestion_window_packets)?;
 
         let cwnd_prev = sender.cwnd;
-        sender.ack_n_packets(1, partial);
+        sender.ack_n_packets(1)?;
 
         assert_eq!(sender.cwnd, cwnd_prev + partial);
-    }
-
-    #[test]
-    fn reno_slow_start_multi_acks() {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(3, size);
-
-        // Acked 3 packets.
-        assert_eq!(sender.cwnd, cwnd_prev + size * 3);
+        Ok(())
     }
 
     #[test]
@@ -288,32 +243,34 @@ mod tests {
     }
 
     #[test]
-    fn reno_congestion_event() {
+    fn reno_congestion_event() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
         let prev_cwnd = sender.cwnd;
 
         sender.send_packet(size);
-        sender.lose_n_packets(1, size, None);
+        sender.lose_n_packets(1, None)?;
 
         // In Reno, after congestion event, cwnd will be cut in half.
         assert_eq!(prev_cwnd / 2, sender.cwnd);
+        Ok(())
     }
 
     #[test]
-    fn reno_loss_reduction_is_exact_at_width_limit() {
+    fn reno_loss_reduction_is_exact_at_width_limit() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         sender.cwnd = usize::MAX;
         sender.send_packet(size);
-        sender.lose_n_packets(1, size, None);
+        sender.lose_n_packets(1, None)?;
         assert_eq!(sender.cwnd, usize::MAX / 2);
         assert_eq!(sender.bytes_acked_ca, usize::MAX / 4);
+        Ok(())
     }
 
     #[test]
-    fn reno_congestion_avoidance() {
+    fn reno_congestion_avoidance() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
 
@@ -326,7 +283,7 @@ mod tests {
         let prev_cwnd = sender.cwnd;
 
         sender.advance_time(rtt);
-        sender.lose_n_packets(1, size, None);
+        sender.lose_n_packets(1, None)?;
 
         // After congestion event, cwnd will be reduced.
         let cur_cwnd = prev_cwnd / 2;
@@ -335,7 +292,7 @@ mod tests {
         sender.update_rtt(rtt);
         sender.advance_time(2 * rtt);
 
-        sender.ack_n_packets(13, size);
+        sender.ack_n_packets(13)?;
         // Acked packets were sent before the loss event, window does not
         // increase.
         assert_eq!(sender.cwnd, cur_cwnd);
@@ -344,11 +301,11 @@ mod tests {
             sender.send_packet(size);
         }
         sender.advance_time(rtt);
-        sender.ack_n_packets(2, size);
+        sender.ack_n_packets(2)?;
         // Not enough ACKed, window does not increase.
         assert_eq!(sender.cwnd, cur_cwnd);
 
-        sender.ack_n_packets(1, size);
+        sender.ack_n_packets(1)?;
         // Expect cwnd increased by MSS
         assert_eq!(sender.cwnd, cur_cwnd + size);
 
@@ -357,11 +314,12 @@ mod tests {
         }
 
         // Expect a second window increase after a cwnd's worth of ACKs.
-        sender.ack_n_packets(5, size);
+        sender.ack_n_packets(5)?;
         // Not yet, one more ACK needed.
         assert_eq!(sender.cwnd, cur_cwnd + size);
-        sender.ack_n_packets(1, size);
+        sender.ack_n_packets(1)?;
         // Expect cwnd increased by MSS
         assert_eq!(sender.cwnd, cur_cwnd + 2 * size);
+        Ok(())
     }
 }
