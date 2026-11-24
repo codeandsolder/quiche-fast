@@ -1444,6 +1444,76 @@ impl PacketDataEmission {
     }
 }
 
+/// Wire layout fixed when the outgoing header and packet number are written.
+struct TxPacketHeader {
+    packet_type: Type,
+    epoch: packet::Epoch,
+    number: u64,
+    number_len: usize,
+    output_capacity: usize,
+    payload_capacity: usize,
+    payload_offset: usize,
+    crypto_overhead: usize,
+    length_field: Option<(usize, usize)>,
+    trace: Option<String>,
+    #[cfg(feature = "qlog")]
+    qlog_header: Option<qlog::events::quic::PacketHeader>,
+}
+
+impl TxPacketHeader {
+    const fn overhead(&self) -> usize {
+        self.payload_offset + self.crypto_overhead
+    }
+}
+
+/// Congestion accounting of a packet under construction. Padding can put an
+/// otherwise non-ack-eliciting packet in flight.
+#[derive(Clone, Copy, Default)]
+enum PacketFlight {
+    #[default]
+    NotInFlight,
+    PaddingInFlight,
+    AckEliciting,
+}
+
+impl PacketFlight {
+    const fn in_flight(self) -> bool {
+        !matches!(self, Self::NotInFlight)
+    }
+
+    const fn ack_eliciting(self) -> bool {
+        matches!(self, Self::AckEliciting)
+    }
+
+    const fn record_padding(&mut self) {
+        if !self.in_flight() {
+            *self = Self::PaddingInFlight;
+        }
+    }
+}
+
+#[derive(Default)]
+struct TxPathProbes {
+    pmtud: bool,
+    has_path_frame: bool,
+    challenge: Option<[u8; 8]>,
+}
+
+#[derive(Default)]
+struct TxPacketAssembly {
+    frames: SmallVec<[frame::Frame; 1]>,
+    left: usize,
+    flight: PacketFlight,
+    probes: TxPathProbes,
+    data: PacketDataEmission,
+}
+
+#[derive(Clone, Copy)]
+struct TxAckBudget {
+    elicit_required: bool,
+    congestion_limit: usize,
+}
+
 /// A QUIC connection.
 pub struct Connection<F = DefaultBufFactory>
 where
@@ -4749,7 +4819,6 @@ impl<F: BufFactory> Connection<F> {
         let is_closing = self.local_error.is_some();
 
         b.reset();
-        let out_len = b.cap();
 
         let max_dgram_len = if self.dgram_send_queue.is_empty() {
             None
@@ -4776,7 +4845,6 @@ impl<F: BufFactory> Connection<F> {
         self.requeue_lost_frames(epoch, now)?;
 
         let is_app_limited = self.delivery_rate_check_if_app_limited();
-        let n_paths = self.paths.len();
 
         if should_skip {
             let skipped_pn = self.next_pkt_num;
@@ -4787,9 +4855,84 @@ impl<F: BufFactory> Connection<F> {
             self.next_pkt_num += 1;
         }
 
+        let header =
+            self.prepare_tx_header(b, send_pid, pkt_type, epoch, pn, pn_len)?;
+        let mut assembly = TxPacketAssembly {
+            left: header.payload_capacity,
+            ..Default::default()
+        };
+        let budget = self.emit_tx_ack_frame(
+            b,
+            &header,
+            &mut assembly,
+            send_pid,
+            is_closing,
+            bypass_cwnd,
+        )?;
+
+        if pkt_type == Type::Short {
+            self.emit_tx_path_probes(
+                b,
+                &header,
+                &mut assembly,
+                send_pid,
+                is_closing,
+            )?;
+            if !is_closing {
+                let frame_count = assembly.frames.len();
+                self.emit_short_header_control_frames(
+                    b,
+                    &mut assembly.frames,
+                    &mut assembly.left,
+                    send_pid,
+                    now,
+                )?;
+                if assembly.frames.len() != frame_count {
+                    assembly.flight = PacketFlight::AckEliciting;
+                }
+            }
+        }
+
+        self.emit_tx_close_frame(b, &mut assembly, send_pid, pkt_type, now)?;
+        assembly.data = self.emit_packet_data(
+            b,
+            &mut assembly.frames,
+            &mut assembly.left,
+            send_pid,
+            pkt_type,
+            max_dgram_len,
+        )?;
+        if assembly.data.has_data() || assembly.data.datagram_emitted {
+            assembly.flight = PacketFlight::AckEliciting;
+        }
+
+        Self::complete_tx_frames(
+            b,
+            &header,
+            &mut assembly,
+            budget,
+            self.paths.get_mut(send_pid)?,
+            has_initial,
+            is_closing,
+        )?;
+        self.finalize_tx_packet(
+            b,
+            header,
+            assembly,
+            send_pid,
+            now,
+            is_app_limited,
+        )
+    }
+
+    /// Encode the header and reserve the protected payload's wire capacity.
+    fn prepare_tx_header(
+        &mut self, b: &mut packet::PacketWriter<'_>, send_pid: usize,
+        pkt_type: Type, epoch: packet::Epoch, pn: u64, pn_len: usize,
+    ) -> Result<TxPacketHeader> {
         let path = self.paths.get_mut(send_pid)?;
-        let pkt_space = &mut self.pkt_num_spaces[epoch];
-        let crypto_ctx = &mut self.crypto_ctx[epoch];
+        let crypto_ctx = &self.crypto_ctx[epoch];
+        let out_len = b.cap();
 
         // Limit output buffer size by estimated path MTU if enabled.
         let mut left = path
@@ -4845,8 +4988,6 @@ impl<F: BufFactory> Connection<F> {
             None
         };
 
-        let hdr_ty = hdr.ty;
-
         // Capture the header before packet construction can retire a CID.
         // Do not allocate it for a disabled packet event.
         #[cfg(feature = "qlog")]
@@ -4869,61 +5010,63 @@ impl<F: BufFactory> Connection<F> {
 
         // Reserve enough space for the long-header length including the
         // packet number and AEAD tag. Limit the packet at width transitions.
-        let payload_length_width = if pkt_type != Type::Short {
+        let length_field = if pkt_type == Type::Short {
+            None
+        } else {
             let (capacity, width) = frame::payload_capacity(
                 left.checked_sub(b.off()).ok_or(Error::Done)?,
             )
             .ok_or(Error::Done)?;
             left = b.off() + width + capacity;
             overhead += width;
-            width
-        } else {
-            0
+            Some((b.off(), width))
         };
 
-        // Make sure we have enough space left for the packet overhead.
-        if let Some(v) = left.checked_sub(overhead) {
-            left = v;
-        } else {
-            // We can't send more because there isn't enough space available
-            // in the output buffer.
-            //
-            // This usually happens when we try to send a new packet but
-            // failed because cwnd is almost full. In such case app_limited
-            // is set to false here to make cwnd grow when ACK is received.
+        // In the absence of room for the minimum protected payload, we
+        // cannot use the current congestion window for another packet.
+        let Some(payload_capacity) = left
+            .checked_sub(overhead)
+            .filter(|&left| left >= PAYLOAD_MIN_LEN)
+        else {
             path.recovery.update_app_limited(false);
             return Err(Error::Done);
+        };
+
+        if let Some((_, width)) = length_field {
+            frame::FrameSink::put_padding(b, width)?;
         }
+        packet::encode_pkt_num(pn, pn_len, b)?;
 
-        // Make sure there is enough space for the minimum payload length.
-        if left < PAYLOAD_MIN_LEN {
-            path.recovery.update_app_limited(false);
-            return Err(Error::Done);
-        }
+        Ok(TxPacketHeader {
+            packet_type: pkt_type,
+            epoch,
+            number: pn,
+            number_len: pn_len,
+            output_capacity: out_len,
+            payload_capacity,
+            payload_offset: b.off(),
+            crypto_overhead,
+            length_field,
+            trace: hdr_trace,
+            #[cfg(feature = "qlog")]
+            qlog_header: qlog_pkt_hdr,
+        })
+    }
 
-        let mut frames: SmallVec<[frame::Frame; 1]> = SmallVec::new();
-
-        let mut ack_eliciting = false;
-        let mut in_flight = false;
-        let mut is_pmtud_probe = false;
+    /// ACK-only packets are not congestion controlled; reserve the
+    /// congestion-controlled capacity only after attempting the ACK.
+    fn emit_tx_ack_frame(
+        &mut self, b: &mut packet::PacketWriter<'_>, header: &TxPacketHeader,
+        assembly: &mut TxPacketAssembly, send_pid: usize, is_closing: bool,
+        bypass_cwnd: bool,
+    ) -> Result<TxAckBudget> {
+        let path = self.paths.get_mut(send_pid)?;
+        let pkt_space = &mut self.pkt_num_spaces[header.epoch];
 
         // Whether a PING frame must explicitly elicit an ACK when no other
         // frame does so implicitly.
         let ack_elicit_required =
-            !is_closing && path.recovery.should_elicit_ack(epoch);
-
-        let header_offset = b.off();
-
-        // Reserve the selected width before the payload is emitted.
-        //
-        // Only long header packets have an explicit length field.
-        if pkt_type != Type::Short {
-            frame::FrameSink::put_padding(b, payload_length_width)?;
-        }
-
-        packet::encode_pkt_num(pn, pn_len, b)?;
-
-        let payload_offset = b.off();
+            !is_closing && path.recovery.should_elicit_ack(header.epoch);
 
         // `usize::MAX` bypasses cwnd when authorized by packet selection;
         // `left` still bounds the packet. Keep this local so other cwnd users
@@ -4933,9 +5076,9 @@ impl<F: BufFactory> Connection<F> {
         } else {
             path.recovery.cwnd_available()
         }
-        .saturating_sub(overhead);
+        .saturating_sub(header.overhead());
 
-        let left_before_packing_ack_frame = left;
+        let left_before_packing_ack_frame = assembly.left;
 
         // Create ACK frame.
         //
@@ -4949,7 +5092,7 @@ impl<F: BufFactory> Connection<F> {
         if pkt_space.recv_pkt_need_ack.len() > 0 &&
             (pkt_space.ack_elicited || ack_elicit_required) &&
             (!is_closing ||
-                (pkt_type == Type::Handshake &&
+                (header.packet_type == Type::Handshake &&
                     self.local_error
                         .as_ref()
                         .is_some_and(|le| le.is_app))) &&
@@ -4983,119 +5126,137 @@ impl<F: BufFactory> Connection<F> {
                 // ACK-only packets are not congestion controlled so ACKs must
                 // be bundled considering the buffer capacity only, and not the
                 // available cwnd.
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(
+                    b,
+                    &mut assembly.frames,
+                    frame,
+                    &mut assembly.left,
+                )? {
                     pkt_space.ack_elicited = false;
                 }
             }
         }
 
         // Limit output packet size by congestion window size.
-        left = cmp::min(
-            left,
+        assembly.left = cmp::min(
+            assembly.left,
             // Bytes consumed by ACK frames.
             send_limit_from_cwnd
-                .saturating_sub(left_before_packing_ack_frame - left),
+                .saturating_sub(left_before_packing_ack_frame - assembly.left),
         );
 
-        let mut challenge_data = None;
+        Ok(TxAckBudget {
+            elicit_required: ack_elicit_required,
+            congestion_limit: send_limit_from_cwnd,
+        })
+    }
 
-        // RFC 9000 Sections 8.2.1 and 8.2.2 require UDP datagrams carrying
-        // PATH_CHALLENGE or PATH_RESPONSE to be expanded to at least 1200
-        // bytes, including on an already validated path.
-        let mut has_path_frame = false;
-
-        if pkt_type == Type::Short {
-            // Create PMTUD probe.
-            //
-            // A PMTUD probe must ignore `left`, which is already limited by the
-            // current PMTU. The probe remains limited by the output buffer and
-            // congestion window.
-            //
-            // Generate PMTUD probes only after handshake confirmation to avoid
-            // interference from anti-amplification limits.
-            let path = self.paths.get_mut(send_pid)?;
-            if let Some(probe_size) = path.pmtu_probe_size(
-                self.handshake_confirmed && self.handshake_completed,
-                out_len,
-                is_closing || !frames.is_empty(),
-            ) {
-                trace!(
-                    "{} sending PMTUD probe of {probe_size} bytes",
-                    self.trace_id,
-                );
-
-                left = probe_size
-                    .checked_sub(overhead)
-                    .filter(|&size| size >= PAYLOAD_MIN_LEN)
-                    .ok_or(Error::Done)?;
-
-                let padding = frame::Frame::Padding { len: left - 1 };
-                let ping = frame::Frame::Ping {
-                    mtu_probe: Some(probe_size),
-                };
-
-                if !push_frame_to_pkt(b, &mut frames, padding, &mut left)? ||
-                    !push_frame_to_pkt(b, &mut frames, ping, &mut left)?
-                {
-                    return Err(Error::Done);
-                }
-
-                ack_eliciting = true;
-                in_flight = true;
-                is_pmtud_probe = true;
-            }
-
-            // Create PATH_RESPONSE frames while space permits.
-            if push_received_path_responses(path, b, &mut frames, &mut left)? {
-                has_path_frame = true;
-                ack_eliciting = true;
-                in_flight = true;
-            }
-
-            // Create PATH_CHALLENGE frame if needed.
-            if path.validation_requested() {
-                // TODO: ensure that data is unique over paths.
-                let data = rand::rand_u64().to_be_bytes();
-
-                let frame = frame::Frame::PathChallenge { data };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    // Let's notify the path once we know the packet size.
-                    challenge_data = Some(data);
-                    has_path_frame = true;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            if let Some(key_update) = crypto_ctx.key_update.as_mut() {
-                key_update.update_acked = true;
-            }
-        }
-
-        if pkt_type == Type::Short && !is_closing {
-            let previous_frame_count = frames.len();
-            self.emit_short_header_control_frames(
-                b,
-                &mut frames,
-                &mut left,
-                send_pid,
-                now,
-            )?;
-            if frames.len() != previous_frame_count {
-                ack_eliciting = true;
-                in_flight = true;
-            }
-        }
-
+    /// Emit PMTU and address-validation probes on the selected path.
+    fn emit_tx_path_probes(
+        &mut self, b: &mut packet::PacketWriter<'_>, header: &TxPacketHeader,
+        assembly: &mut TxPacketAssembly, send_pid: usize, is_closing: bool,
+    ) -> Result<()> {
         let path = self.paths.get_mut(send_pid)?;
+        // Create PMTUD probe.
+        //
+        // A PMTUD probe must ignore `left`, which is already limited by the
+        // current PMTU. The probe remains limited by the output buffer and
+        // congestion window.
+        //
+        // Generate PMTUD probes only after handshake confirmation to avoid
+        // interference from anti-amplification limits.
+        if let Some(probe_size) = path.pmtu_probe_size(
+            self.handshake_confirmed && self.handshake_completed,
+            header.output_capacity,
+            is_closing || !assembly.frames.is_empty(),
+        ) {
+            trace!(
+                "{} sending PMTUD probe of {probe_size} bytes",
+                self.trace_id,
+            );
 
+            assembly.left = probe_size
+                .checked_sub(header.overhead())
+                .filter(|&size| size >= PAYLOAD_MIN_LEN)
+                .ok_or(Error::Done)?;
+
+            let padding = frame::Frame::Padding {
+                len: assembly.left - 1,
+            };
+            let ping = frame::Frame::Ping {
+                mtu_probe: Some(probe_size),
+            };
+
+            if !push_frame_to_pkt(
+                b,
+                &mut assembly.frames,
+                padding,
+                &mut assembly.left,
+            )? || !push_frame_to_pkt(
+                b,
+                &mut assembly.frames,
+                ping,
+                &mut assembly.left,
+            )? {
+                return Err(Error::Done);
+            }
+
+            assembly.flight = PacketFlight::AckEliciting;
+            assembly.probes.pmtud = true;
+        }
+
+        // Create PATH_RESPONSE frames while space permits.
+        if push_received_path_responses(
+            path,
+            b,
+            &mut assembly.frames,
+            &mut assembly.left,
+        )? {
+            assembly.probes.has_path_frame = true;
+            assembly.flight = PacketFlight::AckEliciting;
+        }
+
+        // Create PATH_CHALLENGE frame if needed.
+        if path.validation_requested() {
+            // TODO: ensure that data is unique over paths.
+            let data = rand::rand_u64().to_be_bytes();
+
+            let frame = frame::Frame::PathChallenge { data };
+
+            if push_frame_to_pkt(
+                b,
+                &mut assembly.frames,
+                frame,
+                &mut assembly.left,
+            )? {
+                // Let's notify the path once we know the packet size.
+                assembly.probes.challenge = Some(data);
+                assembly.probes.has_path_frame = true;
+
+                assembly.flight = PacketFlight::AckEliciting;
+            }
+        }
+
+        if let Some(key_update) =
+            self.crypto_ctx[header.epoch].key_update.as_mut()
+        {
+            key_update.update_acked = true;
+        }
+
+        Ok(())
+    }
+
+    fn emit_tx_close_frame(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        assembly: &mut TxPacketAssembly, send_pid: usize, pkt_type: Type,
+        now: Instant,
+    ) -> Result<()> {
+        let path = self.paths.get(send_pid)?;
         // Try to send closure on the active path, unless it is the last path.
         if let Some(conn_err) = self
             .local_error
             .as_ref()
-            .filter(|_| path.active() || n_paths == 1)
+            .filter(|_| path.active() || self.paths.len() == 1)
         {
             let frame = match (conn_err.is_app, pkt_type) {
                 (false, _) => Some(frame::Frame::ConnectionClose {
@@ -5111,70 +5272,67 @@ impl<F: BufFactory> Connection<F> {
             };
 
             if let Some(frame) = frame {
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
+                if push_frame_to_pkt(
+                    b,
+                    &mut assembly.frames,
+                    frame,
+                    &mut assembly.left,
+                )? {
                     self.lifecycle = ConnectionLifecycle::Draining {
                         deadline: now + (path.recovery.pto() * 3),
                         origin: CloseOrigin::Local,
                     };
-                    ack_eliciting = true;
-                    in_flight = true;
+                    assembly.flight = PacketFlight::AckEliciting;
                 }
             }
         }
 
-        let payload = self.emit_packet_data(
-            b,
-            &mut frames,
-            &mut left,
-            send_pid,
-            pkt_type,
-            max_dgram_len,
-        )?;
-        let has_data = payload.has_data();
-        let dgram_emitted = payload.datagram_emitted;
-        let stream_data_skipped = payload.stream.skipped;
-        let retransmitted_bytes = payload.retransmitted_bytes();
-        let retransmitted_fin = payload.stream.retransmitted_fin;
-        if has_data || dgram_emitted {
-            ack_eliciting = true;
-            in_flight = true;
-        }
-        let path = self.paths.get_mut(send_pid)?;
-        let crypto_ctx = &mut self.crypto_ctx[epoch];
+        Ok(())
+    }
 
+    /// Satisfy pending ACK elicitation, then pad the protected payload.
+    fn complete_tx_frames(
+        b: &mut packet::PacketWriter<'_>, header: &TxPacketHeader,
+        assembly: &mut TxPacketAssembly, budget: TxAckBudget,
+        path: &mut path::Path, has_initial: bool, is_closing: bool,
+    ) -> Result<()> {
         // If no other ack-eliciting frame is sent, include a PING frame
         // - if PTO probe needed; OR
         // - if we've sent too many non ack-eliciting packets without having
         // sent an ACK eliciting one; OR
         // - the application requested an ack-eliciting frame be sent.
-        if (ack_elicit_required || path.needs_ack_eliciting) &&
-            !ack_eliciting &&
-            left >= 1 &&
+        if (budget.elicit_required || path.needs_ack_eliciting) &&
+            !assembly.flight.ack_eliciting() &&
+            assembly.left >= 1 &&
             !is_closing
         {
             let frame = frame::Frame::Ping { mtu_probe: None };
 
-            if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                ack_eliciting = true;
-                in_flight = true;
+            if push_frame_to_pkt(
+                b,
+                &mut assembly.frames,
+                frame,
+                &mut assembly.left,
+            )? {
+                assembly.flight = PacketFlight::AckEliciting;
             }
         }
 
-        if ack_eliciting && !is_pmtud_probe {
+        if assembly.flight.ack_eliciting() && !assembly.probes.pmtud {
             path.needs_ack_eliciting = false;
-            path.recovery.ping_sent(epoch);
+            path.recovery.ping_sent(header.epoch);
         }
 
         // Pending stream data means the sender is size-, not app-limited.
-        if !has_data &&
-            !stream_data_skipped &&
-            !dgram_emitted &&
-            send_limit_from_cwnd > LEGACY_APP_LIMITED_BYTE_THRESHOLD
+        if !assembly.data.has_data() &&
+            !assembly.data.stream.skipped &&
+            !assembly.data.datagram_emitted &&
+            budget.congestion_limit > LEGACY_APP_LIMITED_BYTE_THRESHOLD
         {
             path.recovery.on_app_limited();
         }
 
-        if frames.is_empty() {
+        if assembly.frames.is_empty() {
             // When we reach this point we are not able to write more, so set
             // app_limited to false.
             path.recovery.update_app_limited(false);
@@ -5189,12 +5347,15 @@ impl<F: BufFactory> Connection<F> {
         // as Initial always requires padding.
         //
         // 2) this is a probing packet towards an unvalidated peer address.
-        if pkt_type == Type::Short && left >= 1 {
+        if header.packet_type == Type::Short && assembly.left >= 1 {
             let pad_len = if has_initial || !path.validated() {
-                left
-            } else if has_path_frame {
-                let pkt_len = b.off() + crypto_overhead;
-                cmp::min(left, MIN_CLIENT_INITIAL_LEN.saturating_sub(pkt_len))
+                assembly.left
+            } else if assembly.probes.has_path_frame {
+                let pkt_len = b.off() + header.crypto_overhead;
+                cmp::min(
+                    assembly.left,
+                    MIN_CLIENT_INITIAL_LEN.saturating_sub(pkt_len),
+                )
             } else {
                 0
             };
@@ -5202,52 +5363,72 @@ impl<F: BufFactory> Connection<F> {
             if pad_len > 0 {
                 let frame = frame::Frame::Padding { len: pad_len };
 
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    in_flight = true;
+                if push_frame_to_pkt(
+                    b,
+                    &mut assembly.frames,
+                    frame,
+                    &mut assembly.left,
+                )? {
+                    assembly.flight.record_padding();
                 }
             }
         }
 
         // Pad payload so that it's always at least 4 bytes.
-        if b.off() - payload_offset < PAYLOAD_MIN_LEN {
-            let payload_len = b.off() - payload_offset;
+        if b.off() - header.payload_offset < PAYLOAD_MIN_LEN {
+            let payload_len = b.off() - header.payload_offset;
 
             let frame = frame::Frame::Padding {
                 len: PAYLOAD_MIN_LEN - payload_len,
             };
 
-            if frame.wire_len()? <= left {
-                frame.encode(b)?;
-                frames.push(frame);
-                in_flight = true;
+            if push_frame_to_pkt(
+                b,
+                &mut assembly.frames,
+                frame,
+                &mut assembly.left,
+            )? {
+                assembly.flight.record_padding();
             }
         }
 
-        let payload_len = b.off() - payload_offset;
+        Ok(())
+    }
 
-        // Fill in payload length.
-        if pkt_type != Type::Short {
-            let len = pn_len + payload_len + crypto_overhead;
+    /// Patch the long-header length, log the plaintext frame metadata, then
+    /// seal the packet and verify the protected wire length.
+    fn seal_tx_packet(
+        &mut self, b: &mut packet::PacketWriter<'_>, header: TxPacketHeader,
+        frames: &[frame::Frame], send_pid: usize, now: Instant,
+    ) -> Result<usize> {
+        let path = self.paths.get(send_pid)?;
+        #[cfg(not(feature = "qlog"))]
+        let _ = now;
 
-            let mut payload_with_len =
-                b.patch(header_offset, payload_length_width)?;
-            payload_with_len
-                .put_varint_with_len(len as u64, payload_length_width)?;
+        let payload_len = b.off() - header.payload_offset;
+
+        if let Some((offset, width)) = header.length_field {
+            let len = header.number_len + payload_len + header.crypto_overhead;
+            b.patch(offset, width)?
+                .put_varint_with_len(len as u64, width)?;
         }
 
         trace!(
-            "{} tx pkt {} len={payload_len} pn={pn} {}",
+            "{} tx pkt {} len={payload_len} pn={} {}",
             self.trace_id,
-            hdr_trace.unwrap_or_default(),
+            header.trace.unwrap_or_default(),
+            header.number,
             AddrTupleFmt(path.local_addr(), path.peer_addr())
         );
 
-        for frame in &frames {
+        for frame in frames {
             trace!("{} tx frm {frame:?}", self.trace_id);
         }
 
         #[cfg(feature = "qlog")]
-        if let (Some(q), Some(header)) = (&mut self.qlog.streamer, qlog_pkt_hdr) {
+        if let (Some(q), Some(qlog_header)) =
+            (&mut self.qlog.streamer, header.qlog_header)
+        {
             let qlog_frames = frames
                 .iter()
                 .map(|frame| {
@@ -5259,7 +5440,8 @@ impl<F: BufFactory> Connection<F> {
             // https://datatracker.ietf.org/doc/html/draft-ietf-quic-qlog-main-schema-00#section-5.1
             //
             // `length` includes packet headers and trailers (AEAD tag).
-            let length = payload_len + payload_offset + crypto_overhead;
+            let length =
+                payload_len + header.payload_offset + header.crypto_overhead;
             let qlog_raw_info = RawInfo {
                 length: Some(length as u64),
                 payload_length: Some(payload_len as u64),
@@ -5271,7 +5453,7 @@ impl<F: BufFactory> Connection<F> {
 
             let ev_data =
                 EventData::QuicPacketSent(qlog::events::quic::PacketSent {
-                    header,
+                    header: qlog_header,
                     frames: Some(qlog_frames),
                     raw: Some(qlog_raw_info),
                     send_at_time: Some(send_at_time),
@@ -5281,21 +5463,21 @@ impl<F: BufFactory> Connection<F> {
             q.add_event_data_with_instant(ev_data, now).ok();
         }
 
-        let aead = match crypto_ctx.crypto_seal {
-            Some(ref mut v) => v,
-            None => return Err(Error::InvalidState),
-        };
+        let aead = self.crypto_ctx[header.epoch]
+            .crypto_seal
+            .as_mut()
+            .ok_or(Error::InvalidState)?;
 
         // The AEAD interface needs an initialized output slice. Initialize only
         // the fixed tag bytes, not the caller's unused packet capacity.
-        frame::FrameSink::put_padding(b, crypto_overhead)?;
+        frame::FrameSink::put_padding(b, header.crypto_overhead)?;
         let mut encrypted = octets::OctetsMut::with_slice(b.written_mut());
         let written = packet::encrypt_pkt(
             &mut encrypted,
-            pn,
-            pn_len,
+            header.number,
+            header.number_len,
             payload_len,
-            payload_offset,
+            header.payload_offset,
             None,
             aead,
         )?;
@@ -5303,15 +5485,33 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::CryptoFail);
         }
 
+        Ok(written)
+    }
+
+    /// Hand the protected packet to recovery and commit its send accounting.
+    fn finalize_tx_packet(
+        &mut self, b: &mut packet::PacketWriter<'_>, header: TxPacketHeader,
+        mut assembly: TxPacketAssembly, send_pid: usize, now: Instant,
+        is_app_limited: bool,
+    ) -> Result<(Type, usize)> {
+        let pkt_type = header.packet_type;
+        let epoch = header.epoch;
+        let pn = header.number;
+        let written =
+            self.seal_tx_packet(b, header, &assembly.frames, send_pid, now)?;
+        let path = self.paths.get_mut(send_pid)?;
+        let ack_eliciting = assembly.flight.ack_eliciting();
+        let in_flight = assembly.flight.in_flight();
+
         let sent_pkt_has_data = if path.recovery.gcongestion_enabled() {
-            has_data || dgram_emitted
+            assembly.data.has_data() || assembly.data.datagram_emitted
         } else {
-            has_data
+            assembly.data.has_data()
         };
 
         let sent_pkt = recovery::Sent {
             pkt_num: pn,
-            frames,
+            frames: std::mem::take(&mut assembly.frames),
             time_sent: now,
             time_acked: None,
             time_lost: None,
@@ -5328,7 +5528,7 @@ impl<F: BufFactory> Connection<F> {
             tx_in_flight: 0,
             lost: 0,
             has_data: sent_pkt_has_data,
-            is_pmtud_probe,
+            is_pmtud_probe: assembly.probes.pmtud,
         };
 
         if in_flight && is_app_limited {
@@ -5346,8 +5546,18 @@ impl<F: BufFactory> Connection<F> {
 
         self.on_packet_sent(send_pid, sent_pkt, epoch, handshake_status, now)?;
 
+        self.record_tx_packet(send_pid, written, now, pkt_type, &assembly)?;
+        Ok((pkt_type, written))
+    }
+
+    /// Commit path statistics, retransmission attribution and connection
+    /// timers after recovery has accepted the packet.
+    fn record_tx_packet(
+        &mut self, send_pid: usize, written: usize, now: Instant, pkt_type: Type,
+        assembly: &TxPacketAssembly,
+    ) -> Result<()> {
         let path = self.paths.get_mut(send_pid)?;
-        if is_pmtud_probe {
+        if assembly.probes.pmtud {
             if let Some(pmtud) = path.pmtud.as_mut() {
                 pmtud.set_in_flight(true);
             }
@@ -5357,13 +5567,14 @@ impl<F: BufFactory> Connection<F> {
         });
 
         // Record sent packet size if we probe the path.
-        if let Some(data) = challenge_data {
+        if let Some(data) = assembly.probes.challenge {
             path.add_challenge_sent(data, written, now);
         }
 
         // Attribute retransmission to the packet and path that actually
         // carried the repeated payload or FIN, not the lost frame's path.
-        if retransmitted_bytes != 0 || retransmitted_fin {
+        let retransmitted_bytes = assembly.data.retransmitted_bytes();
+        if retransmitted_bytes != 0 || assembly.data.stream.retransmitted_fin {
             self.retrans_count = self.retrans_count.saturating_add(1);
             path.retrans_count = path.retrans_count.saturating_add(1);
             self.stream_retrans_bytes = self
@@ -5395,19 +5606,19 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // On the client, drop initial state after sending an Handshake packet.
-        if !self.is_server && hdr_ty == Type::Handshake {
+        if !self.is_server && pkt_type == Type::Handshake {
             self.drop_epoch_state(packet::Epoch::Initial, now);
         }
 
         // (Re)start the idle timer if we are sending the first ack-eliciting
         // packet since last receiving a packet.
-        if ack_eliciting && !self.ack_eliciting_sent {
+        if assembly.flight.ack_eliciting() && !self.ack_eliciting_sent {
             if let Some(idle_timeout) = self.idle_timeout() {
                 self.idle_timer = now.checked_add(idle_timeout);
             }
         }
 
-        if ack_eliciting {
+        if assembly.flight.ack_eliciting() {
             self.ack_eliciting_sent = true;
         }
 
@@ -5417,7 +5628,7 @@ impl<F: BufFactory> Connection<F> {
             self.mark_closed(CloseCause::PacketNumbersExhausted);
         }
 
-        Ok((pkt_type, written))
+        Ok(())
     }
 
     /// Emit CRYPTO first, then choose between DATAGRAM and STREAM.

@@ -32,6 +32,84 @@ use crate::Header;
 
 use rstest::rstest;
 
+/// The long-header length slot is chosen before frames are encoded and
+/// patched after the payload is finalized. Near a varint width transition,
+/// the spare bytes must not leak into the protected packet.
+#[test]
+fn tx_header_length_patch_matches_protected_wire_size() {
+    let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    let conn = &mut pipe.client;
+    let path_id = conn.paths.get_active_path_id().unwrap();
+    conn.paths.get_mut(path_id).unwrap().pmtud = None;
+    let epoch = packet::Epoch::Initial;
+    let pn_len = 2;
+
+    let mut scratch = [0; 256];
+    let mut writer = packet::PacketWriter::from_initialized(&mut scratch);
+    let initial_header = conn
+        .prepare_tx_header(&mut writer, path_id, Type::Initial, epoch, 0, pn_len)
+        .unwrap();
+    let (prefix, _) = initial_header.length_field.unwrap();
+    let tag_len = initial_header.crypto_overhead;
+
+    // One byte short of the minimum protected payload must not succeed.
+    let mut small = vec![0; prefix + 2 + pn_len + tag_len + PAYLOAD_MIN_LEN - 1];
+    let mut writer = packet::PacketWriter::from_initialized(&mut small);
+    assert!(matches!(
+        conn.prepare_tx_header(
+            &mut writer,
+            path_id,
+            Type::Initial,
+            epoch,
+            0,
+            pn_len
+        ),
+        Err(Error::Done)
+    ));
+
+    // The two-byte length can encode 16383. A four-byte slot only becomes
+    // usable when there is room for both the wider slot and 16384 bytes.
+    for (index, (available, width, encoded_len)) in [
+        (2 + 16383, 2, 16383),
+        (2 + 16384, 2, 16383),
+        (4 + 16384, 4, 16384),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut out = vec![0; prefix + available];
+        let mut writer = packet::PacketWriter::from_initialized(&mut out);
+        let header = conn
+            .prepare_tx_header(
+                &mut writer,
+                path_id,
+                Type::Initial,
+                epoch,
+                index as u64,
+                pn_len,
+            )
+            .unwrap();
+        assert_eq!(header.length_field, Some((prefix, width)));
+        assert_eq!(header.payload_offset, prefix + width + pn_len);
+        assert_eq!(header.payload_capacity, encoded_len - pn_len - tag_len);
+        let frames = [frame::Frame::Padding {
+            len: header.payload_capacity,
+        }];
+        frames[0].encode(&mut writer).unwrap();
+        let written = conn
+            .seal_tx_packet(&mut writer, header, &frames, path_id, Instant::now())
+            .unwrap();
+        assert_eq!(written, prefix + width + encoded_len);
+        assert_eq!(writer.off(), written);
+        let mut length = octets::Octets::with_slice(
+            &writer.written_mut()[prefix..prefix + width],
+        );
+        assert_eq!(length.get_varint(), Ok(encoded_len as u64));
+        assert_eq!(length.cap(), 0);
+    }
+}
+
 /// A preferred datagram must remain queued when only stream data fits.
 /// Insufficient stream space is not application-limited.
 #[test]
