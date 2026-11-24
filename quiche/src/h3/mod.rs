@@ -6251,15 +6251,15 @@ mod tests {
         // only partially written.
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        assert_eq!(s.pipe.server.data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.server.stream_data_blocked_recv_count, 1);
+        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 1);
 
-        assert_eq!(s.pipe.client.data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.stream_data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stream_data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 1);
+        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
     }
 
     #[test]
@@ -6569,15 +6569,15 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(4));
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(4));
 
-        assert_eq!(s.pipe.server.data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.data_blocked_recv_count, 1);
-        assert_eq!(s.pipe.server.stream_data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 1);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 0);
 
-        assert_eq!(s.pipe.client.data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stream_data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 1);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
     }
 
     #[test]
@@ -6637,15 +6637,15 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(6));
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(0));
 
-        assert_eq!(s.pipe.server.data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.server.data_blocked_recv_count, 1);
-        assert_eq!(s.pipe.server.stream_data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.server.stats().data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.server.stats().data_blocked_recv_count, 1);
+        assert_eq!(s.pipe.server.stats().stream_data_blocked_recv_count, 0);
 
-        assert_eq!(s.pipe.client.data_blocked_sent_count, 1);
-        assert_eq!(s.pipe.client.stream_data_blocked_sent_count, 0);
-        assert_eq!(s.pipe.client.data_blocked_recv_count, 0);
-        assert_eq!(s.pipe.client.stream_data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().data_blocked_sent_count, 1);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_sent_count, 0);
+        assert_eq!(s.pipe.client.stats().data_blocked_recv_count, 0);
+        assert_eq!(s.pipe.client.stats().stream_data_blocked_recv_count, 0);
     }
 
     #[test]
@@ -8426,10 +8426,10 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
         // Verify that dgram counts are incremented.
-        assert_eq!(s.pipe.client.dgram_sent_count, 6);
-        assert_eq!(s.pipe.client.dgram_recv_count, 0);
-        assert_eq!(s.pipe.server.dgram_sent_count, 0);
-        assert_eq!(s.pipe.server.dgram_recv_count, 6);
+        assert_eq!(s.pipe.client.stats().dgram_sent, 6);
+        assert_eq!(s.pipe.client.stats().dgram_recv, 0);
+        assert_eq!(s.pipe.server.stats().dgram_sent, 0);
+        assert_eq!(s.pipe.server.stats().dgram_recv, 6);
 
         let server_path = s.pipe.server.paths.get_active().expect("no active");
         let client_path = s.pipe.client.paths.get_active().expect("no active");
