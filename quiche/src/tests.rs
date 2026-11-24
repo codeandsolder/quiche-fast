@@ -3902,7 +3902,7 @@ fn stop_sending(
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(pipe.server.next_pkt_num - 5..pipe.server.next_pkt_num);
 
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -3926,7 +3926,7 @@ fn stop_sending(
     assert_eq!(frames.len(), 1);
 
     match frames.first() {
-        Some(frame::Frame::ACK { .. }) => (),
+        Some(frame::Frame::Ack { .. }) => (),
 
         f => panic!("expected ACK frame, got {f:?}"),
     };
@@ -4551,7 +4551,7 @@ fn stop_sending_ack_race(
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(pipe.server.next_pkt_num - 5..pipe.server.next_pkt_num);
 
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -4590,7 +4590,7 @@ fn stop_sending_ack_race(
     assert_eq!(frames.len(), 1);
 
     match frames.first() {
-        Some(frame::Frame::ACK { .. }) => (),
+        Some(frame::Frame::Ack { .. }) => (),
 
         f => panic!("expected ACK frame, got {f:?}"),
     };
@@ -4674,7 +4674,7 @@ fn stop_sending_stream_ack_race(
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(pipe.server.next_pkt_num - 5..pipe.server.next_pkt_num);
 
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -4713,7 +4713,7 @@ fn stop_sending_stream_ack_race(
     assert_eq!(frames.len(), 1);
 
     match frames.first() {
-        Some(frame::Frame::ACK { .. }) => (),
+        Some(frame::Frame::Ack { .. }) => (),
 
         f => panic!("expected ACK frame, got {f:?}"),
     };
@@ -5898,7 +5898,7 @@ fn stop_sending_before_flushed_packets(
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..6);
 
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -7547,7 +7547,7 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited(
         test_utils::decode_pkt(&mut pipe.server, &mut buf[..sent]).unwrap();
     assert_eq!(1, frames.len());
     assert!(
-        matches!(frames[0], frame::Frame::ACK { .. }),
+        matches!(frames[0], frame::Frame::Ack { .. }),
         "the packet sent by the client must be an ACK only packet"
     );
 }
@@ -7618,7 +7618,7 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited_despite_max_unacknowledgin
         assert_eq!(1, frames.len());
 
         assert!(
-            matches!(frames[0], frame::Frame::ACK { .. }),
+            matches!(frames[0], frame::Frame::Ack { .. }),
             "the packet sent by the client must be an ACK only packet"
         );
     }
@@ -7653,7 +7653,7 @@ fn reject_ack_for_unsent_packet_number_space(
     };
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..1);
-    let frame = frame::Frame::ACK {
+    let frame = frame::Frame::Ack {
         ack_delay: 0,
         ranges,
         ecn_counts: None,
@@ -7747,7 +7747,7 @@ fn validate_peer_sent_ack_range(
     // Send an invalid ACK range to the server and expect server error
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..10);
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -7837,7 +7837,7 @@ fn validate_peer_sent_ack_range_for_multi_path(
     // so +1 to include global_max_sent pkt
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..global_max_sent + 1);
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -7864,7 +7864,7 @@ fn validate_peer_sent_ack_range_for_multi_path(
     // +2 to include a packet greater than global_max_sent pkt
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..global_max_sent + 2);
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -7989,7 +7989,7 @@ fn prevent_optimistic_ack(
     let skip_pn = server_skip_pn.unwrap();
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(skip_pn..skip_pn + 1);
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -13234,7 +13234,7 @@ fn consecutive_non_ack_eliciting(
         assert!(
             frames
                 .iter()
-                .all(|frame| matches!(frame, frame::Frame::ACK { .. })),
+                .all(|frame| matches!(frame, frame::Frame::Ack { .. })),
             "ACK only"
         );
     }
@@ -13456,7 +13456,7 @@ fn stop_sending_stream_send_after_reset_stream_ack(
     let mut ranges = ranges::RangeSet::default();
     ranges.insert(0..12);
 
-    let frames = [frame::Frame::ACK {
+    let frames = [frame::Frame::Ack {
         ack_delay: 15,
         ranges,
         ecn_counts: None,
@@ -13483,7 +13483,7 @@ fn stop_sending_stream_send_after_reset_stream_ack(
     assert_eq!(frames.len(), 1);
 
     match frames.first() {
-        Some(frame::Frame::ACK { .. }) => (),
+        Some(frame::Frame::Ack { .. }) => (),
 
         f => panic!("expected ACK frame, got {f:?}"),
     };
@@ -13847,7 +13847,7 @@ fn pmtud_no_duplicate_probes(
     }
 
     assert_eq!(frames.len(), 3);
-    assert!(matches!(frames[0], frame::Frame::ACK { .. }));
+    assert!(matches!(frames[0], frame::Frame::Ack { .. }));
     assert!(matches!(frames[1], frame::Frame::Padding { .. }));
     assert!(matches!(frames[2], frame::Frame::Ping { .. }));
 

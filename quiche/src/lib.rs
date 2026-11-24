@@ -3895,7 +3895,7 @@ impl<F: BufFactory> Connection<F> {
                         }
                     },
 
-                    frame::Frame::ACK { ranges, .. } => {
+                    frame::Frame::Ack { ranges, .. } => {
                         // Stop acknowledging packets less than or equal to the
                         // largest acknowledged in the sent ACK frame that, in
                         // turn, got acked.
@@ -4544,7 +4544,7 @@ impl<F: BufFactory> Connection<F> {
                         self.streams.add_tx_buffered(retransmitted);
                     },
 
-                    frame::Frame::ACK { .. } => {
+                    frame::Frame::Ack { .. } => {
                         pkt_space.ack_elicited = true;
                     },
 
@@ -4940,7 +4940,7 @@ impl<F: BufFactory> Connection<F> {
             #[cfg(feature = "fuzzing")]
             let ack_delay = rand::rand_u8() as u64 + 1;
 
-            let frame = frame::Frame::ACK {
+            let frame = frame::Frame::Ack {
                 ack_delay,
                 ranges: pkt_space.recv_pkt_need_ack.clone(),
                 ecn_counts: None, // sending ECN is not supported at this time
@@ -8909,7 +8909,7 @@ impl<F: BufFactory> Connection<F> {
         match frame {
             frame::Frame::Padding { .. } | frame::Frame::Ping { .. } => (),
 
-            frame::Frame::ACK {
+            frame::Frame::Ack {
                 ranges, ack_delay, ..
             } => self.process_ack_frame(&ranges, ack_delay, epoch, now)?,
 
