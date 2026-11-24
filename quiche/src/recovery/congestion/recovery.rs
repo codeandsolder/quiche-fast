@@ -172,9 +172,9 @@ impl RecoveryEpoch {
                     break;
                 }
 
-                if unacked.time_acked.is_some() {
+                if unacked.acked_at.is_some() {
                     // Already acked.
-                } else if unacked.time_lost.is_some() {
+                } else if unacked.lost_at.is_some() {
                     // An acked packet was already declared lost.
                     spurious_losses += 1;
                     spurious_pkt_thresh.get_or_insert_with(|| {
@@ -184,8 +184,8 @@ impl RecoveryEpoch {
                             &self.skipped_packet_numbers,
                         )
                     });
-                    unacked.time_acked = Some(now);
-                    self.newly_acked_send_times.push(unacked.time_sent);
+                    unacked.acked_at = Some(now);
+                    self.newly_acked_send_times.push(unacked.sent_at);
 
                     if unacked.flight.in_flight() {
                         has_in_flight_spurious_loss = true;
@@ -198,11 +198,11 @@ impl RecoveryEpoch {
 
                     newly_acked.push(Acked {
                         pkt_num: unacked.pkt_num,
-                        time_sent: unacked.time_sent,
+                        sent_at: unacked.sent_at,
                         size: unacked.size,
                         in_flight: unacked.flight.in_flight(),
 
-                        rtt: now.saturating_duration_since(unacked.time_sent),
+                        rtt: now.saturating_duration_since(unacked.sent_at),
                         delivered: unacked.delivered,
                         delivered_time: unacked.delivered_time,
                         first_sent_time: unacked.first_sent_time,
@@ -215,8 +215,8 @@ impl RecoveryEpoch {
                         .extend(std::mem::take(&mut unacked.frames));
 
                     has_ack_eliciting |= unacked.flight.ack_eliciting();
-                    unacked.time_acked = Some(now);
-                    self.newly_acked_send_times.push(unacked.time_sent);
+                    unacked.acked_at = Some(now);
+                    self.newly_acked_send_times.push(unacked.sent_at);
                 }
             }
         }
@@ -265,7 +265,7 @@ impl RecoveryEpoch {
             .sent_packets
             .iter_mut()
             .take_while(|p| p.pkt_num <= largest_acked)
-            .filter(|p| p.time_acked.is_none() && p.time_lost.is_none());
+            .filter(|p| p.acked_at.is_none() && p.lost_at.is_none());
 
         for unacked in unacked_iter {
             let skipped_between = skipped_packet_numbers
@@ -276,12 +276,12 @@ impl RecoveryEpoch {
                 .saturating_sub(unacked.pkt_num)
                 .saturating_sub(skipped_between);
 
-            if lost_send_time.is_some_and(|time| unacked.time_sent <= time) ||
+            if lost_send_time.is_some_and(|time| unacked.sent_at <= time) ||
                 packet_distance >= pkt_thresh
             {
                 self.pending_lost_frames.queue_ack(unacked.frames.drain(..));
 
-                unacked.time_lost = Some(now);
+                unacked.lost_at = Some(now);
 
                 if unacked.flight.is_pmtud_probe() {
                     pmtud_lost_bytes += unacked.size;
@@ -296,13 +296,13 @@ impl RecoveryEpoch {
 
                     if unacked.flight.ack_eliciting() &&
                         first_rtt_sample_time.is_some_and(|first_rtt| {
-                            unacked.time_sent > first_rtt
+                            unacked.sent_at > first_rtt
                         })
                     {
                         // Packets are visited in packet number order, so this
                         // records the span the lost packets were sent over.
-                        first_lost_ack_eliciting.get_or_insert(unacked.time_sent);
-                        last_lost_ack_eliciting = Some(unacked.time_sent);
+                        first_lost_ack_eliciting.get_or_insert(unacked.sent_at);
+                        last_lost_ack_eliciting = Some(unacked.sent_at);
                         lost_ack_eliciting += 1;
                     }
 
@@ -320,7 +320,7 @@ impl RecoveryEpoch {
 
                 lost_packets += 1;
             } else {
-                self.timing.loss = unacked.time_sent.checked_add(loss_delay);
+                self.timing.loss = unacked.sent_at.checked_add(loss_delay);
                 break;
             }
         }
@@ -346,13 +346,13 @@ impl RecoveryEpoch {
         // be removed at this point, but their removal is delayed for a later
         // time, once the gaps have been filled.
         while let Some(pkt) = self.sent_packets.front() {
-            if let Some(time_lost) = pkt.time_lost {
-                if loss_thresh.is_none_or(|threshold| time_lost > threshold) {
+            if let Some(lost_at) = pkt.lost_at {
+                if loss_thresh.is_none_or(|threshold| lost_at > threshold) {
                     break;
                 }
             }
 
-            if pkt.time_acked.is_none() && pkt.time_lost.is_none() {
+            if pkt.acked_at.is_none() && pkt.lost_at.is_none() {
                 break;
             }
 
@@ -504,8 +504,8 @@ impl LegacyRecovery {
             .epochs
             .iter()
             .flat_map(|epoch| epoch.sent_packets.iter())
-            .filter(|pkt| pkt.time_acked.is_none() && pkt.time_lost.is_none())
-            .map(|pkt| pkt.time_sent)
+            .filter(|pkt| pkt.acked_at.is_none() && pkt.lost_at.is_none())
+            .map(|pkt| pkt.sent_at)
             .min();
 
         if let Some(oldest_outstanding) = oldest_outstanding {
@@ -531,7 +531,7 @@ impl LegacyRecovery {
         );
 
         if let Some(pkt) = loss.largest_lost_pkt {
-            if !self.congestion.in_congestion_recovery(pkt.time_sent) {
+            if !self.congestion.in_congestion_recovery(pkt.sent_at) {
                 (self.congestion.cc_ops.checkpoint)(&mut self.congestion);
             }
 
@@ -721,7 +721,7 @@ impl RecoveryOps for LegacyRecovery {
             if largest_newly_acked.pkt_num == largest_acked_pkt_num &&
                 has_ack_eliciting
             {
-                let latest_rtt = now - largest_newly_acked.time_sent;
+                let latest_rtt = now - largest_newly_acked.sent_at;
                 self.rtt_stats.update_rtt(
                     latest_rtt,
                     Duration::from_micros(ack_delay),
@@ -826,9 +826,7 @@ impl RecoveryOps for LegacyRecovery {
             // Skip packets that have already been acked or lost, and packets
             // that don't contain either CRYPTO or STREAM frames.
             .filter(|p| {
-                p.flight.has_data() &&
-                    p.time_acked.is_none() &&
-                    p.time_lost.is_none()
+                p.flight.has_data() && p.acked_at.is_none() && p.lost_at.is_none()
             })
             // Only return as many packets as the number of probe packets that
             // will be sent.
@@ -867,8 +865,8 @@ impl RecoveryOps for LegacyRecovery {
             .iter()
             .filter(|p| {
                 p.flight.in_flight() &&
-                    p.time_acked.is_none() &&
-                    p.time_lost.is_none()
+                    p.acked_at.is_none() &&
+                    p.lost_at.is_none()
             })
             .fold(0, |acc, p| acc + p.size);
 
@@ -995,8 +993,8 @@ impl RecoveryOps for LegacyRecovery {
             // ACK-only packets need no acknowledgment of their own, so they
             // must not prevent an otherwise idle path from being retired.
             epoch.sent_packets.iter().any(|pkt| {
-                pkt.time_acked.is_none() &&
-                    pkt.time_lost.is_none() &&
+                pkt.acked_at.is_none() &&
+                    pkt.lost_at.is_none() &&
                     pkt.flight.ack_eliciting()
             }) || !epoch.acked_frames.is_empty() ||
                 epoch.pending_lost_frames.has_pending() ||
@@ -1100,11 +1098,11 @@ impl RecoveryOps for LegacyRecovery {
         &mut self, now: Instant,
     ) -> Option<&'static str> {
         let cc_state = self.state_str(now);
-        if cc_state != self.qlog_prev_cc_state {
+        if cc_state == self.qlog_prev_cc_state {
+            None
+        } else {
             self.qlog_prev_cc_state = cc_state;
             Some(cc_state)
-        } else {
-            None
         }
     }
 
@@ -1167,7 +1165,7 @@ impl std::fmt::Debug for LegacyRecovery {
 pub struct Acked {
     pub pkt_num: u64,
 
-    pub time_sent: Instant,
+    pub sent_at: Instant,
 
     pub size: usize,
 

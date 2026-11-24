@@ -5566,9 +5566,9 @@ impl<F: BufFactory> Connection<F> {
         let sent_pkt = recovery::Sent {
             pkt_num: pn,
             frames: std::mem::take(&mut assembly.frames),
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            sent_at: now,
+            acked_at: None,
+            lost_at: None,
             // RFC 9002, Section 2: a packet containing a PADDING frame is
             // counted toward bytes in flight even though it is not
             // ack-eliciting, so record the size of every in-flight packet.

@@ -874,7 +874,7 @@ mod tests {
         let ack_time = sent_time + rtt;
         let acked = [Acked {
             pkt_num,
-            time_sent: sent_time,
+            sent_at: sent_time,
         }];
         let mut event = BBRv2CongestionEvent::new(
             ack_time,

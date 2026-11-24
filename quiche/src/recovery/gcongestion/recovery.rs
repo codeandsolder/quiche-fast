@@ -63,7 +63,7 @@ struct SentPacket {
 #[derive(Debug)]
 enum SentStatus {
     Sent {
-        time_sent: Instant,
+        sent_at: Instant,
         flight: PacketFlight,
         sent_bytes: usize,
         frames: SmallVec<[frame::Frame; 1]>,
@@ -210,7 +210,7 @@ impl RecoveryEpoch {
                 if *pkt_num < peer_sent_range.end {
                     match status.ack() {
                         SentStatus::Sent {
-                            time_sent,
+                            sent_at,
                             flight,
                             sent_bytes,
                             frames,
@@ -222,7 +222,7 @@ impl RecoveryEpoch {
                             }
                             newly_acked.push(Acked {
                                 pkt_num: *pkt_num,
-                                time_sent,
+                                sent_at,
                             });
 
                             self.acked_frames.extend(frames);
@@ -285,9 +285,9 @@ impl RecoveryEpoch {
                 break;
             }
 
-            if let SentStatus::Sent { time_sent, .. } = status {
+            if let SentStatus::Sent { sent_at, .. } = status {
                 let loss_by_time =
-                    lost_send_time.is_some_and(|time| *time_sent <= time);
+                    lost_send_time.is_some_and(|time| *sent_at <= time);
                 let skipped_between = skipped_packet_numbers
                     .iter()
                     .filter(|&&pn| pn > *pkt_num && pn <= largest_acked)
@@ -327,7 +327,7 @@ impl RecoveryEpoch {
                         });
                     }
                 } else {
-                    self.timing.loss = time_sent.checked_add(loss_delay);
+                    self.timing.loss = sent_at.checked_add(loss_delay);
                     break;
                 }
             }
@@ -637,7 +637,7 @@ impl RecoveryOps for GRecovery {
         &mut self, pkt: Sent, epoch: packet::Epoch,
         handshake_status: HandshakeStatus, now: Instant, trace_id: &str,
     ) {
-        let time_sent = if self.time_sent_set_to_now {
+        let sent_at = if self.time_sent_set_to_now {
             now
         } else {
             self.get_next_release_time().time(now).unwrap_or(now)
@@ -654,7 +654,7 @@ impl RecoveryOps for GRecovery {
         }
 
         let status = SentStatus::Sent {
-            time_sent,
+            sent_at,
             flight,
             sent_bytes,
             frames: pkt.frames,
@@ -670,7 +670,7 @@ impl RecoveryOps for GRecovery {
         epoch.sent_packets.push_back(SentPacket { pkt_num, status });
 
         if flight.ack_eliciting() {
-            epoch.timing.last_ack_eliciting = Some(time_sent);
+            epoch.timing.last_ack_eliciting = Some(sent_at);
             self.outstanding_non_ack_eliciting = 0;
         } else {
             self.outstanding_non_ack_eliciting += 1;
@@ -678,7 +678,7 @@ impl RecoveryOps for GRecovery {
 
         if flight.in_flight() {
             self.pacer.on_packet_sent(
-                time_sent,
+                sent_at,
                 self.bytes_in_flight.get(),
                 pkt_num,
                 sent_bytes,
@@ -688,7 +688,7 @@ impl RecoveryOps for GRecovery {
 
             self.bytes_in_flight.add(sent_bytes, now);
             epoch.timing.in_flight_count += 1;
-            self.set_loss_detection_timer(handshake_status, time_sent);
+            self.set_loss_detection_timer(handshake_status, sent_at);
         }
 
         trace!("{trace_id} {self:?}");
@@ -744,7 +744,7 @@ impl RecoveryOps for GRecovery {
             update_rtt = largest_newly_acked.pkt_num == largest_acked_pkt_num &&
                 has_ack_eliciting;
             if update_rtt {
-                let latest_rtt = now - largest_newly_acked.time_sent;
+                let latest_rtt = now - largest_newly_acked.sent_at;
                 self.rtt_stats.update_rtt(
                     latest_rtt,
                     Duration::from_micros(ack_delay),
@@ -1133,11 +1133,11 @@ impl RecoveryOps for GRecovery {
         &mut self, now: Instant,
     ) -> Option<&'static str> {
         let cc_state = self.state_str(now);
-        if cc_state != self.qlog_prev_cc_state {
+        if cc_state == self.qlog_prev_cc_state {
+            None
+        } else {
             self.qlog_prev_cc_state = cc_state;
             Some(cc_state)
-        } else {
-            None
         }
     }
 

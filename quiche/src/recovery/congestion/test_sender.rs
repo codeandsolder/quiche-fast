@@ -72,9 +72,9 @@ impl TestSender {
         let mut sent = Sent {
             pkt_num: self.next_pkt,
             frames: Default::default(),
-            time_sent: self.time,
-            time_acked: None,
-            time_lost: None,
+            sent_at: self.time,
+            acked_at: None,
+            lost_at: None,
             size: bytes,
             flight: PacketFlight::AckEliciting,
             delivered: 0,
@@ -119,11 +119,11 @@ impl TestSender {
 
             acked.push(Acked {
                 pkt_num: unacked.pkt_num,
-                time_sent: unacked.time_sent,
+                sent_at: unacked.sent_at,
                 size: unacked.size,
                 in_flight: unacked.flight.in_flight(),
 
-                rtt: self.time.saturating_duration_since(unacked.time_sent),
+                rtt: self.time.saturating_duration_since(unacked.sent_at),
                 delivered: unacked.delivered,
                 delivered_time: unacked.delivered_time,
                 first_sent_time: unacked.first_sent_time,
@@ -144,7 +144,7 @@ impl TestSender {
     }
 
     pub(crate) fn lose_n_packets(
-        &mut self, n: usize, bytes: usize, time_sent: Option<Instant>,
+        &mut self, n: usize, bytes: usize, sent_at: Option<Instant>,
     ) {
         let mut unacked = None;
 
@@ -154,11 +154,11 @@ impl TestSender {
         }
 
         let mut unacked = unacked.unwrap();
-        if let Some(time) = time_sent {
-            unacked.time_sent = time;
+        if let Some(time) = sent_at {
+            unacked.sent_at = time;
         }
 
-        if !self.cc.in_congestion_recovery(unacked.time_sent) {
+        if !self.cc.in_congestion_recovery(unacked.sent_at) {
             (self.cc.cc_ops.checkpoint)(&mut self.cc);
         }
 

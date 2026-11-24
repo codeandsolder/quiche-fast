@@ -48,7 +48,7 @@ pub struct Lost {
 #[derive(Debug)]
 pub struct Acked {
     pub(super) pkt_num: u64,
-    pub(super) time_sent: Instant,
+    pub(super) sent_at: Instant,
 }
 
 pub(super) trait CongestionControl: Debug {

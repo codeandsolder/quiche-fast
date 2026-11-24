@@ -621,9 +621,9 @@ pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
     Sent {
         pkt_num,
         frames: smallvec![],
-        time_sent: now,
-        time_acked: None,
-        time_lost: None,
+        sent_at: now,
+        acked_at: None,
+        lost_at: None,
         size,
         flight: PacketFlight::Data,
         delivered: 0,

@@ -29,8 +29,11 @@ use std::sync::Arc;
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ptr::NonNull;
 
-use intrusive_collections::intrusive_adapter;
+use intrusive_collections::Adapter;
+use intrusive_collections::DefaultLinkOps;
+use intrusive_collections::DefaultPointerOps;
 use intrusive_collections::KeyAdapter;
 use intrusive_collections::RBTree;
 use intrusive_collections::RBTreeAtomicLink;
@@ -726,7 +729,7 @@ impl<F: BufFactory> StreamMap<F> {
         self.stopped.insert(stream_id, error_code);
     }
 
-    /// Reissue STOP_SENDING only while the receive side lacks a final size.
+    /// Reissue `STOP_SENDING` only while the receive side lacks a final size.
     pub(crate) fn requeue_stop_sending(
         &mut self, stream_id: u64, error_code: u64,
     ) {
@@ -738,7 +741,7 @@ impl<F: BufFactory> StreamMap<F> {
         }
     }
 
-    /// Lost MAX_STREAM_DATA matters only while the stream still exists.
+    /// Lost `MAX_STREAM_DATA` matters only while the stream still exists.
     pub(crate) fn requeue_receive_credit(&mut self, stream_id: u64) {
         if self.get(stream_id).is_some() {
             self.insert_almost_full(stream_id);
@@ -1172,9 +1175,73 @@ impl StreamPriorityKey {
     }
 }
 
-intrusive_adapter!(StreamWritablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { writable => RBTreeAtomicLink });
+/// One statically selected link per priority queue. The tree's adapter type
+/// fixes the link for its entire lifetime, so no queue can inadvertently
+/// interpret a different link as one of its own nodes.
+#[derive(Clone, Copy, Default)]
+struct StreamPriorityAdapter<const OFFSET: usize> {
+    link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
+    pointer_ops: DefaultPointerOps<Arc<StreamPriorityKey>>,
+}
 
-impl KeyAdapter<'_> for StreamWritablePriorityAdapter {
+impl<const OFFSET: usize> StreamPriorityAdapter<OFFSET> {
+    // Ensure every instantiated adapter refers to an actual link field.
+    const LINK_OFFSET: usize = {
+        assert!(
+            OFFSET == std::mem::offset_of!(StreamPriorityKey, readable) ||
+                OFFSET == std::mem::offset_of!(StreamPriorityKey, writable) ||
+                OFFSET ==
+                    std::mem::offset_of!(
+                        StreamPriorityKey,
+                        stopped_writable
+                    ) ||
+                OFFSET == std::mem::offset_of!(StreamPriorityKey, flushable)
+        );
+        OFFSET
+    };
+}
+
+// SAFETY: LINK_OFFSET is the compile-time offset of one RBTreeAtomicLink
+// within StreamPriorityKey. get_link and get_value are inverse operations,
+// retaining the allocation's provenance. Arc owns the stable allocation;
+// DefaultPointerOps transfers that ownership to and from the collection.
+unsafe impl<const OFFSET: usize> Adapter for StreamPriorityAdapter<OFFSET> {
+    type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
+    type PointerOps = DefaultPointerOps<Arc<StreamPriorityKey>>;
+
+    unsafe fn get_value(
+        &self, link: NonNull<RBTreeAtomicLink>,
+    ) -> *const StreamPriorityKey {
+        // SAFETY: Adapter requires a link previously obtained by get_link.
+        unsafe { link.as_ptr().cast::<u8>().sub(Self::LINK_OFFSET).cast() }
+    }
+
+    unsafe fn get_link(
+        &self, value: *const StreamPriorityKey,
+    ) -> NonNull<RBTreeAtomicLink> {
+        // SAFETY: Adapter requires a valid value. The offset is in bounds,
+        // aligned, and addresses a non-null link within that allocation.
+        unsafe {
+            NonNull::new_unchecked(
+                value.cast::<u8>().add(Self::LINK_OFFSET).cast_mut().cast(),
+            )
+        }
+    }
+
+    fn link_ops(&self) -> &Self::LinkOps {
+        &self.link_ops
+    }
+
+    fn link_ops_mut(&mut self) -> &mut Self::LinkOps {
+        &mut self.link_ops
+    }
+
+    fn pointer_ops(&self) -> &Self::PointerOps {
+        &self.pointer_ops
+    }
+}
+
+impl<const OFFSET: usize> KeyAdapter<'_> for StreamPriorityAdapter<OFFSET> {
     type Key = (u8, bool, u64);
 
     fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
@@ -1182,35 +1249,15 @@ impl KeyAdapter<'_> for StreamWritablePriorityAdapter {
     }
 }
 
-intrusive_adapter!(StreamStoppedWritablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { stopped_writable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamStoppedWritablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
-
-intrusive_adapter!(StreamReadablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { readable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamReadablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
-
-intrusive_adapter!(StreamFlushablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { flushable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamFlushablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
+type StreamReadablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, readable) }>;
+type StreamWritablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, writable) }>;
+type StreamStoppedWritablePriorityAdapter = StreamPriorityAdapter<
+    { std::mem::offset_of!(StreamPriorityKey, stopped_writable) },
+>;
+type StreamFlushablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, flushable) }>;
 
 /// An iterator over QUIC streams.
 #[derive(Default)]
@@ -2649,6 +2696,46 @@ mod tests {
         assert_eq!(streams.readable().collect::<Vec<_>>(), vec![8, 4, 0, 12]);
         assert_eq!(streams.writable().collect::<Vec<_>>(), vec![8, 12, 4, 0]);
         assert_eq!(streams.peek_flushable().map(|key| key.id), Some(8));
+    }
+
+    #[test]
+    fn priority_adapter_link_roundtrip_and_independence() {
+        fn roundtrip<const OFFSET: usize>(
+            key: &Arc<StreamPriorityKey>,
+        ) -> NonNull<RBTreeAtomicLink> {
+            let adapter = StreamPriorityAdapter::<OFFSET>::default();
+            let ptr = Arc::as_ptr(key);
+            // SAFETY: key is a live Arc allocation, and the adapter returns
+            // the exact link that is immediately converted back to it.
+            let link = unsafe { adapter.get_link(ptr) };
+            assert_eq!(unsafe { adapter.get_value(link) }, ptr);
+            link
+        }
+
+        let key = Arc::new(StreamPriorityKey::default());
+        let links = [
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, readable) }>(
+                &key,
+            ),
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, writable) }>(
+                &key,
+            ),
+            roundtrip::<
+                { std::mem::offset_of!(StreamPriorityKey, stopped_writable) },
+            >(&key),
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, flushable) }>(
+                &key,
+            ),
+        ];
+        for (i, link) in links.iter().enumerate() {
+            assert!(!links[..i].contains(link));
+        }
+        assert_eq!(links, [
+            NonNull::from(&key.readable),
+            NonNull::from(&key.writable),
+            NonNull::from(&key.stopped_writable),
+            NonNull::from(&key.flushable),
+        ]);
     }
 
     #[test]

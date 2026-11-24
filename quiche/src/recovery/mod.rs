@@ -570,11 +570,11 @@ pub struct Sent {
 
     pub frames: SmallVec<[frame::Frame; 1]>,
 
-    pub time_sent: Instant,
+    pub sent_at: Instant,
 
-    pub time_acked: Option<Instant>,
+    pub acked_at: Option<Instant>,
 
-    pub time_lost: Option<Instant>,
+    pub lost_at: Option<Instant>,
 
     pub size: usize,
 
@@ -596,7 +596,7 @@ pub struct Sent {
 impl std::fmt::Debug for Sent {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "pkt_num={:?} ", self.pkt_num)?;
-        write!(f, "pkt_sent_time={:?} ", self.time_sent)?;
+        write!(f, "pkt_sent_time={:?} ", self.sent_at)?;
         write!(f, "pkt_size={:?} ", self.size)?;
         write!(f, "delivered={:?} ", self.delivered)?;
         write!(f, "delivered_time={:?} ", self.delivered_time)?;
@@ -1964,9 +1964,9 @@ mod tests {
             let p = Sent {
                 pkt_num: i,
                 frames: smallvec![],
-                time_sent: now,
-                time_acked: None,
-                time_lost: None,
+                sent_at: now,
+                acked_at: None,
+                lost_at: None,
                 size: 1200,
                 flight: PacketFlight::Data,
                 delivered: 0,
@@ -3128,9 +3128,9 @@ mod tests {
         let p_initial = Sent {
             pkt_num: 0,
             frames: smallvec::smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            sent_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::AckEliciting,
             delivered: 0,
@@ -3155,9 +3155,9 @@ mod tests {
         let p_app = Sent {
             pkt_num: 0, // Application space has its own packet numbers
             frames: smallvec::smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            sent_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::Data,
             delivered: 0,
@@ -3221,9 +3221,9 @@ mod tests {
         let p = Sent {
             pkt_num: 0,
             frames: frames.clone(),
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            sent_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::Data,
             delivered: 0,
