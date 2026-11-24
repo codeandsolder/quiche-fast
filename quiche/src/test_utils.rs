@@ -154,12 +154,12 @@ impl Pipe {
         Ok(ctx)
     }
 
-    #[must_use]
+    #[must_use = "the returned address identifies the client endpoint in the test pipe"]
     pub fn client_addr() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 1234))
     }
 
-    #[must_use]
+    #[must_use = "the returned address identifies the server endpoint in the test pipe"]
     pub fn server_addr() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 4321))
     }
@@ -601,7 +601,7 @@ pub fn decode_pkt<F: BufFactory>(
     Ok(frames)
 }
 
-#[must_use]
+#[must_use = "the returned identifier and token must be retained as a matching pair"]
 pub fn create_cid_and_reset_token(
     cid_len: usize,
 ) -> (ConnectionId<'static>, u128) {
@@ -616,7 +616,7 @@ pub fn create_cid_and_reset_token(
     (cid, reset_token)
 }
 
-#[must_use]
+#[must_use = "the returned packet is the recovery event fixture"]
 pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
     Sent {
         pkt_num,

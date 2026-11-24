@@ -359,7 +359,7 @@ impl Frame {
     }
 
     #[cfg(feature = "qlog")]
-    #[must_use]
+    #[must_use = "the returned frame is the diagnostic representation to record"]
     pub fn to_qlog(&self) -> Http3Frame {
         use qlog::events::RawInfo;
 

@@ -531,22 +531,22 @@ pub enum PacketFlight {
 }
 
 impl PacketFlight {
-    #[must_use]
+    #[must_use = "the result controls congestion-window accounting"]
     pub const fn in_flight(self) -> bool {
         !matches!(self, Self::NotInFlight)
     }
 
-    #[must_use]
+    #[must_use = "the result determines whether acknowledgement and loss recovery are required"]
     pub const fn ack_eliciting(self) -> bool {
         matches!(self, Self::AckEliciting | Self::Data | Self::PmtuProbe)
     }
 
-    #[must_use]
+    #[must_use = "the result distinguishes data-bearing packets for congestion accounting"]
     pub const fn has_data(self) -> bool {
         matches!(self, Self::Data)
     }
 
-    #[must_use]
+    #[must_use = "the result selects path MTU probe accounting"]
     pub const fn is_pmtud_probe(self) -> bool {
         matches!(self, Self::PmtuProbe)
     }
