@@ -1087,10 +1087,10 @@ fn handshake_confirmation(
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
     assert!(!pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_confirmed);
+    assert!(!pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
 
@@ -1098,10 +1098,10 @@ fn handshake_confirmation(
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_confirmed);
+    assert!(!pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
@@ -1109,10 +1109,10 @@ fn handshake_confirmation(
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
 
@@ -1120,18 +1120,18 @@ fn handshake_confirmation(
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_confirmed);
+    assert!(pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_confirmed);
+    assert!(pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 }
 
 #[rstest]
@@ -8847,7 +8847,7 @@ fn pto_probe_not_stranded_by_earlier_epoch_data(
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     // Queue Handshake CRYPTO data ahead of an Application PTO probe.
     let handshake_send = &mut pipe.client.crypto_ctx[packet::Epoch::Handshake]
@@ -10203,7 +10203,7 @@ fn app_close_by_client(
         test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
         assert!(pipe.client.is_established());
-        assert!(!pipe.client.handshake_confirmed);
+        assert!(!pipe.client.handshake_progress.confirmed());
 
         // Exhaust cwnd and model a Handshake PTO expiring before the client
         // closes the connection.
@@ -14452,10 +14452,10 @@ fn connect_custom_client_dcid() {
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
     assert!(!pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_confirmed);
+    assert!(!pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
 
@@ -14463,10 +14463,10 @@ fn connect_custom_client_dcid() {
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(!pipe.server.is_established());
-    assert!(!pipe.server.handshake_confirmed);
+    assert!(!pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
@@ -14474,10 +14474,10 @@ fn connect_custom_client_dcid() {
     let flight = test_utils::emit_flight(&mut pipe.server).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(!pipe.client.handshake_confirmed);
+    assert!(!pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.client, flight).unwrap();
 
@@ -14485,18 +14485,18 @@ fn connect_custom_client_dcid() {
     let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_confirmed);
+    assert!(pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 
     test_utils::process_flight(&mut pipe.server, flight).unwrap();
 
     assert!(pipe.client.is_established());
-    assert!(pipe.client.handshake_confirmed);
+    assert!(pipe.client.handshake_progress.confirmed());
 
     assert!(pipe.server.is_established());
-    assert!(pipe.server.handshake_confirmed);
+    assert!(pipe.server.handshake_progress.confirmed());
 }
 
 #[rstest]
@@ -15612,4 +15612,34 @@ fn alpn_rejects_empty_and_oversized_protocol_lists() {
     }
     assert!(config.set_application_protos_wire_format(&wire).is_err());
     assert_eq!(config.application_protos, previous);
+}
+
+#[test]
+fn handshake_progress_is_monotonic_in_either_order() {
+    for confirmation_first in [false, true] {
+        let mut progress = HandshakeProgress::default();
+        assert!(!progress.completed());
+        assert!(!progress.confirmed());
+        if confirmation_first {
+            progress.confirm();
+            assert_eq!(progress, HandshakeProgress::PeerConfirmed);
+            assert!(!progress.completed());
+            assert!(progress.confirmed());
+            progress.confirm();
+            progress.mark_completed();
+        } else {
+            progress.mark_completed();
+            assert_eq!(progress, HandshakeProgress::Established);
+            assert!(progress.completed());
+            assert!(!progress.confirmed());
+            progress.mark_completed();
+            progress.confirm();
+        }
+        assert_eq!(progress, HandshakeProgress::Confirmed);
+        assert!(progress.completed());
+        assert!(progress.confirmed());
+        progress.confirm();
+        progress.mark_completed();
+        assert_eq!(progress, HandshakeProgress::Confirmed);
+    }
 }

@@ -167,7 +167,7 @@ impl StreamDirection {
 /// Stream-count credit and its signaling, for one direction. A stream's
 /// ordinal implicitly opens all lower ordinals of the same initiator.
 #[derive(Default)]
-pub(crate) struct StreamQuota {
+pub(super) struct StreamQuota {
     peer_limit: u64,
     peer_opened: u64,
     local_limit: u64,

@@ -1343,6 +1343,40 @@ enum ConnectionLifecycle {
     Closed(CloseCause),
 }
 
+/// TLS completion and peer confirmation can arrive in either order.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum HandshakeProgress {
+    #[default]
+    Handshaking,
+    PeerConfirmed,
+    Established,
+    Confirmed,
+}
+
+impl HandshakeProgress {
+    const fn completed(self) -> bool {
+        matches!(self, Self::Established | Self::Confirmed)
+    }
+
+    const fn confirmed(self) -> bool {
+        matches!(self, Self::PeerConfirmed | Self::Confirmed)
+    }
+
+    const fn mark_completed(&mut self) {
+        *self = match *self {
+            Self::Handshaking | Self::Established => Self::Established,
+            Self::PeerConfirmed | Self::Confirmed => Self::Confirmed,
+        };
+    }
+
+    const fn confirm(&mut self) {
+        *self = match *self {
+            Self::Handshaking | Self::PeerConfirmed => Self::PeerConfirmed,
+            Self::Established | Self::Confirmed => Self::Confirmed,
+        };
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum HandshakeDoneState {
     #[default]
@@ -1645,14 +1679,11 @@ where
     /// Whether the peer's transport parameters were parsed.
     parsed_peer_transport_params: bool,
 
-    /// Whether the connection handshake has been completed.
-    handshake_completed: bool,
+    /// TLS completion and handshake confirmation.
+    handshake_progress: HandshakeProgress,
 
     /// Server's reliable `HANDSHAKE_DONE` transmission state.
     handshake_done: HandshakeDoneState,
-
-    /// Whether the connection handshake has been confirmed.
-    handshake_confirmed: bool,
 
     /// Key phase bit used for outgoing protected packets.
     key_phase: bool,
@@ -1773,7 +1804,13 @@ pub fn accept_with_buf_factory<F: BufFactory>(
         original_destination_cid: odcid,
         retry_source_cid: scid,
     });
-    Connection::new(scid, retry_cids, None, local, peer, config, true)
+    Connection::new(
+        scid,
+        ConnectionStart::Server { retry: retry_cids },
+        local,
+        peer,
+        config,
+    )
 }
 
 /// A wrapper for connection IDs used in [`accept_with_retry`].
@@ -1784,6 +1821,35 @@ pub struct RetryConnectionIds<'a> {
     /// The SCID of the Retry packet sent by the server. This can be different
     /// from the new connection's SCID.
     pub retry_source_cid: &'a ConnectionId<'a>,
+}
+
+/// Role-specific inputs to connection creation. A client chooses an initial
+/// destination CID; only a server can restore a validated Retry exchange.
+enum ConnectionStart<'a> {
+    Client {
+        dcid: Option<&'a ConnectionId<'a>>,
+    },
+    Server {
+        retry: Option<RetryConnectionIds<'a>>,
+    },
+}
+
+impl ConnectionStart<'_> {
+    const fn is_server(&self) -> bool {
+        matches!(self, Self::Server { .. })
+    }
+
+    fn validate(&self) -> Result<()> {
+        if let Self::Client { dcid: Some(dcid) } = self {
+            // RFC 9000 section 7.2: Initial destination CIDs have at least
+            // eight bytes.
+            if !cfg!(feature = "custom-client-dcid") || dcid.len() < 8 {
+                return Err(Error::InvalidDcidInitialization);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Creates a new server-side connection after the client responded to a Retry
@@ -1811,7 +1877,15 @@ pub fn accept_with_retry<F: BufFactory>(
     scid: &ConnectionId, retry_cids: RetryConnectionIds, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection<F>> {
-    Connection::new(scid, Some(retry_cids), None, local, peer, config, true)
+    Connection::new(
+        scid,
+        ConnectionStart::Server {
+            retry: Some(retry_cids),
+        },
+        local,
+        peer,
+        config,
+    )
 }
 
 /// Creates a new client-side connection.
@@ -1842,7 +1916,13 @@ pub fn connect(
     server_name: Option<&str>, scid: &ConnectionId, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection> {
-    let mut conn = Connection::new(scid, None, None, local, peer, config, false)?;
+    let mut conn = Connection::new(
+        scid,
+        ConnectionStart::Client { dcid: None },
+        local,
+        peer,
+        config,
+    )?;
 
     if let Some(server_name) = server_name {
         conn.handshake.set_host_name(server_name)?;
@@ -1874,8 +1954,13 @@ pub fn connect_with_dcid(
     server_name: Option<&str>, scid: &ConnectionId, dcid: &ConnectionId,
     local: SocketAddr, peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection> {
-    let mut conn =
-        Connection::new(scid, None, Some(dcid), local, peer, config, false)?;
+    let mut conn = Connection::new(
+        scid,
+        ConnectionStart::Client { dcid: Some(dcid) },
+        local,
+        peer,
+        config,
+    )?;
 
     if let Some(server_name) = server_name {
         conn.handshake.set_host_name(server_name)?;
@@ -1899,7 +1984,13 @@ pub fn connect_with_buffer_factory<F: BufFactory>(
     server_name: Option<&str>, scid: &ConnectionId, local: SocketAddr,
     peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection<F>> {
-    let mut conn = Connection::new(scid, None, None, local, peer, config, false)?;
+    let mut conn = Connection::new(
+        scid,
+        ConnectionStart::Client { dcid: None },
+        local,
+        peer,
+        config,
+    )?;
 
     if let Some(server_name) = server_name {
         conn.handshake.set_host_name(server_name)?;
@@ -1929,8 +2020,13 @@ pub fn connect_with_dcid_and_buffer_factory<F: BufFactory>(
     server_name: Option<&str>, scid: &ConnectionId, dcid: &ConnectionId,
     local: SocketAddr, peer: SocketAddr, config: &mut Config,
 ) -> Result<Connection<F>> {
-    let mut conn =
-        Connection::new(scid, None, Some(dcid), local, peer, config, false)?;
+    let mut conn = Connection::new(
+        scid,
+        ConnectionStart::Client { dcid: Some(dcid) },
+        local,
+        peer,
+        config,
+    )?;
 
     if let Some(server_name) = server_name {
         conn.handshake.set_host_name(server_name)?;
@@ -2166,49 +2262,21 @@ impl Default for QlogInfo {
 
 impl<F: BufFactory> Connection<F> {
     fn new(
-        scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
-        client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
-        config: &mut Config, is_server: bool,
+        scid: &ConnectionId, start: ConnectionStart<'_>, local: SocketAddr,
+        peer: SocketAddr, config: &mut Config,
     ) -> Result<Self> {
         let tls = config.tls_ctx.new_handshake()?;
-        Self::with_tls(
-            scid,
-            retry_cids,
-            client_dcid,
-            local,
-            peer,
-            config,
-            tls,
-            is_server,
-        )
+        Self::with_tls(scid, start, local, peer, config, tls)
     }
 
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "The signature mirrors protocol state and grouping would obscure call sites"
-    )]
     fn with_tls(
-        scid: &ConnectionId, retry_cids: Option<RetryConnectionIds>,
-        client_dcid: Option<&ConnectionId>, local: SocketAddr, peer: SocketAddr,
-        config: &Config, tls: tls::Handshake, is_server: bool,
+        scid: &ConnectionId, start: ConnectionStart<'_>, local: SocketAddr,
+        peer: SocketAddr, config: &Config, tls: tls::Handshake,
     ) -> Result<Self> {
-        if retry_cids.is_some() && client_dcid.is_some() {
-            // These are exclusive, the caller should only specify one or the
-            // other.
-            return Err(Error::InvalidDcidInitialization);
-        }
-        #[cfg(feature = "custom-client-dcid")]
-        if let Some(client_dcid) = client_dcid {
-            // The Minimum length is 8.
-            // See https://datatracker.ietf.org/doc/html/rfc9000#section-7.2-3
-            if client_dcid.len() < 8 {
-                return Err(Error::InvalidDcidInitialization);
-            }
-        }
-        #[cfg(not(feature = "custom-client-dcid"))]
-        if client_dcid.is_some() {
-            return Err(Error::InvalidDcidInitialization);
-        }
+        start.validate()?;
+        let is_server = start.is_server();
+        let did_retry =
+            matches!(&start, ConnectionStart::Server { retry: Some(_) });
 
         let max_rx_data = config.local_transport_params.initial_max_data;
 
@@ -2232,7 +2300,7 @@ impl<F: BufFactory> Connection<F> {
         );
 
         // If we sent a Retry assume the peer's address is verified.
-        path.verified_peer_address = retry_cids.is_some();
+        path.verified_peer_address = did_retry;
 
         // Do not allocate more than the number of active CIDs. A wire limit
         // above the addressable collection size cannot constrain it further.
@@ -2357,7 +2425,7 @@ impl<F: BufFactory> Connection<F> {
 
             did_version_negotiation: false,
 
-            did_retry: false,
+            did_retry,
 
             got_peer_conn_id: false,
 
@@ -2366,11 +2434,9 @@ impl<F: BufFactory> Connection<F> {
 
             parsed_peer_transport_params: false,
 
-            handshake_completed: false,
+            handshake_progress: HandshakeProgress::default(),
 
             handshake_done: HandshakeDoneState::Pending,
-
-            handshake_confirmed: false,
 
             key_phase: false,
 
@@ -2411,32 +2477,41 @@ impl<F: BufFactory> Connection<F> {
 
             max_amplification_factor: config.max_amplification_factor,
         };
-        if let Some(retry_cids) = retry_cids {
-            conn.local_transport_params
+        conn.initialize_handshake(start, active_path_id)?;
+        Ok(conn)
+    }
+
+    /// Apply the role-specific transport parameters and install initial keys.
+    fn initialize_handshake(
+        &mut self, start: ConnectionStart<'_>, active_path_id: usize,
+    ) -> Result<()> {
+        if let ConnectionStart::Server {
+            retry: Some(retry_cids),
+        } = &start
+        {
+            self.local_transport_params
                 .original_destination_connection_id =
                 Some(ConnectionId::copy_from_slice(
                     retry_cids.original_destination_cid.as_ref(),
                 ));
 
-            conn.local_transport_params.retry_source_connection_id =
+            self.local_transport_params.retry_source_connection_id =
                 Some(ConnectionId::copy_from_slice(
                     retry_cids.retry_source_cid.as_ref(),
                 ));
-
-            conn.did_retry = true;
         }
 
-        conn.local_transport_params.initial_source_connection_id =
-            Some(conn.ids.get_scid(0)?.cid.clone());
+        self.local_transport_params.initial_source_connection_id =
+            Some(self.ids.get_scid(0)?.cid.clone());
 
-        conn.handshake.init(is_server)?;
+        self.handshake.init(start.is_server())?;
 
-        conn.handshake
-            .use_legacy_codepoint(config.version != PROTOCOL_VERSION_V1);
+        self.handshake
+            .use_legacy_codepoint(self.version != PROTOCOL_VERSION_V1);
 
-        conn.encode_transport_params()?;
+        self.encode_transport_params()?;
 
-        if !is_server {
+        if let ConnectionStart::Client { dcid: client_dcid } = start {
             let dcid = client_dcid.map_or_else(
                 || {
                     // Derive initial secrets for the client. We can do this
@@ -2450,20 +2525,20 @@ impl<F: BufFactory> Connection<F> {
 
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &dcid,
-                conn.is_server,
+                self.is_server,
                 crypto::CounterInitialization::FirstPacket,
             )?;
 
-            let reset_token = conn.peer_transport_params.stateless_reset_token;
-            conn.set_initial_dcid(dcid, reset_token, active_path_id)?;
+            let reset_token = self.peer_transport_params.stateless_reset_token;
+            self.set_initial_dcid(dcid, reset_token, active_path_id)?;
 
-            conn.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
-            conn.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
+            self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
+            self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
-            conn.derived_initial_secrets = true;
+            self.derived_initial_secrets = true;
         }
 
-        Ok(conn)
+        Ok(())
     }
 
     /// Sets keylog output to the designated [`Writer`].
@@ -3631,7 +3706,7 @@ impl<F: BufFactory> Connection<F> {
         // Check for key update.
         let mut aead_next = None;
 
-        if self.handshake_confirmed &&
+        if self.handshake_progress.confirmed() &&
             hdr.ty == Type::Short &&
             hdr.key_phase != self.key_phase
         {
@@ -4466,8 +4541,8 @@ impl<F: BufFactory> Connection<F> {
                 .unwrap_or(usize::MAX)
                 .min(MAX_SEND_UDP_PAYLOAD_SIZE);
         let handshake_ready =
-            self.handshake_confirmed && self.handshake_completed;
-        let mut limit = if self.handshake_completed {
+            self.handshake_progress == HandshakeProgress::Confirmed;
+        let mut limit = if self.handshake_progress.completed() {
             send_path.recovery.max_datagram_size().min(peer_limit)
         } else {
             MIN_CLIENT_INITIAL_LEN
@@ -4842,7 +4917,7 @@ impl<F: BufFactory> Connection<F> {
         // will exhaust the number space and silently close the connection.
         let should_skip = self.next_pkt_num < octets::MAX_VAR_INT - 1 &&
             self.pkt_num_manager
-                .should_skip_pn(self.handshake_completed);
+                .should_skip_pn(self.handshake_progress.completed());
         let pn = self.next_pkt_num + u64::from(should_skip);
         let pn_len = packet::pkt_num_len(
             pn,
@@ -5182,7 +5257,7 @@ impl<F: BufFactory> Connection<F> {
         // Generate PMTUD probes only after handshake confirmation to avoid
         // interference from anti-amplification limits.
         if let Some(probe_size) = path.pmtu_probe_size(
-            self.handshake_confirmed && self.handshake_completed,
+            self.handshake_progress == HandshakeProgress::Confirmed,
             header.output_capacity,
             is_closing || !assembly.frames.is_empty(),
         ) {
@@ -5548,7 +5623,7 @@ impl<F: BufFactory> Connection<F> {
             has_handshake_keys: self.crypto_ctx[packet::Epoch::Handshake]
                 .has_keys(),
             peer_verified_address: self.peer_verified_initial_address,
-            completed: self.handshake_completed,
+            completed: self.handshake_progress.completed(),
         };
 
         self.on_packet_sent(send_pid, sent_pkt, epoch, handshake_status, now)?;
@@ -6156,7 +6231,7 @@ impl<F: BufFactory> Connection<F> {
         self.pkt_num_manager.on_packet_sent(
             cwnd,
             max_datagram_size,
-            self.handshake_completed,
+            self.handshake_progress.completed(),
         );
 
         path.recovery.on_packet_sent(
@@ -8433,7 +8508,7 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result indicates whether handshake establishment is complete"]
     pub const fn is_established(&self) -> bool {
-        self.handshake_completed
+        self.handshake_progress.completed()
     }
 
     /// Returns true if the connection is resumed.
@@ -8840,7 +8915,7 @@ impl<F: BufFactory> Connection<F> {
             is_server: self.is_server,
         };
 
-        if self.handshake_completed {
+        if self.handshake_progress.completed() {
             return self.handshake.process_post_handshake(&mut ex_data);
         }
 
@@ -8905,16 +8980,18 @@ impl<F: BufFactory> Connection<F> {
             return Ok(());
         }
 
-        self.handshake_completed = self.handshake.is_completed();
+        if self.handshake.is_completed() {
+            self.handshake_progress.mark_completed();
+        }
         self.alpn = self.handshake.alpn_protocol().to_vec();
         self.parse_available_peer_transport_params()?;
 
-        if self.handshake_completed {
+        if self.handshake_progress.completed() {
             // The handshake is considered confirmed at the server when the
             // handshake completes, at which point we can also drop the
             // handshake epoch.
             if self.is_server {
-                self.handshake_confirmed = true;
+                self.handshake_progress.confirm();
 
                 self.drop_epoch_state(packet::Epoch::Handshake, now);
             }
@@ -8952,7 +9029,7 @@ impl<F: BufFactory> Connection<F> {
                 crypto::Level::OneRTT => packet::Epoch::Application,
             };
 
-            if !self.handshake_confirmed {
+            if !self.handshake_progress.confirmed() {
                 match epoch {
                     // Downgrade the epoch to Handshake as the handshake is not
                     // completed yet.
@@ -9670,7 +9747,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         self.peer_verified_initial_address = true;
-        self.handshake_confirmed = true;
+        self.handshake_progress.confirm();
         self.drop_epoch_state(packet::Epoch::Handshake, now);
         Ok(())
     }

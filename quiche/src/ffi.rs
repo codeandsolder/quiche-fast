@@ -92,6 +92,7 @@ use crate::CongestionControlAlgorithm;
 use crate::Connection;
 use crate::ConnectionError;
 use crate::ConnectionId;
+use crate::ConnectionStart;
 use crate::Error;
 use crate::Header;
 use crate::PathEvent;
@@ -1057,13 +1058,13 @@ pub extern "C" fn quiche_conn_new_with_tls_and_client_dcid(
 
         into_raw_or_null(Connection::with_tls(
             &scid,
-            None, // retry_cids
-            dcid.as_ref(),
+            ConnectionStart::Client {
+                dcid: dcid.as_ref(),
+            },
             local,
             peer,
             config,
             tls,
-            false,
         ))
     }
 }
@@ -1115,9 +1116,13 @@ pub extern "C" fn quiche_conn_new_with_tls(
         return ptr::null_mut();
     };
 
-    into_raw_or_null(Connection::with_tls(
-        &scid, retry_cids, None, local, peer, config, tls, is_server,
-    ))
+    let start = match (is_server, retry_cids) {
+        (true, retry) => ConnectionStart::Server { retry },
+        (false, None) => ConnectionStart::Client { dcid: None },
+        (false, Some(_)) => return ptr::null_mut(),
+    };
+
+    into_raw_or_null(Connection::with_tls(&scid, start, local, peer, config, tls))
 }
 
 #[no_mangle]
