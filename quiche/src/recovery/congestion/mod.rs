@@ -92,7 +92,7 @@ pub struct Congestion {
     // RFC6937 PRR.
     pub(crate) prr: prr::PRR,
 
-    pub(crate) congestion_window: usize,
+    pub(crate) cwnd: usize,
 
     pub(crate) ssthresh: SsThresh,
 
@@ -100,7 +100,7 @@ pub struct Congestion {
 
     bytes_acked_ca: usize,
 
-    pub(crate) congestion_recovery_start_time: Option<Instant>,
+    pub(crate) recovery_started_at: Option<Instant>,
 
     pub(crate) app_limited: bool,
 
@@ -121,7 +121,7 @@ impl Congestion {
             .saturating_mul(recovery_config.initial_congestion_window_packets);
 
         let mut cc = Self {
-            congestion_window: initial_congestion_window,
+            cwnd: initial_congestion_window,
 
             ssthresh: SsThresh::default(),
 
@@ -129,7 +129,7 @@ impl Congestion {
 
             bytes_acked_ca: 0,
 
-            congestion_recovery_start_time: None,
+            recovery_started_at: None,
 
             cc_ops: recovery_config.cc_algorithm.into(),
 
@@ -159,10 +159,10 @@ impl Congestion {
     /// Persistent congestion is not a reversible single loss event: discard
     /// every curve checkpoint, pending growth credit and recovery allowance.
     fn on_persistent_congestion(&mut self) {
-        self.congestion_window = self
+        self.cwnd = self
             .max_datagram_size
             .saturating_mul(super::MINIMUM_WINDOW_PACKETS);
-        self.congestion_recovery_start_time = None;
+        self.recovery_started_at = None;
         self.bytes_acked_sl = 0;
         self.bytes_acked_ca = 0;
         self.cubic_state = cubic::State::default();
@@ -171,7 +171,7 @@ impl Congestion {
     }
 
     pub(crate) fn in_congestion_recovery(&self, sent_time: Instant) -> bool {
-        self.congestion_recovery_start_time
+        self.recovery_started_at
             .is_some_and(|start| sent_time <= start)
     }
 
@@ -185,8 +185,8 @@ impl Congestion {
             .saturating_mul(self.initial_congestion_window_packets)
     }
 
-    pub(crate) const fn congestion_window(&self) -> usize {
-        self.congestion_window
+    pub(crate) const fn window(&self) -> usize {
+        self.cwnd
     }
 
     const fn update_app_limited(&mut self, v: bool) {
@@ -199,8 +199,7 @@ impl Congestion {
     ) {
         if in_flight {
             self.update_app_limited(
-                bytes_in_flight.saturating_add(sent_bytes) <
-                    self.congestion_window,
+                bytes_in_flight.saturating_add(sent_bytes) < self.cwnd,
             );
 
             (self.cc_ops.on_packet_sent)(self, sent_bytes, bytes_in_flight, now);
@@ -208,9 +207,7 @@ impl Congestion {
             self.prr.on_packet_sent(sent_bytes);
 
             // HyStart++: Start of the round in a slow start.
-            if self.hystart.enabled() &&
-                self.congestion_window < self.ssthresh.get()
-            {
+            if self.hystart.enabled() && self.cwnd < self.ssthresh.get() {
                 self.hystart.start_round(pkt.pkt_num);
             }
         }
@@ -245,6 +242,9 @@ impl Congestion {
     }
 }
 
+type CongestionDebugFormatter =
+    fn(&Congestion, &mut std::fmt::Formatter) -> std::fmt::Result;
+
 pub struct CongestionControlOps {
     pub on_init: fn(r: &mut Congestion),
 
@@ -278,17 +278,14 @@ pub struct CongestionControlOps {
     #[cfg(feature = "qlog")]
     pub state_str: fn(r: &Congestion, now: Instant) -> &'static str,
 
-    pub debug_fmt: fn(
-        r: &Congestion,
-        formatter: &mut std::fmt::Formatter,
-    ) -> std::fmt::Result,
+    pub debug_fmt: Option<CongestionDebugFormatter>,
 }
 
 impl From<CongestionControlAlgorithm> for &'static CongestionControlOps {
     fn from(algo: CongestionControlAlgorithm) -> Self {
         match algo {
             CongestionControlAlgorithm::Reno => &reno::RENO,
-            CongestionControlAlgorithm::CUBIC => &cubic::CUBIC,
+            CongestionControlAlgorithm::Cubic => &cubic::CUBIC,
             // Bbr2Gcongestion is routed to the congestion implementation in
             // the gcongestion directory by Recovery::new_with_config;
             // LegacyRecovery never gets a RecoveryConfig with the

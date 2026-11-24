@@ -10798,7 +10798,7 @@ fn in_handshake_config(
     let custom_cc_algorithm = if cc_algorithm_name == "cubic" {
         CongestionControlAlgorithm::Bbr2Gcongestion
     } else {
-        CongestionControlAlgorithm::CUBIC
+        CongestionControlAlgorithm::Cubic
     };
 
     // Manually construct `SslContextBuilder` for the server so we can modify

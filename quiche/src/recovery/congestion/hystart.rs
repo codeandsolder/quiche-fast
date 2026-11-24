@@ -192,7 +192,7 @@ impl Hystart {
     }
 
     // Return a cwnd increment during CSS (Conservative Slow Start).
-    pub const fn css_cwnd_inc(&self, pkt_size: usize) -> usize {
+    pub const fn css_cwnd_inc(pkt_size: usize) -> usize {
         pkt_size / CSS_GROWTH_DIVISOR
     }
 
@@ -220,10 +220,9 @@ mod tests {
 
     #[test]
     fn css_cwnd_inc() {
-        let hspp = Hystart::default();
         let datagram_size = 1200;
 
-        let css_cwnd_inc = hspp.css_cwnd_inc(datagram_size);
+        let css_cwnd_inc = Hystart::css_cwnd_inc(datagram_size);
 
         assert_eq!(datagram_size / CSS_GROWTH_DIVISOR, css_cwnd_inc);
     }

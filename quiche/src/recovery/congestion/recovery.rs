@@ -892,7 +892,7 @@ impl RecoveryOps for LegacyRecovery {
     }
 
     fn cwnd(&self) -> usize {
-        self.congestion.congestion_window()
+        self.congestion.window()
     }
 
     fn cwnd_available(&self) -> usize {
@@ -958,10 +958,9 @@ impl RecoveryOps for LegacyRecovery {
         if self.congestion.ssthresh.startup_exit().is_none() &&
             self.cwnd() == self.congestion.send_quantum()
         {
-            self.congestion.congestion_window = new_max_datagram_size
-                .saturating_mul(
-                    self.congestion.initial_congestion_window_packets,
-                );
+            self.congestion.cwnd = new_max_datagram_size.saturating_mul(
+                self.congestion.initial_congestion_window_packets,
+            );
         }
 
         self.congestion.max_datagram_size = new_max_datagram_size;
@@ -1143,7 +1142,7 @@ impl std::fmt::Debug for LegacyRecovery {
         write!(
             f,
             "congestion_recovery_start_time={:?} ",
-            self.congestion.congestion_recovery_start_time
+            self.congestion.recovery_started_at
         )?;
         write!(f, "{:?} ", self.congestion.delivery_rate)?;
 
@@ -1152,7 +1151,9 @@ impl std::fmt::Debug for LegacyRecovery {
         }
 
         // CC-specific debug info
-        (self.congestion.cc_ops.debug_fmt)(&self.congestion, f)?;
+        if let Some(debug_fmt) = self.congestion.cc_ops.debug_fmt {
+            debug_fmt(&self.congestion, f)?;
+        }
 
         Ok(())
     }
