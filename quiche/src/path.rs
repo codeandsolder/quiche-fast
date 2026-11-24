@@ -1891,229 +1891,76 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multiple_probes() {
+    #[rstest::rstest]
+    fn challenge_queue_bounds_and_response_retirement(
+        #[values(2, 4)] sent_count: usize,
+    ) {
         let client_addr = "127.0.0.1:1234".parse().unwrap();
         let server_addr = "127.0.0.1:4321".parse().unwrap();
-
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = config.recovery;
-
+        let queue_limit = config.path_challenge_recv_max_queue_len;
         let path = Path::new(
             client_addr,
             server_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            &config.recovery,
+            queue_limit,
             true,
             None,
         );
-        let mut client_path_mgr = PathMap::new(path, 2, false);
-        let mut server_path = Path::new(
+        let mut paths = PathMap::new(path, 2, false);
+        let mut peer = Path::new(
             server_addr,
             client_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            &config.recovery,
+            queue_limit,
             false,
             None,
         );
-
-        let client_pid = client_path_mgr
+        let pid = paths
             .path_id_from_addrs(&(client_addr, server_addr))
             .unwrap();
-
-        // First probe.
-        let data = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
-
-        // Second probe.
-        let data_2 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
+        let challenges: Vec<_> =
+            (0..sent_count).map(|i| (i as u64).to_be_bytes()).collect();
+        let now = Instant::now();
+        for (i, &data) in challenges.iter().enumerate() {
+            paths.get_mut(pid).unwrap().add_challenge_sent(
+                data,
+                MIN_CLIENT_INITIAL_LEN,
+                now,
+            );
+            assert_eq!(
+                paths
+                    .get(pid)
+                    .unwrap()
+                    .validation
+                    .in_flight_challenges
+                    .len(),
+                i + 1
+            );
+            peer.on_challenge_received(data);
+            assert_eq!(peer.received_challenges.len(), (i + 1).min(queue_limit));
+        }
+        // A challenge dropped by the bounded receive queue is never answered.
+        for (i, &data) in challenges.iter().take(queue_limit).enumerate() {
+            paths.on_response_received(data).unwrap();
+            assert_eq!(
+                paths
+                    .get(pid)
+                    .unwrap()
+                    .validation
+                    .in_flight_challenges
+                    .len(),
+                sent_count - i - 1
+            );
+        }
         assert_eq!(
-            client_path_mgr
-                .get(client_pid)
+            paths
+                .get(pid)
                 .unwrap()
                 .validation
                 .in_flight_challenges
                 .len(),
-            2
+            sent_count.saturating_sub(queue_limit)
         );
-
-        // If we receive multiple challenges, we can store them.
-        server_path.on_challenge_received(data);
-        assert_eq!(server_path.received_challenges.len(), 1);
-        server_path.on_challenge_received(data_2);
-        assert_eq!(server_path.received_challenges.len(), 2);
-
-        // Response for first probe.
-        client_path_mgr.on_response_received(data).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            1
-        );
-
-        // Response for second probe.
-        client_path_mgr.on_response_received(data_2).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn too_many_probes() {
-        let client_addr = "127.0.0.1:1234".parse().unwrap();
-        let server_addr = "127.0.0.1:4321".parse().unwrap();
-
-        // Default to DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN
-        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let recovery_config = config.recovery;
-
-        let path = Path::new(
-            client_addr,
-            server_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
-            true,
-            None,
-        );
-        let mut client_path_mgr = PathMap::new(path, 2, false);
-        let mut server_path = Path::new(
-            server_addr,
-            client_addr,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
-            false,
-            None,
-        );
-
-        let client_pid = client_path_mgr
-            .path_id_from_addrs(&(client_addr, server_addr))
-            .unwrap();
-
-        // First probe.
-        let data = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data, MIN_CLIENT_INITIAL_LEN, Instant::now());
-
-        // Second probe.
-        let data_2 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_2, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            2
-        );
-
-        // Third probe.
-        let data_3 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_3, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            3
-        );
-
-        // Fourth probe.
-        let data_4 = rand::rand_u64().to_be_bytes();
-
-        client_path_mgr
-            .get_mut(client_pid)
-            .unwrap()
-            .add_challenge_sent(data_4, MIN_CLIENT_INITIAL_LEN, Instant::now());
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            4
-        );
-
-        // If we receive multiple challenges, we can store them up to our queue
-        // size.
-        server_path.on_challenge_received(data);
-        assert_eq!(server_path.received_challenges.len(), 1);
-        server_path.on_challenge_received(data_2);
-        assert_eq!(server_path.received_challenges.len(), 2);
-        server_path.on_challenge_received(data_3);
-        assert_eq!(server_path.received_challenges.len(), 3);
-        server_path.on_challenge_received(data_4);
-        assert_eq!(server_path.received_challenges.len(), 3);
-
-        // Response for first probe.
-        client_path_mgr.on_response_received(data).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            3
-        );
-
-        // Response for second probe.
-        client_path_mgr.on_response_received(data_2).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            2
-        );
-
-        // Response for third probe.
-        client_path_mgr.on_response_received(data_3).unwrap();
-        assert_eq!(
-            client_path_mgr
-                .get(client_pid)
-                .unwrap()
-                .validation
-                .in_flight_challenges
-                .len(),
-            1
-        );
-
-        // There will never be a response for fourth probe...
     }
 }

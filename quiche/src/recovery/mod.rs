@@ -1174,129 +1174,45 @@ mod tests {
         );
     }
 
+    fn sent_fixture(
+        pn: u64, now: Instant, size: usize, flight: PacketFlight,
+    ) -> Sent {
+        Sent {
+            flight,
+            ..test_utils::helper_packet_sent(pn, now, size)
+        }
+    }
+
+    /// Identical initial send/flight observations for both timer scenarios.
+    fn recovery_with_four_sent_packets(
+        cc_algorithm_name: &str, now: Instant,
+    ) -> Recovery {
+        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
+        let mut r = Recovery::new(&cfg);
+        let epoch = packet::Epoch::Application;
+        assert_eq!(r.sent_packets_len(epoch), 0);
+        for pn in 0..4 {
+            r.on_packet_sent(
+                sent_fixture(pn, now, 1000, PacketFlight::AckEliciting),
+                epoch,
+                HandshakeStatus::default(),
+                now,
+                "",
+            );
+            assert_eq!(r.sent_packets_len(epoch), pn as usize + 1);
+            assert_eq!(r.bytes_in_flight(), (pn as usize + 1) * 1000);
+            assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        }
+        r
+    }
+
     #[rstest]
     fn loss_on_pto(
         #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
-        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-
-        let mut r = Recovery::new(&cfg);
-
         let mut now = Instant::now();
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-
-        // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 3,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 4000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        let mut r = recovery_with_four_sent_packets(cc_algorithm_name, now);
 
         // Wait for 10ms.
         now += Duration::from_millis(10);
@@ -1338,21 +1254,7 @@ mod tests {
         assert_eq!(r.lost_count(), 0);
         assert_eq!(r.pto_count(), 1);
 
-        let p = Sent {
-            pkt_num: 4,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(4, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -1365,21 +1267,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight(), 3000);
         assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(30));
 
-        let p = Sent {
-            pkt_num: 5,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(5, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -1496,123 +1384,8 @@ mod tests {
     fn loss_on_timer(
         #[values("reno", "cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
     ) {
-        let mut cfg = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        assert_eq!(cfg.set_cc_algorithm_name(cc_algorithm_name), Ok(()));
-
-        let mut r = Recovery::new(&cfg);
-
         let mut now = Instant::now();
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-
-        // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
-
-        let p = Sent {
-            pkt_num: 3,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
-
-        r.on_packet_sent(
-            p,
-            packet::Epoch::Application,
-            HandshakeStatus::default(),
-            now,
-            "",
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 4000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        let mut r = recovery_with_four_sent_packets(cc_algorithm_name, now);
 
         // Wait for 10ms.
         now += Duration::from_millis(10);
@@ -2262,21 +2035,7 @@ mod tests {
         assert_eq!(r.cwnd(), 12000 + 1200 * 10);
 
         // Send the second packet burst.
-        let p = Sent {
-            pkt_num: 10,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 6000,
-            flight: PacketFlight::Data,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(10, now, 6000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2299,21 +2058,7 @@ mod tests {
         }
 
         // Send the third and fourth packet bursts together.
-        let p = Sent {
-            pkt_num: 11,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 6000,
-            flight: PacketFlight::Data,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(11, now, 6000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2328,21 +2073,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
 
         // Send the fourth packet burst.
-        let p = Sent {
-            pkt_num: 12,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::Data,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(12, now, 1000, PacketFlight::Data);
 
         r.on_packet_sent(
             p,
@@ -2751,21 +2482,7 @@ mod tests {
         assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
 
         // Start by sending a few packets.
-        let p = Sent {
-            pkt_num: 0,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(0, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
@@ -2780,21 +2497,7 @@ mod tests {
         assert_eq!(r.bytes_in_flight(), 1000);
         assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
 
-        let p = Sent {
-            pkt_num: 1,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::PmtuProbe,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(1, now, 1000, PacketFlight::PmtuProbe);
 
         r.on_packet_sent(
             p,
@@ -2806,21 +2509,7 @@ mod tests {
 
         assert_eq!(r.in_flight_count(packet::Epoch::Application), 2);
 
-        let p = Sent {
-            pkt_num: 2,
-            frames: smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
-            size: 1000,
-            flight: PacketFlight::AckEliciting,
-            delivered: 0,
-            delivered_time: now,
-            first_sent_time: now,
-            is_app_limited: false,
-            tx_in_flight: 0,
-            lost: 0,
-        };
+        let p = sent_fixture(2, now, 1000, PacketFlight::AckEliciting);
 
         r.on_packet_sent(
             p,
