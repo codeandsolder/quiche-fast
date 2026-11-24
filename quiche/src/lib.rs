@@ -1411,6 +1411,39 @@ enum HandshakeDoneState {
     Acknowledged,
 }
 
+/// STREAM emission, including a pending stream that could not fit.
+#[derive(Default)]
+struct StreamPacketEmission {
+    emitted: bool,
+    skipped: bool,
+    retransmitted_bytes: u64,
+    retransmitted_fin: bool,
+}
+
+/// Data-bearing frames emitted into one packet. DATAGRAM is intentionally
+/// separate because the legacy congestion controller excludes it from data
+/// accounting, while gcongestion includes it.
+#[derive(Default)]
+struct PacketDataEmission {
+    crypto_retransmitted_bytes: Option<u64>,
+    stream: StreamPacketEmission,
+    datagram_emitted: bool,
+}
+
+impl PacketDataEmission {
+    const fn has_data(&self) -> bool {
+        self.crypto_retransmitted_bytes.is_some() || self.stream.emitted
+    }
+
+    const fn retransmitted_bytes(&self) -> u64 {
+        let crypto_bytes = match self.crypto_retransmitted_bytes {
+            Some(bytes) => bytes,
+            None => 0,
+        };
+        crypto_bytes.saturating_add(self.stream.retransmitted_bytes)
+    }
+}
+
 /// A QUIC connection.
 pub struct Connection<F = DefaultBufFactory>
 where
@@ -4873,10 +4906,6 @@ impl<F: BufFactory> Connection<F> {
         let mut ack_eliciting = false;
         let mut in_flight = false;
         let mut is_pmtud_probe = false;
-        let mut has_data = false;
-        let mut stream_data_skipped = false;
-        let mut retransmitted_bytes = 0_u64;
-        let mut retransmitted_fin = false;
 
         // Whether a PING frame must explicitly elicit an ACK when no other
         // frame does so implicitly.
@@ -5061,7 +5090,6 @@ impl<F: BufFactory> Connection<F> {
         }
 
         let path = self.paths.get_mut(send_pid)?;
-        let crypto_ctx = &mut self.crypto_ctx[epoch];
 
         // Try to send closure on the active path, unless it is the last path.
         if let Some(conn_err) = self
@@ -5094,262 +5122,25 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        // Create CRYPTO frame.
-        if crypto_ctx.crypto_stream.is_flushable() && !is_closing && path.active()
-        {
-            let crypto_off = crypto_ctx.crypto_stream.send.off_front();
-
-            // Encode the frame.
-            //
-            // Instead of creating a `frame::Frame` object, encode the frame
-            // directly into the packet buffer.
-            //
-            // First we reserve some space in the output buffer for writing the
-            // frame header, with a length width selected from the available
-            // packet space.
-            //
-            // Then we emit the data from the crypto stream's send buffer.
-            //
-            // Finally we go back and encode the frame header with the now
-            // available information.
-            let hdr_off = b.off();
-            let fixed = 1 + octets::varint_len(crypto_off);
-
-            if let Some((max_len, width)) = left
-                .checked_sub(fixed)
-                .and_then(frame::payload_capacity)
-                .filter(|(capacity, _)| *capacity > 0)
-            {
-                let hdr_len = fixed + width;
-                frame::FrameSink::put_padding(b, hdr_len)?;
-                let emission = crypto_ctx
-                    .crypto_stream
-                    .send
-                    .emit(bytes::BufMut::limit(&mut *b, max_len));
-                let len = emission.len;
-                retransmitted_bytes = emission.retransmitted_bytes;
-                let mut crypto_hdr = b.patch(hdr_off, hdr_len)?;
-                frame::encode_crypto_header(
-                    crypto_off,
-                    len as u64,
-                    width,
-                    &mut crypto_hdr,
-                )?;
-
-                // The payload and its header were encoded above. Only
-                // record recovery metadata and account for the written bytes.
-                left -= hdr_len + len;
-                frames.push(frame::Frame::CryptoHeader {
-                    offset: crypto_off,
-                    length: len,
-                });
-                ack_eliciting = true;
-                in_flight = true;
-                has_data = true;
-            }
+        let payload = self.emit_packet_data(
+            b,
+            &mut frames,
+            &mut left,
+            send_pid,
+            pkt_type,
+            max_dgram_len,
+        )?;
+        let has_data = payload.has_data();
+        let dgram_emitted = payload.datagram_emitted;
+        let stream_data_skipped = payload.stream.skipped;
+        let retransmitted_bytes = payload.retransmitted_bytes();
+        let retransmitted_fin = payload.stream.retransmitted_fin;
+        if has_data || dgram_emitted {
+            ack_eliciting = true;
+            in_flight = true;
         }
-
-        // The preference of data-bearing frame to include in a packet
-        // is managed by `self.emit_dgram`. However, whether any frames
-        // can be sent depends on the state of their buffers. In the case
-        // where one type is preferred but its buffer is empty, fall back
-        // to the other type in order not to waste this function call.
-        let mut dgram_emitted = false;
-        let dgrams_to_emit = max_dgram_len.is_some();
-        let stream_to_emit = self.streams.has_flushable();
-
-        let mut do_dgram = self.emit_dgram && dgrams_to_emit;
-        let do_stream = !self.emit_dgram && stream_to_emit;
-
-        if !do_stream && dgrams_to_emit {
-            do_dgram = true;
-        }
-
-        // Create DATAGRAM frame.
-        if (pkt_type == Type::Short || pkt_type == Type::ZeroRTT) &&
-            left >= 3 &&
-            !is_closing &&
-            path.active() &&
-            do_dgram
-        {
-            if let Some(max_dgram_payload) = max_dgram_len {
-                while let Some(len) = self.dgram_send_queue.peek_front_len() {
-                    let hdr_len = 1 + frame::payload_length_width(len as u64);
-
-                    if (hdr_len + len) <= left {
-                        // Front of the queue fits this packet, send it.
-                        match self.dgram_send_queue.pop() {
-                            Some(data) => {
-                                // The queued datagram already has a known
-                                // length.
-                                frame::encode_dgram_header(len as u64, b)?;
-                                frame::FrameSink::put_bytes(b, data.as_ref())?;
-
-                                // The DATAGRAM header and payload were already
-                                // encoded directly above. Avoid routing the
-                                // metadata-only DatagramHeader through
-                                // the frame serializer.
-                                left -= hdr_len + len;
-                                frames.push(frame::Frame::DatagramHeader {
-                                    length: len,
-                                });
-                                ack_eliciting = true;
-                                in_flight = true;
-                                dgram_emitted = true;
-                                self.dgram_sent_count =
-                                    self.dgram_sent_count.saturating_add(1);
-                                path.dgram_sent_count =
-                                    path.dgram_sent_count.saturating_add(1);
-                            },
-
-                            None => continue,
-                        }
-                    } else if len > max_dgram_payload {
-                        // This dgram frame will never fit. Let's purge it.
-                        self.dgram_send_queue.pop();
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Create a single STREAM frame for the first stream that is flushable.
-        if (pkt_type == Type::Short || pkt_type == Type::ZeroRTT) &&
-            !is_closing &&
-            path.active() &&
-            !dgram_emitted
-        {
-            while let Some(priority_key) = self.streams.peek_flushable() {
-                let stream_id = priority_key.id;
-                let stream = match self.streams.get_mut(stream_id) {
-                    // Revalidate the intrusive queue entry before emission.
-                    // ACK processing can remove retransmit data while leaving a
-                    // stale flushable node queued. Empty FIN is the one valid
-                    // zero-payload case and must remain eligible.
-                    Some(v) if v.is_flushable() => v,
-                    _ => {
-                        self.streams.remove_flushable(&priority_key);
-                        continue;
-                    },
-                };
-
-                let stream_off = stream.send.off_front();
-
-                // Encode the frame.
-                //
-                // Instead of creating a `frame::Frame` object, encode the frame
-                // directly into the packet buffer.
-                //
-                // First we reserve some space in the output buffer for writing
-                // the frame header, choosing a length width that can encode
-                // the largest payload fitting in the remaining space.
-                //
-                // Then we emit the data from the stream's send buffer.
-                //
-                // Finally we go back and encode the frame header with the now
-                // available information.
-                let hdr_off = b.off();
-                let fixed = 1 +
-                    octets::varint_len(stream_id) +
-                    octets::varint_len(stream_off);
-
-                // A non-FIN STREAM frame must carry at least one byte. If the
-                // header and payload don't fit, leave the stream flushable for
-                // a later packet. Empty FIN frames only need the header.
-                let (max_len, width) = match left
-                    .checked_sub(fixed)
-                    .and_then(frame::payload_capacity)
-                {
-                    Some((v, width)) if v > 0 || stream.send.empty_fin_next() =>
-                        (v, width),
-                    _ => {
-                        stream_data_skipped = true;
-
-                        if stream.incremental() {
-                            let priority_key = Arc::clone(stream.priority_key());
-                            self.streams.remove_flushable(&priority_key);
-                            self.streams.enqueue(
-                                &priority_key,
-                                stream::PriorityQueue::Flushable,
-                            );
-                        }
-
-                        break;
-                    },
-                };
-
-                let hdr_len = fixed + width;
-                frame::FrameSink::put_padding(b, hdr_len)?;
-                let emission =
-                    stream.send.emit(bytes::BufMut::limit(&mut *b, max_len));
-                let len = emission.len;
-                let fin = emission.fin;
-
-                // ACK processing can leave a stream in the flushable queue
-                // after removing all of its retransmission data. Unlink the
-                // stale entry and continue with the next stream;
-                // future retransmits or writedata will queue the stream again.
-                if len == 0 && !fin {
-                    b.rewind(hdr_len)?;
-                    let priority_key = Arc::clone(stream.priority_key());
-                    self.streams.remove_flushable(&priority_key);
-                    continue;
-                }
-
-                let mut stream_hdr = b.patch(hdr_off, hdr_len)?;
-                frame::encode_stream_header(
-                    stream_id,
-                    stream_off,
-                    len as u64,
-                    fin,
-                    width,
-                    &mut stream_hdr,
-                )?;
-
-                retransmitted_bytes = retransmitted_bytes
-                    .saturating_add(emission.retransmitted_bytes);
-                retransmitted_fin = emission.retransmitted_fin;
-
-                // The payload and its header were encoded above. Only
-                // record recovery metadata and account for the written bytes.
-                left -= hdr_len + len;
-                frames.push(frame::Frame::StreamHeader {
-                    stream_id,
-                    offset: stream_off,
-                    length: len,
-                    fin,
-                });
-                ack_eliciting = true;
-                in_flight = true;
-                has_data = true;
-
-                let priority_key = Arc::clone(stream.priority_key());
-                // Remove the stream when it is no longer flushable.
-                if !stream.is_flushable() {
-                    self.streams.remove_flushable(&priority_key);
-                } else if stream.incremental() {
-                    // Shuffle the incremental stream to the back of the
-                    // queue.
-                    self.streams.remove_flushable(&priority_key);
-                    self.streams
-                        .enqueue(&priority_key, stream::PriorityQueue::Flushable);
-                }
-
-                // Update tx_buffered when data is emitted.
-                self.streams.sub_tx_buffered(len as u64);
-
-                #[cfg(feature = "fuzzing")]
-                // Coalesce STREAM frames when fuzzing.
-                continue;
-
-                #[cfg(not(feature = "fuzzing"))]
-                break;
-            }
-        }
-
-        // Alternate trying to send DATAGRAMs next time.
-        self.emit_dgram = !dgram_emitted;
+        let path = self.paths.get_mut(send_pid)?;
+        let crypto_ctx = &mut self.crypto_ctx[epoch];
 
         // If no other ack-eliciting frame is sent, include a PING frame
         // - if PTO probe needed; OR
@@ -5627,6 +5418,268 @@ impl<F: BufFactory> Connection<F> {
         }
 
         Ok((pkt_type, written))
+    }
+
+    /// Emit CRYPTO first, then choose between DATAGRAM and STREAM.
+    fn emit_packet_data(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+        send_pid: usize, pkt_type: Type, max_dgram_len: Option<usize>,
+    ) -> Result<PacketDataEmission> {
+        let mut emission = PacketDataEmission::default();
+        if self.local_error.is_some() || !self.paths.get(send_pid)?.active() {
+            self.emit_dgram = true;
+            return Ok(emission);
+        }
+
+        let crypto_stream =
+            &mut self.crypto_ctx[pkt_type.to_epoch()?].crypto_stream;
+        if crypto_stream.is_flushable() {
+            emission.crypto_retransmitted_bytes =
+                Self::emit_crypto_frame(crypto_stream, b, frames, left)?;
+        }
+
+        if matches!(pkt_type, Type::Short | Type::ZeroRTT) {
+            // Alternate between the queues when both have data. Fall back to
+            // STREAM when a preferred datagram cannot be emitted.
+            if *left >= 3 && (self.emit_dgram || !self.streams.has_flushable()) {
+                if let Some(max_payload) = max_dgram_len {
+                    emission.datagram_emitted = self.emit_datagram_frames(
+                        b,
+                        frames,
+                        left,
+                        send_pid,
+                        max_payload,
+                    )?;
+                }
+            }
+            if !emission.datagram_emitted {
+                emission.stream = self.emit_stream_frames(b, frames, left)?;
+            }
+        }
+
+        self.emit_dgram = !emission.datagram_emitted;
+        Ok(emission)
+    }
+
+    /// Serialize CRYPTO directly, returning the retransmitted byte count
+    /// only if a frame was actually written.
+    fn emit_crypto_frame(
+        crypto_stream: &mut stream::Stream, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+    ) -> Result<Option<u64>> {
+        let crypto_off = crypto_stream.send.off_front();
+
+        // Encode the frame.
+        //
+        // Instead of creating a `frame::Frame` object, encode the frame
+        // directly into the packet buffer.
+        //
+        // First we reserve some space in the output buffer for writing the
+        // frame header, with a length width selected from the available
+        // packet space.
+        //
+        // Then we emit the data from the crypto stream's send buffer.
+        //
+        // Finally we go back and encode the frame header with the now
+        // available information.
+        let hdr_off = b.off();
+        let fixed = 1 + octets::varint_len(crypto_off);
+
+        if let Some((max_len, width)) = left
+            .checked_sub(fixed)
+            .and_then(frame::payload_capacity)
+            .filter(|(capacity, _)| *capacity > 0)
+        {
+            let hdr_len = fixed + width;
+            frame::FrameSink::put_padding(b, hdr_len)?;
+            let emission = crypto_stream
+                .send
+                .emit(bytes::BufMut::limit(&mut *b, max_len));
+            let len = emission.len;
+            let mut crypto_hdr = b.patch(hdr_off, hdr_len)?;
+            frame::encode_crypto_header(
+                crypto_off,
+                len as u64,
+                width,
+                &mut crypto_hdr,
+            )?;
+
+            // The payload and its header were encoded above. Only
+            // record recovery metadata and account for the written bytes.
+            *left -= hdr_len + len;
+            frames.push(frame::Frame::CryptoHeader {
+                offset: crypto_off,
+                length: len,
+            });
+            return Ok(Some(emission.retransmitted_bytes));
+        }
+
+        Ok(None)
+    }
+
+    fn emit_datagram_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+        send_pid: usize, max_dgram_payload: usize,
+    ) -> Result<bool> {
+        let path = self.paths.get_mut(send_pid)?;
+        let mut emitted = false;
+        while let Some(len) = self.dgram_send_queue.peek_front_len() {
+            let hdr_len = 1 + frame::payload_length_width(len as u64);
+
+            if hdr_len + len <= *left {
+                // The front datagram fits this packet. The payload is already
+                // owned by the queue, so encode it directly into the writer.
+                if let Some(data) = self.dgram_send_queue.pop() {
+                    frame::encode_dgram_header(len as u64, b)?;
+                    frame::FrameSink::put_bytes(b, data.as_ref())?;
+                    *left -= hdr_len + len;
+                    frames.push(frame::Frame::DatagramHeader { length: len });
+                    emitted = true;
+                    self.dgram_sent_count =
+                        self.dgram_sent_count.saturating_add(1);
+                    path.dgram_sent_count =
+                        path.dgram_sent_count.saturating_add(1);
+                }
+            } else if len > max_dgram_payload {
+                // This datagram will never fit; discard it.
+                self.dgram_send_queue.pop();
+            } else {
+                break;
+            }
+        }
+        Ok(emitted)
+    }
+
+    fn emit_stream_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+    ) -> Result<StreamPacketEmission> {
+        let mut emission_summary = StreamPacketEmission::default();
+        while let Some(priority_key) = self.streams.peek_flushable() {
+            let stream_id = priority_key.id;
+            // Revalidate the intrusive queue entry before emission: ACKs may
+            // have removed data, leaving a stale entry. Empty FIN remains
+            // eligible.
+            let Some(stream) =
+                self.streams.get_mut(stream_id).filter(|s| s.is_flushable())
+            else {
+                self.streams.remove_flushable(&priority_key);
+                continue;
+            };
+
+            let stream_off = stream.send.off_front();
+
+            // Encode the frame.
+            //
+            // Instead of creating a `frame::Frame` object, encode the frame
+            // directly into the packet buffer.
+            //
+            // First we reserve some space in the output buffer for writing
+            // the frame header, choosing a length width that can encode
+            // the largest payload fitting in the remaining space.
+            //
+            // Then we emit the data from the stream's send buffer.
+            //
+            // Finally we go back and encode the frame header with the now
+            // available information.
+            let hdr_off = b.off();
+            let fixed = 1 +
+                octets::varint_len(stream_id) +
+                octets::varint_len(stream_off);
+
+            // A non-FIN STREAM frame must carry at least one byte. If the
+            // header and payload don't fit, leave the stream flushable for
+            // a later packet. Empty FIN frames only need the header.
+            let (max_len, width) =
+                match left.checked_sub(fixed).and_then(frame::payload_capacity) {
+                    Some((v, width)) if v > 0 || stream.send.empty_fin_next() =>
+                        (v, width),
+                    _ => {
+                        emission_summary.skipped = true;
+
+                        if stream.incremental() {
+                            let priority_key = Arc::clone(stream.priority_key());
+                            self.streams.remove_flushable(&priority_key);
+                            self.streams.enqueue(
+                                &priority_key,
+                                stream::PriorityQueue::Flushable,
+                            );
+                        }
+
+                        break;
+                    },
+                };
+
+            let hdr_len = fixed + width;
+            frame::FrameSink::put_padding(b, hdr_len)?;
+            let emission =
+                stream.send.emit(bytes::BufMut::limit(&mut *b, max_len));
+            let len = emission.len;
+            let fin = emission.fin;
+
+            // ACK processing can leave a stream in the flushable queue
+            // after removing all of its retransmission data. Unlink the
+            // stale entry and continue with the next stream;
+            // future retransmits or writedata will queue the stream again.
+            if len == 0 && !fin {
+                b.rewind(hdr_len)?;
+                let priority_key = Arc::clone(stream.priority_key());
+                self.streams.remove_flushable(&priority_key);
+                continue;
+            }
+
+            let mut stream_hdr = b.patch(hdr_off, hdr_len)?;
+            frame::encode_stream_header(
+                stream_id,
+                stream_off,
+                len as u64,
+                fin,
+                width,
+                &mut stream_hdr,
+            )?;
+
+            emission_summary.retransmitted_bytes = emission_summary
+                .retransmitted_bytes
+                .saturating_add(emission.retransmitted_bytes);
+            emission_summary.retransmitted_fin = emission.retransmitted_fin;
+
+            // The payload and its header were encoded above. Only
+            // record recovery metadata and account for the written bytes.
+            *left -= hdr_len + len;
+            frames.push(frame::Frame::StreamHeader {
+                stream_id,
+                offset: stream_off,
+                length: len,
+                fin,
+            });
+            emission_summary.emitted = true;
+
+            let priority_key = Arc::clone(stream.priority_key());
+            // Remove the stream when it is no longer flushable.
+            if !stream.is_flushable() {
+                self.streams.remove_flushable(&priority_key);
+            } else if stream.incremental() {
+                // Shuffle the incremental stream to the back of the
+                // queue.
+                self.streams.remove_flushable(&priority_key);
+                self.streams
+                    .enqueue(&priority_key, stream::PriorityQueue::Flushable);
+            }
+
+            // Update tx_buffered when data is emitted.
+            self.streams.sub_tx_buffered(len as u64);
+
+            #[cfg(feature = "fuzzing")]
+            // Coalesce STREAM frames when fuzzing.
+            continue;
+
+            #[cfg(not(feature = "fuzzing"))]
+            break;
+        }
+
+        Ok(emission_summary)
     }
 
     /// Emit connection control frames in their wire scheduling order.

@@ -32,6 +32,97 @@ use crate::Header;
 
 use rstest::rstest;
 
+/// A preferred datagram must remain queued when only stream data fits.
+/// Insufficient stream space is not application-limited.
+#[test]
+fn packet_data_falls_back_to_stream_without_consuming_datagram() {
+    let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    config.enable_dgram(true, 10, 10);
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let conn = &mut pipe.client;
+    let path_id = conn.paths.get_active_path_id().unwrap();
+    let max_dgram_len = conn.dgram_max_writable_len();
+    let datagram = b"abcde";
+    assert_eq!(conn.dgram_send(datagram), Ok(()));
+    assert_eq!(conn.stream_send(0, b"s", true), Ok(1));
+    conn.emit_dgram = true;
+
+    // STREAM uses type, stream ID, offset, two-byte length, one payload byte.
+    // DATAGRAM uses type, two-byte length, five payload bytes.
+    for capacity in [5, 6, 8] {
+        let mut storage = [0; 8];
+        let mut writer =
+            packet::PacketWriter::from_initialized(&mut storage[..capacity]);
+        let mut frames = SmallVec::new();
+        let mut left = capacity;
+        let emission = conn
+            .emit_packet_data(
+                &mut writer,
+                &mut frames,
+                &mut left,
+                path_id,
+                Type::Short,
+                max_dgram_len,
+            )
+            .unwrap();
+        assert_eq!(emission.retransmitted_bytes(), 0);
+        assert!(!emission.stream.retransmitted_fin);
+        assert_eq!(writer.off() + left, capacity);
+
+        match capacity {
+            5 => {
+                assert!(emission.stream.skipped);
+                assert!(!emission.has_data());
+                assert!(frames.is_empty());
+                assert_eq!(left, 5);
+                assert_eq!(conn.streams.tx_buffered(), 1);
+            },
+            6 => {
+                assert!(emission.has_data());
+                assert!(!emission.stream.skipped);
+                assert!(!emission.datagram_emitted);
+                assert_eq!(frames.as_slice(), &[frame::Frame::StreamHeader {
+                    stream_id: 0,
+                    offset: 0,
+                    length: 1,
+                    fin: true,
+                }]);
+                assert_eq!(
+                    frame::Frame::from_bytes(
+                        &mut octets::Octets::with_slice(writer.written_mut()),
+                        Type::Short
+                    ),
+                    Ok(frame::Frame::Stream {
+                        stream_id: 0,
+                        data: <RangeBuf>::from(b"s", 0, true),
+                    })
+                );
+                assert_eq!(conn.streams.tx_buffered(), 0);
+            },
+            8 => {
+                assert!(emission.datagram_emitted);
+                assert!(!emission.has_data());
+                assert_eq!(frames.as_slice(), &[frame::Frame::DatagramHeader {
+                    length: datagram.len()
+                }]);
+                assert_eq!(
+                    frame::Frame::from_bytes(
+                        &mut octets::Octets::with_slice(writer.written_mut()),
+                        Type::Short
+                    ),
+                    Ok(frame::Frame::Datagram {
+                        data: datagram.to_vec(),
+                    })
+                );
+            },
+            _ => unreachable!(),
+        }
+        assert_eq!(conn.dgram_send_queue.is_empty(), capacity == 8);
+        assert_eq!(conn.emit_dgram, capacity != 8);
+    }
+}
+
 /// Pending control frames survive a full packet and are committed only when
 /// they fit, in the same order as the packet scheduler.
 #[test]
