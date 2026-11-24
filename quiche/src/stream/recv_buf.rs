@@ -460,7 +460,9 @@ impl RecvBuf {
     }
 
     #[cfg(test)]
-    pub(crate) fn flow_control_for_tests(&self) -> &flowcontrol::FlowControl {
+    pub(crate) const fn flow_control_for_tests(
+        &self,
+    ) -> &flowcontrol::FlowControl {
         &self.flow_control
     }
 }
@@ -494,7 +496,7 @@ mod tests {
     fn assert_emit_discard(
         recv: &mut RecvBuf, emit: bool, target_len: usize, result_len: usize,
         is_fin: bool, test_bytes: Option<&[u8]>,
-    ) {
+    ) -> Result<()> {
         let mut buf = Vec::<u8>::with_capacity(512).limit(target_len);
         let action = if emit {
             RecvAction::Emit { out: &mut buf }
@@ -502,7 +504,7 @@ mod tests {
             RecvAction::Discard { len: target_len }
         };
 
-        let (read, fin) = recv.emit_or_discard(action).unwrap();
+        let (read, fin) = recv.emit_or_discard(action)?;
 
         let buf = buf.into_inner();
         if emit {
@@ -514,6 +516,7 @@ mod tests {
 
         assert_eq!(read, result_len);
         assert_eq!(is_fin, fin);
+        Ok(())
     }
 
     // Helper function for testing buffer status for either emit or discard.
@@ -539,7 +542,9 @@ mod tests {
     }
 
     #[rstest]
-    fn empty_stream_frame(#[values(true, false)] emit: bool) {
+    fn empty_stream_frame(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(15, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -550,7 +555,7 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 1);
 
-        assert_emit_discard(&mut recv, emit, 32, 5, false, None);
+        assert_emit_discard(&mut recv, emit, 32, 5, false, None)?;
 
         // Don't store non-fin empty buffer, but track its offset.
         let buf = RangeBuf::from(b"", 10, false);
@@ -602,12 +607,15 @@ mod tests {
         // The gap prevents delivery; once filled, the tail and FIN survive.
         assert_emit_discard_done(&mut recv, emit);
         assert_eq!(recv.write(RangeBuf::from(b"bbb", 5, false)), Ok(()));
-        assert_emit_discard(&mut recv, emit, 32, 5, true, Some(b"bbbaa"));
+        assert_emit_discard(&mut recv, emit, 32, 5, true, Some(b"bbbaa"))?;
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn ordered_read(#[values(true, false)] emit: bool) {
+    fn ordered_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -639,11 +647,12 @@ mod tests {
             19,
             true,
             Some(b"helloworldsomething"),
-        );
+        )?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 19);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[test]
@@ -791,7 +800,9 @@ mod tests {
     }
 
     #[rstest]
-    fn split_read(#[values(true, false)] emit: bool) {
+    fn split_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -807,17 +818,18 @@ mod tests {
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 0);
 
-        assert_emit_discard(&mut recv, emit, 10, 10, false, Some(b"somethingh"));
+        assert_emit_discard(&mut recv, emit, 10, 10, false, Some(b"somethingh"))?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 10);
 
-        assert_emit_discard(&mut recv, emit, 5, 5, false, Some(b"ellow"));
+        assert_emit_discard(&mut recv, emit, 5, 5, false, Some(b"ellow"))?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 15);
 
-        assert_emit_discard(&mut recv, emit, 5, 4, true, Some(b"orld"));
+        assert_emit_discard(&mut recv, emit, 5, 4, true, Some(b"orld"))?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 19);
+        Ok(())
     }
 
     #[test]
@@ -869,7 +881,9 @@ mod tests {
     }
 
     #[rstest]
-    fn incomplete_read(#[values(true, false)] emit: bool) {
+    fn incomplete_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -903,13 +917,16 @@ mod tests {
             19,
             true,
             Some(b"somethinghelloworld"),
-        );
+        )?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 19);
+        Ok(())
     }
 
     #[rstest]
-    fn zero_len_read(#[values(true, false)] emit: bool) {
+    fn zero_len_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -927,13 +944,16 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 1);
 
-        assert_emit_discard(&mut recv, emit, 32, 9, true, Some(b"something"));
+        assert_emit_discard(&mut recv, emit, 32, 9, true, Some(b"something"))?;
         assert_eq!(recv.len, 9);
         assert_eq!(recv.off, 9);
+        Ok(())
     }
 
     #[rstest]
-    fn past_read(#[values(true, false)] emit: bool) {
+    fn past_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -948,7 +968,7 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 1);
 
-        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"something"));
+        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"something"))?;
         assert_eq!(recv.len, 9);
         assert_eq!(recv.off, 9);
 
@@ -964,14 +984,17 @@ mod tests {
         assert_eq!(recv.off, 9);
         assert_eq!(recv.data.len(), 0);
 
-        assert_emit_discard(&mut recv, emit, 32, 0, true, Some(b""));
+        assert_emit_discard(&mut recv, emit, 32, 0, true, Some(b""))?;
         assert_eq!(recv.write(RangeBuf::from(b"", 9, true)), Ok(()));
         assert_eq!(recv.write(RangeBuf::from(b"ello", 5, true)), Ok(()));
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn fully_overlapping_read(#[values(true, false)] emit: bool) {
+    fn fully_overlapping_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -989,16 +1012,19 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 1);
 
-        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"something"));
+        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"something"))?;
         assert_eq!(recv.len, 9);
         assert_eq!(recv.off, 9);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn fully_overlapping_read2(#[values(true, false)] emit: bool) {
+    fn fully_overlapping_read2(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1016,16 +1042,19 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 2);
 
-        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"somehello"));
+        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"somehello"))?;
         assert_eq!(recv.len, 9);
         assert_eq!(recv.off, 9);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn fully_overlapping_read3(#[values(true, false)] emit: bool) {
+    fn fully_overlapping_read3(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1043,16 +1072,19 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 3);
 
-        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"somhellog"));
+        assert_emit_discard(&mut recv, emit, 32, 9, false, Some(b"somhellog"))?;
         assert_eq!(recv.len, 9);
         assert_eq!(recv.off, 9);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn fully_overlapping_read_multi(#[values(true, false)] emit: bool) {
+    fn fully_overlapping_read_multi(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1083,16 +1115,19 @@ mod tests {
             18,
             false,
             Some(b"somhellogsomhellog"),
-        );
+        )?;
         assert_eq!(recv.len, 18);
         assert_eq!(recv.off, 18);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn overlapping_start_read(#[values(true, false)] emit: bool) {
+    fn overlapping_start_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1117,16 +1152,19 @@ mod tests {
             13,
             true,
             Some(b"somethingello"),
-        );
+        )?;
 
         assert_eq!(recv.len, 13);
         assert_eq!(recv.off, 13);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn overlapping_end_read(#[values(true, false)] emit: bool) {
+    fn overlapping_end_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1144,15 +1182,25 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 2);
 
-        assert_emit_discard(&mut recv, emit, 32, 12, true, Some(b"helsomething"));
+        assert_emit_discard(
+            &mut recv,
+            emit,
+            32,
+            12,
+            true,
+            Some(b"helsomething"),
+        )?;
         assert_eq!(recv.len, 12);
         assert_eq!(recv.off, 12);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
-    fn overlapping_end_twice_read(#[values(true, false)] emit: bool) {
+    fn overlapping_end_twice_read(
+        #[values(true, false)] emit: bool,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1182,17 +1230,18 @@ mod tests {
         assert_eq!(recv.off, 0);
         assert_eq!(recv.data.len(), 6);
 
-        assert_emit_discard(&mut recv, emit, 32, 10, true, Some(b"helloworld"));
+        assert_emit_discard(&mut recv, emit, 32, 10, true, Some(b"helloworld"))?;
         assert_eq!(recv.len, 10);
         assert_eq!(recv.off, 10);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
     fn overlapping_end_twice_and_contained_read(
         #[values(true, false)] emit: bool,
-    ) {
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1229,17 +1278,18 @@ mod tests {
             16,
             true,
             Some(b"helloworldbarfoo"),
-        );
+        )?;
         assert_eq!(recv.len, 16);
         assert_eq!(recv.off, 16);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
     fn partially_multi_overlapping_reordered_read(
         #[values(true, false)] emit: bool,
-    ) {
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1270,18 +1320,19 @@ mod tests {
             15,
             true,
             Some(b"somethinhelloar"),
-        );
+        )?;
         assert_eq!(recv.len, 15);
         assert_eq!(recv.off, 15);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[rstest]
     fn partially_multi_overlapping_reordered_read2(
         #[values(true, false)] emit: bool,
-    ) {
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1330,16 +1381,18 @@ mod tests {
             14,
             false,
             Some(b"aabbbcdddeefff"),
-        );
+        )?;
         assert_eq!(recv.len, 14);
         assert_eq!(recv.off, 14);
         assert_eq!(recv.data.len(), 0);
 
         assert_emit_discard_done(&mut recv, emit);
+        Ok(())
     }
 
     #[test]
-    fn interval_insertion_matches_first_arrival_byte_model() {
+    fn interval_insertion_matches_first_arrival_byte_model(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         const SIZE: usize = 8;
 
         let intervals: Vec<_> = (0..=SIZE)
@@ -1360,8 +1413,7 @@ mod tests {
                         &first[first_start..first_end],
                         first_start as u64,
                         false,
-                    ))
-                    .unwrap();
+                    ))?;
                     expected[first_start..first_end].fill(Some(1));
 
                     let mut output = [0; SIZE];
@@ -1385,15 +1437,14 @@ mod tests {
                         &second[second_start..second_end],
                         second_start as u64,
                         false,
-                    ))
-                    .unwrap();
+                    ))?;
                     for byte in &mut expected[second_start..second_end] {
                         byte.get_or_insert(2);
                     }
 
                     // Fill every remaining gap with a different byte
                     // and check that the first arrival was preserved.
-                    recv.write(RangeBuf::from(&[3; SIZE], 0, true)).unwrap();
+                    recv.write(RangeBuf::from(&[3; SIZE], 0, true))?;
                     let expected: Vec<_> =
                         expected[read..].iter().map(|b| b.unwrap_or(3)).collect();
                     assert_eq!(recv.emit(&mut output), Ok((SIZE - read, true)));
@@ -1403,10 +1454,12 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn mixed_read_actions() {
+    fn mixed_read_actions() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let mut recv =
             RecvBuf::new(u64::MAX, DEFAULT_STREAM_WINDOW, DEFAULT_STREAM_WINDOW);
         assert_eq!(recv.len, 0);
@@ -1433,19 +1486,20 @@ mod tests {
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 0);
 
-        assert_emit_discard(&mut recv, true, 5, 5, false, Some(b"hello"));
+        assert_emit_discard(&mut recv, true, 5, 5, false, Some(b"hello"))?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 5);
 
-        assert_emit_discard(&mut recv, false, 5, 5, false, None);
+        assert_emit_discard(&mut recv, false, 5, 5, false, None)?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 10);
 
-        assert_emit_discard(&mut recv, true, 9, 9, true, Some(b"something"));
+        assert_emit_discard(&mut recv, true, 9, 9, true, Some(b"something"))?;
         assert_eq!(recv.len, 19);
         assert_eq!(recv.off, 19);
 
         assert_emit_discard_done(&mut recv, true);
         assert_emit_discard_done(&mut recv, false);
+        Ok(())
     }
 }

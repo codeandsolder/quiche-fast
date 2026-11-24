@@ -386,12 +386,12 @@ impl HmmDetector {
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         !matches!(self.episode, HmmEpisode::Idle)
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         matches!(self.episode, HmmEpisode::Persistent)
     }
 }

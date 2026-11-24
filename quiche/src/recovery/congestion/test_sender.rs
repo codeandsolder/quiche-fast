@@ -58,7 +58,7 @@ impl TestSender {
             ..RecoveryConfig::default()
         };
 
-        TestSender {
+        Self {
             next_pkt: 0,
             bytes_in_flight: 0,
             time: Instant::now(),
@@ -186,7 +186,7 @@ impl TestSender {
 
     pub(super) fn update_rtt(&mut self, rtt: Duration) {
         self.rtt_stats
-            .update_rtt(rtt, Duration::ZERO, self.time, true)
+            .update_rtt(rtt, Duration::ZERO, self.time, true);
     }
 
     pub(super) fn advance_time(&mut self, period: Duration) {

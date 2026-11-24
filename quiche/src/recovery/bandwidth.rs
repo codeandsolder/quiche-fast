@@ -640,31 +640,31 @@ mod tests {
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
-                bits_per_second: 123456
+                bits_per_second: 123_456
             }),
             "123.46 Kbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
-                bits_per_second: 1234567
+                bits_per_second: 1_234_567
             }),
             "1.23 Mbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
-                bits_per_second: 12345678
+                bits_per_second: 12_345_678
             }),
             "12.35 Mbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
-                bits_per_second: 123456789
+                bits_per_second: 123_456_789
             }),
             "123.46 Mbps"
         );
         assert_eq!(
             format!("{:?}", Bandwidth {
-                bits_per_second: 1234567890
+                bits_per_second: 1_234_567_890
             }),
             "1.23 Gbps"
         );

@@ -181,7 +181,7 @@ impl Rate {
     }
 
     #[cfg(test)]
-    pub fn delivered(&self) -> u64 {
+    pub const fn delivered(&self) -> u64 {
         self.delivered
     }
 
@@ -190,7 +190,7 @@ impl Rate {
     }
 
     #[cfg(test)]
-    pub fn sample_is_app_limited(&self) -> bool {
+    pub const fn sample_is_app_limited(&self) -> bool {
         self.sample.is_app_limited
     }
 }
@@ -248,8 +248,9 @@ mod tests {
     use std::ops::Range;
 
     #[test]
-    fn legacy_delivery_rate_crosses_four_gib() {
-        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+    fn legacy_delivery_rate_crosses_four_gib(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let mut r = LegacyRecovery::new(&config);
         let now = Instant::now();
         let mss = r.max_datagram_size();
@@ -272,6 +273,7 @@ mod tests {
             r.delivery_rate(),
             Bandwidth::from_bytes_and_time_delta(delivered, interval)
         );
+        Ok(())
     }
 
     // A `RateSample` generated while `Rate` is app-limited inherits that state.
@@ -279,8 +281,8 @@ mod tests {
     // This test generates samples before and after `Rate` becomes app-limited
     // and checks each sample's state.
     #[test]
-    fn sample_is_app_limited() {
-        let config = Config::new(0xbabababa).unwrap();
+    fn sample_is_app_limited() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let mut r = LegacyRecovery::new(&config);
         let mut now = Instant::now();
         let mss = r.max_datagram_size();
@@ -313,14 +315,15 @@ mod tests {
         assert_eq!(r.congestion.delivery_rate.end_of_app_limited, 0);
         // The resulting `RateSample` remains app-limited.
         assert!(r.congestion.delivery_rate.sample_is_app_limited());
+        Ok(())
     }
 
     // A `RateSample` updates the delivery rate only when it is not app-limited
     // or its rate exceeds the previous value.
     #[test]
-    fn app_limited_delivery_rate() {
+    fn app_limited_delivery_rate() -> Result<(), Box<dyn std::error::Error>> {
         // Confirm that a rate sample is not generated when app-limited.
-        let config = Config::new(0xbabababa).unwrap();
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let mut r = LegacyRecovery::new(&config);
         let mut now = Instant::now();
         let mss = r.max_datagram_size();
@@ -389,11 +392,12 @@ mod tests {
         assert_eq!(expected_delivery_rate, 2400);
         let app_limited_delivery_rate = r.delivery_rate().to_bytes_per_second();
         assert_eq!(app_limited_delivery_rate, expected_delivery_rate);
+        Ok(())
     }
 
     #[test]
-    fn rate_check() {
-        let config = Config::new(0xbabababa).unwrap();
+    fn rate_check() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let mut r = LegacyRecovery::new(&config);
 
         let now = Instant::now();
@@ -425,7 +429,9 @@ mod tests {
                 rtt,
                 delivered: 0,
                 delivered_time: now,
-                first_sent_time: now.checked_sub(rtt).unwrap(),
+                first_sent_time: now
+                    .checked_sub(rtt)
+                    .ok_or("fixture timestamp underflow")?,
                 is_app_limited: false,
             };
 
@@ -440,11 +446,12 @@ mod tests {
 
         // Estimated delivery rate = (1200 x 2) / 0.05s = 48000.
         assert_eq!(r.delivery_rate().to_bytes_per_second(), 48000);
+        Ok(())
     }
 
     #[test]
-    fn app_limited_cwnd_full() {
-        let config = Config::new(0xbabababa).unwrap();
+    fn app_limited_cwnd_full() -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let mut r = LegacyRecovery::new(&config);
 
         let now = Instant::now();
@@ -484,12 +491,13 @@ mod tests {
         // Not App Limited after sending full cwnd worth of data
         assert!(!r.app_limited());
         assert!(!r.congestion.delivery_rate.sample_is_app_limited());
+        Ok(())
     }
 
     fn helper_send_and_ack_packets(
         recovery: &mut LegacyRecovery, range: Range<u64>, now: Instant,
         rtt: Duration, mss: usize,
-    ) {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for pn in range.clone() {
             let pkt = test_utils::helper_packet_sent(pn, now, mss);
             recovery.on_packet_sent(
@@ -507,17 +515,15 @@ mod tests {
         let mut acked = ranges::RangeSet::default();
         acked.insert(range);
 
-        let ack_outcome = recovery
-            .on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now + rtt,
-                None,
-                "",
-            )
-            .unwrap();
+        let ack_outcome = recovery.on_ack_received(
+            &acked,
+            25,
+            packet::Epoch::Application,
+            HandshakeStatus::default(),
+            now + rtt,
+            None,
+            "",
+        )?;
 
         assert_eq!(ack_outcome, OnAckReceivedOutcome {
             lost_packets: 0,
@@ -525,5 +531,6 @@ mod tests {
             acked_bytes: mss * packet_count,
             spurious_losses: 0,
         });
+        Ok(())
     }
 }

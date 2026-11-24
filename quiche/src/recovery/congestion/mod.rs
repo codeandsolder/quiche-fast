@@ -347,7 +347,7 @@ mod tests {
 
     #[test]
     fn ssthresh_init() {
-        let ssthresh: SsThresh = Default::default();
+        let ssthresh: SsThresh = SsThresh::default();
         assert_eq!(ssthresh.get(), usize::MAX);
         assert_eq!(ssthresh.startup_exit(), None);
     }
@@ -359,7 +359,7 @@ mod tests {
             None,
             StartupExitReason::ConservativeSlowStartRounds,
         );
-        let mut ssthresh: SsThresh = Default::default();
+        let mut ssthresh: SsThresh = SsThresh::default();
         ssthresh.update(1000, true);
         assert_eq!(ssthresh.get(), 1000);
         assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));
@@ -378,7 +378,7 @@ mod tests {
     fn ssthresh_in_slow_start() {
         let expected_startup_exit =
             StartupExit::new(1000, None, StartupExitReason::Loss);
-        let mut ssthresh: SsThresh = Default::default();
+        let mut ssthresh: SsThresh = SsThresh::default();
         ssthresh.update(1000, false);
         assert_eq!(ssthresh.get(), 1000);
         assert_eq!(ssthresh.startup_exit(), Some(expected_startup_exit));

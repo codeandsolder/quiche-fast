@@ -116,7 +116,7 @@ impl RttJumpDetector {
     /// The start time of the most recently confirmed persistent RTT jump
     /// episode, if any.
     #[cfg(test)]
-    pub(super) fn last_persistent_jump_time(&self) -> Option<Instant> {
+    pub(super) const fn last_persistent_jump_time(&self) -> Option<Instant> {
         self.last_persistent_jump_time
     }
 

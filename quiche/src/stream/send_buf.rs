@@ -552,7 +552,7 @@ impl<F: BufFactory> SendBuf<F> {
     /// Seeds send offsets without buffering the preceding data.
     #[cfg(test)]
     pub fn seed_offsets_for_test(&mut self, off: u64) {
-        assert!(self.data.is_empty());
+        assert_eq!(self.data.len(), 0);
         self.off = off;
         self.emit_off = off;
     }
@@ -712,7 +712,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stream_buffered_accounting_keeps_full_logical_width() {
+    fn stream_buffered_accounting_keeps_full_logical_width(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut streams = <crate::stream::StreamMap>::new(5, 5, 15);
         let baseline = u64::from(u32::MAX);
         let params = crate::TransportParams {
@@ -734,37 +735,42 @@ mod tests {
                 &params,
                 crate::stream::StreamOpenIntent::Local,
                 false,
-            )
-            .unwrap()
+            )?
             .send
             .buffered_bytes = baseline;
         streams.add_tx_buffered(baseline);
 
         {
-            let stream = streams
-                .get_or_create(
-                    4,
-                    &params,
-                    &params,
-                    crate::stream::StreamOpenIntent::Local,
-                    false,
-                )
-                .unwrap();
+            let stream = streams.get_or_create(
+                4,
+                &params,
+                &params,
+                crate::stream::StreamOpenIntent::Local,
+                false,
+            )?;
             assert_eq!(stream.send.write(b"hello", false), Ok(5));
         }
         streams.add_tx_buffered(5);
         assert_eq!(streams.tx_buffered(), baseline + 5);
         assert!(streams.tx_buffered_is_consistent());
 
-        streams.get_mut(0).unwrap().send.buffered_bytes = 0;
+        streams
+            .get_mut(0)
+            .ok_or("expected open stream")?
+            .send
+            .buffered_bytes = 0;
         streams.sub_tx_buffered(baseline);
         assert_eq!(streams.tx_buffered(), 5);
         let mut buf = [0; 5];
-        let Emission { len: written, .. } =
-            streams.get_mut(4).unwrap().send.emit(&mut buf[..]);
+        let Emission { len: written, .. } = streams
+            .get_mut(4)
+            .ok_or("expected open stream")?
+            .send
+            .emit(&mut buf[..]);
         streams.sub_tx_buffered(written as u64);
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
+        Ok(())
     }
 
     #[test]
@@ -1061,7 +1067,7 @@ mod tests {
         assert_eq!(send.buffered_bytes, 0);
     }
 
-    /// Check SendBuf::len calculation on a retransmit case
+    /// Check `SendBuf::len` calculation on a retransmit case
     #[test]
     fn send_buf_len_on_retransmit() {
         let mut buf = [0; 15];
@@ -1158,7 +1164,8 @@ mod tests {
     }
 
     #[test]
-    fn sparse_ack_and_loss_match_byte_state_model() {
+    fn sparse_ack_and_loss_match_byte_state_model(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         enum ByteState {
             Pending,
@@ -1177,7 +1184,7 @@ mod tests {
             assert_eq!(send.write(DATA, false), Ok(DATA.len()));
             for _ in 0..160 {
                 // Deterministic, dependency-free operation sequence.
-                rng = rng.wrapping_mul(1664525).wrapping_add(1013904223);
+                rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                 let first = (rng >> 8) as usize % (DATA.len() + 1);
                 let len = (rng >> 16) as usize % (DATA.len() + 1);
                 let end = (first + len).min(highest);
@@ -1251,20 +1258,22 @@ mod tests {
                     "seed {seed}"
                 );
                 for buf in &send.data {
-                    let start = buf.start_offset() as usize;
-                    let end = buf.max_off() as usize;
+                    let start = usize::try_from(buf.start_offset())?;
+                    let end = usize::try_from(buf.max_off())?;
                     assert!(model[start..end].iter().all(|&s| s != Acked));
                 }
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn send_buf_final_size_retransmit() {
+    fn send_buf_final_size_retransmit(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut buf = [0; 50];
         let mut send = <SendBuf>::new(u64::MAX);
 
-        send.write(&buf, false).unwrap();
+        send.write(&buf, false)?;
         assert_eq!(send.off_front(), 0);
 
         // Emit the whole buffer
@@ -1279,9 +1288,10 @@ mod tests {
         // Server receives STOP_SENDING from client. The final_size we
         // send in the RESET_STREAM should be 50. If we send anything less,
         // it's a FINAL_SIZE_ERROR.
-        let (fin_off, unsent) = send.stop(0).unwrap();
+        let (fin_off, unsent) = send.stop(0)?;
         assert_eq!(fin_off, 50);
         assert_eq!(unsent, 0);
+        Ok(())
     }
 
     #[test]

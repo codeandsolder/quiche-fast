@@ -166,12 +166,12 @@ impl GlobalMinDetector {
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         !matches!(self.episode, GlobalMinEpisode::Idle)
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         matches!(self.episode, GlobalMinEpisode::Persistent)
     }
 }

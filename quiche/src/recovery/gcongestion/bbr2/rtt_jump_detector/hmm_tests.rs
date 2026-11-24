@@ -399,8 +399,8 @@ fn hmm_detection_is_scale_invariant() {
         let base = Instant::now();
         hmm_build_baseline(&mut detector, 8, base, base_rtt);
         let mut fired = false;
-        for pkt in 9..31u64 {
-            sample(&mut detector, base, base_rtt * pkt as u32, base_rtt * 2);
+        for pkt in 9..31u32 {
+            sample(&mut detector, base, base_rtt * pkt, base_rtt * 2);
             fired |= detector.is_rtt_jump_persistent();
         }
         fired

@@ -1175,19 +1175,19 @@ mod tests {
     use crate::Config;
 
     #[test]
-    fn loss_threshold() {
-        let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+    fn loss_threshold() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new(crate::PROTOCOL_VERSION)?;
         let recovery_config = config.recovery;
         assert!(!recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
         assert!(matches!(loss_thresh, LossThreshold::StandardInitial));
-        assert_eq!(loss_thresh.pkt_thresh().unwrap(), INITIAL_PACKET_THRESHOLD);
+        assert_eq!(loss_thresh.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
         assert_eq!(loss_thresh.time_thresh(), INITIAL_TIME_THRESHOLD);
 
         // First spurious loss.
         loss_thresh.on_spurious_loss(INITIAL_PACKET_THRESHOLD);
-        assert_eq!(loss_thresh.pkt_thresh().unwrap(), INITIAL_PACKET_THRESHOLD);
+        assert_eq!(loss_thresh.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
         assert_eq!(loss_thresh.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
 
         // Packet gaps < INITIAL_PACKET_THRESHOLD will NOT change packet
@@ -1196,10 +1196,7 @@ mod tests {
             loss_thresh.on_spurious_loss(packet_gap);
 
             // Packet threshold only increases once the packet gap increases.
-            assert_eq!(
-                loss_thresh.pkt_thresh().unwrap(),
-                INITIAL_PACKET_THRESHOLD
-            );
+            assert_eq!(loss_thresh.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
             assert_eq!(loss_thresh.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
         }
 
@@ -1217,32 +1214,34 @@ mod tests {
             } else {
                 MAX_PACKET_THRESHOLD
             };
-            assert_eq!(loss_thresh.pkt_thresh().unwrap(), new_packet_threshold);
+            assert_eq!(loss_thresh.pkt_thresh(), Some(new_packet_threshold));
             assert_eq!(loss_thresh.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
         }
         // Packet threshold is capped at MAX_PACKET_THRESHOLD
-        assert_eq!(loss_thresh.pkt_thresh().unwrap(), MAX_PACKET_THRESHOLD);
+        assert_eq!(loss_thresh.pkt_thresh(), Some(MAX_PACKET_THRESHOLD));
         assert_eq!(loss_thresh.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
 
         // Packet threshold is monotonically increasing
         loss_thresh.on_spurious_loss(INITIAL_PACKET_THRESHOLD);
-        assert_eq!(loss_thresh.pkt_thresh().unwrap(), MAX_PACKET_THRESHOLD);
+        assert_eq!(loss_thresh.pkt_thresh(), Some(MAX_PACKET_THRESHOLD));
         assert_eq!(loss_thresh.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
+        Ok(())
     }
 
     #[test]
-    fn relaxed_loss_threshold() {
+    fn relaxed_loss_threshold(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // The max time threshold when operating in relaxed loss mode.
         const MAX_TIME_THRESHOLD: f64 = 2.0;
 
-        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+        let mut config = Config::new(crate::PROTOCOL_VERSION)?;
         config.set_enable_relaxed_loss_threshold(true);
         let recovery_config = config.recovery;
         assert!(recovery_config.enable_relaxed_loss_threshold);
 
         let mut loss_thresh = LossThreshold::new(&recovery_config);
         assert!(matches!(loss_thresh, LossThreshold::RelaxedInitial));
-        assert_eq!(loss_thresh.pkt_thresh().unwrap(), INITIAL_PACKET_THRESHOLD);
+        assert_eq!(loss_thresh.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
         assert_eq!(loss_thresh.time_thresh(), INITIAL_TIME_THRESHOLD);
 
         // First spurious loss.
@@ -1257,8 +1256,10 @@ mod tests {
             // The initial time-threshold overhead reaches `1.0` after three
             // rounds of doubling.
             let new_time_threshold = if subsequent_loss_count <= 3 {
-                1.0 + INITIAL_TIME_THRESHOLD_OVERHEAD *
-                    2_f64.powi(subsequent_loss_count as i32)
+                INITIAL_TIME_THRESHOLD_OVERHEAD.mul_add(
+                    2_f64.powi(i32::try_from(subsequent_loss_count)?),
+                    1.0,
+                )
             } else {
                 2.0
             };
@@ -1270,14 +1271,17 @@ mod tests {
         // Time threshold is capped at 2.0.
         assert_eq!(loss_thresh.pkt_thresh(), None);
         assert_eq!(loss_thresh.time_thresh(), MAX_TIME_THRESHOLD);
+        Ok(())
     }
 
     #[test]
-    fn test_high_pto_count_no_panic() {
-        let mut config = Config::new(crate::PROTOCOL_VERSION).unwrap();
+    fn test_high_pto_count_no_panic(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut config = Config::new(crate::PROTOCOL_VERSION)?;
         config.set_cc_algorithm(CongestionControlAlgorithm::Bbr2Gcongestion);
         let recovery_config = config.recovery;
-        let mut r = GRecovery::new(&recovery_config).unwrap();
+        let mut r = GRecovery::new(&recovery_config)
+            .ok_or("expected gcongestion recovery")?;
 
         r.pto_count = 99999;
 
@@ -1286,7 +1290,7 @@ mod tests {
             let Some(EventData::QuicMetricsUpdated(initial)) =
                 r.get_updated_qlog_event_data()
             else {
-                panic!("expected initial recovery metrics");
+                return Err("expected initial recovery metrics".into());
             };
             assert_eq!(initial.pto_count, Some(u16::MAX));
             assert_eq!(
@@ -1303,7 +1307,7 @@ mod tests {
             let Some(EventData::QuicMetricsUpdated(reset)) =
                 r.get_updated_qlog_event_data()
             else {
-                panic!("expected PTO reset");
+                return Err("expected PTO reset".into());
             };
             assert_eq!(reset.pto_count, Some(0));
             r.pto_count = 99999;
@@ -1317,5 +1321,6 @@ mod tests {
         let now = Instant::now();
 
         let _ = r.deadline(handshake_status, now);
+        Ok(())
     }
 }

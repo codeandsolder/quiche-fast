@@ -636,8 +636,12 @@ mod tests {
         sender.cubic_state.curve.w_est = Window::bytes(cwnd);
         sender.cubic_state.curve.k = 0.0;
         sender.cubic_state.curve.reno_gain = RenoGain::Full;
-        sender.cubic_state.curve.epoch_start =
-            Some(sender.time - Duration::from_secs(100));
+        sender.cubic_state.curve.epoch_start = Some(
+            sender
+                .time
+                .checked_sub(Duration::from_secs(100))
+                .ok_or("fixture timestamp underflow")?,
+        );
         sender.send_packet(mss);
         sender.send_packet(mss);
         sender.update_app_limited(false);
@@ -899,14 +903,20 @@ mod tests {
     }
 
     #[test]
-    fn cubic_rollback_restores_full_curve_once() {
+    fn cubic_rollback_restores_full_curve_once(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
         let cwnd = 20 * size;
         sender.cwnd = cwnd;
         sender.ssthresh.update(cwnd, false);
         sender.cubic_state.curve = CurveState {
-            epoch_start: Some(sender.time - Duration::from_secs(2)),
+            epoch_start: Some(
+                sender
+                    .time
+                    .checked_sub(Duration::from_secs(2))
+                    .ok_or("fixture timestamp underflow")?,
+            ),
             k: 1.5,
             w_max: Window::bytes(100_000),
             w_est: Window::bytes(50_000),
@@ -937,6 +947,7 @@ mod tests {
         assert_eq!(sender.cubic_state.last_ack_time, Some(last_ack));
         sender.cwnd = beta_reduce(cwnd);
         assert!(!rollback(&mut sender));
+        Ok(())
     }
 
     #[test]
@@ -1054,9 +1065,8 @@ mod tests {
         // cwnd must have grown beyond the post-loss value.
         assert!(
             sender.cwnd > post_loss_cwnd,
-            "cwnd stuck at {} (post-loss {}): perpetual recovery trap",
+            "cwnd stuck at {} (post-loss {post_loss_cwnd}): perpetual recovery trap",
             sender.cwnd,
-            post_loss_cwnd,
         );
         // Recovery start hasn't changed.
         assert_eq!(

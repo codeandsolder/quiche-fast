@@ -155,10 +155,10 @@ impl RangeSet {
     #[cfg(test)]
     pub fn flatten(&self) -> impl DoubleEndedIterator<Item = u64> + '_ {
         match self {
-            RangeSet::BTree(set) =>
+            Self::BTree(set) =>
                 Either::Left(set.inner.iter().flat_map(|(k, v)| *k..*v)),
 
-            RangeSet::Inline(set) =>
+            Self::Inline(set) =>
                 Either::Right(set.inner.iter().flat_map(|(s, e)| *s..*e)),
         }
     }
@@ -167,9 +167,9 @@ impl RangeSet {
     #[cfg(test)]
     pub fn first(&self) -> Option<u64> {
         match self {
-            RangeSet::Inline(set) => set.inner.first().map(|(s, _)| *s),
+            Self::Inline(set) => set.inner.first().map(|(s, _)| *s),
 
-            RangeSet::BTree(set) => set.inner.first_key_value().map(|(k, _)| *k),
+            Self::BTree(set) => set.inner.first_key_value().map(|(k, _)| *k),
         }
     }
 
@@ -600,7 +600,7 @@ mod tests {
     #[test]
     fn prev_to() {
         let mut r = BTreeRangeSet {
-            inner: Default::default(),
+            inner: BTreeMap::default(),
             capacity: usize::MAX,
         };
 
@@ -617,7 +617,7 @@ mod tests {
     #[test]
     fn next_to() {
         let mut r = BTreeRangeSet {
-            inner: Default::default(),
+            inner: BTreeMap::default(),
             capacity: usize::MAX,
         };
 
@@ -843,16 +843,18 @@ mod tests {
 
     #[test]
     fn mixed_operations_match_dense_reference() {
-        const WIDTH: u64 = 32;
+        const WIDTH: usize = 32;
         for capacity in 0..=8 {
             let mut actual = RangeSet::new(capacity);
-            let mut reference = [false; WIDTH as usize];
+            let mut reference = [false; WIDTH];
             let mut state = 42_u64;
             for _ in 0..4000 {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
-                let start = ((state >> 32) % WIDTH) as usize;
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                let start = ((state >> 32) % WIDTH as u64) as usize;
                 let size = ((state >> 40) % 7) as usize;
-                if state & 7 == 0 {
+                if state.trailing_zeros() >= 3 {
                     actual.remove_until(start as u64);
                     reference[..=start].fill(false);
                 } else {

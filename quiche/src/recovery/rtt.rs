@@ -219,7 +219,8 @@ mod tests {
         );
         assert_eq!(
             stats.rttvar.as_nanos(),
-            (first / 2).as_nanos() * 3 / 4 + (second - first).as_nanos() / 4
+            (first / 2).as_nanos() * 3 / 4 +
+                second.abs_diff(first).as_nanos() / 4
         );
         assert_eq!(stats.loss_delay(1.125), Duration::MAX);
         assert_eq!(stats.probe_timeout(), Duration::MAX);

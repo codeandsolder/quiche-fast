@@ -1192,9 +1192,11 @@ mod tests {
     use std::time::Instant;
 
     #[rstest::rstest]
-    fn legacy_pmtu_uses_live_mss(#[values("cubic", "reno")] algorithm: &str) {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config.set_cc_algorithm_name(algorithm).unwrap();
+    fn legacy_pmtu_uses_live_mss(
+        #[values("cubic", "reno")] algorithm: &str,
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.set_cc_algorithm_name(algorithm)?;
         let mut r = LegacyRecovery::new(&config);
         let initial_packets = r.congestion.initial_congestion_window_packets;
 
@@ -1216,11 +1218,13 @@ mod tests {
         assert_eq!(r.max_datagram_size(), 1300);
         r.congestion.on_persistent_congestion();
         assert_eq!(r.cwnd(), 1300 * crate::recovery::MINIMUM_WINDOW_PACKETS);
+        Ok(())
     }
 
     #[test]
-    fn test_high_pto_count_no_panic() {
-        let config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
+    fn test_high_pto_count_no_panic(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let config = crate::Config::new(crate::PROTOCOL_VERSION)?;
         let recovery_config = config.recovery;
         let mut r = LegacyRecovery::new_with_config(&recovery_config);
 
@@ -1231,7 +1235,7 @@ mod tests {
             let Some(EventData::QuicMetricsUpdated(initial)) =
                 r.get_updated_qlog_event_data()
             else {
-                panic!("expected initial recovery metrics");
+                return Err("expected initial recovery metrics".into());
             };
             assert_eq!(initial.pto_count, Some(u16::MAX));
             r.pto_count = u32::MAX;
@@ -1240,7 +1244,7 @@ mod tests {
             let Some(EventData::QuicMetricsUpdated(reset)) =
                 r.get_updated_qlog_event_data()
             else {
-                panic!("expected PTO reset");
+                return Err("expected PTO reset".into());
             };
             assert_eq!(reset.pto_count, Some(0));
             r.pto_count = 99999;
@@ -1254,5 +1258,6 @@ mod tests {
         let now = Instant::now();
 
         let _ = r.deadline(handshake_status, now);
+        Ok(())
     }
 }
