@@ -10327,6 +10327,45 @@ fn close(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
     );
 }
 
+/// A close-only packet does not elicit ACKs (RFC 9000 section 13.2).
+/// Closing must not consume a pending ACK-elicitation request or restart
+/// the idle timer, and the packet must not enter congestion flight accounting.
+#[rstest]
+fn close_only_packet_does_not_elicit_ack(
+    #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
+    #[values(false, true)] application: bool,
+) {
+    let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    assert_eq!(pipe.advance(), Ok(()));
+    let conn = &mut pipe.client;
+    let path = conn.paths.get_active_mut().unwrap();
+    assert!(path.validated());
+    path.needs_ack_eliciting = true;
+    let before = path.recovery.bytes_in_flight();
+    let idle_timer = conn.idle_timer;
+    conn.ack_eliciting_sent = false;
+
+    assert_eq!(conn.close(application, 42, b"closing"), Ok(()));
+    let mut buf = [0; 1500];
+    let (written, _) = conn.send(&mut buf).unwrap();
+    let frames =
+        test_utils::decode_pkt(&mut pipe.server, &mut buf[..written]).unwrap();
+    assert_eq!(frames.len(), 1);
+    assert!(matches!(
+        frames[0],
+        frame::Frame::ConnectionClose { .. } |
+            frame::Frame::ApplicationClose { .. }
+    ));
+    assert!(!frames[0].ack_eliciting());
+    let path = pipe.client.paths.get_active().unwrap();
+    assert_eq!(path.recovery.bytes_in_flight(), before);
+    assert!(path.needs_ack_eliciting);
+    assert!(!pipe.client.ack_eliciting_sent);
+    assert_eq!(pipe.client.idle_timer, idle_timer);
+    assert!(pipe.client.is_draining());
+}
+
 #[rstest]
 fn app_close_by_client(
     #[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str,
