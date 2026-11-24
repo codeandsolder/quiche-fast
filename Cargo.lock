@@ -2847,6 +2847,8 @@ dependencies = [
  "octets",
  "quiche",
  "ring",
+ "serde",
+ "serde_json",
  "url",
 ]
 

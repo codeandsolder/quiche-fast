@@ -34,6 +34,8 @@ nix = { workspace = true, features = ["net", "socket", "uio"] }
 octets = { workspace = true }
 quiche = { workspace = true }
 ring = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 url = { workspace = true }
 
 [lib]
