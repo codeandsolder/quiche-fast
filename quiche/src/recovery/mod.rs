@@ -570,7 +570,7 @@ pub struct Sent {
 
     pub frames: SmallVec<[frame::Frame; 1]>,
 
-    pub sent_at: Instant,
+    pub transmitted_at: Instant,
 
     pub acked_at: Option<Instant>,
 
@@ -596,7 +596,7 @@ pub struct Sent {
 impl std::fmt::Debug for Sent {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "pkt_num={:?} ", self.pkt_num)?;
-        write!(f, "pkt_sent_time={:?} ", self.sent_at)?;
+        write!(f, "pkt_sent_time={:?} ", self.transmitted_at)?;
         write!(f, "pkt_size={:?} ", self.size)?;
         write!(f, "delivered={:?} ", self.delivered)?;
         write!(f, "delivered_time={:?} ", self.delivered_time)?;
@@ -1964,7 +1964,7 @@ mod tests {
             let p = Sent {
                 pkt_num: i,
                 frames: smallvec![],
-                sent_at: now,
+                transmitted_at: now,
                 acked_at: None,
                 lost_at: None,
                 size: 1200,
@@ -2623,12 +2623,12 @@ mod tests {
 
         // Three packets spanning ten seconds, none of which is acknowledged.
         for (pkt_num, offset) in [(1, 0), (2, 5), (3, 10)] {
-            let sent_at = start + Duration::from_secs(offset);
+            let transmitted_at = start + Duration::from_secs(offset);
             r.on_packet_sent(
-                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                test_utils::helper_packet_sent(pkt_num, transmitted_at, 1000),
                 epoch,
                 HandshakeStatus::default(),
-                sent_at,
+                transmitted_at,
                 "",
             );
         }
@@ -2678,12 +2678,12 @@ mod tests {
         // These two packets span long enough for persistent congestion, but
         // both predate the first RTT sample.
         for (pkt_num, offset) in [(0, 0), (1, 5)] {
-            let sent_at = start + Duration::from_secs(offset);
+            let transmitted_at = start + Duration::from_secs(offset);
             r.on_packet_sent(
-                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                test_utils::helper_packet_sent(pkt_num, transmitted_at, 1000),
                 epoch,
                 HandshakeStatus::default(),
-                sent_at,
+                transmitted_at,
                 "",
             );
         }
@@ -3128,7 +3128,7 @@ mod tests {
         let p_initial = Sent {
             pkt_num: 0,
             frames: smallvec::smallvec![],
-            sent_at: now,
+            transmitted_at: now,
             acked_at: None,
             lost_at: None,
             size: 1000,
@@ -3155,7 +3155,7 @@ mod tests {
         let p_app = Sent {
             pkt_num: 0, // Application space has its own packet numbers
             frames: smallvec::smallvec![],
-            sent_at: now,
+            transmitted_at: now,
             acked_at: None,
             lost_at: None,
             size: 1000,
@@ -3221,7 +3221,7 @@ mod tests {
         let p = Sent {
             pkt_num: 0,
             frames: frames.clone(),
-            sent_at: now,
+            transmitted_at: now,
             acked_at: None,
             lost_at: None,
             size: 1000,

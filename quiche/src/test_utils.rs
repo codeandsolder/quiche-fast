@@ -521,7 +521,7 @@ pub fn encode_raw_pkt<F: BufFactory>(
         ),
         pkt_num: pn,
         pkt_num_len: pn_len,
-        token: conn.token.clone(),
+        token: conn.initial.token.clone(),
         versions: None,
         key_phase: conn.key_phase,
     };
@@ -621,7 +621,7 @@ pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
     Sent {
         pkt_num,
         frames: smallvec![],
-        sent_at: now,
+        transmitted_at: now,
         acked_at: None,
         lost_at: None,
         size,

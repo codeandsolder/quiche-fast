@@ -728,7 +728,13 @@ mod tests {
 
         // Seed a logical byte count without allocating gigabytes of data.
         streams
-            .get_or_create(0, &params, &params, true, false)
+            .get_or_create(
+                0,
+                &params,
+                &params,
+                crate::stream::StreamOpenIntent::Local,
+                false,
+            )
             .unwrap()
             .send
             .buffered_bytes = baseline;
@@ -736,7 +742,13 @@ mod tests {
 
         {
             let stream = streams
-                .get_or_create(4, &params, &params, true, false)
+                .get_or_create(
+                    4,
+                    &params,
+                    &params,
+                    crate::stream::StreamOpenIntent::Local,
+                    false,
+                )
                 .unwrap();
             assert_eq!(stream.send.write(b"hello", false), Ok(5));
         }

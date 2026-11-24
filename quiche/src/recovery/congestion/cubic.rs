@@ -296,7 +296,7 @@ fn on_packet_acked(
         return;
     }
     r.cubic_state.last_ack_time = Some(now);
-    let in_congestion_recovery = r.in_congestion_recovery(packet.sent_at);
+    let in_congestion_recovery = r.in_congestion_recovery(packet.transmitted_at);
 
     if in_congestion_recovery {
         r.prr.on_packet_acked(
@@ -446,8 +446,8 @@ fn congestion_event(
     r: &mut Congestion, bytes_in_flight: usize, _lost_bytes: usize,
     largest_lost_pkt: &Sent, now: Instant,
 ) {
-    let sent_at = largest_lost_pkt.sent_at;
-    let in_congestion_recovery = r.in_congestion_recovery(sent_at);
+    let transmitted_at = largest_lost_pkt.transmitted_at;
+    let in_congestion_recovery = r.in_congestion_recovery(transmitted_at);
 
     // Start a new congestion event if packet was sent after the
     // start of the previous congestion recovery period.
@@ -944,7 +944,7 @@ mod tests {
         let acked = Acked {
             pkt_num: 0,
             // To exit from recovery
-            sent_at: sender.time + rtt,
+            transmitted_at: sender.time + rtt,
             size,
             in_flight: true,
             delivered: 0,
@@ -975,7 +975,7 @@ mod tests {
         let acked = Acked {
             pkt_num: 0,
             // To exit from recovery
-            sent_at: sender.time + rtt,
+            transmitted_at: sender.time + rtt,
             size,
             in_flight: true,
             delivered: 0,

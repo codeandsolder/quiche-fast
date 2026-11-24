@@ -1350,7 +1350,7 @@ mod tests {
             local,
             first,
             &recovery,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1370,7 +1370,7 @@ mod tests {
             local,
             second,
             &recovery,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1515,7 +1515,7 @@ mod tests {
             local,
             old_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1543,7 +1543,7 @@ mod tests {
             local,
             new_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1559,7 +1559,7 @@ mod tests {
             local,
             third_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1584,7 +1584,7 @@ mod tests {
                     local,
                     third_peer,
                     &recovery_config,
-                    config.path_challenge_recv_max_queue_len,
+                    config.options.path_challenge_recv_max_queue_len,
                     false,
                     None,
                 ),
@@ -1728,7 +1728,7 @@ mod tests {
             "127.0.0.1:1234".parse().unwrap(),
             "127.0.0.1:4321".parse().unwrap(),
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1757,7 +1757,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             Some(&config),
         );
@@ -1781,7 +1781,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             Some(&config),
         );
@@ -1818,7 +1818,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             Some(&config),
         );
@@ -1852,7 +1852,7 @@ mod tests {
             client_addr,
             server_addr,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1862,7 +1862,7 @@ mod tests {
             client_addr_2,
             server_addr,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1939,7 +1939,7 @@ mod tests {
         let client_addr = "127.0.0.1:1234".parse().unwrap();
         let server_addr = "127.0.0.1:4321".parse().unwrap();
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let queue_limit = config.path_challenge_recv_max_queue_len;
+        let queue_limit = config.options.path_challenge_recv_max_queue_len;
         let path = Path::new(
             client_addr,
             server_addr,

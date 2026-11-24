@@ -117,7 +117,7 @@ struct PacingTuning {
     /// minRTT is under estimated, so it is better to have the RTT be
     /// slightly over estimated.  The pacer can only schedule packets
     /// 1/8th of an RTT into the future, so the error introduced by
-    /// setting `sent_at` to `now` is bounded.
+    /// setting `transmitted_at` to `now` is bounded.
     time_sent_set_to_now: bool,
 }
 

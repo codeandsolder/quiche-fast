@@ -185,7 +185,7 @@ impl RecoveryEpoch {
                         )
                     });
                     unacked.acked_at = Some(now);
-                    self.newly_acked_send_times.push(unacked.sent_at);
+                    self.newly_acked_send_times.push(unacked.transmitted_at);
 
                     if unacked.flight.in_flight() {
                         has_in_flight_spurious_loss = true;
@@ -198,11 +198,12 @@ impl RecoveryEpoch {
 
                     newly_acked.push(Acked {
                         pkt_num: unacked.pkt_num,
-                        sent_at: unacked.sent_at,
+                        transmitted_at: unacked.transmitted_at,
                         size: unacked.size,
                         in_flight: unacked.flight.in_flight(),
 
-                        rtt: now.saturating_duration_since(unacked.sent_at),
+                        rtt: now
+                            .saturating_duration_since(unacked.transmitted_at),
                         delivered: unacked.delivered,
                         delivered_time: unacked.delivered_time,
                         first_sent_time: unacked.first_sent_time,
@@ -216,7 +217,7 @@ impl RecoveryEpoch {
 
                     has_ack_eliciting |= unacked.flight.ack_eliciting();
                     unacked.acked_at = Some(now);
-                    self.newly_acked_send_times.push(unacked.sent_at);
+                    self.newly_acked_send_times.push(unacked.transmitted_at);
                 }
             }
         }
@@ -276,7 +277,7 @@ impl RecoveryEpoch {
                 .saturating_sub(unacked.pkt_num)
                 .saturating_sub(skipped_between);
 
-            if lost_send_time.is_some_and(|time| unacked.sent_at <= time) ||
+            if lost_send_time.is_some_and(|time| unacked.transmitted_at <= time) ||
                 packet_distance >= pkt_thresh
             {
                 self.pending_lost_frames.queue_ack(unacked.frames.drain(..));
@@ -296,13 +297,14 @@ impl RecoveryEpoch {
 
                     if unacked.flight.ack_eliciting() &&
                         first_rtt_sample_time.is_some_and(|first_rtt| {
-                            unacked.sent_at > first_rtt
+                            unacked.transmitted_at > first_rtt
                         })
                     {
                         // Packets are visited in packet number order, so this
                         // records the span the lost packets were sent over.
-                        first_lost_ack_eliciting.get_or_insert(unacked.sent_at);
-                        last_lost_ack_eliciting = Some(unacked.sent_at);
+                        first_lost_ack_eliciting
+                            .get_or_insert(unacked.transmitted_at);
+                        last_lost_ack_eliciting = Some(unacked.transmitted_at);
                         lost_ack_eliciting += 1;
                     }
 
@@ -320,7 +322,7 @@ impl RecoveryEpoch {
 
                 lost_packets += 1;
             } else {
-                self.timing.loss = unacked.sent_at.checked_add(loss_delay);
+                self.timing.loss = unacked.transmitted_at.checked_add(loss_delay);
                 break;
             }
         }
@@ -505,7 +507,7 @@ impl LegacyRecovery {
             .iter()
             .flat_map(|epoch| epoch.sent_packets.iter())
             .filter(|pkt| pkt.acked_at.is_none() && pkt.lost_at.is_none())
-            .map(|pkt| pkt.sent_at)
+            .map(|pkt| pkt.transmitted_at)
             .min();
 
         if let Some(oldest_outstanding) = oldest_outstanding {
@@ -531,7 +533,7 @@ impl LegacyRecovery {
         );
 
         if let Some(pkt) = loss.largest_lost_pkt {
-            if !self.congestion.in_congestion_recovery(pkt.sent_at) {
+            if !self.congestion.in_congestion_recovery(pkt.transmitted_at) {
                 (self.congestion.cc_ops.checkpoint)(&mut self.congestion);
             }
 
@@ -721,7 +723,7 @@ impl RecoveryOps for LegacyRecovery {
             if largest_newly_acked.pkt_num == largest_acked_pkt_num &&
                 has_ack_eliciting
             {
-                let latest_rtt = now - largest_newly_acked.sent_at;
+                let latest_rtt = now - largest_newly_acked.transmitted_at;
                 self.rtt_stats.update_rtt(
                     latest_rtt,
                     Duration::from_micros(ack_delay),
@@ -1165,7 +1167,7 @@ impl std::fmt::Debug for LegacyRecovery {
 pub struct Acked {
     pub pkt_num: u64,
 
-    pub sent_at: Instant,
+    pub transmitted_at: Instant,
 
     pub size: usize,
 

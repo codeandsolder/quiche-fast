@@ -556,6 +556,33 @@ pub enum QlogLevel {
     Extra = 2,
 }
 
+/// Runtime options copied as a unit when creating a connection.
+#[derive(Clone, Copy)]
+struct ConnectionOptions {
+    grease: bool,
+
+    enable_send_streams_blocked: bool,
+
+    disable_dcid_reuse: bool,
+
+    path_challenge_recv_max_queue_len: usize,
+
+    max_amplification_factor: usize,
+}
+
+impl Default for ConnectionOptions {
+    fn default() -> Self {
+        Self {
+            grease: true,
+            enable_send_streams_blocked: false,
+            disable_dcid_reuse: false,
+            path_challenge_recv_max_queue_len:
+                DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN,
+            max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
+        }
+    }
+}
+
 /// Stores configuration shared between multiple connections.
 pub struct Config {
     local_transport_params: TransportParams,
@@ -566,11 +593,9 @@ pub struct Config {
 
     application_protos: Vec<Vec<u8>>,
 
-    grease: bool,
+    options: ConnectionOptions,
 
     recovery: recovery::RecoveryConfig,
-
-    enable_send_streams_blocked: bool,
 
     pmtud: pmtud::Config,
 
@@ -579,14 +604,8 @@ pub struct Config {
     dgram_recv_max_queue_len: usize,
     dgram_send_max_queue_len: usize,
 
-    path_challenge_recv_max_queue_len: usize,
-
     max_connection_window: u64,
     max_stream_window: u64,
-
-    max_amplification_factor: usize,
-
-    disable_dcid_reuse: bool,
 
     track_unknown_transport_params: Option<usize>,
 }
@@ -644,9 +663,8 @@ impl Config {
             version,
             tls_ctx,
             application_protos: Vec::new(),
-            grease: true,
+            options: ConnectionOptions::default(),
             recovery: recovery::RecoveryConfig::default(),
-            enable_send_streams_blocked: false,
             pmtud: pmtud::Config::default(),
 
             tx_cap_factor: TX_CAP_FACTOR,
@@ -654,15 +672,8 @@ impl Config {
             dgram_recv_max_queue_len: DEFAULT_MAX_DGRAM_QUEUE_LEN,
             dgram_send_max_queue_len: DEFAULT_MAX_DGRAM_QUEUE_LEN,
 
-            path_challenge_recv_max_queue_len:
-                DEFAULT_MAX_PATH_CHALLENGE_RX_QUEUE_LEN,
-
             max_connection_window: MAX_CONNECTION_WINDOW,
             max_stream_window: stream::MAX_STREAM_WINDOW,
-
-            max_amplification_factor: MAX_AMPLIFICATION_FACTOR,
-
-            disable_dcid_reuse: false,
 
             track_unknown_transport_params: None,
         })
@@ -810,7 +821,7 @@ impl Config {
     ///
     /// The default value is `true`.
     pub const fn grease(&mut self, grease: bool) {
-        self.grease = grease;
+        self.options.grease = grease;
     }
 
     /// Enables logging of secrets.
@@ -923,7 +934,7 @@ impl Config {
     ///
     /// The default value is `3`.
     pub const fn set_max_amplification_factor(&mut self, v: usize) {
-        self.max_amplification_factor = v;
+        self.options.max_amplification_factor = v;
     }
 
     /// Sets the send capacity factor.
@@ -1188,7 +1199,7 @@ impl Config {
     ///
     /// The default value is false.
     pub const fn set_enable_send_streams_blocked(&mut self, enable: bool) {
-        self.enable_send_streams_blocked = enable;
+        self.options.enable_send_streams_blocked = enable;
     }
 
     /// Configures whether to enable `HyStart`++.
@@ -1239,7 +1250,7 @@ impl Config {
     pub const fn set_path_challenge_recv_max_queue_len(
         &mut self, queue_len: usize,
     ) {
-        self.path_challenge_recv_max_queue_len = queue_len;
+        self.options.path_challenge_recv_max_queue_len = queue_len;
     }
 
     /// Sets the maximum size of the connection window.
@@ -1277,7 +1288,7 @@ impl Config {
     ///
     /// The default value is `false`.
     pub const fn set_disable_dcid_reuse(&mut self, v: bool) {
-        self.disable_dcid_reuse = v;
+        self.options.disable_dcid_reuse = v;
     }
 
     /// Enables tracking unknown transport parameters.
@@ -1343,6 +1354,16 @@ enum ConnectionLifecycle {
     Closed(CloseCause),
 }
 
+impl ConnectionLifecycle {
+    const fn close_once(&mut self, cause: CloseCause) -> bool {
+        if matches!(*self, Self::Closed(_)) {
+            return false;
+        }
+        *self = Self::Closed(cause);
+        true
+    }
+}
+
 /// Effective limits may be defaults, remembered 0-RTT limits, or freshly
 /// validated peer parameters. Only the last state is a negotiated result.
 #[derive(Clone, Debug, PartialEq)]
@@ -1392,6 +1413,49 @@ impl InitialExchange {
     const fn peer_identified(self) -> bool {
         matches!(self, Self::PeerIdentified)
     }
+}
+
+/// Initial exchange history persists after Initial packet protection is
+/// retired, including the authenticated Retry and address-validation evidence.
+#[derive(Default)]
+struct InitialHandshake {
+    exchange: InitialExchange,
+    version_negotiated: bool,
+    retried: bool,
+    peer_verified_address: bool,
+    odcid: Option<ConnectionId<'static>>,
+    rscid: Option<ConnectionId<'static>>,
+    token: Option<Vec<u8>>,
+}
+
+/// RFC 9000 idle timeout refreshes on receive and on the first subsequent
+/// ack-eliciting send, not on every packet transmitted.
+#[derive(Default)]
+struct IdleTimer {
+    deadline: Option<Instant>,
+    ack_eliciting_sent: bool,
+}
+
+impl IdleTimer {
+    fn refresh(&mut self, now: Instant, timeout: Option<Duration>) {
+        if let Some(timeout) = timeout {
+            self.deadline = now.checked_add(timeout);
+        }
+    }
+
+    fn on_first_ack_eliciting_send(
+        &mut self, now: Instant, timeout: Option<Duration>,
+    ) {
+        self.refresh(now, timeout);
+        self.ack_eliciting_sent = true;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum PayloadPreference {
+    #[default]
+    Datagram,
+    Stream,
 }
 
 /// TLS completion and peer confirmation can arrive in either order.
@@ -1504,6 +1568,22 @@ struct TxPacketAssembly {
     flight: recovery::PacketFlight,
     probes: TxPathProbes,
     data: PacketDataEmission,
+}
+
+impl TxPacketAssembly {
+    /// Legacy recovery excludes DATAGRAM-only packets from data accounting,
+    /// whereas gcongestion includes them. Protection and recovery share the
+    /// resulting classification.
+    const fn classify_data_flight(&mut self, datagram_is_data: bool) {
+        if self.data.has_data() ||
+            (self.data.datagram_emitted && datagram_is_data)
+        {
+            debug_assert!(!self.flight.is_pmtud_probe());
+            self.flight = recovery::PacketFlight::Data;
+        } else if self.data.datagram_emitted {
+            self.flight.record_ack_eliciting();
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1664,6 +1744,12 @@ where
     /// TLS handshake state.
     handshake: tls::Handshake,
 
+    initial: InitialHandshake,
+
+    idle: IdleTimer,
+
+    options: ConnectionOptions,
+
     early_data_rejection_handled: bool,
 
     /// Serialized TLS session buffer.
@@ -1680,9 +1766,6 @@ where
 
     /// The path manager.
     paths: path::PathMap,
-
-    /// `PATH_CHALLENGE` receive queue max length.
-    path_challenge_recv_max_queue_len: usize,
 
     /// List of supported application protocols.
     application_protos: Vec<Vec<u8>>,
@@ -1711,17 +1794,6 @@ where
     /// Streams map, indexed by stream ID.
     pub(crate) streams: stream::StreamMap<F>,
 
-    /// Peer's original destination connection ID. Used by the client to
-    /// validate the server's transport parameter.
-    odcid: Option<ConnectionId<'static>>,
-
-    /// Peer's retry source connection ID. Used by the client during stateless
-    /// retry to validate the server's transport parameter.
-    rscid: Option<ConnectionId<'static>>,
-
-    /// Received address verification token.
-    token: Option<Vec<u8>>,
-
     /// Error code and reason to be sent to the peer in a `CONNECTION_CLOSE`
     /// frame.
     local_error: Option<ConnectionError>,
@@ -1732,9 +1804,6 @@ where
 
     /// The connection-level limit at which send blocking occurred.
     blocked_limit: Option<u64>,
-
-    /// Idle timeout expiration time.
-    idle_timer: Option<Instant>,
 
     /// Connection processing lifecycle and terminal cause.
     lifecycle: ConnectionLifecycle,
@@ -1748,19 +1817,6 @@ where
     /// Whether this is a server-side connection.
     is_server: bool,
 
-    /// Initial protection and authenticated peer CID progress.
-    initial_exchange: InitialExchange,
-
-    /// Whether a version negotiation packet has already been received. Only
-    /// relevant for client connections.
-    did_version_negotiation: bool,
-
-    /// Whether stateless retry has been performed.
-    did_retry: bool,
-
-    /// Whether the peer verified our initial address.
-    peer_verified_initial_address: bool,
-
     /// TLS completion and handshake confirmation.
     handshake_progress: HandshakeProgress,
 
@@ -1769,17 +1825,6 @@ where
 
     /// Key phase bit used for outgoing protected packets.
     key_phase: bool,
-
-    /// Whether an ack-eliciting packet has been sent since last receiving a
-    /// packet.
-    ack_eliciting_sent: bool,
-
-    /// Whether to send GREASE.
-    grease: bool,
-
-    /// Whether to send `STREAMS_BLOCKED` frames when bidi or uni stream quota
-    /// exhausted.
-    enable_send_streams_blocked: bool,
 
     /// TLS keylog writer.
     keylog: Option<Box<dyn std::io::Write + Send + Sync>>,
@@ -1791,15 +1836,7 @@ where
     dgram_recv_queue: dgram::DatagramQueue<F>,
     dgram_send_queue: dgram::DatagramQueue<F>,
 
-    /// Whether to emit DATAGRAM frames in the next packet.
-    emit_dgram: bool,
-
-    /// Whether the connection should prevent from reusing destination
-    /// Connection IDs when the peer migrates.
-    disable_dcid_reuse: bool,
-
-    /// The anti-amplification limit factor.
-    max_amplification_factor: usize,
+    payload_preference: PayloadPreference,
 }
 
 /// Creates a new server-side connection.
@@ -2371,6 +2408,15 @@ impl<F: BufFactory> Connection<F> {
             local_transport_params: config.local_transport_params.clone(),
 
             handshake: tls,
+            initial: InitialHandshake {
+                retried: did_retry,
+                // Servers assume the client has verified the server address.
+                peer_verified_address: is_server,
+                ..Default::default()
+            },
+            idle: IdleTimer::default(),
+            options: config.options,
+            payload_preference: PayloadPreference::default(),
 
             early_data_rejection_handled: false,
 
@@ -2380,8 +2426,6 @@ impl<F: BufFactory> Connection<F> {
 
             paths,
             counters: ConnectionCounters::default(),
-            path_challenge_recv_max_queue_len: config
-                .path_challenge_recv_max_queue_len,
             application_protos: config.application_protos.clone(),
 
             rx_data: 0,
@@ -2404,19 +2448,11 @@ impl<F: BufFactory> Connection<F> {
                 config.max_stream_window,
             ),
 
-            odcid: None,
-
-            rscid: None,
-
-            token: None,
-
             local_error: None,
 
             peer_error: None,
 
             blocked_limit: None,
-
-            idle_timer: None,
 
             lifecycle: ConnectionLifecycle::Active,
 
@@ -2426,26 +2462,11 @@ impl<F: BufFactory> Connection<F> {
 
             is_server,
 
-            initial_exchange: InitialExchange::default(),
-
-            did_version_negotiation: false,
-
-            did_retry,
-
-            // Assume clients validate the server's address implicitly.
-            peer_verified_initial_address: is_server,
-
             handshake_progress: HandshakeProgress::default(),
 
             handshake_done: HandshakeDoneState::Pending,
 
             key_phase: false,
-
-            ack_eliciting_sent: false,
-
-            grease: config.grease,
-
-            enable_send_streams_blocked: config.enable_send_streams_blocked,
 
             keylog: None,
 
@@ -2459,12 +2480,6 @@ impl<F: BufFactory> Connection<F> {
             dgram_send_queue: dgram::DatagramQueue::new(
                 config.dgram_send_max_queue_len,
             ),
-
-            emit_dgram: true,
-
-            disable_dcid_reuse: config.disable_dcid_reuse,
-
-            max_amplification_factor: config.max_amplification_factor,
         };
         conn.initialize_handshake(&start, active_path_id)?;
         Ok(conn)
@@ -2486,7 +2501,7 @@ impl<F: BufFactory> Connection<F> {
             local,
             peer,
             &config.recovery,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             Some(config),
         );
@@ -2569,7 +2584,7 @@ impl<F: BufFactory> Connection<F> {
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
-            self.initial_exchange = InitialExchange::AwaitingPeerId;
+            self.initial.exchange = InitialExchange::AwaitingPeerId;
         }
 
         Ok(())
@@ -3207,7 +3222,7 @@ impl<F: BufFactory> Connection<F> {
             if self.is_server && !recv_path.verified_peer_address {
                 recv_path.grant_amplification_credit(
                     len,
-                    self.max_amplification_factor,
+                    self.options.max_amplification_factor,
                 );
             }
         } else if !self.is_server {
@@ -3389,7 +3404,7 @@ impl<F: BufFactory> Connection<F> {
 
         // Only authenticated, nonduplicate packets can select or create paths.
         let recv_pid = if hdr.ty == Type::Short &&
-            self.initial_exchange.peer_identified()
+            self.initial.exchange.peer_identified()
         {
             let pkt_dcid = ConnectionId::from_ref(&hdr.dcid);
             self.get_or_create_recv_path_id(recv_pid, &pkt_dcid, buf_len, info)?
@@ -3439,7 +3454,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Ignore duplicate version negotiation.
-        if self.did_version_negotiation {
+        if self.initial.version_negotiated {
             return Err(Error::Done);
         }
 
@@ -3495,7 +3510,7 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::UnknownVersion);
         }
 
-        self.did_version_negotiation = true;
+        self.initial.version_negotiated = true;
 
         // Derive Initial secrets based on the new version.
         let (aead_open, aead_seal) = crypto::derive_initial_key_material(
@@ -3526,7 +3541,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Ignore duplicate retry.
-        if self.did_retry {
+        if self.initial.retried {
             return Err(Error::Done);
         }
 
@@ -3539,11 +3554,11 @@ impl<F: BufFactory> Connection<F> {
 
         trace!("{} rx pkt {hdr:?}", self.trace_id);
 
-        self.token = hdr.token;
-        self.did_retry = true;
+        self.initial.token = hdr.token;
+        self.initial.retried = true;
 
         // Remember peer's new connection ID.
-        self.odcid = Some(self.destination_id().clone());
+        self.initial.odcid = Some(self.destination_id().clone());
 
         self.set_initial_dcid(
             hdr.scid.clone(),
@@ -3551,7 +3566,7 @@ impl<F: BufFactory> Connection<F> {
             self.paths.get_active_path_id()?,
         )?;
 
-        self.rscid = Some(self.destination_id().clone());
+        self.initial.rscid = Some(self.destination_id().clone());
 
         // Derive Initial secrets using the new connection ID.
         let (aead_open, aead_seal) = crypto::derive_initial_key_material(
@@ -3571,7 +3586,7 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         // Reset connection state to force sending another Initial packet.
         self.drop_epoch_state(packet::Epoch::Initial, now);
-        self.initial_exchange = InitialExchange::AwaitingPeerId;
+        self.initial.exchange = InitialExchange::AwaitingPeerId;
         self.handshake.clear()?;
 
         self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
@@ -3583,13 +3598,13 @@ impl<F: BufFactory> Connection<F> {
     fn prepare_rx_packet(
         &mut self, hdr: &Header<'_>, b: &mut octets::OctetsMut<'_>,
     ) -> Result<usize> {
-        if self.is_server && !self.did_version_negotiation {
+        if self.is_server && !self.initial.version_negotiated {
             if !version_is_supported(hdr.version) {
                 return Err(Error::UnknownVersion);
             }
 
             self.version = hdr.version;
-            self.did_version_negotiation = true;
+            self.initial.version_negotiated = true;
 
             self.handshake
                 .use_legacy_codepoint(self.version != PROTOCOL_VERSION_V1);
@@ -3625,7 +3640,7 @@ impl<F: BufFactory> Connection<F> {
         };
 
         // Derive initial secrets on the server.
-        if !self.initial_exchange.keys_derived() {
+        if !self.initial.exchange.keys_derived() {
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &hdr.dcid,
                 self.is_server,
@@ -3635,7 +3650,7 @@ impl<F: BufFactory> Connection<F> {
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
-            self.initial_exchange = InitialExchange::AwaitingPeerId;
+            self.initial.exchange = InitialExchange::AwaitingPeerId;
         }
 
         Ok(payload_len)
@@ -3878,14 +3893,14 @@ impl<F: BufFactory> Connection<F> {
     fn install_rx_peer_connection_id(
         &mut self, hdr: &Header<'static>, recv_pid: usize,
     ) -> Result<()> {
-        if self.initial_exchange.peer_identified() {
+        if self.initial.exchange.peer_identified() {
             return Ok(());
         }
 
         if self.is_server {
             self.set_initial_dcid(hdr.scid.clone(), None, recv_pid)?;
 
-            if !self.did_retry {
+            if !self.initial.retried {
                 self.local_transport_params
                     .original_destination_connection_id =
                     Some(ConnectionId::copy_from_slice(hdr.dcid.as_ref()));
@@ -3893,8 +3908,8 @@ impl<F: BufFactory> Connection<F> {
                 self.encode_transport_params()?;
             }
         } else {
-            if self.odcid.is_none() {
-                self.odcid = Some(self.destination_id().clone());
+            if self.initial.odcid.is_none() {
+                self.initial.odcid = Some(self.destination_id().clone());
             }
 
             // Replace the randomly generated destination connection ID with
@@ -3906,7 +3921,7 @@ impl<F: BufFactory> Connection<F> {
             )?;
         }
 
-        self.initial_exchange = InitialExchange::PeerIdentified;
+        self.initial.exchange = InitialExchange::PeerIdentified;
         Ok(())
     }
 
@@ -4321,13 +4336,16 @@ impl<F: BufFactory> Connection<F> {
                 recv_pid != active_path_id &&
                 self.pkt_num_spaces[epoch].largest_rx_non_probing_pkt_num == pn
             {
-                self.on_peer_migrated(recv_pid, self.disable_dcid_reuse, now)?;
+                self.on_peer_migrated(
+                    recv_pid,
+                    self.options.disable_dcid_reuse,
+                    now,
+                )?;
             }
         }
 
-        if let Some(idle_timeout) = self.idle_timeout() {
-            self.idle_timer = now.checked_add(idle_timeout);
-        }
+        let timeout = self.idle_timeout();
+        self.idle.refresh(now, timeout);
 
         // Update send capacity.
         self.update_tx_cap();
@@ -4347,7 +4365,7 @@ impl<F: BufFactory> Connection<F> {
             self.paths.get_mut(recv_pid)?.verified_peer_address = true;
         }
 
-        self.ack_eliciting_sent = false;
+        self.idle.ack_eliciting_sent = false;
 
         Ok(())
     }
@@ -4555,7 +4573,7 @@ impl<F: BufFactory> Connection<F> {
 
         // There's no point in trying to send a packet if the Initial secrets
         // have not been derived yet, so return early.
-        if !self.initial_exchange.keys_derived() {
+        if !self.initial.exchange.keys_derived() {
             return Err(Error::Done);
         }
 
@@ -4953,18 +4971,9 @@ impl<F: BufFactory> Connection<F> {
             pkt_type,
             max_dgram_len,
         )?;
-        // Legacy recovery does not count DATAGRAM-only traffic as data;
-        // gcongestion does. Preserve that backend policy in the one packet
-        // classification carried through protection, ACK and loss processing.
-        if assembly.data.has_data() ||
-            (assembly.data.datagram_emitted &&
-                self.paths.get(send_pid)?.recovery.gcongestion_enabled())
-        {
-            debug_assert!(!assembly.flight.is_pmtud_probe());
-            assembly.flight = recovery::PacketFlight::Data;
-        } else if assembly.data.datagram_emitted {
-            assembly.flight.record_ack_eliciting();
-        }
+        let datagram_is_data = assembly.data.datagram_emitted &&
+            self.paths.get(send_pid)?.recovery.gcongestion_enabled();
+        assembly.classify_data_flight(datagram_is_data);
 
         Self::complete_tx_frames(
             b,
@@ -5031,7 +5040,7 @@ impl<F: BufFactory> Connection<F> {
             // this field (Retry doesn't count, as it's not encoded as part of
             // this code path).
             token: if pkt_type == Type::Initial {
-                self.token.clone()
+                self.initial.token.clone()
             } else {
                 None
             },
@@ -5566,7 +5575,7 @@ impl<F: BufFactory> Connection<F> {
         let sent_pkt = recovery::Sent {
             pkt_num: pn,
             frames: std::mem::take(&mut assembly.frames),
-            sent_at: now,
+            transmitted_at: now,
             acked_at: None,
             lost_at: None,
             // RFC 9002, Section 2: a packet containing a PADDING frame is
@@ -5591,7 +5600,7 @@ impl<F: BufFactory> Connection<F> {
         let handshake_status = recovery::HandshakeStatus {
             has_handshake_keys: self.crypto_ctx[packet::Epoch::Handshake]
                 .has_keys(),
-            peer_verified_address: self.peer_verified_initial_address,
+            peer_verified_address: self.initial.peer_verified_address,
             completed: self.handshake_progress.completed(),
         };
 
@@ -5665,14 +5674,9 @@ impl<F: BufFactory> Connection<F> {
 
         // (Re)start the idle timer if we are sending the first ack-eliciting
         // packet since last receiving a packet.
-        if assembly.flight.ack_eliciting() && !self.ack_eliciting_sent {
-            if let Some(idle_timeout) = self.idle_timeout() {
-                self.idle_timer = now.checked_add(idle_timeout);
-            }
-        }
-
-        if assembly.flight.ack_eliciting() {
-            self.ack_eliciting_sent = true;
+        if assembly.flight.ack_eliciting() && !self.idle.ack_eliciting_sent {
+            let timeout = self.idle_timeout();
+            self.idle.on_first_ack_eliciting_send(now, timeout);
         }
 
         // RFC 9000 §12.3: when the send number reaches its maximum, close
@@ -5692,7 +5696,7 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<PacketDataEmission> {
         let mut emission = PacketDataEmission::default();
         if self.local_error.is_some() || !self.paths.get(send_pid)?.active() {
-            self.emit_dgram = true;
+            self.payload_preference = PayloadPreference::Datagram;
             return Ok(emission);
         }
 
@@ -5706,7 +5710,10 @@ impl<F: BufFactory> Connection<F> {
         if matches!(pkt_type, Type::Short | Type::ZeroRTT) {
             // Alternate between the queues when both have data. Fall back to
             // STREAM when a preferred datagram cannot be emitted.
-            if *left >= 3 && (self.emit_dgram || !self.streams.has_flushable()) {
+            if *left >= 3 &&
+                (self.payload_preference == PayloadPreference::Datagram ||
+                    !self.streams.has_flushable())
+            {
                 if let Some(max_payload) = max_dgram_len {
                     emission.datagram_emitted = self.emit_datagram_frames(
                         b,
@@ -5722,7 +5729,11 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        self.emit_dgram = !emission.datagram_emitted;
+        self.payload_preference = if emission.datagram_emitted {
+            PayloadPreference::Stream
+        } else {
+            PayloadPreference::Datagram
+        };
         Ok(emission)
     }
 
@@ -6659,27 +6670,12 @@ impl<F: BufFactory> Connection<F> {
 
         let cap = self.tx_cap;
 
-        // Get existing stream or create a new one.
-        let stream = match self.get_or_create_stream(stream_id, true) {
-            Ok(v) => v,
-
-            Err(Error::StreamLimit) => {
-                // If the local endpoint has exhausted the peer's stream count
-                // limit, record the current limit so that a STREAMS_BLOCKED
-                // frame can be sent.
-                if self.enable_send_streams_blocked &&
-                    stream::is_local(stream_id, self.is_server)
-                {
-                    self.streams
-                        .quota_mut(stream::StreamDirection::from_id(stream_id))
-                        .note_blocked();
-                }
-
-                return Err(Error::StreamLimit);
-            },
-
-            Err(e) => return Err(e),
+        let intent = if self.options.enable_send_streams_blocked {
+            stream::StreamOpenIntent::LocalSend
+        } else {
+            stream::StreamOpenIntent::Local
         };
+        let stream = self.get_or_create_stream(stream_id, intent)?;
 
         #[cfg(feature = "qlog")]
         let offset = stream.send.off_back();
@@ -6828,7 +6824,9 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         // Get existing stream or create a new one, but if the stream
         // has already been closed and collected, ignore the prioritization.
-        match self.get_or_create_stream(stream_id, true) {
+        match self
+            .get_or_create_stream(stream_id, stream::StreamOpenIntent::Local)
+        {
             Ok(_) => (),
 
             Err(Error::Done) => return Ok(()),
@@ -7732,7 +7730,7 @@ impl<F: BufFactory> Connection<F> {
                     .as_ref()
                     .map(|key_update| key_update.timer);
 
-                let timers = [self.idle_timer, path_timer, key_update_timer];
+                let timers = [self.idle.deadline, path_timer, key_update_timer];
 
                 timers.into_iter().flatten().min()
             },
@@ -7776,7 +7774,7 @@ impl<F: BufFactory> Connection<F> {
             ConnectionLifecycle::Active => (),
         }
 
-        if let Some(timer) = self.idle_timer {
+        if let Some(timer) = self.idle.deadline {
             if timer <= now {
                 trace!("{} idle timeout expired", self.trace_id);
 
@@ -8725,7 +8723,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Validate original_destination_connection_id.
-        if let Some(odcid) = &self.odcid {
+        if let Some(odcid) = &self.initial.odcid {
             match &peer_params.original_destination_connection_id {
                 Some(v) if v == odcid => (),
                 None if self.is_server => (),
@@ -8739,7 +8737,7 @@ impl<F: BufFactory> Connection<F> {
         // it sent a Retry packet. An unsolicited value is not merely redundant:
         // RFC 9000 section 7.3 requires TRANSPORT_PARAMETER_ERROR in this case.
         match (
-            self.rscid.as_ref(),
+            self.initial.rscid.as_ref(),
             peer_params.retry_source_connection_id.as_ref(),
         ) {
             (None, None) => (),
@@ -9082,13 +9080,13 @@ impl<F: BufFactory> Connection<F> {
     /// Returns the mutable stream with the given ID if it exists, or creates
     /// a new one otherwise.
     fn get_or_create_stream(
-        &mut self, id: u64, local: bool,
+        &mut self, id: u64, intent: stream::StreamOpenIntent,
     ) -> Result<&mut stream::Stream<F>> {
         self.streams.get_or_create(
             id,
             &self.local_transport_params,
             self.peer_parameters.effective(),
-            local,
+            intent,
             self.is_server,
         )
     }
@@ -9112,7 +9110,9 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::InvalidStreamState(id));
         }
 
-        match self.get_or_create_stream(id, local) {
+        match self
+            .get_or_create_stream(id, stream::StreamOpenIntent::from_local(local))
+        {
             Ok(stream) => Ok(Some(stream)),
             Err(Error::Done) => Ok(None),
             Err(e) => Err(e),
@@ -9223,22 +9223,8 @@ impl<F: BufFactory> Connection<F> {
                     self.counters.data_blocked_recv_count.saturating_add(1);
             },
 
-            frame::Frame::StreamDataBlocked { stream_id, .. } => {
-                // A blocked sender references its sending side and can open
-                // a stream before the first byte of STREAM data arrives.
-                if self
-                    .get_or_create_stream_for_received_frame(
-                        stream_id,
-                        PeerStreamSide::Sending,
-                    )?
-                    .is_some()
-                {
-                    self.counters.stream_data_blocked_recv_count = self
-                        .counters
-                        .stream_data_blocked_recv_count
-                        .saturating_add(1);
-                }
-            },
+            frame::Frame::StreamDataBlocked { stream_id, .. } =>
+                self.process_stream_data_blocked(stream_id)?,
 
             frame::Frame::StreamsBlocked { direction, .. } => {
                 self.streams.quota_mut(direction).record_blocked_received();
@@ -9302,6 +9288,24 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
+    fn process_stream_data_blocked(&mut self, stream_id: u64) -> Result<()> {
+        // A blocked sender references its sending side and can open
+        // a stream before the first byte of STREAM data arrives.
+        if self
+            .get_or_create_stream_for_received_frame(
+                stream_id,
+                PeerStreamSide::Sending,
+            )?
+            .is_some()
+        {
+            self.counters.stream_data_blocked_recv_count = self
+                .counters
+                .stream_data_blocked_recv_count
+                .saturating_add(1);
+        }
+        Ok(())
+    }
+
     /// Validate connection-wide ACK ranges and update recovery on all paths.
     fn process_ack_frame(
         &mut self, ranges: &ranges::RangeSet, ack_delay: u64,
@@ -9326,7 +9330,7 @@ impl<F: BufFactory> Connection<F> {
         if epoch == packet::Epoch::Handshake ||
             (epoch == packet::Epoch::Application && self.is_established())
         {
-            self.peer_verified_initial_address = true;
+            self.initial.peer_verified_address = true;
         }
 
         let handshake_status = self.handshake_status();
@@ -9702,7 +9706,7 @@ impl<F: BufFactory> Connection<F> {
             return Err(Error::InvalidPacket);
         }
 
-        self.peer_verified_initial_address = true;
+        self.initial.peer_verified_address = true;
         self.handshake_progress.confirm();
         self.drop_epoch_state(packet::Epoch::Handshake, now);
         Ok(())
@@ -9810,7 +9814,7 @@ impl<F: BufFactory> Connection<F> {
             has_handshake_keys: self.crypto_ctx[packet::Epoch::Handshake]
                 .has_keys(),
 
-            peer_verified_address: self.peer_verified_initial_address,
+            peer_verified_address: self.initial.peer_verified_address,
 
             completed: self.is_established(),
         }
@@ -9958,12 +9962,15 @@ impl<F: BufFactory> Connection<F> {
             info.to,
             info.from,
             &self.recovery_config,
-            self.path_challenge_recv_max_queue_len,
+            self.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
 
-        path.grant_amplification_credit(buf_len, self.max_amplification_factor);
+        path.grant_amplification_credit(
+            buf_len,
+            self.options.max_amplification_factor,
+        );
         path.active_scid_seq = Some(in_scid_seq);
 
         // Automatically probes the new path.
@@ -10125,7 +10132,7 @@ impl<F: BufFactory> Connection<F> {
             local_addr,
             peer_addr,
             &self.recovery_config,
-            self.path_challenge_recv_max_queue_len,
+            self.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -10150,7 +10157,7 @@ impl<F: BufFactory> Connection<F> {
     /// The ID goes back to the pool of spare IDs a new path can take, unless
     /// DCID reuse is disabled, in which case it is retired.
     fn release_dcid(&mut self, dcid_seq: u64) -> Result<()> {
-        if self.disable_dcid_reuse && !self.ids.zero_length_dcid() {
+        if self.options.disable_dcid_reuse && !self.ids.zero_length_dcid() {
             self.ids.retire_dcid(dcid_seq)?;
         } else {
             self.ids.unlink_dcid(dcid_seq);
@@ -10159,22 +10166,23 @@ impl<F: BufFactory> Connection<F> {
         Ok(())
     }
 
-    // Marks the connection as closed once, retaining the cause before
-    // generating any terminal telemetry.
+    // Retain the original terminal cause on repeated close attempts.
+    #[cfg(not(feature = "qlog"))]
+    const fn mark_closed(&mut self, cause: CloseCause) {
+        self.lifecycle.close_once(cause);
+    }
+
+    #[cfg(feature = "qlog")]
     fn mark_closed(&mut self, cause: CloseCause) {
-        if self.is_closed() {
+        if !self.lifecycle.close_once(cause) {
             return;
         }
-        self.lifecycle = ConnectionLifecycle::Closed(cause);
-        #[cfg(feature = "qlog")]
-        {
-            let event = self.close_event(cause);
-            qlog_with_type!(QLOG_CONNECTION_CLOSED, self.qlog, q, {
-                q.add_event_data_now(EventData::QuicConnectionClosed(event))
-                    .ok();
-            });
-            self.qlog.streamer = None;
-        }
+        let event = self.close_event(cause);
+        qlog_with_type!(QLOG_CONNECTION_CLOSED, self.qlog, q, {
+            q.add_event_data_now(EventData::QuicConnectionClosed(event))
+                .ok();
+        });
+        self.qlog.streamer = None;
     }
 
     #[cfg(feature = "qlog")]

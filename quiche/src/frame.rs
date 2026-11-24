@@ -542,8 +542,6 @@ impl Frame {
 
     #[cfg(feature = "qlog")]
     pub fn to_qlog(&self, ack_delay_exponent: u64) -> QuicFrame {
-        use qlog::events::RawInfo;
-
         match self {
             Self::Padding { len } => QuicFrame::Padding {
                 raw: Some(Box::new(qlog_payload(*len as u64))),
@@ -566,42 +564,18 @@ impl Frame {
                 stream_id,
                 error_code,
                 final_size,
-            } => QuicFrame::ResetStream {
-                stream_id: *stream_id,
-                error: qlog::events::ApplicationError::Unknown,
-                error_code: Some(*error_code),
-                final_size: *final_size,
-                raw: None,
-            },
+            } => qlog_reset_stream(*stream_id, *error_code, *final_size),
 
             Self::StopSending {
                 stream_id,
                 error_code,
-            } => QuicFrame::StopSending {
-                stream_id: *stream_id,
-                error: qlog::events::ApplicationError::Unknown,
-                error_code: Some(*error_code),
-                raw: None,
-            },
+            } => qlog_stop_sending(*stream_id, *error_code),
 
             Self::Crypto { data } => qlog_crypto(data.off(), data.len()),
             Self::CryptoHeader { offset, length } =>
                 qlog_crypto(*offset, *length),
 
-            Self::NewToken { token } => QuicFrame::NewToken {
-                token: qlog::Token {
-                    // TODO: pick the token type some how
-                    ty: Some(qlog::TokenType::Retry),
-                    raw: Some(RawInfo {
-                        data: qlog::HexSlice::maybe_string(Some(token))
-                            .map(Box::new),
-                        length: Some(token.len() as u64),
-                        payload_length: None,
-                    }),
-                    details: None,
-                },
-                raw: None,
-            },
+            Self::NewToken { token } => qlog_new_token(token),
 
             Self::Stream { stream_id, data } =>
                 qlog_stream(*stream_id, data.off(), data.len(), data.fin()),
@@ -653,20 +627,12 @@ impl Frame {
                 retire_prior_to,
                 conn_id,
                 reset_token,
-            } => QuicFrame::NewConnectionId {
-                sequence_number: *seq_num,
-                retire_prior_to: *retire_prior_to,
-                // Qlog's length field is u8. Do not silently wrap if a
-                // diagnostic frame contains an oversized identifier.
-                connection_id_length: Some(
-                    u8::try_from(conn_id.len()).unwrap_or(u8::MAX),
-                ),
-                connection_id: format!("{}", qlog::HexSlice::new(conn_id)),
-                stateless_reset_token: qlog::HexSlice::maybe_string(Some(
-                    reset_token,
-                )),
-                raw: None,
-            },
+            } => qlog_new_connection_id(
+                *seq_num,
+                *retire_prior_to,
+                conn_id,
+                reset_token,
+            ),
 
             Self::RetireConnectionId { seq_num } =>
                 QuicFrame::RetireConnectionId {
@@ -700,6 +666,65 @@ impl Frame {
                 raw: Some(Box::new(qlog_payload(*length as u64))),
             },
         }
+    }
+}
+
+#[cfg(feature = "qlog")]
+const fn qlog_reset_stream(
+    stream_id: u64, error_code: u64, final_size: u64,
+) -> QuicFrame {
+    QuicFrame::ResetStream {
+        stream_id,
+        error: qlog::events::ApplicationError::Unknown,
+        error_code: Some(error_code),
+        final_size,
+        raw: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+const fn qlog_stop_sending(stream_id: u64, error_code: u64) -> QuicFrame {
+    QuicFrame::StopSending {
+        stream_id,
+        error: qlog::events::ApplicationError::Unknown,
+        error_code: Some(error_code),
+        raw: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_new_token(token: &[u8]) -> QuicFrame {
+    QuicFrame::NewToken {
+        token: qlog::Token {
+            // TODO: pick the token type some how
+            ty: Some(qlog::TokenType::Retry),
+            raw: Some(qlog::events::RawInfo {
+                data: qlog::HexSlice::maybe_string(Some(token)).map(Box::new),
+                length: Some(token.len() as u64),
+                payload_length: None,
+            }),
+            details: None,
+        },
+        raw: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_new_connection_id(
+    seq_num: u64, retire_prior_to: u64, conn_id: &packet::ConnectionId<'_>,
+    reset_token: &[u8; 16],
+) -> QuicFrame {
+    QuicFrame::NewConnectionId {
+        sequence_number: seq_num,
+        retire_prior_to,
+        // Qlog's length field is u8. Do not silently wrap if a
+        // diagnostic frame contains an oversized identifier.
+        connection_id_length: Some(
+            u8::try_from(conn_id.len()).unwrap_or(u8::MAX),
+        ),
+        connection_id: format!("{}", qlog::HexSlice::new(conn_id)),
+        stateless_reset_token: qlog::HexSlice::maybe_string(Some(reset_token)),
+        raw: None,
     }
 }
 

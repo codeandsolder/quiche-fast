@@ -126,7 +126,7 @@ fn packet_data_falls_back_to_stream_without_consuming_datagram() {
     let datagram = b"abcde";
     assert_eq!(conn.dgram_send(datagram), Ok(()));
     assert_eq!(conn.stream_send(0, b"s", true), Ok(1));
-    conn.emit_dgram = true;
+    conn.payload_preference = PayloadPreference::Datagram;
 
     // STREAM uses type, stream ID, offset, two-byte length, one payload byte.
     // DATAGRAM uses type, two-byte length, five payload bytes.
@@ -199,7 +199,10 @@ fn packet_data_falls_back_to_stream_without_consuming_datagram() {
             _ => unreachable!(),
         }
         assert_eq!(conn.dgram_send_queue.is_empty(), capacity == 8);
-        assert_eq!(conn.emit_dgram, capacity != 8);
+        assert_eq!(
+            conn.payload_preference == PayloadPreference::Datagram,
+            capacity != 8
+        );
     }
 }
 
@@ -397,8 +400,9 @@ fn retry_source_cid_transport_parameter_matches_retry_history() {
         let mut pipe = test_utils::Pipe::new("cubic").unwrap();
         let client = &mut pipe.client;
         let original_dcid = ConnectionId::from(b"original".to_vec());
-        client.odcid = Some(original_dcid.clone());
-        client.rscid = observed_retry.map(|id| ConnectionId::from(id.to_vec()));
+        client.initial.odcid = Some(original_dcid.clone());
+        client.initial.rscid =
+            observed_retry.map(|id| ConnectionId::from(id.to_vec()));
         let params = TransportParams {
             initial_source_connection_id: Some(client.destination_id().clone()),
             original_destination_connection_id: Some(original_dcid),
@@ -5690,7 +5694,7 @@ fn invalid_initial_client(
     assert!(!pipe.client.is_closed());
 
     // ...and the idle timeout should be armed.
-    assert!(pipe.client.idle_timer.is_some());
+    assert!(pipe.client.idle.deadline.is_some());
 }
 
 #[rstest]
@@ -5757,7 +5761,7 @@ fn invalid_initial_payload(
         scid: ConnectionId::from_ref(scid.as_ref()),
         pkt_num: 0,
         pkt_num_len: pn_len,
-        token: pipe.client.token.clone(),
+        token: pipe.client.initial.token.clone(),
         versions: None,
         key_phase: false,
     };
@@ -7691,7 +7695,7 @@ fn reject_ack_for_unsent_packet_number_space(
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     let epoch = packet::Epoch::Handshake;
     assert_eq!(pipe.client.pkt_num_spaces[epoch].largest_tx_pkt_num, None);
-    assert!(!pipe.client.peer_verified_initial_address);
+    assert!(!pipe.client.initial.peer_verified_address);
     let hdr = Header {
         ty: Type::Handshake,
         version: PROTOCOL_VERSION,
@@ -7715,7 +7719,7 @@ fn reject_ack_for_unsent_packet_number_space(
             .process_frame(frame, &hdr, 0, epoch, Instant::now()),
         Err(Error::InvalidAckRange)
     );
-    assert!(!pipe.client.peer_verified_initial_address);
+    assert!(!pipe.client.initial.peer_verified_address);
     assert_eq!(
         pipe.client
             .paths
@@ -10055,7 +10059,7 @@ fn terminal_connection_lifecycle(
         };
         CloseCause::Explicit(CloseOrigin::Local)
     } else {
-        conn.idle_timer = Some(past);
+        conn.idle.deadline = Some(past);
         CloseCause::IdleTimeout
     };
     assert_eq!(conn.timeout_instant(), Some(past));
@@ -10066,7 +10070,7 @@ fn terminal_connection_lifecycle(
     assert_eq!(conn.is_timed_out(), !drain);
     assert_eq!(conn.timeout(), None);
     // A stale timer or repeated event must not change the terminal cause.
-    conn.idle_timer = Some(past);
+    conn.idle.deadline = Some(past);
     conn.on_timeout();
     conn.mark_closed(CloseCause::NoViablePath);
     assert_eq!(conn.lifecycle, ConnectionLifecycle::Closed(cause));
@@ -10094,7 +10098,7 @@ fn close_qlog_reports_actual_terminal_cause() {
     let now = Instant::now();
     pipe.client
         .set_qlog(Box::new(std::io::sink()), String::new(), String::new());
-    pipe.client.idle_timer = Some(now);
+    pipe.client.idle.deadline = Some(now);
     pipe.client.on_timeout();
     assert!(pipe.client.is_timed_out());
     assert_eq!(
@@ -10147,8 +10151,8 @@ fn close_only_packet_does_not_elicit_ack(
     assert!(path.validated());
     path.needs_ack_eliciting = true;
     let before = path.recovery.bytes_in_flight();
-    let idle_timer = conn.idle_timer;
-    conn.ack_eliciting_sent = false;
+    let idle_timer = conn.idle.deadline;
+    conn.idle.ack_eliciting_sent = false;
 
     assert_eq!(conn.close(application, 42, b"closing"), Ok(()));
     let mut buf = [0; 1500];
@@ -10165,8 +10169,8 @@ fn close_only_packet_does_not_elicit_ack(
     let path = pipe.client.paths.get_active().unwrap();
     assert_eq!(path.recovery.bytes_in_flight(), before);
     assert!(path.needs_ack_eliciting);
-    assert!(!pipe.client.ack_eliciting_sent);
-    assert_eq!(pipe.client.idle_timer, idle_timer);
+    assert!(!pipe.client.idle.ack_eliciting_sent);
+    assert_eq!(pipe.client.idle.deadline, idle_timer);
     assert!(pipe.client.is_draining());
 }
 
@@ -11206,7 +11210,7 @@ fn initial_max_data_is_flow_control_win() {
     // Stream flow control windows equal initial_max_stream_data.
     assert_eq!(
         pipe.client
-            .get_or_create_stream(0, true)
+            .get_or_create_stream(0, stream::StreamOpenIntent::Local)
             .unwrap()
             .recv
             .flow_control_for_tests()
@@ -11215,7 +11219,7 @@ fn initial_max_data_is_flow_control_win() {
     );
     assert_eq!(
         pipe.server
-            .get_or_create_stream(0, false)
+            .get_or_create_stream(0, stream::StreamOpenIntent::Peer)
             .unwrap()
             .recv
             .flow_control_for_tests()
@@ -13723,7 +13727,7 @@ fn challenge_no_cids(
         scid: ConnectionId::from_ref(&[5, 4, 3, 2, 1]),
         pkt_num: 0,
         pkt_num_len: pn_len,
-        token: pipe.client.token.clone(),
+        token: pipe.client.initial.token.clone(),
         versions: None,
         key_phase: pipe.client.key_phase,
     };

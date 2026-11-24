@@ -86,8 +86,8 @@ impl Rate {
     ) {
         // No packets in flight.
         if bytes_in_flight == 0 {
-            self.first_sent_time = pkt.sent_at;
-            self.delivered_time = pkt.sent_at;
+            self.first_sent_time = pkt.transmitted_at;
+            self.delivered_time = pkt.transmitted_at;
         }
 
         pkt.first_sent_time = self.first_sent_time;
@@ -113,14 +113,15 @@ impl Rate {
             self.sample.prior_delivered = pkt.delivered;
             self.sample.prior_time = Some(pkt.delivered_time);
             self.sample.is_app_limited = pkt.is_app_limited;
-            self.sample.send_elapsed =
-                pkt.sent_at.saturating_duration_since(pkt.first_sent_time);
+            self.sample.send_elapsed = pkt
+                .transmitted_at
+                .saturating_duration_since(pkt.first_sent_time);
             self.sample.rtt = pkt.rtt;
             self.sample.ack_elapsed = self
                 .delivered_time
                 .saturating_duration_since(pkt.delivered_time);
 
-            self.first_sent_time = pkt.sent_at;
+            self.first_sent_time = pkt.transmitted_at;
         }
 
         self.largest_acked = self.largest_acked.max(pkt.pkt_num);
@@ -418,7 +419,7 @@ mod tests {
         for pn in 0..2 {
             let acked = Acked {
                 pkt_num: pn,
-                sent_at: now,
+                transmitted_at: now,
                 size: mss,
                 in_flight: true,
                 rtt,

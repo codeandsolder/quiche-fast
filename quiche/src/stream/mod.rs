@@ -123,6 +123,29 @@ pub enum PriorityQueue {
     Flushable,
 }
 
+/// Opening a stream for a send may signal exhausted local stream credit;
+/// priority changes and receive-side processing do not request that signal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StreamOpenIntent {
+    Local,
+    LocalSend,
+    Peer,
+}
+
+impl StreamOpenIntent {
+    pub(crate) const fn from_local(local: bool) -> Self {
+        if local {
+            Self::Local
+        } else {
+            Self::Peer
+        }
+    }
+
+    const fn is_local(self) -> bool {
+        !matches!(self, Self::Peer)
+    }
+}
+
 /// Direction of QUIC stream-count credit, independent of the initiator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamDirection {
@@ -405,8 +428,8 @@ impl<F: BufFactory> StreamMap<F> {
     /// Returns the mutable stream with the given ID if it exists, or creates
     /// a new one otherwise.
     ///
-    /// The `local` parameter indicates whether the stream is locally
-    /// initiated. It validates the stream ID and selects the initial flow
+    /// The opening intent identifies the initiator and whether a failed
+    /// local open should advertise exhaustion. It selects the initial flow
     /// control values from the local and remote transport parameters.
     ///
     /// This also takes care of enforcing both local and the peer's stream
@@ -414,8 +437,10 @@ impl<F: BufFactory> StreamMap<F> {
     /// error is returned.
     pub(crate) fn get_or_create(
         &mut self, id: u64, local_params: &crate::TransportParams,
-        peer_params: &crate::TransportParams, local: bool, is_server: bool,
+        peer_params: &crate::TransportParams, intent: StreamOpenIntent,
+        is_server: bool,
     ) -> Result<&mut Stream<F>> {
+        let local = intent.is_local();
         let (stream, is_new_and_writable) = match self.streams.entry(id) {
             hash_map::Entry::Vacant(v) => {
                 // Stream has already been closed and garbage collected.
@@ -455,8 +480,14 @@ impl<F: BufFactory> StreamMap<F> {
 
                 // Enforce the same quota rule for both directions and
                 // initiators.
-                self.quotas[StreamDirection::from_id(id).index()]
-                    .open(local, stream_sequence + 1)?;
+                let quota =
+                    &mut self.quotas[StreamDirection::from_id(id).index()];
+                if let Err(error) = quota.open(local, stream_sequence + 1) {
+                    if intent == StreamOpenIntent::LocalSend {
+                        quota.note_blocked();
+                    }
+                    return Err(error);
+                }
 
                 let initial_window = receive_limit;
                 let s = Stream::new(
@@ -1557,7 +1588,7 @@ mod tests {
                             stream_id,
                             &conn.local_transport_params,
                             conn.peer_parameters.effective(),
-                            !conn.is_server,
+                            StreamOpenIntent::from_local(!conn.is_server),
                             conn.is_server,
                         )
                         .err(),
@@ -1683,7 +1714,13 @@ mod tests {
         let mut streams = <StreamMap>::new(max, max, DEFAULT_STREAM_WINDOW);
         let is_server = stream_type & 1 == 0;
         streams
-            .get_or_create(stream_type, &params, &params, false, is_server)
+            .get_or_create(
+                stream_type,
+                &params,
+                &params,
+                StreamOpenIntent::Peer,
+                is_server,
+            )
             .unwrap();
         // Collect one peer-created stream. No additional stream ID in this
         // type exists once the maximum has already been advertised.
@@ -1706,7 +1743,13 @@ mod tests {
         let is_server = (stream_type & 1 != 0) == local;
         streams.collect(stream_type);
         streams
-            .get_or_create(stream_type, &params, &params, local, is_server)
+            .get_or_create(
+                stream_type,
+                &params,
+                &params,
+                StreamOpenIntent::from_local(local),
+                is_server,
+            )
             .unwrap();
         streams.collect(stream_type);
         streams.collect(stream_type);
@@ -1736,7 +1779,13 @@ mod tests {
         let is_server = (stream_type & 1 != 0) == local;
         assert_eq!(
             streams
-                .get_or_create(stream_id, &params, &params, local, is_server)
+                .get_or_create(
+                    stream_id,
+                    &params,
+                    &params,
+                    StreamOpenIntent::from_local(local),
+                    is_server
+                )
                 .err(),
             Some(Error::StreamLimit)
         );
@@ -1755,7 +1804,13 @@ mod tests {
         }
 
         assert!(streams
-            .get_or_create(stream_id, &params, &params, local, is_server)
+            .get_or_create(
+                stream_id,
+                &params,
+                &params,
+                StreamOpenIntent::from_local(local),
+                is_server
+            )
             .is_ok());
         assert!(streams.collected.ranges.is_none());
     }
@@ -2313,7 +2368,13 @@ mod tests {
         assert!(is_bidi(stream_id), "stream id is bidirectional");
         assert_eq!(
             streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .err(),
             Some(Error::StreamLimit),
             "stream limit should be exceeded"
@@ -2333,7 +2394,13 @@ mod tests {
             assert!(is_local(stream_id, false), "stream id is client initiated");
             assert!(is_bidi(stream_id), "stream id is bidirectional");
             assert!(streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .is_ok());
         }
     }
@@ -2349,14 +2416,26 @@ mod tests {
         // Highest permitted
         let stream_id = 8;
         assert!(streams
-            .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+            .get_or_create(
+                stream_id,
+                &local_tp,
+                &peer_tp,
+                StreamOpenIntent::Peer,
+                true
+            )
             .is_ok());
 
         // One more than highest permitted
         let stream_id = 12;
         assert_eq!(
             streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .err(),
             Some(Error::StreamLimit)
         );
@@ -2381,7 +2460,13 @@ mod tests {
 
         for id in [0, 4, 8, 12] {
             assert!(streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .is_ok());
         }
 
@@ -2419,7 +2504,13 @@ mod tests {
         // same order to start with.
         for id in [12, 4, 8, 0] {
             assert!(streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .is_ok());
         }
 
@@ -2468,7 +2559,13 @@ mod tests {
 
         for (id, urgency) in input.clone() {
             streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true,
+                )
                 .unwrap();
             streams.set_priority(id, urgency, true);
         }
@@ -2479,7 +2576,13 @@ mod tests {
         // Re-applying priority to a stream does not cause duplication.
         for (id, urgency) in input {
             streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true,
+                )
                 .unwrap();
             streams.set_priority(id, urgency, true);
         }
@@ -2501,7 +2604,7 @@ mod tests {
 
         // Adding streams doesn't break expected ordering.
         streams
-            .get_or_create(44, &local_tp, &peer_tp, false, true)
+            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
             .unwrap();
 
         let walk_5: Vec<u64> = streams.writable().collect();
@@ -2536,7 +2639,13 @@ mod tests {
 
         for (id, urgency) in input.clone() {
             streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true,
+                )
                 .unwrap();
             streams.set_priority(id, urgency, true);
         }
@@ -2596,7 +2705,7 @@ mod tests {
 
         // Adding streams doesn't break expected ordering.
         streams
-            .get_or_create(44, &local_tp, &peer_tp, false, true)
+            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
             .unwrap();
         streams.set_priority(44, 20, true);
 
@@ -2615,9 +2724,15 @@ mod tests {
         let mut right = StreamMap::<DefaultBufFactory>::new(100, 100, 100);
         let key = |map: &mut StreamMap| {
             Arc::clone(
-                map.get_or_create(0, &local_tp, &peer_tp, false, true)
-                    .unwrap()
-                    .priority_key(),
+                map.get_or_create(
+                    0,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true,
+                )
+                .unwrap()
+                .priority_key(),
             )
         };
         let left_key = key(&mut left);
@@ -2679,7 +2794,13 @@ mod tests {
         for id in [12, 4, 8, 0] {
             let key = Arc::clone(
                 streams
-                    .get_or_create(id, &local_tp, &peer_tp, false, true)
+                    .get_or_create(
+                        id,
+                        &local_tp,
+                        &peer_tp,
+                        StreamOpenIntent::Peer,
+                        true,
+                    )
                     .unwrap()
                     .priority_key(),
             );
@@ -2877,7 +2998,7 @@ mod tests {
                     stream_id,
                     &local_params,
                     &peer_params,
-                    true,
+                    StreamOpenIntent::Local,
                     false,
                 )
                 .unwrap();

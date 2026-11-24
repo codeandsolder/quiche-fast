@@ -75,7 +75,7 @@ fn on_packet_acked(
         return;
     }
 
-    if r.in_congestion_recovery(packet.sent_at) {
+    if r.in_congestion_recovery(packet.transmitted_at) {
         return;
     }
 
@@ -118,9 +118,9 @@ fn congestion_event(
 ) {
     // Start a new congestion event if packet was sent after the
     // start of the previous congestion recovery period.
-    let sent_at = largest_lost_pkt.sent_at;
+    let transmitted_at = largest_lost_pkt.transmitted_at;
 
-    if !r.in_congestion_recovery(sent_at) {
+    if !r.in_congestion_recovery(transmitted_at) {
         r.recovery_started_at = Some(now);
 
         r.cwnd /= 2;
@@ -272,7 +272,7 @@ mod tests {
         sender.inject_ack(
             Acked {
                 pkt_num: 0,
-                sent_at: now,
+                transmitted_at: now,
                 size,
                 in_flight: false,
                 rtt: Duration::ZERO,

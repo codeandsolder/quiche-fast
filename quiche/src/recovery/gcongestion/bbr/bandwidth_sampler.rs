@@ -886,9 +886,12 @@ mod bandwidth_sampler_tests {
         }
 
         fn make_acked_packet(&self, pkt_num: u64) -> Acked {
-            let sent_at = self.get_packet_time(pkt_num);
+            let transmitted_at = self.get_packet_time(pkt_num);
 
-            Acked { pkt_num, sent_at }
+            Acked {
+                pkt_num,
+                transmitted_at,
+            }
         }
 
         fn make_lost_packet(&self, pkt_num: u64) -> Lost {
@@ -1620,7 +1623,7 @@ mod bandwidth_sampler_tests {
         // If packet 1 is acked it should not produce a bandwidth sample.
         let acked = Acked {
             pkt_num: 1,
-            sent_at: test_sender.clock,
+            transmitted_at: test_sender.clock,
         };
         test_sender.advance_time(Duration::from_millis(10));
         let sample = test_sender.sampler.on_congestion_event(

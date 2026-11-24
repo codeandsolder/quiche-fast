@@ -1228,7 +1228,7 @@ impl Connection {
             .open_qpack_stream(conn, stream::Type::QpackDecoder)
             .ok();
 
-        if conn.grease {
+        if conn.options.grease {
             // Try opening a GREASE stream, but ignore errors since it's not
             // critical.
             http3_conn.open_grease_stream(conn).ok();
@@ -1584,7 +1584,7 @@ impl Connection {
         let mut d = [42; 10];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        if !self.frames_greased && conn.grease {
+        if !self.frames_greased && conn.options.grease {
             self.send_grease_frames(conn, stream_id)?;
             self.frames_greased = true;
         }
@@ -2600,7 +2600,7 @@ impl Connection {
     fn send_settings<F: BufFactory>(
         &mut self, conn: &mut super::Connection<F>,
     ) -> Result<()> {
-        let mut grease = if conn.grease {
+        let mut grease = if conn.options.grease {
             let id = grease_value();
             let collision = self
                 .local_settings
@@ -3613,9 +3613,9 @@ pub mod testing {
                     self.pipe.advance().ok();
                 }
 
-                if is_client && self.pipe.client.grease {
+                if is_client && self.pipe.client.options.grease {
                     self.client.open_grease_stream(&mut self.pipe.client)?;
-                } else if !is_client && self.pipe.server.grease {
+                } else if !is_client && self.pipe.server.options.grease {
                     self.server.open_grease_stream(&mut self.pipe.server)?;
                 }
                 self.pipe.advance().ok();
