@@ -75,8 +75,10 @@ impl DatagramBatch {
     }
 }
 
-/// Owns at most one generated burst per UDP socket. Swapping the scratch
-/// buffer transfers ownership without copying packet payloads. Backpressure
+/// Owns at most one generated burst per UDP socket.
+///
+/// Swapping the scratch buffer transfers ownership without copying packet
+/// payloads. Backpressure
 /// preserves the unsent datagrams, without replaying accepted datagrams.
 pub struct DatagramQueue {
     buffer: Vec<u8>,
@@ -89,7 +91,7 @@ pub struct DatagramQueue {
 impl DatagramQueue {
     /// Allocate a reusable buffer with the same size as the producer's scratch
     /// buffer.
-    #[must_use]
+    #[must_use = "the queue owns generated datagrams until the socket accepts them"]
     pub fn new(buffer_size: usize, gso: bool) -> Self {
         Self {
             buffer: vec![0; buffer_size],
@@ -101,8 +103,8 @@ impl DatagramQueue {
     }
 
     /// Whether generated datagrams remain unsent.
-    #[must_use]
-    pub fn is_pending(&self) -> bool {
+    #[must_use = "pending packets must be drained before generating another burst"]
+    pub const fn is_pending(&self) -> bool {
         self.next < self.batches.len()
     }
 
@@ -490,18 +492,28 @@ mod pacing_tests {
         assert_eq!(batches.len(), 3);
         let mut queue = DatagramQueue::new(output.len(), true);
         queue.stage(&mut output, &mut batches)?;
-        assert!(!queue.flush_with(|bytes, route, stride, pacing| {
-            assert!(pacing);
-            assert_eq!(bytes, [1, 1, 2, 2]);
-            assert_eq!(*route, info);
-            assert_eq!(stride, Some(2));
-            Err(io::ErrorKind::WouldBlock.into())
-        })?);
         let mut sent = Vec::new();
         let mut routes = Vec::new();
+        assert!(!queue.flush_with(|bytes, route, stride, pacing| {
+            assert!(pacing);
+            if routes.is_empty() {
+                assert_eq!(bytes, [1, 1, 2, 2]);
+                assert_eq!(*route, info);
+                assert_eq!(stride, Some(2));
+                routes.push(*route);
+                sent.extend_from_slice(bytes);
+                Ok(bytes.len())
+            } else {
+                assert_eq!(bytes, [3, 3]);
+                assert_eq!(*route, later);
+                assert_eq!(stride, None);
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        })?);
+        assert_eq!(sent, [1, 1, 2, 2]);
         assert!(queue.flush_with(|bytes, route, stride, pacing| {
             assert!(pacing);
-            assert_eq!(stride, (bytes.len() == 4).then_some(2));
+            assert_eq!(stride, None);
             routes.push(*route);
             sent.extend_from_slice(bytes);
             Ok(bytes.len())
