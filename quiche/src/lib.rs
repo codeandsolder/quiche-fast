@@ -2202,8 +2202,6 @@ impl<F: BufFactory> Connection<F> {
 
         // If we sent a Retry assume the peer's address is verified.
         path.verified_peer_address = retry_cids.is_some();
-        // Assume clients validate the server's address implicitly.
-        path.peer_verified_local_address = is_server;
 
         // Do not allocate more than the number of active CIDs. A wire limit
         // above the addressable collection size cannot constrain it further.
