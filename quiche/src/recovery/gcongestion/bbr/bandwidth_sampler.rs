@@ -842,7 +842,7 @@ mod bandwidth_sampler_tests {
 
     use super::*;
 
-    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     const REGULAR_PACKET_SIZE: usize = 1280;
 
@@ -1756,7 +1756,7 @@ mod max_ack_height_tracker_tests {
 
     use super::*;
 
-    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
     #[test]
     fn app_limited_phase_uses_strict_sampled_ack_boundary() {

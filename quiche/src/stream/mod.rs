@@ -1546,7 +1546,9 @@ mod tests {
     }
 
     #[rstest]
-    fn collected_streams_per_type(#[values(0, 1, 2, 3)] stream_type: u64) {
+    fn collected_streams_per_type(
+        #[values(0, 1, 2, 3)] stream_type: u64,
+    ) -> TestResult {
         let mut collected = CollectedStreams::default();
         assert!(collected.ranges.is_none());
 
@@ -1573,10 +1575,11 @@ mod tests {
         for id in 0..12 {
             assert_eq!(collected.contains(id), id & 0x3 == stream_type);
         }
+        Ok(())
     }
 
     #[test]
-    fn collected_streams_preserve_fragmented_and_large_ids() {
+    fn collected_streams_preserve_fragmented_and_large_ids() -> TestResult {
         let mut collected = CollectedStreams::default();
 
         for sequence in (0..2048).step_by(2) {
@@ -1604,6 +1607,7 @@ mod tests {
             assert!(!collected.contains(stream_id - 4));
             assert!(!collected.contains((1u64 << 40) | stream_type));
         }
+        Ok(())
     }
 
     /// Completes a client-initiated stream and processes returned stream
