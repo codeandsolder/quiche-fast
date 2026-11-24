@@ -3276,7 +3276,7 @@ mod tests {
         assert_eq!(dcid, &[1, 2]);
     }
 
-    fn datagram_pipe() -> crate::Result<test_utils::Pipe> {
+    fn datagram_pipe() -> Result<test_utils::Pipe> {
         let mut config = test_utils::Pipe::default_config("cubic")?;
         config.enable_dgram(true, 4, 4);
         let mut pipe = test_utils::Pipe::with_config(&mut config)?;
