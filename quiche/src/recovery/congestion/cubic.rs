@@ -542,10 +542,8 @@ mod tests {
     use crate::CongestionControlAlgorithm;
 
     use crate::recovery::congestion::hystart;
-    use crate::recovery::congestion::recovery::LegacyRecovery;
     use crate::recovery::congestion::test_sender::FixtureResult;
     use crate::recovery::congestion::test_sender::TestSender;
-    use crate::recovery::RecoveryOps;
 
     fn test_sender() -> TestSender {
         TestSender::new(CongestionControlAlgorithm::Cubic, false)
@@ -655,57 +653,6 @@ mod tests {
     }
 
     #[test]
-    fn cubic_init() {
-        let cfg = crate::recovery::RecoveryConfig {
-            cc_algorithm: CongestionControlAlgorithm::Cubic,
-            ..crate::recovery::RecoveryConfig::default()
-        };
-
-        let r = LegacyRecovery::new_with_config(&cfg);
-
-        assert!(r.cwnd() > 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-    }
-
-    #[test]
-    fn cubic_slow_start() -> FixtureResult {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(1)?;
-
-        // Check if cwnd increased by packet size (slow start)
-        assert_eq!(sender.cwnd, cwnd_prev + size);
-        Ok(())
-    }
-
-    #[test]
-    fn cubic_slow_start_multi_acks() -> FixtureResult {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(3)?;
-
-        // Acked 3 packets.
-        assert_eq!(sender.cwnd, cwnd_prev + size * 3);
-        Ok(())
-    }
-
-    #[test]
     fn cubic_congestion_event() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -772,8 +719,7 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn cubic_hystart_css_to_ss() -> FixtureResult {
+    fn sender_in_conservative_slow_start() -> Result<TestSender, &'static str> {
         let mut sender = hystart_test_sender();
         let size = sender.max_datagram_size;
 
@@ -782,13 +728,7 @@ mod tests {
 
         let rtt_1st = Duration::from_millis(50);
 
-        let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-        sender.hystart.start_round(next_rnd);
-        // Send 1st round packets.
-        for _ in 0..n_rtt_sample {
-            sender.send_packet(size);
-        }
-        sender.update_app_limited(false);
+        send_hystart_round(&mut sender);
 
         // Receiving Acks.
         sender.advance_time(rtt_1st);
@@ -803,13 +743,7 @@ mod tests {
 
         sender.advance_time(rtt_2nd);
 
-        let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-        sender.hystart.start_round(next_rnd);
-        // Send 2nd round packets.
-        for _ in 0..n_rtt_sample {
-            sender.send_packet(size);
-        }
-        sender.update_app_limited(false);
+        send_hystart_round(&mut sender);
 
         // Receiving Acks.
         // Last ack will cause to exit to CSS.
@@ -827,19 +761,32 @@ mod tests {
         assert!(sender.hystart.css_start_time().is_some());
         assert_eq!(sender.window(), cwnd_prev + size);
 
+        Ok(sender)
+    }
+
+    fn send_hystart_round(sender: &mut TestSender) {
+        let samples = hystart::N_RTT_SAMPLE;
+        let size = sender.max_datagram_size;
+        let next_round = sender.next_pkt + samples as u64 - 1;
+        sender.hystart.start_round(next_round);
+        for _ in 0..samples {
+            sender.send_packet(size);
+        }
+        sender.update_app_limited(false);
+    }
+
+    #[test]
+    fn cubic_hystart_css_to_ss() -> FixtureResult {
+        let mut sender = sender_in_conservative_slow_start()?;
+        let size = sender.max_datagram_size;
+        let n_rtt_sample = hystart::N_RTT_SAMPLE;
         // 3rd round, which RTT is less than previous round to
         // trigger back to Slow Start.
         let rtt_3rd = Duration::from_millis(80);
         sender.advance_time(rtt_3rd);
-        cwnd_prev = sender.window();
+        let cwnd_prev = sender.window();
 
-        let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-        sender.hystart.start_round(next_rnd);
-        // Send 3nd round packets.
-        for _ in 0..n_rtt_sample {
-            sender.send_packet(size);
-        }
-        sender.update_app_limited(false);
+        send_hystart_round(&mut sender);
 
         // Receiving Acks.
         // Last ack will cause to exit to SS.
@@ -858,56 +805,8 @@ mod tests {
 
     #[test]
     fn cubic_hystart_css_to_ca() -> FixtureResult {
-        let mut sender = hystart_test_sender();
-        let size = sender.max_datagram_size;
-
-        // 1st round.
+        let mut sender = sender_in_conservative_slow_start()?;
         let n_rtt_sample = hystart::N_RTT_SAMPLE;
-
-        let rtt_1st = Duration::from_millis(50);
-
-        let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-        sender.hystart.start_round(next_rnd);
-        // Send 1st round packets.
-        for _ in 0..n_rtt_sample {
-            sender.send_packet(size);
-        }
-        sender.update_app_limited(false);
-
-        // Receiving Acks.
-        sender.advance_time(rtt_1st);
-        sender.update_rtt(rtt_1st);
-        sender.ack_n_packets(n_rtt_sample)?;
-
-        // Not in CSS yet.
-        assert!(sender.hystart.css_start_time().is_none());
-
-        // 2nd round.
-        let mut rtt_2nd = Duration::from_millis(100);
-        sender.advance_time(rtt_2nd);
-        // Send 2nd round packets.
-        let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-        sender.hystart.start_round(next_rnd);
-        for _ in 0..n_rtt_sample {
-            sender.send_packet(size);
-        }
-        sender.update_app_limited(false);
-
-        // Receiving Acks.
-        // Last ack will cause to exit to CSS.
-        let mut cwnd_prev = sender.window();
-
-        for _ in 0..n_rtt_sample {
-            cwnd_prev = sender.window();
-            sender.update_rtt(rtt_2nd);
-            sender.ack_n_packets(1)?;
-            // Keep increasing RTT so that hystart exits to CSS.
-            rtt_2nd += rtt_2nd.saturating_add(Duration::from_millis(4));
-        }
-
-        // Now we are in CSS.
-        assert!(sender.hystart.css_start_time().is_some());
-        assert_eq!(sender.window(), cwnd_prev + size);
 
         // Run 5 (CSS_ROUNDS) in CSS, to exit to congestion avoidance.
         let rtt_css = Duration::from_millis(100);
@@ -915,12 +814,7 @@ mod tests {
 
         for _ in 0..hystart::CSS_ROUNDS {
             // Send a round of packets.
-            let next_rnd = sender.next_pkt + n_rtt_sample as u64 - 1;
-            sender.hystart.start_round(next_rnd);
-            for _ in 0..n_rtt_sample {
-                sender.send_packet(size);
-            }
-            sender.update_app_limited(false);
+            send_hystart_round(&mut sender);
 
             // Receiving Acks.
             sender.update_rtt(rtt_css);

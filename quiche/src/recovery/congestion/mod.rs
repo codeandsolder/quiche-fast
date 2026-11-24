@@ -299,6 +299,52 @@ impl From<CongestionControlAlgorithm> for &'static CongestionControlOps {
 mod tests {
     use super::*;
 
+    use super::recovery::LegacyRecovery;
+    use super::test_sender::FixtureResult;
+    use super::test_sender::TestSender;
+    use crate::recovery::RecoveryOps;
+
+    #[rstest::rstest]
+    fn recovery_initial_window(
+        #[values(
+            CongestionControlAlgorithm::Cubic,
+            CongestionControlAlgorithm::Reno
+        )]
+        algorithm: CongestionControlAlgorithm,
+    ) {
+        let config = RecoveryConfig {
+            cc_algorithm: algorithm,
+            ..RecoveryConfig::default()
+        };
+        let recovery = LegacyRecovery::new_with_config(&config);
+        assert_eq!(
+            recovery.cwnd(),
+            config.initial_congestion_window_packets *
+                config.max_send_udp_payload_size
+        );
+        assert_eq!(recovery.bytes_in_flight(), 0);
+    }
+
+    #[rstest::rstest]
+    fn slow_start_credits_acked_bytes(
+        #[values(
+            CongestionControlAlgorithm::Cubic,
+            CongestionControlAlgorithm::Reno
+        )]
+        algorithm: CongestionControlAlgorithm,
+        #[values(1, 3)] acknowledged: usize,
+    ) -> FixtureResult {
+        let mut sender = TestSender::new(algorithm, false);
+        let size = sender.max_datagram_size;
+        for _ in 0..sender.initial_congestion_window_packets {
+            sender.send_packet(size);
+        }
+        let previous = sender.cwnd;
+        sender.ack_n_packets(acknowledged)?;
+        assert_eq!(sender.cwnd, previous + size * acknowledged);
+        Ok(())
+    }
+
     #[test]
     fn ssthresh_init() {
         let ssthresh: SsThresh = Default::default();

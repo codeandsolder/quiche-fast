@@ -39,7 +39,7 @@ use crate::recovery::RecoveryConfig;
 use crate::CongestionControlAlgorithm;
 use crate::DEFAULT_INITIAL_RTT;
 
-pub(super) type FixtureResult = std::result::Result<(), &'static str>;
+pub(super) type FixtureResult = Result<(), &'static str>;
 
 pub(super) struct TestSender {
     cc: Congestion,

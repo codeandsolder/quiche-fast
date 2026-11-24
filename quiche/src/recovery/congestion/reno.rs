@@ -165,10 +165,8 @@ mod tests {
 
     use super::*;
 
-    use crate::recovery::congestion::recovery::LegacyRecovery;
     use crate::recovery::congestion::test_sender::FixtureResult;
     use crate::recovery::congestion::test_sender::TestSender;
-    use crate::recovery::RecoveryOps;
 
     use std::time::Duration;
 
@@ -195,38 +193,6 @@ mod tests {
     }
 
     #[test]
-    fn reno_init() {
-        let cfg = crate::recovery::RecoveryConfig {
-            cc_algorithm: CongestionControlAlgorithm::Reno,
-            ..crate::recovery::RecoveryConfig::default()
-        };
-
-        let r = LegacyRecovery::new_with_config(&cfg);
-
-        assert!(r.cwnd() > 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-    }
-
-    #[test]
-    fn reno_slow_start() -> FixtureResult {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(1)?;
-
-        // Check if cwnd increased by packet size (slow start).
-        assert_eq!(sender.cwnd, cwnd_prev + size);
-        Ok(())
-    }
-
-    #[test]
     fn reno_slow_start_smaller_than_mss() -> FixtureResult {
         let mut sender = test_sender();
         let size = sender.max_datagram_size;
@@ -243,25 +209,6 @@ mod tests {
         sender.ack_n_packets(1)?;
 
         assert_eq!(sender.cwnd, cwnd_prev + partial);
-        Ok(())
-    }
-
-    #[test]
-    fn reno_slow_start_multi_acks() -> FixtureResult {
-        let mut sender = test_sender();
-        let size = sender.max_datagram_size;
-
-        // Send initcwnd full MSS packets to become no longer app limited
-        for _ in 0..sender.initial_congestion_window_packets {
-            sender.send_packet(size);
-        }
-
-        let cwnd_prev = sender.cwnd;
-
-        sender.ack_n_packets(3)?;
-
-        // Acked 3 packets.
-        assert_eq!(sender.cwnd, cwnd_prev + size * 3);
         Ok(())
     }
 
