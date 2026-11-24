@@ -731,7 +731,7 @@ impl CongestionControl for BBRv2 {
         let mut mode_changes_allowed = MAX_MODE_CHANGES_PER_CONGESTION_EVENT;
         while mode_changes_allowed > 0 &&
             self.mode.do_on_congestion_event(
-                &mut congestion_event,
+                &congestion_event,
                 self.target_bytes_inflight(),
                 &self.params,
                 recovery_stats,
