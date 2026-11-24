@@ -401,26 +401,26 @@ impl Frame {
 
     pub(crate) fn encode(&self, b: &mut impl FrameSink) -> Result<()> {
         match self {
-            Self::Padding { len } => b.put_padding(*len)?,
+            Self::Padding { len } => b.put_padding(*len),
 
-            Self::Ping { .. } => b.put_varint(0x01)?,
+            Self::Ping { .. } => b.put_varint(0x01),
 
             Self::Ack {
                 ack_delay,
                 ranges,
                 ecn_counts,
-            } => encode_ack_frame(*ack_delay, ranges, ecn_counts.as_ref(), b)?,
+            } => encode_ack_frame(*ack_delay, ranges, ecn_counts.as_ref(), b),
 
             Self::ResetStream {
                 stream_id,
                 error_code,
                 final_size,
-            } => encode_varints(b, [0x04, *stream_id, *error_code, *final_size])?,
+            } => encode_varints(b, [0x04, *stream_id, *error_code, *final_size]),
 
             Self::StopSending {
                 stream_id,
                 error_code,
-            } => encode_varints(b, [0x05, *stream_id, *error_code])?,
+            } => encode_varints(b, [0x05, *stream_id, *error_code]),
 
             Self::Crypto { data } => {
                 encode_crypto_header(
@@ -430,12 +430,12 @@ impl Frame {
                     b,
                 )?;
 
-                b.put_bytes(data)?;
+                b.put_bytes(data)
             },
 
             Self::NewToken { token } => {
                 encode_varints(b, [0x07, token.len() as u64])?;
-                b.put_bytes(token)?;
+                b.put_bytes(token)
             },
 
             Self::Stream { stream_id, data } => {
@@ -448,28 +448,28 @@ impl Frame {
                     b,
                 )?;
 
-                b.put_bytes(data)?;
+                b.put_bytes(data)
             },
 
-            Self::MaxData { max } => encode_varints(b, [0x10, *max])?,
+            Self::MaxData { max } => encode_varints(b, [0x10, *max]),
 
             Self::MaxStreamData { stream_id, max } =>
-                encode_varints(b, [0x11, *stream_id, *max])?,
+                encode_varints(b, [0x11, *stream_id, *max]),
 
-            Self::MaxStreamsBidi { max } => encode_varints(b, [0x12, *max])?,
+            Self::MaxStreamsBidi { max } => encode_varints(b, [0x12, *max]),
 
-            Self::MaxStreamsUni { max } => encode_varints(b, [0x13, *max])?,
+            Self::MaxStreamsUni { max } => encode_varints(b, [0x13, *max]),
 
-            Self::DataBlocked { limit } => encode_varints(b, [0x14, *limit])?,
+            Self::DataBlocked { limit } => encode_varints(b, [0x14, *limit]),
 
             Self::StreamDataBlocked { stream_id, limit } =>
-                encode_varints(b, [0x15, *stream_id, *limit])?,
+                encode_varints(b, [0x15, *stream_id, *limit]),
 
             Self::StreamsBlockedBidi { limit } =>
-                encode_varints(b, [0x16, *limit])?,
+                encode_varints(b, [0x16, *limit]),
 
             Self::StreamsBlockedUni { limit } =>
-                encode_varints(b, [0x17, *limit])?,
+                encode_varints(b, [0x17, *limit]),
 
             Self::NewConnectionId {
                 seq_num,
@@ -482,21 +482,21 @@ impl Frame {
                 conn_id,
                 reset_token,
                 b,
-            )?,
+            ),
 
             Self::RetireConnectionId { seq_num } =>
-                encode_varints(b, [0x19, *seq_num])?,
+                encode_varints(b, [0x19, *seq_num]),
 
             Self::PathChallenge { data } => {
                 b.put_varint(0x1a)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             Self::PathResponse { data } => {
                 b.put_varint(0x1b)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             Self::ConnectionClose {
@@ -510,29 +510,28 @@ impl Frame {
                     *frame_type,
                     reason.len() as u64,
                 ])?;
-                b.put_bytes(reason.as_ref())?;
+                b.put_bytes(reason.as_ref())
             },
 
             Self::ApplicationClose { error_code, reason } => {
                 encode_varints(b, [0x1d, *error_code, reason.len() as u64])?;
-                b.put_bytes(reason.as_ref())?;
+                b.put_bytes(reason.as_ref())
             },
 
-            Self::HandshakeDone => b.put_varint(0x1e)?,
+            Self::HandshakeDone => b.put_varint(0x1e),
 
             Self::Datagram { data } => {
                 encode_dgram_header(data.len() as u64, b)?;
 
-                b.put_bytes(data.as_ref())?;
+                b.put_bytes(data.as_ref())
             },
 
             // These variants only describe frames already encoded directly
             // into the packet. They do not own a serializable payload.
             Self::CryptoHeader { .. } |
             Self::StreamHeader { .. } |
-            Self::DatagramHeader { .. } => return Err(Error::InvalidState),
+            Self::DatagramHeader { .. } => Err(Error::InvalidState),
         }
-        Ok(())
     }
 
     pub const fn ack_eliciting(&self) -> bool {
@@ -562,7 +561,7 @@ impl Frame {
 
         match self {
             Self::Padding { len } => QuicFrame::Padding {
-                raw: Some(qlog_payload(*len as u64)),
+                raw: Some(Box::new(qlog_payload(*len as u64))),
             },
 
             Self::Ping { .. } => QuicFrame::Ping { raw: None },
@@ -720,30 +719,30 @@ impl Frame {
             Self::HandshakeDone => QuicFrame::HandshakeDone { raw: None },
 
             Self::Datagram { data } => QuicFrame::Datagram {
-                raw: Some(qlog_payload(data.len() as u64)),
+                raw: Some(Box::new(qlog_payload(data.len() as u64))),
             },
 
             Self::DatagramHeader { length } => QuicFrame::Datagram {
-                raw: Some(qlog_payload(*length as u64)),
+                raw: Some(Box::new(qlog_payload(*length as u64))),
             },
         }
     }
 }
 
 #[cfg(feature = "qlog")]
-fn qlog_payload(length: u64) -> Box<qlog::events::RawInfo> {
-    Box::new(qlog::events::RawInfo {
+const fn qlog_payload(length: u64) -> qlog::events::RawInfo {
+    qlog::events::RawInfo {
         length: None,
         payload_length: Some(length),
         data: None,
-    })
+    }
 }
 
 #[cfg(feature = "qlog")]
 fn qlog_crypto(offset: u64, length: usize) -> QuicFrame {
     QuicFrame::Crypto {
         offset,
-        raw: Some(qlog_payload(length as u64)),
+        raw: Some(Box::new(qlog_payload(length as u64))),
     }
 }
 
@@ -755,7 +754,7 @@ fn qlog_stream(
         stream_id,
         offset: Some(offset),
         fin: fin.then_some(true),
-        raw: Some(qlog_payload(length as u64)),
+        raw: Some(Box::new(qlog_payload(length as u64))),
     }
 }
 

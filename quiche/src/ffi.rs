@@ -60,21 +60,6 @@ use libc::AF_INET6;
 use windows_sys::Win32::Networking::WinSock::AF_INET6;
 
 #[cfg(not(windows))]
-use libc::in_addr;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN_ADDR as in_addr;
-
-#[cfg(not(windows))]
-use libc::in6_addr;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN6_ADDR as in6_addr;
-
-#[cfg(not(windows))]
-use libc::sa_family_t;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::ADDRESS_FAMILY as sa_family_t;
-
-#[cfg(not(windows))]
 use libc::sockaddr_in;
 #[cfg(windows)]
 use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN as sockaddr_in;
@@ -93,13 +78,6 @@ use windows_sys::Win32::Networking::WinSock::SOCKADDR_STORAGE as sockaddr_storag
 use libc::c_int as socklen_t;
 #[cfg(not(windows))]
 use libc::socklen_t;
-
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN6_ADDR_0;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::IN_ADDR_0;
-#[cfg(windows)]
-use windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6_0;
 
 use std::net::SocketAddr;
 use std::time::Instant;
@@ -125,33 +103,14 @@ use crate::StreamIter;
 use crate::TxBufferTrackingState;
 use crate::Type;
 
-// These values are properties of the target socket ABI, not runtime
-// inputs. Prove representability and storage layout during compilation.
-#[cfg(not(windows))]
-const IPV4_FAMILY: sa_family_t = {
-    assert!(AF_INET >= 0 && AF_INET <= sa_family_t::MAX as c_int);
-    AF_INET as sa_family_t
-};
-#[cfg(not(windows))]
-const IPV6_FAMILY: sa_family_t = {
-    assert!(AF_INET6 >= 0 && AF_INET6 <= sa_family_t::MAX as c_int);
-    AF_INET6 as sa_family_t
-};
-#[cfg(windows)]
-const IPV4_FAMILY: sa_family_t = AF_INET;
-#[cfg(windows)]
-const IPV6_FAMILY: sa_family_t = AF_INET6;
-
-const IPV4_ADDR_LEN: socklen_t = {
-    assert!(size_of::<sockaddr_in>() <= socklen_t::MAX as usize);
-    size_of::<sockaddr_in>() as socklen_t
-};
-const IPV6_ADDR_LEN: socklen_t = {
-    assert!(size_of::<sockaddr_in6>() <= socklen_t::MAX as usize);
-    size_of::<sockaddr_in6>() as socklen_t
-};
-
+// Both socket2 and libc/windows-sys describe the target socket ABI.
 const _: () = {
+    assert!(
+        size_of::<socket2::SockAddrStorage>() == size_of::<sockaddr_storage>()
+    );
+    assert!(
+        align_of::<socket2::SockAddrStorage>() == align_of::<sockaddr_storage>()
+    );
     assert!(size_of::<sockaddr_in>() <= size_of::<sockaddr_storage>());
     assert!(size_of::<sockaddr_in6>() <= size_of::<sockaddr_storage>());
     assert!(align_of::<sockaddr_in>() <= align_of::<sockaddr_storage>());
@@ -2771,8 +2730,8 @@ unsafe fn std_addr_from_c(
     // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
     // the caller guarantees the corresponding field is readable.
     let family = unsafe { (&raw const (*addr).sa_family).read() };
-    match family {
-        IPV4_FAMILY => {
+    match c_int::from(family) {
+        found if found == c_int::from(AF_INET) => {
             let in4 = addr.cast::<sockaddr_in>();
             if len != size_of::<sockaddr_in>() || !in4.is_aligned() {
                 return Err(());
@@ -2808,7 +2767,7 @@ unsafe fn std_addr_from_c(
             Ok(out.into())
         },
 
-        IPV6_FAMILY => {
+        found if found == c_int::from(AF_INET6) => {
             let in6 = addr.cast::<sockaddr_in6>();
             if len != size_of::<sockaddr_in6>() || !in6.is_aligned() {
                 return Err(());
@@ -2854,105 +2813,13 @@ unsafe fn std_addr_from_c(
 }
 
 fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
-    // SAFETY: the platform sockaddr_storage type consists of integer/byte
-    // fields, all of which admit zero initialization.
-    let mut out: sockaddr_storage = unsafe { std::mem::zeroed() };
-    let sin_port = addr.port().to_be();
-
-    let len = match addr {
-        SocketAddr::V4(addr) => {
-            let out_in = (&raw mut out).cast::<sockaddr_in>();
-
-            let s_addr = u32::from_ne_bytes(addr.ip().octets());
-
-            #[cfg(not(windows))]
-            let sin_addr = in_addr { s_addr };
-            #[cfg(windows)]
-            let sin_addr = in_addr {
-                S_un: IN_ADDR_0 { S_addr: s_addr },
-            };
-
-            let address = sockaddr_in {
-                sin_family: IPV4_FAMILY,
-
-                sin_addr,
-
-                #[cfg(any(
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                    target_os = "openbsd",
-                    target_os = "netbsd"
-                ))]
-                sin_len: const {
-                    assert!(size_of::<sockaddr_in>() <= u8::MAX as usize);
-                    size_of::<sockaddr_in>() as u8
-                },
-
-                sin_port,
-
-                sin_zero: [0; 8],
-            };
-
-            // SAFETY: sockaddr_storage has sufficient size and alignment
-            // for sockaddr_in; the raw pointer comes from this local object.
-            unsafe { out_in.write(address) };
-            IPV4_ADDR_LEN
-        },
-
-        SocketAddr::V6(addr) => {
-            let out_in6 = (&raw mut out).cast::<sockaddr_in6>();
-
-            #[cfg(not(windows))]
-            let sin6_addr = in6_addr {
-                s6_addr: addr.ip().octets(),
-            };
-            #[cfg(windows)]
-            let sin6_addr = in6_addr {
-                u: IN6_ADDR_0 {
-                    Byte: addr.ip().octets(),
-                },
-            };
-
-            let address = sockaddr_in6 {
-                sin6_family: IPV6_FAMILY,
-
-                sin6_addr,
-
-                #[cfg(any(
-                    target_os = "macos",
-                    target_os = "ios",
-                    target_os = "watchos",
-                    target_os = "freebsd",
-                    target_os = "dragonfly",
-                    target_os = "openbsd",
-                    target_os = "netbsd"
-                ))]
-                sin6_len: const {
-                    assert!(size_of::<sockaddr_in6>() <= u8::MAX as usize);
-                    size_of::<sockaddr_in6>() as u8
-                },
-
-                sin6_port: sin_port,
-
-                sin6_flowinfo: addr.flowinfo(),
-
-                #[cfg(not(windows))]
-                sin6_scope_id: addr.scope_id(),
-                #[cfg(windows)]
-                Anonymous: SOCKADDR_IN6_0 {
-                    sin6_scope_id: addr.scope_id(),
-                },
-            };
-
-            // SAFETY: sockaddr_storage has sufficient size and alignment
-            // for sockaddr_in6; the raw pointer comes from this local object.
-            unsafe { out_in6.write(address) };
-            IPV6_ADDR_LEN
-        },
-    };
+    let address = socket2::SockAddr::from(*addr);
+    let len = address.len();
+    let mut storage = address.as_storage();
+    // SAFETY: socket2 exposes view_as for platform sockaddr types. Size
+    // and alignment equality with our target ABI type are checked above.
+    // The address was fully initialized by the SocketAddr conversion.
+    let out = unsafe { *storage.view_as::<sockaddr_storage>() };
     (out, len)
 }
 
@@ -3584,8 +3451,8 @@ mod tests {
                     Ipv4Addr::new(192, 0, 2, 1),
                     65535,
                 )),
-                IPV4_FAMILY,
-                IPV4_ADDR_LEN,
+                c_int::from(AF_INET),
+                size_of::<sockaddr_in>(),
             ),
             (
                 SocketAddr::V6(SocketAddrV6::new(
@@ -3594,16 +3461,19 @@ mod tests {
                     0x12345678,
                     42,
                 )),
-                IPV6_FAMILY,
-                IPV6_ADDR_LEN,
+                c_int::from(AF_INET6),
+                size_of::<sockaddr_in6>(),
             ),
         ];
         for (address, family, expected_len) in cases {
             let (storage, len) = std_addr_to_c(&address);
-            assert_eq!(len, expected_len);
+            assert_eq!(usize::try_from(len).unwrap(), expected_len);
             let ptr = (&raw const storage).cast::<sockaddr>();
             // SAFETY: std_addr_to_c initialized this supported sockaddr layout.
-            assert_eq!(unsafe { (&raw const (*ptr).sa_family).read() }, family);
+            assert_eq!(
+                c_int::from(unsafe { (&raw const (*ptr).sa_family).read() }),
+                family
+            );
             assert_eq!(unsafe { std_addr_from_c(ptr, len) }, Ok(address));
         }
     }
@@ -3629,7 +3499,7 @@ mod tests {
     #[test]
     fn malformed_sockaddr_is_rejected() {
         let mut addr: sockaddr = unsafe { std::mem::zeroed() };
-        addr.sa_family = AF_INET as sa_family_t;
+        addr.sa_family = AF_INET.try_into().unwrap();
 
         assert_eq!(unsafe { std_addr_from_c(&addr, 0) }, Err(()));
 

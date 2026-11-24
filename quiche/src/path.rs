@@ -1668,9 +1668,9 @@ mod tests {
         let mut ack_only = test_utils::helper_packet_sent(5, now, 40);
         ack_only.flight = recovery::PacketFlight::NotInFlight;
         ack_only.size = 0;
-        let mut ranges = crate::ranges::RangeSet::default();
+        let mut ranges = RangeSet::default();
         ranges.push_item(0);
-        ack_only.frames.push(Frame::ACK {
+        ack_only.frames.push(Frame::Ack {
             ack_delay: 0,
             ranges,
             ecn_counts: None,

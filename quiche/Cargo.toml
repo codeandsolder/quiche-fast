@@ -46,7 +46,7 @@ gcongestion = []
 fuzzing = []
 
 # Build and expose the FFI API.
-ffi = ["dep:cdylib-link-lines"]
+ffi = ["dep:cdylib-link-lines", "dep:socket2"]
 
 # Exposes internal APIs that have no stability guarantees across versions.
 internal = []
@@ -80,6 +80,7 @@ qlog = { workspace = true, optional = true }
 serde_json = { version = "1.0", optional = true }
 sfv = { version = "0.16", optional = true }
 slab = "0.4"
+socket2 = { version = "0.6", optional = true }
 smallvec = { workspace = true, features = ["union"] }
 enum_dispatch = "0.3"
 
