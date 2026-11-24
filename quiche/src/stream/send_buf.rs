@@ -722,7 +722,9 @@ mod tests {
             initial_max_streams_bidi: 5,
             ..Default::default()
         };
-        streams.update_peer_max_streams_bidi(5);
+        streams
+            .quota_mut(crate::stream::StreamDirection::Bidirectional)
+            .update_peer_limit(5);
 
         // Seed a logical byte count without allocating gigabytes of data.
         streams

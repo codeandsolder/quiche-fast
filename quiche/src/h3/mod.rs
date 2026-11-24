@@ -3380,7 +3380,12 @@ impl Connection {
 
         // MAX_STREAMS_BIDI is a count: the first forbidden request
         // stream ID is count * 4, not count * 4 + 4.
-        if prioritized_element_id >= conn.streams.max_streams_bidi() * 4 {
+        if prioritized_element_id >=
+            conn.streams
+                .quota(crate::stream::StreamDirection::Bidirectional)
+                .local_limit() *
+                4
+        {
             conn.close(
                 true,
                 Error::InvalidId.to_wire(),

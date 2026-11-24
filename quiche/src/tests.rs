@@ -25,6 +25,8 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use super::*;
+use crate::stream::StreamDirection::Bidirectional;
+use crate::stream::StreamDirection::Unidirectional;
 
 use crate::range_buf::RangeBuf;
 use crate::test_utils::stream_recv_discard;
@@ -209,22 +211,32 @@ fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
     let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
     let conn = &mut pipe.client;
-    conn.should_send_max_streams_bidi = true;
-    conn.should_send_max_streams_uni = true;
+    conn.streams.quota_mut(Bidirectional).credit_retransmit = true;
+    conn.streams.quota_mut(Unidirectional).credit_retransmit = true;
     conn.blocked_limit = Some(17);
-    conn.streams_blocked_bidi_state.update_at(3);
-    conn.streams_blocked_uni_state.update_at(4);
+    conn.streams.quota_mut(Bidirectional).update_peer_limit(3);
+    conn.streams.quota_mut(Bidirectional).note_blocked();
+    conn.streams.quota_mut(Unidirectional).update_peer_limit(4);
+    conn.streams.quota_mut(Unidirectional).note_blocked();
 
     let expected = [
-        frame::Frame::MaxStreamsBidi {
-            max: conn.streams.max_streams_bidi_next(),
+        frame::Frame::MaxStreams {
+            direction: Bidirectional,
+            max: conn.streams.quota(Bidirectional).next_local_limit(),
         },
-        frame::Frame::MaxStreamsUni {
-            max: conn.streams.max_streams_uni_next(),
+        frame::Frame::MaxStreams {
+            direction: Unidirectional,
+            max: conn.streams.quota(Unidirectional).next_local_limit(),
         },
         frame::Frame::DataBlocked { limit: 17 },
-        frame::Frame::StreamsBlockedBidi { limit: 3 },
-        frame::Frame::StreamsBlockedUni { limit: 4 },
+        frame::Frame::StreamsBlocked {
+            direction: Bidirectional,
+            limit: 3,
+        },
+        frame::Frame::StreamsBlocked {
+            direction: Unidirectional,
+            limit: 4,
+        },
     ];
     let previous_blocked_count = conn.data_blocked_sent_count;
     for expected_frame in expected {
@@ -255,16 +267,20 @@ fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
             }
         }
     }
-    assert!(!conn.should_send_max_streams_bidi);
-    assert!(!conn.should_send_max_streams_uni);
+    assert!(!conn.streams.quota(Bidirectional).credit_retransmit);
+    assert!(!conn.streams.quota(Unidirectional).credit_retransmit);
     assert_eq!(conn.blocked_limit, None);
     assert_eq!(conn.data_blocked_sent_count, previous_blocked_count + 1);
     assert!(!conn
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
     assert!(!conn
-        .streams_blocked_uni_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Unidirectional)
+        .pending_blocked_limit()
+        .is_some());
 }
 
 /// A PATH_CHALLENGE must remain queued if its nine-byte response does not
@@ -2914,11 +2930,13 @@ fn stream_left(
     }
 
     let frame = if uni {
-        frame::Frame::MaxStreamsUni {
+        frame::Frame::MaxStreams {
+            direction: Unidirectional,
             max: MAX_STREAM_COUNT,
         }
     } else {
-        frame::Frame::MaxStreamsBidi {
+        frame::Frame::MaxStreams {
+            direction: Bidirectional,
             max: MAX_STREAM_COUNT,
         }
     };
@@ -2961,10 +2979,22 @@ fn stream_count_frame_bounds(
     assert_eq!(pipe.handshake(), Ok(()));
 
     let make_frame = |count| match (uni, blocked) {
-        (false, false) => frame::Frame::MaxStreamsBidi { max: count },
-        (true, false) => frame::Frame::MaxStreamsUni { max: count },
-        (false, true) => frame::Frame::StreamsBlockedBidi { limit: count },
-        (true, true) => frame::Frame::StreamsBlockedUni { limit: count },
+        (false, false) => frame::Frame::MaxStreams {
+            direction: Bidirectional,
+            max: count,
+        },
+        (true, false) => frame::Frame::MaxStreams {
+            direction: Unidirectional,
+            max: count,
+        },
+        (false, true) => frame::Frame::StreamsBlocked {
+            direction: Bidirectional,
+            limit: count,
+        },
+        (true, true) => frame::Frame::StreamsBlocked {
+            direction: Unidirectional,
+            limit: count,
+        },
     };
     assert!(pipe
         .send_pkt_to_server(
@@ -3208,28 +3238,44 @@ fn streams_blocked_bidi_stat(
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
-    let frames = [frame::Frame::StreamsBlockedBidi {
+    let frames = [frame::Frame::StreamsBlocked {
+        direction: Bidirectional,
         limit: MAX_STREAM_COUNT,
     }];
 
     let pkt_type = Type::Short;
     assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 1);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 1);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
     // Sending again increments further.
     assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 2);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 2);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 }
 
 #[rstest]
@@ -3241,28 +3287,44 @@ fn streams_blocked_uni_stat(
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     assert_eq!(pipe.handshake(), Ok(()));
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
-    let frames = [frame::Frame::StreamsBlockedUni {
+    let frames = [frame::Frame::StreamsBlocked {
+        direction: Unidirectional,
         limit: MAX_STREAM_COUNT,
     }];
 
     let pkt_type = Type::Short;
     assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 1);
-    assert_eq!(pipe.client.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.client.streams_blocked_uni_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        1
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
     // Sending again increments further.
     assert!(pipe.send_pkt_to_server(pkt_type, &frames, &mut buf).is_ok());
 
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 2);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        2
+    );
 }
 
 /// Tests that a STREAMS_BLOCKED (bidi) frame is sent when the client tries to
@@ -3298,13 +3360,17 @@ fn streams_blocked_bidi_sent(
     if enable_send_streams_blocked {
         assert!(pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
     } else {
         assert!(!pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
     }
 
     // Advance so the client flushes its pending frames to the server.
@@ -3314,14 +3380,16 @@ fn streams_blocked_bidi_sent(
         // The client should have sent one STREAMS_BLOCKED (bidi) frame.
         assert!(!pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
 
         // The server must have received our STREAMS_BLOCKED (bidi) frame.
-        assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 1);
+        assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 1);
     } else {
         // Frames not sent when feature disabled.
-        assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
+        assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
     }
 
     // A second attempt at the same stream must NOT produce another frame —
@@ -3334,15 +3402,20 @@ fn streams_blocked_bidi_sent(
         assert_eq!(pipe.advance(), Ok(()));
         assert!(!pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
     }
 
     // Simulate the peer raising the bidi stream limit to 4. The client can
     // now open stream 12 (sequence 3) but will be blocked at stream 16
     // (sequence 4 > new limit of 4). That is a new limit, so a fresh
     // STREAMS_BLOCKED frame must be armed and subsequently sent.
-    pipe.client.streams.update_peer_max_streams_bidi(4);
+    pipe.client
+        .streams
+        .quota_mut(Bidirectional)
+        .update_peer_limit(4);
     assert_eq!(pipe.client.stream_send(12, b"a", false), Ok(1));
     assert_eq!(
         pipe.client.stream_send(16, b"a", false),
@@ -3353,8 +3426,10 @@ fn streams_blocked_bidi_sent(
         // The blocked flag must be set for the new limit.
         assert!(pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
     }
 
     // Emit the client's outgoing flight and process it at the server.
@@ -3365,13 +3440,15 @@ fn streams_blocked_bidi_sent(
         Err(Error::StreamLimit)
     );
     if enable_send_streams_blocked {
-        assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 2);
+        assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 2);
         assert!(!pipe
             .client
-            .streams_blocked_bidi_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Bidirectional)
+            .pending_blocked_limit()
+            .is_some());
     } else {
-        assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
+        assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
     }
 }
 
@@ -3408,13 +3485,17 @@ fn streams_blocked_uni_sent(
     if enable_send_streams_blocked {
         assert!(pipe
             .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Unidirectional)
+            .pending_blocked_limit()
+            .is_some());
     } else {
         assert!(!pipe
             .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Unidirectional)
+            .pending_blocked_limit()
+            .is_some());
     }
 
     // Advance so the client flushes its pending frames to the server.
@@ -3424,14 +3505,22 @@ fn streams_blocked_uni_sent(
     if enable_send_streams_blocked {
         assert!(!pipe
             .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Unidirectional)
+            .pending_blocked_limit()
+            .is_some());
 
         // The server must have received our STREAMS_BLOCKED (uni) frame.
-        assert_eq!(pipe.server.streams_blocked_uni_recv_count, 1);
+        assert_eq!(
+            pipe.server.streams.quota(Unidirectional).blocked_received,
+            1
+        );
     } else {
         // Frame not sent when feature disabled.
-        assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
+        assert_eq!(
+            pipe.server.streams.quota(Unidirectional).blocked_received,
+            0
+        );
     }
 
     // A second attempt at the same stream must NOT produce another frame —
@@ -3442,7 +3531,7 @@ fn streams_blocked_uni_sent(
     );
     assert_eq!(pipe.advance(), Ok(()));
     assert_eq!(
-        pipe.server.streams_blocked_uni_recv_count,
+        pipe.server.streams.quota(Unidirectional).blocked_received,
         if enable_send_streams_blocked { 1 } else { 0 }
     );
 
@@ -3450,7 +3539,10 @@ fn streams_blocked_uni_sent(
     // now open stream 14 (sequence 3) but will be blocked at stream 18
     // (sequence 4 > new limit of 4). That is a new limit, so a fresh
     // STREAMS_BLOCKED frame must be armed and subsequently sent.
-    pipe.client.streams.update_peer_max_streams_uni(4);
+    pipe.client
+        .streams
+        .quota_mut(Unidirectional)
+        .update_peer_limit(4);
     assert_eq!(pipe.client.stream_send(14, b"a", false), Ok(1));
     assert_eq!(
         pipe.client.stream_send(18, b"a", false),
@@ -3460,8 +3552,10 @@ fn streams_blocked_uni_sent(
         // The blocked flag must be set for the new limit.
         assert!(pipe
             .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Unidirectional)
+            .pending_blocked_limit()
+            .is_some());
     }
     // Emit the client's outgoing flight and process it at the server.
     let flight = test_utils::emit_flight(&mut pipe.client);
@@ -3471,20 +3565,28 @@ fn streams_blocked_uni_sent(
         Err(Error::StreamLimit)
     );
     if enable_send_streams_blocked {
-        assert_eq!(pipe.server.streams_blocked_uni_recv_count, 2);
+        assert_eq!(
+            pipe.server.streams.quota(Unidirectional).blocked_received,
+            2
+        );
         assert!(!pipe
             .client
-            .streams_blocked_uni_state
-            .has_pending_stream_blocked_frame());
+            .streams
+            .quota(Unidirectional)
+            .pending_blocked_limit()
+            .is_some());
     } else {
-        assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
+        assert_eq!(
+            pipe.server.streams.quota(Unidirectional).blocked_received,
+            0
+        );
     }
 }
 
 /// Tests that a lost STREAMS_BLOCKED (bidi) frame is retransmitted.
 ///
 /// When the packet carrying the frame is declared lost via the PTO mechanism,
-/// `streams_blocked_bidi_state` must be notified so that the same limit can
+/// The bidirectional stream quota must be notified so that the same limit can
 /// be sent again.  The server must ultimately receive the frame.
 #[rstest]
 fn streams_blocked_bidi_retransmit(
@@ -3510,23 +3612,27 @@ fn streams_blocked_bidi_retransmit(
     // Frame is armed but not yet sent.
     assert!(pipe
         .client
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // Emit the client's flight (stream data + STREAMS_BLOCKED) without
     // delivering it to the server — the packet is "lost" from the server's
     // perspective.
     assert!(test_utils::emit_flight(&mut pipe.client).is_ok());
 
-    // After emission streams_blocked_bidi_state is updated and the sent counter
+    // After emission bidirectional stream quota is updated and the sent counter
     // advances.
     assert!(!pipe
         .client
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // The server has not received anything yet.
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
 
     // Trigger loss detection.
     test_utils::trigger_ack_based_loss(&mut pipe.client, &mut pipe.server);
@@ -3537,16 +3643,18 @@ fn streams_blocked_bidi_retransmit(
     let (len, send_info) = pipe.client.send(&mut buf).unwrap();
 
     // During retransmission, the loss handler clears
-    // `streams_blocked_bidi_state.blocked_sent`. The emit path then sees
-    // `streams_blocked_bidi_state.has_pending_stream_blocked_frame()`, emits
+    // the quota's last sent limit. The emit path then sees
+    // a pending blocked limit, emits
     // the frame, and increments `sent_count` to two.
     assert!(!pipe
         .client
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // The server has not received anything yet.
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 0);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 0);
 
     // The PTO probe carries the retransmitted STREAMS_BLOCKED frame.
     // Deliver it to the server.
@@ -3558,14 +3666,14 @@ fn streams_blocked_bidi_retransmit(
     pipe.server.recv(&mut buf[..len], info).unwrap();
 
     // The server must have received the retransmitted STREAMS_BLOCKED frame.
-    assert_eq!(pipe.server.streams_blocked_bidi_recv_count, 1);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).blocked_received, 1);
     let _ = send_info;
 }
 
 /// Tests that a lost STREAMS_BLOCKED (uni) frame is retransmitted.
 ///
 /// When the packet carrying the frame is declared lost via the PTO mechanism,
-/// `streams_blocked_bidi_state` must be notified so that the same limit can
+/// The unidirectional stream quota must be notified so that the same limit can
 /// be sent again.  The server must ultimately receive the frame.
 #[rstest]
 fn streams_blocked_uni_retransmit(
@@ -3591,8 +3699,10 @@ fn streams_blocked_uni_retransmit(
     // Frame is armed but not yet sent.
     assert!(pipe
         .client
-        .streams_blocked_uni_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Unidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // Emit the client's flight (stream data + STREAMS_BLOCKED) without
     // delivering it to the server — the packet is "lost" from the server's
@@ -3602,11 +3712,16 @@ fn streams_blocked_uni_retransmit(
     // After emission the pending slot is cleared and the sent counter advances.
     assert!(!pipe
         .client
-        .streams_blocked_uni_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Unidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // The server has not received anything yet.
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
     // Trigger loss detection
     test_utils::trigger_ack_based_loss(&mut pipe.client, &mut pipe.server);
@@ -3618,11 +3733,16 @@ fn streams_blocked_uni_retransmit(
 
     assert!(!pipe
         .client
-        .streams_blocked_uni_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Unidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     // The server has not received anything yet.
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        0
+    );
 
     // Deliver the PTO probe (which carries the retransmitted STREAMS_BLOCKED
     // frame) to the server.
@@ -3634,7 +3754,10 @@ fn streams_blocked_uni_retransmit(
     pipe.server.recv(&mut buf[..len], info).unwrap();
 
     // The server must have received the retransmitted STREAMS_BLOCKED frame.
-    assert_eq!(pipe.server.streams_blocked_uni_recv_count, 1);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).blocked_received,
+        1
+    );
     let _ = send_info;
 }
 
@@ -4277,11 +4400,14 @@ fn stop_sending_fin(
     // No more frames are sent by the server.
     assert_eq!(iter.next(), None);
 
-    let max_streams = pipe.server.streams.max_streams_bidi_next();
+    let max_streams = pipe.server.streams.quota(Bidirectional).next_local_limit();
     assert_eq!(pipe.server.stream_shutdown(4, Shutdown::Write, 42), Ok(()));
     assert_eq!(pipe.advance(), Ok(()));
     assert!(pipe.server.streams.is_collected(4));
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        max_streams + 1
+    );
 }
 
 #[rstest]
@@ -4337,7 +4463,7 @@ fn stop_sending_recv_completion_preserves_unreported_error(
     };
     assert_eq!(stream_recv_discard(&mut pipe.server, discard, 0), expected);
     assert_eq!(pipe.server.streams.len(), 1);
-    let max_streams = pipe.server.streams.max_streams_bidi_next();
+    let max_streams = pipe.server.streams.quota(Bidirectional).next_local_limit();
 
     assert_eq!(
         pipe.server.stream_capacity(0),
@@ -4345,7 +4471,10 @@ fn stop_sending_recv_completion_preserves_unreported_error(
     );
     assert_eq!(pipe.server.streams.len(), 0);
     assert!(pipe.server.streams.is_collected(0));
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        max_streams + 1
+    );
 }
 
 /// The first FIN on previously consumed data must be delivered before
@@ -4371,7 +4500,7 @@ fn stop_sending_late_fin_collects_after_notification(
     assert_eq!(pipe.advance(), Ok(()));
     assert!(!pipe.server.stream_readable(0));
     assert_eq!(pipe.server.writable().next(), None);
-    let max_streams = pipe.server.streams.max_streams_bidi_next();
+    let max_streams = pipe.server.streams.quota(Bidirectional).next_local_limit();
 
     // Only the data is duplicate. This is the first FIN; the application
     // must observe the terminal event independently of the send-side STOP.
@@ -4391,7 +4520,10 @@ fn stop_sending_late_fin_collects_after_notification(
     assert!(!pipe.server.stream_readable(0));
     assert_eq!(pipe.server.writable().next(), None);
     assert!(pipe.server.streams.is_collected(0));
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        max_streams + 1
+    );
 
     let written =
         test_utils::encode_pkt(&mut pipe.client, Type::Short, &frames, &mut buf)
@@ -4399,7 +4531,10 @@ fn stop_sending_late_fin_collects_after_notification(
     assert_eq!(pipe.server_recv(&mut buf[..written]), Ok(written));
     assert!(!pipe.server.stream_readable(0));
     assert!(pipe.server.streams.is_collected(0));
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        max_streams + 1
+    );
 }
 
 /// Read-side completion collects completed streams without dropping queued
@@ -4451,7 +4586,7 @@ fn stream_shutdown_read_collects_completed_streams(
     }
 
     assert!(pipe.server.stream_readable(0));
-    let max_streams = pipe.server.streams.max_streams_bidi_next();
+    let max_streams = pipe.server.streams.quota(Bidirectional).next_local_limit();
 
     assert_eq!(pipe.server.stream_shutdown(0, Shutdown::Read, 77), Ok(()));
     match receive_end {
@@ -4473,7 +4608,10 @@ fn stream_shutdown_read_collects_completed_streams(
 
     if !fin_before_shutdown {
         assert!(!pipe.server.streams.is_collected(0));
-        assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams);
+        assert_eq!(
+            pipe.server.streams.quota(Bidirectional).next_local_limit(),
+            max_streams
+        );
 
         let flight = test_utils::emit_flight(&mut pipe.client).unwrap();
         test_utils::process_flight(&mut pipe.server, flight).unwrap();
@@ -4481,7 +4619,7 @@ fn stream_shutdown_read_collects_completed_streams(
 
     assert_eq!(pipe.server.streams.is_collected(0), collected);
     assert_eq!(
-        pipe.server.streams.max_streams_bidi_next(),
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
         max_streams + u64::from(collected)
     );
 
@@ -4491,7 +4629,10 @@ fn stream_shutdown_read_collects_completed_streams(
         assert_eq!(pipe.client.stream_recv(0, &mut []), Ok((0, true)));
         assert_eq!(pipe.advance(), Ok(()));
         assert!(pipe.server.streams.is_collected(0));
-        assert_eq!(pipe.server.streams.max_streams_bidi_next(), max_streams + 1);
+        assert_eq!(
+            pipe.server.streams.quota(Bidirectional).next_local_limit(),
+            max_streams + 1
+        );
     }
 }
 
@@ -6459,8 +6600,11 @@ fn max_streams_sent_only_when_at_threshold(
     // At this point: next = 66, completed = 60, available = 6
     // Complete 2 more streams → available = 4 (> 3)
     // MAX_STREAMS should NOT be sent
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), 66);
-    assert_eq!(pipe.client.streams.peer_streams_left_bidi(), 6);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        66
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).peer_available(), 6);
     pipe.client.stream_send(240, b"a", true).ok();
     pipe.client.stream_send(244, b"a", true).ok();
     pipe.advance().ok();
@@ -6476,7 +6620,7 @@ fn max_streams_sent_only_when_at_threshold(
     pipe.advance().ok();
 
     // Verify MAX_STREAMS was NOT sent (4 > 3 threshold)
-    assert_eq!(pipe.client.streams.peer_streams_left_bidi(), 4);
+    assert_eq!(pipe.client.streams.quota(Bidirectional).peer_available(), 4);
 
     // Complete 1 more stream → available = 3 (== 3)
     // MAX_STREAMS should be sent (new limit: 72)
@@ -6491,7 +6635,7 @@ fn max_streams_sent_only_when_at_threshold(
     pipe.advance().ok();
 
     // Verify MAX_STREAMS was sent (limit increased from 66)
-    let left_after = pipe.client.streams.peer_streams_left_bidi();
+    let left_after = pipe.client.streams.quota(Bidirectional).peer_available();
     assert!(
         left_after > 4,
         "MAX_STREAMS should have been sent, expected > 4 streams left, got {}",
@@ -6566,8 +6710,11 @@ fn high_utilization_maintains_streams_in_aged_connection(
     }
 
     // Verify connection is aged: server's max should have grown from 10 to 60
-    assert_eq!(pipe.server.streams.max_streams_bidi(), 60);
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), 60);
+    assert_eq!(pipe.server.streams.quota(Bidirectional).local_limit(), 60);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        60
+    );
 
     // Now open 9 concurrent streams (high utilization)
     for i in 0..9 {
@@ -6583,7 +6730,8 @@ fn high_utilization_maintains_streams_in_aged_connection(
     }
 
     // Check available capacity from client perspective
-    let available_before = pipe.client.streams.peer_streams_left_bidi();
+    let available_before =
+        pipe.client.streams.quota(Bidirectional).peer_available();
     assert_eq!(available_before, 1, "Should have 1 stream slot available");
 
     // Now complete 2 of the 9 active streams (bidirectionally)
@@ -6609,7 +6757,7 @@ fn high_utilization_maintains_streams_in_aged_connection(
 
     // Verify streams were collected on server side
     assert_eq!(
-        pipe.server.streams.max_streams_bidi_next(),
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
         62,
         "Server should have incremented next by 2"
     );
@@ -6619,7 +6767,8 @@ fn high_utilization_maintains_streams_in_aged_connection(
     // Check: (62 != 60) AND (1 <= 5) → TRUE, should send MAX_STREAMS
 
     // Verify MAX_STREAMS was sent by checking if client's available increased
-    let available_after = pipe.client.streams.peer_streams_left_bidi();
+    let available_after =
+        pipe.client.streams.quota(Bidirectional).peer_available();
     assert!(
         available_after == 3,
         "After completing 2 streams, client should have capacity for at 3 streams \
@@ -11370,7 +11519,7 @@ fn max_streams_threshold_after_handshake_callback_update(
     pipe.advance().ok();
 
     assert_eq!(
-        pipe.server.streams.max_streams_bidi_next(),
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
         CALLBACK_INITIAL_MAX_STREAMS_BIDI + pre_threshold_streams
     );
 
@@ -11378,7 +11527,7 @@ fn max_streams_threshold_after_handshake_callback_update(
     // threshold. The incorrect threshold would already have sent it and given
     // the client more available streams.
     assert_eq!(
-        pipe.client.streams.peer_streams_left_bidi(),
+        pipe.client.streams.quota(Bidirectional).peer_available(),
         CALLBACK_INITIAL_MAX_STREAMS_BIDI - pre_threshold_streams,
         "MAX_STREAMS should NOT have been sent yet."
     );
@@ -11398,13 +11547,13 @@ fn max_streams_threshold_after_handshake_callback_update(
 
     // The server's next limit should have increased by one.
     assert_eq!(
-        pipe.server.streams.max_streams_bidi_next(),
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
         CALLBACK_INITIAL_MAX_STREAMS_BIDI + CALLBACK_INITIAL_MAX_STREAMS_BIDI / 2
     );
 
     // Verify that MAX_STREAMS was sent once availability reached the threshold.
     // With the incorrect threshold of two, this test would never send it.
-    let streams_left = pipe.client.streams.peer_streams_left_bidi();
+    let streams_left = pipe.client.streams.quota(Bidirectional).peer_available();
     assert!(
         streams_left > CALLBACK_INITIAL_MAX_STREAMS_BIDI / 2 + 1,
         "MAX_STREAMS was not sent when available hit the correct threshold (50)"
@@ -15289,15 +15438,21 @@ fn max_streams_bidi_frame_retransmit(
     // ACKs the FIN.
     pipe.server.stream_send(0, b"a", true).unwrap();
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), NUM_STREAMS);
-    assert_eq!(pipe.client.streams.peer_streams_left_bidi(), 0);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        NUM_STREAMS
+    );
+    assert_eq!(pipe.client.streams.quota(Bidirectional).peer_available(), 0);
 
     pipe.client_recv(&mut buf[..len]).unwrap();
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     pipe.server_recv(&mut buf[..len]).unwrap();
 
     // Stream 0 is now complete. Server should send MAX_STREAMS_BIDI.
-    assert_eq!(pipe.server.streams.max_streams_bidi_next(), NUM_STREAMS + 1);
+    assert_eq!(
+        pipe.server.streams.quota(Bidirectional).next_local_limit(),
+        NUM_STREAMS + 1
+    );
 
     // Capture MAX_STREAMS_BIDI packet (don't deliver to simulate loss)
     let (len, _) = pipe.server.send(&mut buf).unwrap();
@@ -15305,11 +15460,14 @@ fn max_streams_bidi_frame_retransmit(
         test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
 
     // Verify MAX_STREAMS is in the packet.
-    let has_max_streams = frames
-        .iter()
-        .any(|f| matches!(f, frame::Frame::MaxStreamsBidi { max: 5 }));
+    let has_max_streams = frames.iter().any(|f| {
+        matches!(f, frame::Frame::MaxStreams {
+            direction: Bidirectional,
+            max: 5
+        })
+    });
     assert!(has_max_streams, "Expected MAX_STREAMS in packet");
-    assert_eq!(pipe.client.streams.peer_streams_left_bidi(), 0);
+    assert_eq!(pipe.client.streams.quota(Bidirectional).peer_available(), 0);
 
     // Trigger loss detection for retransmission
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
@@ -15327,9 +15485,12 @@ fn max_streams_bidi_frame_retransmit(
         test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
 
     // Verify MAX_STREAMS is in the packet.
-    let has_max_streams = frames
-        .iter()
-        .any(|f| matches!(f, frame::Frame::MaxStreamsBidi { max: 5 }));
+    let has_max_streams = frames.iter().any(|f| {
+        matches!(f, frame::Frame::MaxStreams {
+            direction: Bidirectional,
+            max: 5
+        })
+    });
     assert!(has_max_streams, "Expected MAX_STREAMS in packet");
 }
 
@@ -15356,7 +15517,10 @@ fn max_streams_uni_frame_retransmit(
     assert_eq!(pipe.advance(), Ok(()));
 
     // Prior to reading, streams are not collected.
-    assert_eq!(pipe.server.streams.max_streams_uni_next(), NUM_STREAMS);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).next_local_limit(),
+        NUM_STREAMS
+    );
 
     // Server receives all streams and triggers collection.
     for i in 0..NUM_STREAMS {
@@ -15364,8 +15528,14 @@ fn max_streams_uni_frame_retransmit(
         pipe.server.stream_recv(stream_id, &mut buf).ok();
     }
 
-    assert_eq!(pipe.server.streams.max_streams_uni_next(), NUM_STREAMS + 4);
-    assert_eq!(pipe.client.streams.peer_streams_left_uni(), 0);
+    assert_eq!(
+        pipe.server.streams.quota(Unidirectional).next_local_limit(),
+        NUM_STREAMS + 4
+    );
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).peer_available(),
+        0
+    );
 
     // Server should want to send MAX_STREAMS_UNI.
     // Capture the packet (don't deliver to client to simulate loss).
@@ -15374,13 +15544,19 @@ fn max_streams_uni_frame_retransmit(
         test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
 
     // Verify MAX_STREAMS is in the packet.
-    let has_max_streams = frames
-        .iter()
-        .any(|f| matches!(f, frame::Frame::MaxStreamsUni { max: 8 }));
+    let has_max_streams = frames.iter().any(|f| {
+        matches!(f, frame::Frame::MaxStreams {
+            direction: Unidirectional,
+            max: 8
+        })
+    });
     assert!(has_max_streams, "Expected MAX_STREAMS in packet");
 
     // Client's view is unchanged (packet was "lost")
-    assert_eq!(pipe.client.streams.peer_streams_left_uni(), 0);
+    assert_eq!(
+        pipe.client.streams.quota(Unidirectional).peer_available(),
+        0
+    );
 
     // Trigger loss detection on server
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
@@ -15395,9 +15571,12 @@ fn max_streams_uni_frame_retransmit(
         test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
 
     // Verify MAX_STREAMS is in the packet.
-    let has_max_streams = frames
-        .iter()
-        .any(|f| matches!(f, frame::Frame::MaxStreamsUni { max: 8 }));
+    let has_max_streams = frames.iter().any(|f| {
+        matches!(f, frame::Frame::MaxStreams {
+            direction: Unidirectional,
+            max: 8
+        })
+    });
     assert!(has_max_streams, "Expected MAX_STREAMS in packet");
 }
 
@@ -15638,8 +15817,10 @@ fn rejected_zero_rtt_clears_auxiliary_send_state(
     );
     assert!(pipe
         .client
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
 
     assert_eq!(pipe.client.dgram_send(b"early-dgram"), Ok(()));
     assert_eq!(pipe.client.dgram_send_queue_len(), 1);
@@ -15654,12 +15835,16 @@ fn rejected_zero_rtt_clears_auxiliary_send_state(
     assert_eq!(pipe.client.blocked_limit, None);
     assert!(!pipe
         .client
-        .streams_blocked_bidi_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Bidirectional)
+        .pending_blocked_limit()
+        .is_some());
     assert!(!pipe
         .client
-        .streams_blocked_uni_state
-        .has_pending_stream_blocked_frame());
+        .streams
+        .quota(Unidirectional)
+        .pending_blocked_limit()
+        .is_some());
     assert_eq!(pipe.client.dgram_send_queue_len(), 0);
 }
 

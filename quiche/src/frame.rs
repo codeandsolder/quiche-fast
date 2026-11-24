@@ -32,6 +32,7 @@ use crate::Result;
 use crate::packet;
 use crate::range_buf::RangeBuf;
 use crate::ranges;
+use crate::stream::StreamDirection;
 
 #[cfg(feature = "qlog")]
 use qlog::events::quic::AckRange;
@@ -165,11 +166,8 @@ pub enum Frame {
         max: u64,
     },
 
-    MaxStreamsBidi {
-        max: u64,
-    },
-
-    MaxStreamsUni {
+    MaxStreams {
+        direction: StreamDirection,
         max: u64,
     },
 
@@ -182,11 +180,8 @@ pub enum Frame {
         limit: u64,
     },
 
-    StreamsBlockedBidi {
-        limit: u64,
-    },
-
-    StreamsBlockedUni {
+    StreamsBlocked {
+        direction: StreamDirection,
         limit: u64,
     },
 
@@ -318,11 +313,8 @@ impl Frame {
                 max: b.get_varint()?,
             },
 
-            0x12 => Self::MaxStreamsBidi {
-                max: b.get_varint()?,
-            },
-
-            0x13 => Self::MaxStreamsUni {
+            0x12..=0x13 => Self::MaxStreams {
+                direction: StreamDirection::from_uni(frame_type & 1 != 0),
                 max: b.get_varint()?,
             },
 
@@ -335,11 +327,8 @@ impl Frame {
                 limit: b.get_varint()?,
             },
 
-            0x16 => Self::StreamsBlockedBidi {
-                limit: b.get_varint()?,
-            },
-
-            0x17 => Self::StreamsBlockedUni {
+            0x16..=0x17 => Self::StreamsBlocked {
+                direction: StreamDirection::from_uni(frame_type & 1 != 0),
                 limit: b.get_varint()?,
             },
 
@@ -456,20 +445,16 @@ impl Frame {
             Self::MaxStreamData { stream_id, max } =>
                 encode_varints(b, [0x11, *stream_id, *max]),
 
-            Self::MaxStreamsBidi { max } => encode_varints(b, [0x12, *max]),
-
-            Self::MaxStreamsUni { max } => encode_varints(b, [0x13, *max]),
+            Self::MaxStreams { direction, max } =>
+                encode_varints(b, [0x12 | direction.wire_bit(), *max]),
 
             Self::DataBlocked { limit } => encode_varints(b, [0x14, *limit]),
 
             Self::StreamDataBlocked { stream_id, limit } =>
                 encode_varints(b, [0x15, *stream_id, *limit]),
 
-            Self::StreamsBlockedBidi { limit } =>
-                encode_varints(b, [0x16, *limit]),
-
-            Self::StreamsBlockedUni { limit } =>
-                encode_varints(b, [0x17, *limit]),
+            Self::StreamsBlocked { direction, limit } =>
+                encode_varints(b, [0x16 | direction.wire_bit(), *limit]),
 
             Self::NewConnectionId {
                 seq_num,
@@ -638,14 +623,8 @@ impl Frame {
                 raw: None,
             },
 
-            Self::MaxStreamsBidi { max } => QuicFrame::MaxStreams {
-                stream_type: StreamType::Bidirectional,
-                maximum: *max,
-                raw: None,
-            },
-
-            Self::MaxStreamsUni { max } => QuicFrame::MaxStreams {
-                stream_type: StreamType::Unidirectional,
+            Self::MaxStreams { direction, max } => QuicFrame::MaxStreams {
+                stream_type: qlog_stream_type(*direction),
                 maximum: *max,
                 raw: None,
             },
@@ -662,17 +641,12 @@ impl Frame {
                     raw: None,
                 },
 
-            Self::StreamsBlockedBidi { limit } => QuicFrame::StreamsBlocked {
-                stream_type: StreamType::Bidirectional,
-                limit: *limit,
-                raw: None,
-            },
-
-            Self::StreamsBlockedUni { limit } => QuicFrame::StreamsBlocked {
-                stream_type: StreamType::Unidirectional,
-                limit: *limit,
-                raw: None,
-            },
+            Self::StreamsBlocked { direction, limit } =>
+                QuicFrame::StreamsBlocked {
+                    stream_type: qlog_stream_type(*direction),
+                    limit: *limit,
+                    raw: None,
+                },
 
             Self::NewConnectionId {
                 seq_num,
@@ -726,6 +700,14 @@ impl Frame {
                 raw: Some(Box::new(qlog_payload(*length as u64))),
             },
         }
+    }
+}
+
+#[cfg(feature = "qlog")]
+const fn qlog_stream_type(direction: StreamDirection) -> StreamType {
+    match direction {
+        StreamDirection::Bidirectional => StreamType::Bidirectional,
+        StreamDirection::Unidirectional => StreamType::Unidirectional,
     }
 }
 
@@ -868,9 +850,7 @@ impl std::fmt::Debug for Frame {
 
             Self::MaxStreamData { stream_id, max } => write!(f, "MAX_STREAM_DATA stream={stream_id} max={max}"),
 
-            Self::MaxStreamsBidi { max } => write!(f, "MAX_STREAMS type=bidi max={max}"),
-
-            Self::MaxStreamsUni { max } => write!(f, "MAX_STREAMS type=uni max={max}"),
+            Self::MaxStreams { direction, max } => write!(f, "MAX_STREAMS type={} max={max}", direction.label()),
 
             Self::DataBlocked { limit } => write!(f, "DATA_BLOCKED limit={limit}"),
 
@@ -879,9 +859,7 @@ impl std::fmt::Debug for Frame {
                     "STREAM_DATA_BLOCKED stream={stream_id} limit={limit}"
                 ),
 
-            Self::StreamsBlockedBidi { limit } => write!(f, "STREAMS_BLOCKED type=bidi limit={limit}"),
-
-            Self::StreamsBlockedUni { limit } => write!(f, "STREAMS_BLOCKED type=uni limit={limit}"),
+            Self::StreamsBlocked { direction, limit } => write!(f, "STREAMS_BLOCKED type={} limit={limit}", direction.label()),
 
             Self::NewConnectionId {
                 seq_num,
@@ -1742,10 +1720,41 @@ mod tests {
     }
 
     #[test]
+    fn stream_count_direction_keeps_exact_wire_types() {
+        for (direction, max_ty, blocked_ty) in [
+            (StreamDirection::Bidirectional, 0x12, 0x16),
+            (StreamDirection::Unidirectional, 0x13, 0x17),
+        ] {
+            for (frame, ty) in [
+                (Frame::MaxStreams { direction, max: 17 }, max_ty),
+                (
+                    Frame::StreamsBlocked {
+                        direction,
+                        limit: 17,
+                    },
+                    blocked_ty,
+                ),
+            ] {
+                let mut bytes = [0; 2];
+                assert_eq!(encode_checked(&frame, &mut bytes), 2);
+                assert_eq!(bytes, [ty, 17]);
+                let mut reader = octets::Octets::with_slice(&bytes);
+                assert_eq!(
+                    Frame::from_bytes(&mut reader, packet::Type::Short),
+                    Ok(frame)
+                );
+            }
+        }
+    }
+
+    #[test]
     fn max_streams_bidi() {
         let mut d = [42; 128];
 
-        let frame = Frame::MaxStreamsBidi { max: 128_318_273 };
+        let frame = Frame::MaxStreams {
+            direction: StreamDirection::Bidirectional,
+            max: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1754,7 +1763,10 @@ mod tests {
     fn max_streams_uni() {
         let mut d = [42; 128];
 
-        let frame = Frame::MaxStreamsUni { max: 128_318_273 };
+        let frame = Frame::MaxStreams {
+            direction: StreamDirection::Unidirectional,
+            max: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1784,7 +1796,10 @@ mod tests {
     fn streams_blocked_bidi() {
         let mut d = [42; 128];
 
-        let frame = Frame::StreamsBlockedBidi { limit: 128_318_273 };
+        let frame = Frame::StreamsBlocked {
+            direction: StreamDirection::Bidirectional,
+            limit: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }
@@ -1793,7 +1808,10 @@ mod tests {
     fn streams_blocked_uni() {
         let mut d = [42; 128];
 
-        let frame = Frame::StreamsBlockedUni { limit: 128_318_273 };
+        let frame = Frame::StreamsBlocked {
+            direction: StreamDirection::Unidirectional,
+            limit: 128_318_273,
+        };
 
         assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
     }

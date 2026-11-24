@@ -122,6 +122,163 @@ pub enum PriorityQueue {
     Flushable,
 }
 
+/// Direction of QUIC stream-count credit, independent of the initiator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamDirection {
+    Bidirectional,
+    Unidirectional,
+}
+
+impl StreamDirection {
+    pub(crate) const ALL: [Self; 2] = [Self::Bidirectional, Self::Unidirectional];
+
+    pub(crate) const fn from_uni(uni: bool) -> Self {
+        if uni {
+            Self::Unidirectional
+        } else {
+            Self::Bidirectional
+        }
+    }
+
+    pub(crate) const fn from_id(id: u64) -> Self {
+        Self::from_uni(!is_bidi(id))
+    }
+
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::Bidirectional => 0,
+            Self::Unidirectional => 1,
+        }
+    }
+
+    pub(crate) const fn wire_bit(self) -> u64 {
+        match self {
+            Self::Bidirectional => 0,
+            Self::Unidirectional => 1,
+        }
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Bidirectional => "bidi",
+            Self::Unidirectional => "uni",
+        }
+    }
+}
+
+/// Stream-count credit and its signaling, for one direction. A stream's
+/// ordinal implicitly opens all lower ordinals of the same initiator.
+#[derive(Default)]
+pub(crate) struct StreamQuota {
+    peer_limit: u64,
+    peer_opened: u64,
+    local_limit: u64,
+    local_limit_next: u64,
+    initial_limit: u64,
+    local_opened: u64,
+
+    /// An advertised limit needs retransmission even if no new credit exists.
+    pub(crate) credit_retransmit: bool,
+    blocked_at: Option<u64>,
+    blocked_sent: Option<u64>,
+    pub(crate) blocked_received: u64,
+}
+
+impl StreamQuota {
+    fn new(limit: u64) -> Self {
+        Self {
+            local_limit: limit,
+            local_limit_next: limit,
+            initial_limit: limit,
+            ..Self::default()
+        }
+    }
+
+    fn open(&mut self, local: bool, count: u64) -> Result<()> {
+        let (opened, limit) = if local {
+            (&mut self.local_opened, self.peer_limit)
+        } else {
+            (&mut self.peer_opened, self.local_limit)
+        };
+        let next = (*opened).max(count);
+        if next > limit {
+            return Err(Error::StreamLimit);
+        }
+        *opened = next;
+        Ok(())
+    }
+
+    fn release_peer_credit(&mut self) {
+        self.local_limit_next = self
+            .local_limit_next
+            .saturating_add(1)
+            .min(crate::MAX_STREAM_COUNT);
+    }
+
+    pub(crate) fn update_peer_limit(&mut self, value: u64) {
+        self.peer_limit = self.peer_limit.max(value);
+    }
+
+    pub(crate) const fn set_local_limit(&mut self, value: u64) {
+        self.local_limit = value;
+        self.local_limit_next = value;
+        self.initial_limit = value;
+    }
+
+    pub(crate) const fn local_limit(&self) -> u64 {
+        self.local_limit
+    }
+
+    pub(crate) const fn next_local_limit(&self) -> u64 {
+        self.local_limit_next
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn peer_limit(&self) -> u64 {
+        self.peer_limit
+    }
+
+    pub(crate) const fn peer_available(&self) -> u64 {
+        self.peer_limit - self.local_opened
+    }
+
+    /// Advertise new credit at half capacity, or retransmit a lost limit.
+    pub(crate) const fn needs_credit(&self) -> bool {
+        self.credit_retransmit ||
+            (self.local_limit_next != self.local_limit &&
+                self.local_limit.saturating_sub(self.peer_opened) <=
+                    self.initial_limit / 2)
+    }
+
+    pub(crate) const fn commit_credit(&mut self) {
+        self.local_limit = self.local_limit_next;
+        self.credit_retransmit = false;
+    }
+
+    pub(crate) fn note_blocked(&mut self) {
+        self.blocked_at = self.blocked_at.max(Some(self.peer_limit));
+    }
+
+    pub(crate) fn pending_blocked_limit(&self) -> Option<u64> {
+        self.blocked_at
+            .filter(|limit| self.blocked_sent < Some(*limit))
+    }
+
+    pub(crate) const fn mark_blocked_sent(&mut self, limit: u64) {
+        self.blocked_sent = Some(limit);
+    }
+
+    pub(crate) fn mark_blocked_lost(&mut self, limit: u64) {
+        if self.blocked_sent == Some(limit) {
+            self.blocked_sent = None;
+        }
+    }
+
+    pub(crate) const fn record_blocked_received(&mut self) {
+        self.blocked_received = self.blocked_received.saturating_add(1);
+    }
+}
+
 /// Keeps track of QUIC streams and enforces stream limits.
 #[derive(Default)]
 pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
@@ -138,37 +295,8 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
     /// created streams, to prevent peers from re-creating them.
     collected: CollectedStreams,
 
-    /// Peer's maximum bidirectional stream count limit.
-    peer_max_streams_bidi: u64,
-
-    /// Peer's maximum unidirectional stream count limit.
-    peer_max_streams_uni: u64,
-
-    /// The total number of bidirectional streams opened by the peer.
-    peer_opened_streams_bidi: u64,
-
-    /// The total number of unidirectional streams opened by the peer.
-    peer_opened_streams_uni: u64,
-
-    /// Local maximum bidirectional stream count limit.
-    local_max_streams_bidi: u64,
-    local_max_streams_bidi_next: u64,
-
-    /// Initial maximum bidirectional stream count.
-    initial_max_streams_bidi: u64,
-
-    /// Local maximum unidirectional stream count limit.
-    local_max_streams_uni: u64,
-    local_max_streams_uni_next: u64,
-
-    /// Initial maximum unidirectional stream count.
-    initial_max_streams_uni: u64,
-
-    /// The total number of bidirectional streams opened by the local endpoint.
-    local_opened_streams_bidi: u64,
-
-    /// The total number of unidirectional streams opened by the local endpoint.
-    local_opened_streams_uni: u64,
+    /// Independent bidirectional and unidirectional stream quotas.
+    quotas: [StreamQuota; 2],
 
     /// Queue of stream IDs corresponding to streams that have buffered data
     /// ready to be sent to the peer. This also implies that the stream has
@@ -218,29 +346,49 @@ pub struct StreamMap<F: BufFactory = DefaultBufFactory> {
 impl<F: BufFactory> StreamMap<F> {
     /// Forget streams created using parameters from rejected 0-RTT.
     pub(crate) fn reset_for_early_data_rejection(&mut self) {
-        *self = Self::new(
-            self.initial_max_streams_bidi,
-            self.initial_max_streams_uni,
+        let mut reset = Self::new(
+            self.quota(StreamDirection::Bidirectional).initial_limit,
+            self.quota(StreamDirection::Unidirectional).initial_limit,
             self.max_stream_window,
         );
+        // Keep already recorded receive statistics and retransmission
+        // obligations, but discard the rejected early-data blocked limits.
+        for direction in StreamDirection::ALL {
+            let old = self.quota(direction);
+            let new = reset.quota_mut(direction);
+            new.blocked_received = old.blocked_received;
+            new.credit_retransmit = old.credit_retransmit;
+        }
+        *self = reset;
     }
 
     pub fn new(
         max_streams_bidi: u64, max_streams_uni: u64, max_stream_window: u64,
     ) -> Self {
         Self {
-            local_max_streams_bidi: max_streams_bidi,
-            local_max_streams_bidi_next: max_streams_bidi,
-            initial_max_streams_bidi: max_streams_bidi,
-
-            local_max_streams_uni: max_streams_uni,
-            local_max_streams_uni_next: max_streams_uni,
-            initial_max_streams_uni: max_streams_uni,
-
+            quotas: [
+                StreamQuota::new(max_streams_bidi),
+                StreamQuota::new(max_streams_uni),
+            ],
             max_stream_window,
-
             ..Self::default()
         }
+    }
+
+    pub(crate) const fn quota(&self, direction: StreamDirection) -> &StreamQuota {
+        &self.quotas[direction.index()]
+    }
+
+    pub(crate) const fn quota_mut(
+        &mut self, direction: StreamDirection,
+    ) -> &mut StreamQuota {
+        &mut self.quotas[direction.index()]
+    }
+
+    pub(crate) fn has_pending_count_control(&self) -> bool {
+        self.quotas.iter().any(|quota| {
+            quota.needs_credit() || quota.pending_blocked_limit().is_some()
+        })
     }
 
     /// Returns the stream with the given ID if it exists.
@@ -304,60 +452,10 @@ impl<F: BufFactory> StreamMap<F> {
                 // that stream type.
                 let stream_sequence = id >> 2;
 
-                // Enforce stream count limits.
-                match (is_local(id, is_server), is_bidi(id)) {
-                    (true, true) => {
-                        let n = cmp::max(
-                            self.local_opened_streams_bidi,
-                            stream_sequence + 1,
-                        );
-
-                        if n > self.peer_max_streams_bidi {
-                            return Err(Error::StreamLimit);
-                        }
-
-                        self.local_opened_streams_bidi = n;
-                    },
-
-                    (true, false) => {
-                        let n = cmp::max(
-                            self.local_opened_streams_uni,
-                            stream_sequence + 1,
-                        );
-
-                        if n > self.peer_max_streams_uni {
-                            return Err(Error::StreamLimit);
-                        }
-
-                        self.local_opened_streams_uni = n;
-                    },
-
-                    (false, true) => {
-                        let n = cmp::max(
-                            self.peer_opened_streams_bidi,
-                            stream_sequence + 1,
-                        );
-
-                        if n > self.local_max_streams_bidi {
-                            return Err(Error::StreamLimit);
-                        }
-
-                        self.peer_opened_streams_bidi = n;
-                    },
-
-                    (false, false) => {
-                        let n = cmp::max(
-                            self.peer_opened_streams_uni,
-                            stream_sequence + 1,
-                        );
-
-                        if n > self.local_max_streams_uni {
-                            return Err(Error::StreamLimit);
-                        }
-
-                        self.peer_opened_streams_uni = n;
-                    },
-                }
+                // Enforce the same quota rule for both directions and
+                // initiators.
+                self.quotas[StreamDirection::from_id(id).index()]
+                    .open(local, stream_sequence + 1)?;
 
                 let initial_window = max_rx_data;
                 let s = Stream::new(
@@ -635,70 +733,6 @@ impl<F: BufFactory> StreamMap<F> {
         self.stopped.remove(&stream_id);
     }
 
-    /// Updates the peer's maximum bidirectional stream count limit.
-    pub fn update_peer_max_streams_bidi(&mut self, v: u64) {
-        self.peer_max_streams_bidi = cmp::max(self.peer_max_streams_bidi, v);
-    }
-
-    /// Updates the peer's maximum unidirectional stream count limit.
-    pub fn update_peer_max_streams_uni(&mut self, v: u64) {
-        self.peer_max_streams_uni = cmp::max(self.peer_max_streams_uni, v);
-    }
-
-    /// Commits the new `max_streams_bidi` limit.
-    pub const fn update_max_streams_bidi(&mut self) {
-        self.local_max_streams_bidi = self.local_max_streams_bidi_next;
-    }
-
-    /// Sets the `max_streams_bidi` limit to the given value.
-    pub const fn set_max_streams_bidi(&mut self, max: u64) {
-        self.local_max_streams_bidi = max;
-        self.local_max_streams_bidi_next = max;
-        self.initial_max_streams_bidi = max;
-    }
-
-    /// Returns the current `max_streams_bidi` limit.
-    pub const fn max_streams_bidi(&self) -> u64 {
-        self.local_max_streams_bidi
-    }
-
-    /// Returns the new `max_streams_bidi` limit.
-    pub const fn max_streams_bidi_next(&self) -> u64 {
-        self.local_max_streams_bidi_next
-    }
-
-    /// Commits the new `max_streams_uni` limit.
-    pub const fn update_max_streams_uni(&mut self) {
-        self.local_max_streams_uni = self.local_max_streams_uni_next;
-    }
-
-    /// Returns the new `max_streams_uni` limit.
-    pub const fn max_streams_uni_next(&self) -> u64 {
-        self.local_max_streams_uni_next
-    }
-
-    /// Returns the peer's current maximum bidirectional stream count limit.
-    pub const fn peer_max_streams_bidi(&self) -> u64 {
-        self.peer_max_streams_bidi
-    }
-
-    /// Returns the number of bidirectional streams that can be created
-    /// before the peer's stream count limit is reached.
-    pub const fn peer_streams_left_bidi(&self) -> u64 {
-        self.peer_max_streams_bidi - self.local_opened_streams_bidi
-    }
-
-    /// Returns the peer's current maximum unidirectional stream count limit.
-    pub const fn peer_max_streams_uni(&self) -> u64 {
-        self.peer_max_streams_uni
-    }
-
-    /// Returns the number of unidirectional streams that can be created
-    /// before the peer's stream count limit is reached.
-    pub const fn peer_streams_left_uni(&self) -> u64 {
-        self.peer_max_streams_uni - self.local_opened_streams_uni
-    }
-
     /// Updates stream state before its STOP error is returned to the caller.
     pub fn mark_stop_reported(&mut self, stream_id: u64) {
         let Some(stream) = self.streams.get_mut(&stream_id) else {
@@ -726,17 +760,8 @@ impl<F: BufFactory> StreamMap<F> {
         if !s.local {
             // If the stream was created by the peer, give back a max streams
             // credit.
-            if is_bidi(stream_id) {
-                self.local_max_streams_bidi_next = self
-                    .local_max_streams_bidi_next
-                    .saturating_add(1)
-                    .min(crate::MAX_STREAM_COUNT);
-            } else {
-                self.local_max_streams_uni_next = self
-                    .local_max_streams_uni_next
-                    .saturating_add(1)
-                    .min(crate::MAX_STREAM_COUNT);
-            }
+            self.quota_mut(StreamDirection::from_id(stream_id))
+                .release_peer_credit();
         }
 
         self.remove_readable(&s.priority_key);
@@ -801,13 +826,8 @@ impl<F: BufFactory> StreamMap<F> {
     /// Opening a local stream implicitly opens all lower-numbered local streams
     /// of the same type, even if they do not have `Stream` objects yet.
     pub const fn local_stream_opened(&self, stream_id: u64) -> bool {
-        let opened = if is_bidi(stream_id) {
-            self.local_opened_streams_bidi
-        } else {
-            self.local_opened_streams_uni
-        };
-
-        stream_id >> 2 < opened
+        stream_id >> 2 <
+            self.quota(StreamDirection::from_id(stream_id)).local_opened
     }
 
     /// Creates an iterator over streams that need to send `MAX_STREAM_DATA`.
@@ -865,32 +885,6 @@ impl<F: BufFactory> StreamMap<F> {
     /// Returns true if there are any streams that need to send `STOP_SENDING`.
     pub fn has_stopped(&self) -> bool {
         !self.stopped.is_empty()
-    }
-
-    /// Returns true if the max bidirectional streams count needs to be updated
-    /// by sending a `MAX_STREAMS` frame to the peer.
-    ///
-    /// This only sends `MAX_STREAMS` when available capacity is at or below 50%
-    /// of the initial maximum streams target.
-    pub const fn should_update_max_streams_bidi(&self) -> bool {
-        let available = self
-            .local_max_streams_bidi
-            .saturating_sub(self.peer_opened_streams_bidi);
-        self.local_max_streams_bidi_next != self.local_max_streams_bidi &&
-            available <= self.initial_max_streams_bidi / 2
-    }
-
-    /// Returns true if the max unidirectional streams count needs to be updated
-    /// by sending a `MAX_STREAMS` frame to the peer.
-    ///
-    /// This only send `MAX_STREAMS` when available capacity is at or below 50%
-    /// of the initial maximum streams target.
-    pub const fn should_update_max_streams_uni(&self) -> bool {
-        let available = self
-            .local_max_streams_uni
-            .saturating_sub(self.peer_opened_streams_uni);
-        self.local_max_streams_uni_next != self.local_max_streams_uni &&
-            available <= self.initial_max_streams_uni / 2
     }
 
     /// Returns the number of active streams in the map.
@@ -1241,6 +1235,8 @@ mod tests {
     use crate::test_utils::Pipe;
 
     use super::*;
+    use StreamDirection::Bidirectional;
+    use StreamDirection::Unidirectional;
 
     /// The default size of the receiver stream flow control window.
     const DEFAULT_STREAM_WINDOW: u64 = 32 * 1024;
@@ -1265,6 +1261,41 @@ mod tests {
         let mut streams = StreamMap::<DefaultBufFactory>::new(4, 4, 4);
         streams.tx_buffered = 1;
         streams.debug_check_tx_buffered_consistency();
+    }
+
+    #[test]
+    fn count_quota_preserves_independent_direction_and_reset_obligations() {
+        let mut streams = StreamMap::<DefaultBufFactory>::new(3, 7, 1024);
+        let quota = streams.quota_mut(Bidirectional);
+        quota.update_peer_limit(2);
+        assert_eq!(quota.open(true, 2), Ok(()));
+        assert_eq!(quota.open(true, 3), Err(Error::StreamLimit));
+        assert_eq!(quota.peer_available(), 0);
+        quota.note_blocked();
+        assert_eq!(quota.pending_blocked_limit(), Some(2));
+        quota.mark_blocked_sent(2);
+        quota.mark_blocked_lost(1);
+        assert_eq!(quota.pending_blocked_limit(), None);
+        quota.mark_blocked_lost(2);
+        assert_eq!(quota.pending_blocked_limit(), Some(2));
+        quota.record_blocked_received();
+        quota.credit_retransmit = true;
+
+        let uni = streams.quota(Unidirectional);
+        assert_eq!(uni.local_limit(), 7);
+        assert_eq!(uni.pending_blocked_limit(), None);
+        assert_eq!(uni.blocked_received, 0);
+        assert!(!uni.needs_credit());
+
+        streams.reset_for_early_data_rejection();
+        let bidi = streams.quota(Bidirectional);
+        assert_eq!(bidi.local_limit(), 3);
+        assert_eq!(bidi.peer_limit(), 0);
+        assert_eq!(bidi.peer_available(), 0);
+        assert_eq!(bidi.pending_blocked_limit(), None);
+        assert_eq!(bidi.blocked_received, 1);
+        assert!(bidi.needs_credit());
+        assert_eq!(streams.quota(Unidirectional).local_limit(), 7);
     }
 
     #[test]
@@ -1512,9 +1543,9 @@ mod tests {
         }
 
         let peer_limit = if is_bidi(stream_type) {
-            pipe.client.streams.peer_max_streams_bidi()
+            pipe.client.streams.quota(Bidirectional).peer_limit()
         } else {
-            pipe.client.streams.peer_max_streams_uni()
+            pipe.client.streams.quota(Unidirectional).peer_limit()
         };
         assert_eq!(peer_limit, 2 * initial_limit);
 
@@ -1589,10 +1620,10 @@ mod tests {
         // Collect one peer-created stream. No additional stream ID in this
         // type exists once the maximum has already been advertised.
         streams.collect(stream_type);
-        assert_eq!(streams.max_streams_bidi_next(), max);
-        assert_eq!(streams.max_streams_uni_next(), max);
-        assert!(!streams.should_update_max_streams_bidi());
-        assert!(!streams.should_update_max_streams_uni());
+        assert_eq!(streams.quota(Bidirectional).next_local_limit(), max);
+        assert_eq!(streams.quota(Unidirectional).next_local_limit(), max);
+        assert!(!streams.quota(Bidirectional).needs_credit());
+        assert!(!streams.quota(Unidirectional).needs_credit());
     }
 
     #[rstest]
@@ -1602,8 +1633,8 @@ mod tests {
     ) {
         let params = crate::TransportParams::default();
         let mut streams = <StreamMap>::new(1, 1, DEFAULT_STREAM_WINDOW);
-        streams.update_peer_max_streams_bidi(1);
-        streams.update_peer_max_streams_uni(1);
+        streams.quota_mut(Bidirectional).update_peer_limit(1);
+        streams.quota_mut(Unidirectional).update_peer_limit(1);
         let is_server = (stream_type & 1 != 0) == local;
         streams.collect(stream_type);
         streams
@@ -1614,11 +1645,11 @@ mod tests {
         assert_eq!(streams.len(), 0);
         assert!(streams.collected.contains(stream_type));
         assert_eq!(
-            streams.max_streams_bidi_next(),
+            streams.quota(Bidirectional).next_local_limit(),
             1 + u64::from(!local && is_bidi(stream_type))
         );
         assert_eq!(
-            streams.max_streams_uni_next(),
+            streams.quota(Unidirectional).next_local_limit(),
             1 + u64::from(!local && !is_bidi(stream_type))
         );
     }
@@ -1630,8 +1661,8 @@ mod tests {
     ) {
         let params = crate::TransportParams::default();
         let mut streams = <StreamMap>::new(1, 1, DEFAULT_STREAM_WINDOW);
-        streams.update_peer_max_streams_bidi(1);
-        streams.update_peer_max_streams_uni(1);
+        streams.quota_mut(Bidirectional).update_peer_limit(1);
+        streams.quota_mut(Unidirectional).update_peer_limit(1);
 
         let stream_id = 4 | stream_type;
         let is_server = (stream_type & 1 != 0) == local;
@@ -1646,13 +1677,13 @@ mod tests {
         assert!(streams.collected.ranges.is_none());
 
         if local {
-            streams.update_peer_max_streams_bidi(2);
-            streams.update_peer_max_streams_uni(2);
+            streams.quota_mut(Bidirectional).update_peer_limit(2);
+            streams.quota_mut(Unidirectional).update_peer_limit(2);
         } else {
-            streams.local_max_streams_bidi_next = 2;
-            streams.local_max_streams_uni_next = 2;
-            streams.update_max_streams_bidi();
-            streams.update_max_streams_uni();
+            streams.quota_mut(Bidirectional).local_limit_next = 2;
+            streams.quota_mut(Unidirectional).local_limit_next = 2;
+            streams.quota_mut(Bidirectional).commit_credit();
+            streams.quota_mut(Unidirectional).commit_credit();
         }
 
         assert!(streams
@@ -2726,8 +2757,8 @@ mod tests {
         let peer_params = local_params.clone();
 
         // Update peer stream limits to allow locally-initiated streams.
-        streams.update_peer_max_streams_bidi(5);
-        streams.update_peer_max_streams_uni(5);
+        streams.quota_mut(Bidirectional).update_peer_limit(5);
+        streams.quota_mut(Unidirectional).update_peer_limit(5);
 
         let stream_id = 0u64;
 
