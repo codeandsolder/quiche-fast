@@ -47,13 +47,13 @@ use quiche_apps::common::*;
 
 use quiche_apps::sendto::*;
 
-const MAX_BUF_SIZE: usize = 65507;
+const MAX_BUF_SIZE: usize = 65_507;
 
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 fn main() {
-    let mut buf = [0; MAX_BUF_SIZE];
-    let mut out = [0; MAX_BUF_SIZE];
+    let mut buf = vec![0; MAX_BUF_SIZE];
+    let mut out = vec![0; MAX_BUF_SIZE];
     let mut pacing = false;
     let mut batches = Vec::new();
 
@@ -97,6 +97,7 @@ fn main() {
     let enable_gso = args.socket.gso && detect_gso(&socket, max_datagram_size);
 
     trace!("GSO detected: {enable_gso}");
+    let mut tx = DatagramQueue::new(MAX_BUF_SIZE, enable_gso);
 
     // Create the configuration for the QUIC connections.
     let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
@@ -161,20 +162,24 @@ fn main() {
             }
         }
 
-        // Read incoming UDP packets from the socket and feed them to quiche,
-        // until there are no more packets to read.
-        'read: loop {
-            // If the event loop reported no events, it means that the timeout
-            // has expired, so handle it without attempting to read packets. We
-            // will then proceed with the send loop.
-            if events.is_empty() && !continue_write {
-                trace!("timed out");
+        // Handle elapsed timers independently of socket backpressure.
+        if events.is_empty() && !continue_write {
+            clients
+                .values_mut()
+                .for_each(|client| client.conn.on_timeout());
+        }
 
-                clients.values_mut().for_each(|c| c.conn.on_timeout());
-
-                break 'read;
-            }
-
+        // A blocked burst owns its buffer until accepted by the kernel.
+        // Resume draining reads after writable readiness, even if the read
+        // edge occurred while the socket was blocked.
+        let drained = tx
+            .flush(&mut socket, poll.registry(), mio::Token(0))
+            .unwrap_or_else(|error| {
+                error!("UDP flush failed: {error}");
+                std::process::exit(1);
+            });
+        continue_write = false;
+        'read: while drained && !tx.is_pending() {
             let (len, from) = match socket.recv_from(&mut buf) {
                 Ok(v) => v,
 
@@ -254,16 +259,23 @@ fn main() {
                         quiche::negotiate_version(&hdr.scid, &hdr.dcid, &mut out)
                             .unwrap();
 
-                    let out = &out[..len];
-
-                    if let Err(e) = socket.send_to(out, from) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            trace!("send() would block");
-                            break;
-                        }
-
-                        panic!("send() failed: {e:?}");
-                    }
+                    let info = quiche::SendInfo {
+                        from: local_addr,
+                        to: from,
+                        at: std::time::Instant::now(),
+                    };
+                    DatagramBatch::push(&mut batches, 0..len, info, false);
+                    tx.submit(
+                        &mut out,
+                        &mut batches,
+                        &mut socket,
+                        poll.registry(),
+                        mio::Token(0),
+                    )
+                    .unwrap_or_else(|error| {
+                        error!("UDP stateless reply failed: {error}");
+                        std::process::exit(1);
+                    });
                     continue 'read;
                 }
 
@@ -293,16 +305,23 @@ fn main() {
                         )
                         .unwrap();
 
-                        let out = &out[..len];
-
-                        if let Err(e) = socket.send_to(out, from) {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                trace!("send() would block");
-                                break;
-                            }
-
-                            panic!("send() failed: {e:?}");
-                        }
+                        let info = quiche::SendInfo {
+                            from: local_addr,
+                            to: from,
+                            at: std::time::Instant::now(),
+                        };
+                        DatagramBatch::push(&mut batches, 0..len, info, false);
+                        tx.submit(
+                            &mut out,
+                            &mut batches,
+                            &mut socket,
+                            poll.registry(),
+                            mio::Token(0),
+                        )
+                        .unwrap_or_else(|error| {
+                            error!("UDP stateless reply failed: {error}");
+                            std::process::exit(1);
+                        });
                         continue 'read;
                     }
 
@@ -508,8 +527,10 @@ fn main() {
         // Generate outgoing QUIC packets for all active connections and send
         // them on the UDP socket, until quiche reports that there are no more
         // packets to be sent.
-        continue_write = false;
         for client in clients.values_mut() {
+            if tx.is_pending() {
+                break;
+            }
             // Reduce `max_send_burst` by 25% when loss rises by more than 0.1%.
             let loss_rate =
                 client.conn.stats().lost as f64 / client.conn.stats().sent as f64;
@@ -555,7 +576,12 @@ fn main() {
 
                 let start = total_write;
                 total_write += write;
-                DatagramBatch::push(&mut batches, start..total_write, send_info);
+                DatagramBatch::push(
+                    &mut batches,
+                    start..total_write,
+                    send_info,
+                    pacing,
+                );
 
                 if write < client.conn.max_send_udp_payload_size() {
                     continue_write = true;
@@ -567,27 +593,24 @@ fn main() {
                 continue;
             }
 
-            let mut blocked = false;
-            for batch in &batches {
-                match batch.send(&socket, &out, pacing, enable_gso) {
-                    Ok(_) => (),
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        trace!("send() would block");
-                        blocked = true;
-                        break;
-                    },
-                    Err(e) => panic!("send_to() failed: {e:?}"),
-                }
-            }
-            if blocked {
+            let batch_count = batches.len();
+            let drained = tx
+                .submit(
+                    &mut out,
+                    &mut batches,
+                    &mut socket,
+                    poll.registry(),
+                    mio::Token(0),
+                )
+                .unwrap_or_else(|error| {
+                    error!("UDP burst failed: {error}");
+                    std::process::exit(1);
+                });
+            if !drained {
+                continue_write = false;
                 break;
             }
-
-            trace!(
-                "{} written {total_write} bytes in {} datagram batches",
-                client.conn.trace_id(),
-                batches.len(),
-            );
+            trace!("{} written {total_write} bytes in {batch_count} datagram batches", client.conn.trace_id());
 
             if total_write >= max_send_burst {
                 trace!("{} pause writing", client.conn.trace_id(),);

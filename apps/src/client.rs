@@ -26,6 +26,8 @@
 
 use crate::args::*;
 use crate::common::*;
+use crate::sendto::DatagramBatch;
+use crate::sendto::DatagramQueue;
 
 use std::io::prelude::*;
 
@@ -48,8 +50,11 @@ pub fn connect(
     args: ClientArgs, conn_args: CommonArgs,
     output_sink: impl FnMut(String) + 'static,
 ) -> Result<(), ClientError> {
-    let mut buf = [0; 65535];
-    let mut out = [0; MAX_DATAGRAM_SIZE];
+    let mut buf = vec![0; 65_535];
+    let mut out = vec![0; MAX_DATAGRAM_SIZE];
+    let mut batches = Vec::new();
+    let mut tx = DatagramQueue::new(MAX_DATAGRAM_SIZE, false);
+    let mut migrate_tx = DatagramQueue::new(MAX_DATAGRAM_SIZE, false);
 
     let output_sink =
         Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(_)>>;
@@ -96,7 +101,7 @@ pub fn connect(
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
         .unwrap();
 
-    let migrate_socket = if args.perform_migration {
+    let mut migrate_socket = if args.perform_migration {
         let mut socket =
             mio::net::UdpSocket::bind(bind_addr.parse().unwrap()).unwrap();
         poll.registry()
@@ -208,22 +213,18 @@ pub fn connect(
         scid,
     );
 
-    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
-
-    while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            trace!(
-                "{} -> {}: send() would block",
-                socket.local_addr().unwrap(),
-                send_info.to
-            );
-            continue;
-        }
-
-        return Err(ClientError::Other(format!("send() failed: {e:?}")));
-    }
-
-    trace!("written {write}");
+    let (write, send_info) = conn
+        .send(&mut out)
+        .map_err(|error| ClientError::Other(format!("initial send: {error}")))?;
+    DatagramBatch::push(&mut batches, 0..write, send_info, false);
+    tx.submit(
+        &mut out,
+        &mut batches,
+        &mut socket,
+        poll.registry(),
+        mio::Token(0),
+    )
+    .map_err(|error| ClientError::Other(format!("initial UDP send: {error}")))?;
 
     let app_data_start = std::time::Instant::now();
 
@@ -234,7 +235,11 @@ pub fn connect(
     let mut migrated = false;
 
     loop {
-        if !conn.is_in_early_data() || app_proto_selected {
+        if tx.is_pending() ||
+            migrate_tx.is_pending() ||
+            !conn.is_in_early_data() ||
+            app_proto_selected
+        {
             poll.poll(&mut events, conn.timeout()).unwrap();
         }
 
@@ -250,6 +255,9 @@ pub fn connect(
         // Read incoming UDP packets from the socket and feed them to quiche,
         // until there are no more packets to read.
         for event in &events {
+            if !event.is_readable() {
+                continue;
+            }
             let socket = match event.token() {
                 mio::Token(0) => &socket,
 
@@ -481,15 +489,22 @@ pub fn connect(
 
         // Generate outgoing QUIC packets and send them on the UDP socket, until
         // quiche reports that there are no more packets to be sent.
-        let mut sockets = vec![&socket];
-        if let Some(migrate_socket) = migrate_socket.as_ref() {
-            sockets.push(migrate_socket);
+        let mut sockets = vec![(&mut socket, &mut tx, mio::Token(0))];
+        if let Some(migrate_socket) = migrate_socket.as_mut() {
+            sockets.push((migrate_socket, &mut migrate_tx, mio::Token(1)));
         }
 
-        for socket in sockets {
-            let local_addr = socket.local_addr().unwrap();
+        for (socket, tx, token) in sockets {
+            let local_addr = socket.local_addr().map_err(|error| {
+                ClientError::Other(format!("local address: {error}"))
+            })?;
+            if !tx.flush(socket, poll.registry(), token).map_err(|error| {
+                ClientError::Other(format!("UDP flush: {error}"))
+            })? {
+                continue;
+            }
 
-            for peer_addr in conn.paths_iter(local_addr) {
+            'paths: for peer_addr in conn.paths_iter(local_addr) {
                 loop {
                     let (write, send_info) = match conn.send_on_path(
                         &mut out,
@@ -513,20 +528,22 @@ pub fn connect(
                         },
                     };
 
-                    if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            trace!(
-                                "{} -> {}: send() would block",
-                                local_addr,
-                                send_info.to
-                            );
-                            break;
-                        }
-
-                        return Err(ClientError::Other(format!(
-                            "{} -> {}: send() failed: {:?}",
-                            local_addr, send_info.to, e
-                        )));
+                    DatagramBatch::push(&mut batches, 0..write, send_info, false);
+                    let drained = tx
+                        .submit(
+                            &mut out,
+                            &mut batches,
+                            socket,
+                            poll.registry(),
+                            token,
+                        )
+                        .map_err(|error| {
+                            ClientError::Other(format!(
+                                "UDP send {local_addr} -> {peer_addr}: {error}"
+                            ))
+                        })?;
+                    if !drained {
+                        break 'paths;
                     }
 
                     trace!(
