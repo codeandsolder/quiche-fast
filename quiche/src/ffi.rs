@@ -2912,6 +2912,8 @@ mod tests {
     use std::time::Duration;
 
     use libc::c_void;
+
+    type TestResult = std::result::Result<(), Box<dyn std::error::Error>>;
     #[cfg(windows)]
     use windows_sys::Win32::Networking::WinSock::inet_ntop;
 
@@ -2921,7 +2923,7 @@ mod tests {
         target_os = "windows"
     )))]
     #[test]
-    fn ffi_monotonic_timestamp_preserves_deadline_spacing() {
+    fn ffi_monotonic_timestamp_preserves_deadline_spacing() -> TestResult {
         let anchor = Instant::now();
         let clock = timespec {
             tv_sec: 10,
@@ -2929,7 +2931,7 @@ mod tests {
         };
 
         let first = monotonic_deadline_timespec(anchor, anchor, clock)
-            .expect("valid monotonic anchor");
+            .ok_or("valid monotonic anchor")?;
         assert_eq!(first.tv_sec, 10);
         assert_eq!(first.tv_nsec, 100);
 
@@ -2938,16 +2940,18 @@ mod tests {
             anchor,
             clock,
         )
-        .expect("valid later deadline");
+        .ok_or("valid later deadline")?;
         assert_eq!(later.tv_sec, 10);
         assert_eq!(later.tv_nsec, 50_000_100);
 
         let earlier = monotonic_deadline_timespec(
-            anchor - Duration::from_millis(200),
+            anchor
+                .checked_sub(Duration::from_millis(200))
+                .ok_or("monotonic clock underflow")?,
             anchor,
             clock,
         )
-        .expect("valid earlier deadline");
+        .ok_or("valid earlier deadline")?;
         assert_eq!(earlier.tv_sec, 9);
         assert_eq!(earlier.tv_nsec, 800_000_100);
 
@@ -2959,9 +2963,10 @@ mod tests {
                 tv_nsec: 999_999_999,
             },
         )
-        .expect("valid second rollover");
+        .ok_or("valid second rollover")?;
         assert_eq!(crossing.tv_sec, 12);
         assert_eq!(crossing.tv_nsec, 999_999_999);
+        Ok(())
     }
 
     #[cfg(not(any(
@@ -2970,7 +2975,8 @@ mod tests {
         target_os = "windows"
     )))]
     #[test]
-    fn ffi_monotonic_conversion_rejects_invalid_or_unrepresentable_times() {
+    fn ffi_monotonic_conversion_rejects_invalid_or_unrepresentable_times(
+    ) -> TestResult {
         let anchor = Instant::now();
         let ts = |seconds, nanos| timespec {
             tv_sec: seconds,
@@ -2985,7 +2991,9 @@ mod tests {
         .is_none());
         assert!(monotonic_deadline_timespec(anchor, anchor, ts(-1, 0)).is_none());
         assert!(monotonic_deadline_timespec(
-            anchor - Duration::from_secs(2),
+            anchor
+                .checked_sub(Duration::from_secs(2))
+                .ok_or("monotonic clock underflow")?,
             anchor,
             ts(1, 0)
         )
@@ -2998,6 +3006,7 @@ mod tests {
             ts(libc::time_t::MAX, 999_999_999)
         )
         .is_none());
+        Ok(())
     }
 
     #[cfg(not(any(
@@ -3018,98 +3027,115 @@ mod tests {
     }
 
     #[test]
-    fn invalid_utf8_ffi_string_returns_invalid_argument() {
-        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
+    fn invalid_utf8_ffi_string_returns_invalid_argument() -> TestResult {
+        let mut config = Config::new(PROTOCOL_VERSION)?;
         let invalid = [0xff_u8, 0];
 
         assert_eq!(
             quiche_config_set_cc_algorithm_name(
-                &mut config,
+                &raw mut config,
                 invalid.as_ptr().cast(),
             ),
             c_int::from(FFI_ERR_INVALID_ARGUMENT)
         );
+        Ok(())
     }
 
     #[test]
-    fn peer_transport_params_write_full_width_into_uninitialized_storage() {
-        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    fn peer_transport_params_write_full_width_into_uninitialized_storage(
+    ) -> TestResult {
+        let mut config = test_utils::Pipe::default_config("cubic")?;
         config.local_transport_params.max_datagram_frame_size =
             Some(octets::MAX_VAR_INT);
         config.local_transport_params.disable_active_migration = true;
-        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+        let mut pipe = test_utils::Pipe::with_config(&mut config)?;
         let mut out = MaybeUninit::<TransportParams>::uninit();
         assert!(!quiche_conn_peer_transport_params(
-            &pipe.client,
+            &raw const pipe.client,
             out.as_mut_ptr()
         ));
-        pipe.handshake().unwrap();
+        pipe.handshake()?;
         assert!(quiche_conn_peer_transport_params(
-            &pipe.client,
+            &raw const pipe.client,
             out.as_mut_ptr()
         ));
         // SAFETY: the API returned true, so every field has been initialized.
         let out = unsafe { out.assume_init() };
-        let peer = pipe.client.peer_transport_params().unwrap();
+        let peer = pipe
+            .client
+            .peer_transport_params()
+            .ok_or("peer parameters were not negotiated")?;
         assert_eq!(
             out.max_datagram_frame_size,
-            i64::try_from(octets::MAX_VAR_INT).unwrap()
+            i64::try_from(octets::MAX_VAR_INT)?
         );
         assert_eq!(out.max_udp_payload_size, peer.max_udp_payload_size);
         assert_eq!(out.active_conn_id_limit, peer.active_conn_id_limit);
         assert!(out.disable_active_migration);
+        Ok(())
     }
 
     #[test]
-    fn connection_and_path_stats_initialize_output_storage() {
-        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
-        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
-        pipe.handshake().unwrap();
+    fn connection_and_path_stats_initialize_output_storage() -> TestResult {
+        let mut config = test_utils::Pipe::default_config("cubic")?;
+        let mut pipe = test_utils::Pipe::with_config(&mut config)?;
+        pipe.handshake()?;
         let mut stats = MaybeUninit::<Stats>::uninit();
-        quiche_conn_stats(&pipe.client, stats.as_mut_ptr());
+        quiche_conn_stats(&raw const pipe.client, stats.as_mut_ptr());
         // SAFETY: the connection and output pointer are valid.
         let stats = unsafe { stats.assume_init() };
         assert_eq!(stats.paths_count, pipe.client.stats().paths_count);
         assert_eq!(stats.recv, pipe.client.stats().recv);
         let mut path = MaybeUninit::<PathStats>::uninit();
         assert_eq!(
-            quiche_conn_path_stats(&pipe.client, 0, path.as_mut_ptr()),
+            quiche_conn_path_stats(&raw const pipe.client, 0, path.as_mut_ptr()),
             0
         );
         // SAFETY: the successful call initialized all fields.
         let path = unsafe { path.assume_init() };
         assert_eq!(path.pmtu, pipe.client.max_send_udp_payload_size());
+        Ok(())
     }
 
     #[test]
-    fn borrowed_optional_outputs_are_initialized_when_absent() {
-        let pipe = test_utils::Pipe::new("cubic").unwrap();
+    fn borrowed_optional_outputs_are_initialized_when_absent() -> TestResult {
+        let pipe = test_utils::Pipe::new("cubic")?;
         let mut data = MaybeUninit::<*const u8>::uninit();
         let mut len = MaybeUninit::<size_t>::uninit();
-        quiche_conn_peer_cert(&pipe.client, data.as_mut_ptr(), len.as_mut_ptr());
+        quiche_conn_peer_cert(
+            &raw const pipe.client,
+            data.as_mut_ptr(),
+            len.as_mut_ptr(),
+        );
         // SAFETY: the getter writes both outputs even for absence.
-        assert!(unsafe { data.assume_init() }.is_null());
-        assert_eq!(unsafe { len.assume_init() }, 0);
-        quiche_conn_trace_id(&pipe.client, data.as_mut_ptr(), len.as_mut_ptr());
+        let (absent, absent_len) =
+            unsafe { (data.assume_init(), len.assume_init()) };
+        assert!(absent.is_null());
+        assert_eq!(absent_len, 0);
+        quiche_conn_trace_id(
+            &raw const pipe.client,
+            data.as_mut_ptr(),
+            len.as_mut_ptr(),
+        );
         // SAFETY: the getter writes both outputs with a live borrowed view.
         let (data, len) = unsafe { (data.assume_init(), len.assume_init()) };
-        assert_eq!(
-            unsafe { slice::from_raw_parts(data, len) },
-            pipe.client.trace_id().as_bytes()
-        );
+        // SAFETY: the trace ID is borrowed from the still-live connection.
+        let bytes = unsafe { slice::from_raw_parts(data, len) };
+        assert_eq!(bytes, pipe.client.trace_id().as_bytes());
+        Ok(())
     }
 
     #[test]
-    fn connection_error_outputs_accept_uninitialized_storage() {
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
-        pipe.handshake().unwrap();
-        pipe.client.close(true, 42, b"reason").unwrap();
+    fn connection_error_outputs_accept_uninitialized_storage() -> TestResult {
+        let mut pipe = test_utils::Pipe::new("cubic")?;
+        pipe.handshake()?;
+        pipe.client.close(true, 42, b"reason")?;
         let mut app = MaybeUninit::<bool>::uninit();
         let mut code = MaybeUninit::<u64>::uninit();
         let mut reason = MaybeUninit::<*const u8>::uninit();
         let mut len = MaybeUninit::<size_t>::uninit();
         assert!(quiche_conn_local_error(
-            &pipe.client,
+            &raw const pipe.client,
             app.as_mut_ptr(),
             code.as_mut_ptr(),
             reason.as_mut_ptr(),
@@ -3126,20 +3152,25 @@ mod tests {
         };
         assert!(app);
         assert_eq!(code, 42);
-        assert_eq!(unsafe { slice::from_raw_parts(reason, len) }, b"reason");
+        // SAFETY: the successful getter borrows the reason from the live
+        // connection.
+        let reason = unsafe { slice::from_raw_parts(reason, len) };
+        assert_eq!(reason, b"reason");
+        Ok(())
     }
 
     #[test]
-    fn c_algorithm_discriminants_are_checked_before_configuration() {
-        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-        assert_eq!(quiche_config_set_cc_algorithm(&mut config, 0), 0);
+    fn c_algorithm_discriminants_are_checked_before_configuration() -> TestResult
+    {
+        let mut config = Config::new(PROTOCOL_VERSION)?;
+        assert_eq!(quiche_config_set_cc_algorithm(&raw mut config, 0), 0);
         assert_eq!(
             config.recovery.cc_algorithm,
             CongestionControlAlgorithm::Reno
         );
         for invalid in [-1, 2, 3, 5, c_int::MAX] {
             assert_eq!(
-                quiche_config_set_cc_algorithm(&mut config, invalid),
+                quiche_config_set_cc_algorithm(&raw mut config, invalid),
                 c_int::from(FFI_ERR_INVALID_ARGUMENT)
             );
             assert_eq!(
@@ -3151,41 +3182,46 @@ mod tests {
             (1, CongestionControlAlgorithm::Cubic),
             (4, CongestionControlAlgorithm::Bbr2Gcongestion),
         ] {
-            assert_eq!(quiche_config_set_cc_algorithm(&mut config, value), 0);
+            assert_eq!(quiche_config_set_cc_algorithm(&raw mut config, value), 0);
             assert_eq!(config.recovery.cc_algorithm, algorithm);
         }
+        Ok(())
     }
 
     #[test]
-    fn c_shutdown_discriminant_rejects_invalid_values() {
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
-        pipe.handshake().unwrap();
-        pipe.client.stream_send(4, b"a", false).unwrap();
-        pipe.advance().unwrap();
+    fn c_shutdown_discriminant_rejects_invalid_values() -> TestResult {
+        let mut pipe = test_utils::Pipe::new("cubic")?;
+        pipe.handshake()?;
+        pipe.client.stream_send(4, b"a", false)?;
+        pipe.advance()?;
         for invalid in [-1, 2, c_int::MAX] {
             assert_eq!(
-                quiche_conn_stream_shutdown(&mut pipe.server, 4, invalid, 42),
+                quiche_conn_stream_shutdown(&raw mut pipe.server, 4, invalid, 42),
                 c_int::from(FFI_ERR_INVALID_ARGUMENT)
             );
         }
         let mut data = [0; 1];
         assert_eq!(pipe.server.stream_recv(4, &mut data), Ok((1, false)));
         assert_eq!(&data, b"a");
-        assert_eq!(quiche_conn_stream_shutdown(&mut pipe.server, 4, 0, 42), 0);
+        assert_eq!(
+            quiche_conn_stream_shutdown(&raw mut pipe.server, 4, 0, 42),
+            0
+        );
+        Ok(())
     }
 
     #[rstest::rstest]
     fn c_varint_writes_uninitialized_prefix(
         #[values(0, 63, 64, 16383, 16384, 1_073_741_824, octets::MAX_VAR_INT)]
         value: u64,
-    ) {
+    ) -> TestResult {
         let mut out = [MaybeUninit::<u8>::uninit(); 8];
         let len = octets::varint_len(value);
         assert_eq!(quiche_put_varint(out.as_mut_ptr().cast(), len, value), 0);
         let mut decoded = MaybeUninit::<u64>::uninit();
         assert_eq!(
             quiche_get_varint(out.as_ptr().cast(), len, decoded.as_mut_ptr()),
-            ssize_t::try_from(len).unwrap()
+            ssize_t::try_from(len)?
         );
         // SAFETY: successful getter initialized decoded.
         assert_eq!(unsafe { decoded.assume_init() }, value);
@@ -3195,6 +3231,7 @@ mod tests {
             c_int::from(Error::BufferTooShort.to_c())
         );
         assert_eq!(sentinel, [0xaa; 8]);
+        Ok(())
     }
 
     #[test]
@@ -3216,14 +3253,16 @@ mod tests {
                 version.as_mut_ptr(),
                 ty.as_mut_ptr(),
                 scid.as_mut_ptr().cast(),
-                &mut sl,
+                &raw mut sl,
                 dcid.as_mut_ptr().cast(),
-                &mut dl,
+                &raw mut dl,
                 ptr::null_mut(),
-                &mut tl
+                &raw mut tl
             ),
             0
         );
+        // SAFETY: the header parser returned success and initialized both
+        // fields.
         let (version, ty) = unsafe { (version.assume_init(), ty.assume_init()) };
         assert_eq!((version, ty, sl, dl, tl), (0, 6, 3, 2, 0));
         // SAFETY: reported lengths delimit initialized output prefixes.
@@ -3237,21 +3276,26 @@ mod tests {
         assert_eq!(dcid, &[1, 2]);
     }
 
-    #[test]
-    fn c_receive_writes_only_initialized_payload_prefix() {
-        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    fn datagram_pipe() -> Result<test_utils::Pipe> {
+        let mut config = test_utils::Pipe::default_config("cubic")?;
         config.enable_dgram(true, 4, 4);
-        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
-        pipe.handshake().unwrap();
-        pipe.client.stream_send(4, b"payload", true).unwrap();
-        pipe.client.dgram_send(b"datagram").unwrap();
-        pipe.advance().unwrap();
+        let mut pipe = test_utils::Pipe::with_config(&mut config)?;
+        pipe.handshake()?;
+        Ok(pipe)
+    }
+
+    #[test]
+    fn c_receive_writes_only_initialized_payload_prefix() -> TestResult {
+        let mut pipe = datagram_pipe()?;
+        pipe.client.stream_send(4, b"payload", true)?;
+        pipe.client.dgram_send(b"datagram")?;
+        pipe.advance()?;
 
         let mut out = [MaybeUninit::<u8>::uninit(); 32];
         let mut fin = MaybeUninit::<bool>::uninit();
         let mut err = MaybeUninit::<u64>::uninit();
         let len = quiche_conn_stream_recv(
-            &mut pipe.server,
+            &raw mut pipe.server,
             4,
             out.as_mut_ptr().cast(),
             out.len(),
@@ -3271,18 +3315,18 @@ mod tests {
         let mut datagram = [MaybeUninit::<u8>::uninit(); 32];
         assert_eq!(
             quiche_conn_dgram_recv(
-                &mut pipe.server,
+                &raw mut pipe.server,
                 datagram.as_mut_ptr().cast(),
                 datagram.len()
             ),
             8
         );
         // SAFETY: an eight-byte datagram was written into the output prefix.
-        assert_eq!(
-            unsafe { slice::from_raw_parts(datagram.as_ptr().cast::<u8>(), 8) },
-            b"datagram"
-        );
+        let datagram =
+            unsafe { slice::from_raw_parts(datagram.as_ptr().cast::<u8>(), 8) };
+        assert_eq!(datagram, b"datagram");
         assert_eq!(pipe.server.dgram_recv_queue_len(), 0);
+        Ok(())
     }
 
     #[test]
@@ -3297,8 +3341,8 @@ mod tests {
     #[rstest::rstest]
     fn send_initializes_c_packet_metadata(
         #[values(false, true)] specified_path: bool,
-    ) {
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    ) -> TestResult {
+        let mut pipe = test_utils::Pipe::new("cubic")?;
         let mut info = MaybeUninit::<SendInfo>::uninit();
         let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
         let written = if specified_path {
@@ -3306,7 +3350,7 @@ mod tests {
                 std_addr_to_c(&test_utils::Pipe::client_addr());
             let (to, to_len) = std_addr_to_c(&test_utils::Pipe::server_addr());
             quiche_conn_send_on_path(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
                 (&raw const from).cast(),
@@ -3317,14 +3361,14 @@ mod tests {
             )
         } else {
             quiche_conn_send(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
                 info.as_mut_ptr(),
             )
         };
         assert!(written > 0);
-        let len = usize::try_from(written).unwrap();
+        let len = usize::try_from(written)?;
         // SAFETY: the successful send initialized exactly the returned prefix.
         let packet = unsafe {
             slice::from_raw_parts_mut(buf.as_mut_ptr().cast::<u8>(), len)
@@ -3332,37 +3376,34 @@ mod tests {
         assert_eq!(pipe.server_recv(packet), Ok(len));
         // SAFETY: positive send return means the complete SendInfo was written.
         let info = unsafe { info.assume_init() };
-        assert_eq!(
-            unsafe {
-                std_addr_from_c((&raw const info.from).cast(), info.from_len)
-            },
-            Ok(test_utils::Pipe::client_addr())
-        );
-        assert_eq!(
-            unsafe { std_addr_from_c((&raw const info.to).cast(), info.to_len) },
-            Ok(test_utils::Pipe::server_addr())
-        );
+        // SAFETY: both addresses and their lengths were initialized by send.
+        let (from, to) = unsafe {
+            (
+                std_addr_from_c((&raw const info.from).cast(), info.from_len),
+                std_addr_from_c((&raw const info.to).cast(), info.to_len),
+            )
+        };
+        assert_eq!(from, Ok(test_utils::Pipe::client_addr()));
+        assert_eq!(to, Ok(test_utils::Pipe::server_addr()));
+        Ok(())
     }
 
     #[test]
-    fn c_send_protects_stream_and_datagram_in_uninitialized_storage() {
-        let mut config = test_utils::Pipe::default_config("cubic").unwrap();
-        config.enable_dgram(true, 4, 4);
-        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
-        pipe.handshake().unwrap();
-        pipe.client.stream_send(4, b"stream payload", true).unwrap();
-        pipe.client.dgram_send(b"datagram").unwrap();
+    fn c_send_protects_stream_and_datagram_in_uninitialized_storage() -> TestResult
+    {
+        let mut pipe = datagram_pipe()?;
+        pipe.client.stream_send(4, b"stream payload", true)?;
+        pipe.client.dgram_send(b"datagram")?;
         // Each successful output is consumed by the actual packet decryptor.
         for _ in 0..2 {
             let mut buf = [MaybeUninit::<u8>::uninit(); 1500];
             let mut info = MaybeUninit::<SendInfo>::uninit();
             let len = usize::try_from(quiche_conn_send(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 buf.as_mut_ptr().cast(),
                 buf.len(),
                 info.as_mut_ptr(),
-            ))
-            .unwrap();
+            ))?;
             assert!(len > 0);
             // SAFETY: successful send initialized the reported packet prefix.
             let packet = unsafe {
@@ -3375,10 +3416,11 @@ mod tests {
         assert_eq!(&payload[..14], b"stream payload");
         assert_eq!(pipe.server.dgram_recv(&mut payload), Ok(8));
         assert_eq!(&payload[..8], b"datagram");
+        Ok(())
     }
 
     #[test]
-    fn stateless_c_packets_initialize_uninitialized_output() {
+    fn stateless_c_packets_initialize_uninitialized_output() -> TestResult {
         let scid = [1, 2, 3];
         let dcid = [4, 5];
         let new_scid = [6, 7, 8, 9];
@@ -3391,13 +3433,12 @@ mod tests {
             dcid.len(),
             out.as_mut_ptr().cast(),
             out.len(),
-        ))
-        .unwrap();
+        ))?;
         // SAFETY: successful negotiation initialized the returned prefix.
         let packet = unsafe {
             slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len)
         };
-        let hdr = Header::from_slice(packet, 0).unwrap();
+        let hdr = Header::from_slice(packet, 0)?;
         assert_eq!(hdr.ty, Type::VersionNegotiation);
         assert_eq!(hdr.dcid.as_ref(), scid);
         assert_eq!(hdr.scid.as_ref(), dcid);
@@ -3415,14 +3456,13 @@ mod tests {
             PROTOCOL_VERSION,
             out.as_mut_ptr().cast(),
             out.len(),
-        ))
-        .unwrap();
+        ))?;
         // SAFETY: successful Retry initialized the returned prefix.
         let packet = unsafe {
             slice::from_raw_parts_mut(out.as_mut_ptr().cast::<u8>(), len)
         };
         let mut reader = octets::OctetsMut::with_slice(packet);
-        let hdr = Header::from_mutable_cursor(&mut reader, 0).unwrap();
+        let hdr = Header::from_mutable_cursor(&mut reader, 0)?;
         assert_eq!(hdr.ty, Type::Retry);
         assert_eq!(hdr.dcid.as_ref(), scid);
         assert_eq!(hdr.scid.as_ref(), new_scid);
@@ -3431,31 +3471,33 @@ mod tests {
             packet::verify_retry_integrity(&reader, &dcid, PROTOCOL_VERSION),
             Ok(())
         );
+        Ok(())
     }
 
     #[test]
-    fn receive_info_rejects_null_nested_address() {
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    fn receive_info_rejects_null_nested_address() -> TestResult {
+        let mut pipe = test_utils::Pipe::new("cubic")?;
         let info = RecvInfo {
             from: ptr::null(),
-            from_len: size_of::<sockaddr_in>() as socklen_t,
+            from_len: socklen_t::try_from(size_of::<sockaddr_in>())?,
             to: ptr::null(),
             to_len: 0,
         };
         let mut buf = [0; 32];
         assert_eq!(
             quiche_conn_recv(
-                &mut pipe.server,
+                &raw mut pipe.server,
                 buf.as_mut_ptr(),
                 buf.len(),
-                &info
+                &raw const info
             ),
             ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
         );
+        Ok(())
     }
 
     #[test]
-    fn socket_address_layout_roundtrips_both_families() {
+    fn socket_address_layout_roundtrips_both_families() -> TestResult {
         let cases = [
             (
                 SocketAddr::V4(SocketAddrV4::new(
@@ -3469,7 +3511,7 @@ mod tests {
                 SocketAddr::V6(SocketAddrV6::new(
                     Ipv6Addr::LOCALHOST,
                     12345,
-                    0x12345678,
+                    0x1234_5678,
                     42,
                 )),
                 c_int::from(AF_INET6),
@@ -3478,55 +3520,81 @@ mod tests {
         ];
         for (address, family, expected_len) in cases {
             let (storage, len) = std_addr_to_c(&address);
-            assert_eq!(usize::try_from(len).unwrap(), expected_len);
+            assert_eq!(usize::try_from(len)?, expected_len);
             let ptr = (&raw const storage).cast::<sockaddr>();
-            // SAFETY: std_addr_to_c initialized this supported sockaddr layout.
-            assert_eq!(
-                c_int::from(unsafe { (&raw const (*ptr).sa_family).read() }),
-                family
-            );
-            assert_eq!(unsafe { std_addr_from_c(ptr, len) }, Ok(address));
+            // SAFETY: the encoder initialized the address family and fields for
+            // len.
+            let (raw_family, decoded) = unsafe {
+                (
+                    (&raw const (*ptr).sa_family).read(),
+                    std_addr_from_c(ptr, len),
+                )
+            };
+            assert_eq!(c_int::from(raw_family), family);
+            assert_eq!(decoded, Ok(address));
         }
+        Ok(())
     }
 
     #[test]
-    fn address_decoder_checks_length_before_reading_memory() {
-        // SAFETY: invalid lengths and nulls are rejected before reading.
+    fn address_decoder_checks_length_before_reading_memory() -> TestResult {
         let dangling = ptr::NonNull::<sockaddr>::dangling().as_ptr();
         for len in [0, 1, 2, 3, 7] {
-            assert_eq!(unsafe { std_addr_from_c(dangling, len) }, Err(()));
+            // SAFETY: unsupported lengths are rejected before any field read.
+            let decoded = unsafe { std_addr_from_c(dangling, len) };
+            assert_eq!(decoded, Err(()));
         }
-        assert_eq!(
-            unsafe {
-                std_addr_from_c(
-                    ptr::null(),
-                    size_of::<sockaddr_in6>() as socklen_t,
-                )
-            },
-            Err(())
-        );
+        // SAFETY: a null address is rejected before any field read.
+        let decoded = unsafe {
+            std_addr_from_c(
+                ptr::null(),
+                socklen_t::try_from(size_of::<sockaddr_in6>())?,
+            )
+        };
+        assert_eq!(decoded, Err(()));
+        Ok(())
     }
 
     #[test]
-    fn malformed_sockaddr_is_rejected() {
-        let mut addr: sockaddr = unsafe { std::mem::zeroed() };
-        addr.sa_family = AF_INET.try_into().unwrap();
+    fn malformed_sockaddr_is_rejected() -> TestResult {
+        // SAFETY: sockaddr_in contains integer fields and integer-address
+        // storage; zero is valid.
+        let mut addr: sockaddr_in = unsafe { std::mem::zeroed() };
+        addr.sin_family = AF_INET.try_into()?;
 
-        assert_eq!(unsafe { std_addr_from_c(&addr, 0) }, Err(()));
+        // SAFETY: the zero length is rejected without reading the address.
+        let decoded = unsafe { std_addr_from_c((&raw const addr).cast(), 0) };
+        assert_eq!(decoded, Err(()));
 
-        addr.sa_family = 0;
-        assert_eq!(
-            unsafe {
-                std_addr_from_c(&addr, size_of::<sockaddr_in>() as socklen_t)
-            },
-            Err(())
-        );
+        addr.sin_family = 0;
+        // SAFETY: addr is fully initialized IPv4-sized storage; family zero is
+        // invalid.
+        let decoded = unsafe {
+            std_addr_from_c(
+                (&raw const addr).cast(),
+                socklen_t::try_from(size_of::<sockaddr_in>())?,
+            )
+        };
+        assert_eq!(decoded, Err(()));
+        Ok(())
+    }
+
+    /// Decode a C address output and its reported length.
+    ///
+    /// # Safety
+    /// The accessor must have initialized the length and the address fields
+    /// for that length. Both output slots must remain live during decoding.
+    unsafe fn initialized_address(
+        address: &MaybeUninit<sockaddr_storage>, len: MaybeUninit<socklen_t>,
+    ) -> std::result::Result<SocketAddr, ()> {
+        // SAFETY: the caller guarantees the matching accessor initialized both.
+        unsafe { std_addr_from_c(address.as_ptr().cast(), len.assume_init()) }
     }
 
     #[rstest::rstest]
-    fn path_event_pair_initializes_c_outputs(#[values(0, 1, 2, 3, 5)] kind: u8) {
-        let local: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let peer: SocketAddr = "[2001:db8::1]:443".parse().unwrap();
+    fn path_event_pair_initializes_c_outputs(
+        #[values(0, 1, 2, 3, 5)] kind: u8,
+    ) -> TestResult {
         type Accessor = extern "C" fn(
             *const PathEvent,
             *mut sockaddr_storage,
@@ -3534,6 +3602,8 @@ mod tests {
             *mut sockaddr_storage,
             *mut socklen_t,
         );
+        let local: SocketAddr = "127.0.0.1:8080".parse()?;
+        let peer: SocketAddr = "[2001:db8::1]:443".parse()?;
         let (event, accessor): (PathEvent, Accessor) = match kind {
             0 => (PathEvent::New(local, peer), quiche_path_event_new),
             1 => (
@@ -3556,44 +3626,43 @@ mod tests {
         let mut local_len = MaybeUninit::<socklen_t>::uninit();
         let mut peer_len = MaybeUninit::<socklen_t>::uninit();
         accessor(
-            &event,
+            &raw const event,
             local_out.as_mut_ptr(),
             local_len.as_mut_ptr(),
             peer_out.as_mut_ptr(),
             peer_len.as_mut_ptr(),
         );
         // SAFETY: matching accessor has written the complete results.
-        let (local_len, peer_len) =
-            unsafe { (local_len.assume_init(), peer_len.assume_init()) };
-        assert_eq!(
-            unsafe { std_addr_from_c(local_out.as_ptr().cast(), local_len) },
-            Ok(local)
-        );
-        assert_eq!(
-            unsafe { std_addr_from_c(peer_out.as_ptr().cast(), peer_len) },
-            Ok(peer)
-        );
+        let (decoded_local, decoded_peer) = unsafe {
+            (
+                initialized_address(&local_out, local_len),
+                initialized_address(&peer_out, peer_len),
+            )
+        };
+        assert_eq!(decoded_local, Ok(local));
+        assert_eq!(decoded_peer, Ok(peer));
 
         // An invalid second output must not change the first.
         let mut unchanged_len: socklen_t = 77;
         let mut unused_len: socklen_t = 0;
         accessor(
-            &event,
+            &raw const event,
             local_out.as_mut_ptr(),
-            &mut unchanged_len,
+            &raw mut unchanged_len,
             ptr::null_mut(),
-            &mut unused_len,
+            &raw mut unused_len,
         );
         assert_eq!(unchanged_len, 77);
+        Ok(())
     }
 
     #[test]
-    fn reused_cid_event_initializes_all_four_addresses() {
+    fn reused_cid_event_initializes_all_four_addresses() -> TestResult {
         let endpoints: [SocketAddr; 4] = [
-            "127.0.0.1:8080".parse().unwrap(),
-            "[2001:db8::1]:443".parse().unwrap(),
-            "127.0.0.2:8081".parse().unwrap(),
-            "[2001:db8::2]:443".parse().unwrap(),
+            "127.0.0.1:8080".parse()?,
+            "[2001:db8::1]:443".parse()?,
+            "127.0.0.2:8081".parse()?,
+            "[2001:db8::2]:443".parse()?,
         ];
         let event = PathEvent::ReusedSourceConnectionId(
             42,
@@ -3606,7 +3675,7 @@ mod tests {
         let [a, b, c, d] = &mut addrs;
         let [al, bl, cl, dl] = &mut lengths;
         quiche_path_event_reused_source_connection_id(
-            &event,
+            &raw const event,
             seq.as_mut_ptr(),
             a.as_mut_ptr(),
             al.as_mut_ptr(),
@@ -3620,51 +3689,52 @@ mod tests {
         // SAFETY: the matching accessor wrote all four addresses and the ID.
         assert_eq!(unsafe { seq.assume_init() }, 42);
         for ((addr, len), expected) in addrs.iter().zip(lengths).zip(endpoints) {
-            assert_eq!(
-                unsafe {
-                    std_addr_from_c(addr.as_ptr().cast(), len.assume_init())
-                },
-                Ok(expected)
-            );
+            // SAFETY: the matching reused-CID accessor wrote every address and
+            // length.
+            let decoded = unsafe { initialized_address(addr, len) };
+            assert_eq!(decoded, Ok(expected));
         }
+        Ok(())
     }
 
     #[test]
-    fn mismatched_path_event_accessor_is_noop() {
-        let local = "127.0.0.1:8080".parse().unwrap();
-        let peer = "127.0.0.2:443".parse().unwrap();
+    fn mismatched_path_event_accessor_is_noop() -> TestResult {
+        let local = "127.0.0.1:8080".parse()?;
+        let peer = "127.0.0.2:443".parse()?;
         let event = PathEvent::New(local, peer);
-        let mut local_out: sockaddr_storage = unsafe { std::mem::zeroed() };
-        let mut peer_out: sockaddr_storage = unsafe { std::mem::zeroed() };
+        // No read of address storage is needed for a nonmatching accessor.
+        let mut local_out = MaybeUninit::<sockaddr_storage>::uninit();
+        let mut peer_out = MaybeUninit::<sockaddr_storage>::uninit();
         let mut local_len = 11;
         let mut peer_len = 12;
         let mut pmtu = 13;
 
         quiche_path_event_pmtu_updated(
-            &event,
-            &mut local_out,
-            &mut local_len,
-            &mut peer_out,
-            &mut peer_len,
-            &mut pmtu,
+            &raw const event,
+            local_out.as_mut_ptr(),
+            &raw mut local_len,
+            peer_out.as_mut_ptr(),
+            &raw mut peer_len,
+            &raw mut pmtu,
         );
 
         assert_eq!(local_len, 11);
         assert_eq!(peer_len, 12);
         assert_eq!(pmtu, 13);
+        Ok(())
     }
 
     #[test]
-    fn pmtu_updated_path_event() {
-        let local = "127.0.0.1:8080".parse().unwrap();
-        let peer = "127.0.0.2:443".parse().unwrap();
+    fn pmtu_updated_path_event() -> TestResult {
+        let local = "127.0.0.1:8080".parse()?;
+        let peer = "127.0.0.2:443".parse()?;
 
         let event = PathEvent::PmtuUpdated {
             local,
             peer,
             pmtu: 1400,
         };
-        assert_eq!(quiche_path_event_type(&event), 6);
+        assert_eq!(quiche_path_event_type(&raw const event), 6);
 
         let mut local_out = MaybeUninit::<sockaddr_storage>::uninit();
         let mut peer_out = MaybeUninit::<sockaddr_storage>::uninit();
@@ -3673,7 +3743,7 @@ mod tests {
         let mut pmtu = MaybeUninit::<size_t>::uninit();
 
         quiche_path_event_pmtu_updated(
-            &event,
+            &raw const event,
             local_out.as_mut_ptr(),
             local_len.as_mut_ptr(),
             peer_out.as_mut_ptr(),
@@ -3681,27 +3751,23 @@ mod tests {
             pmtu.as_mut_ptr(),
         );
         // SAFETY: the matching event writes each output.
-        assert_eq!(unsafe { pmtu.assume_init() }, 1400);
-        assert_eq!(
-            unsafe {
-                std_addr_from_c(
-                    local_out.as_ptr().cast(),
-                    local_len.assume_init(),
-                )
-            },
-            Ok(local)
-        );
-        assert_eq!(
-            unsafe {
-                std_addr_from_c(peer_out.as_ptr().cast(), peer_len.assume_init())
-            },
-            Ok(peer)
-        );
+        let (pmtu, decoded_local, decoded_peer) = unsafe {
+            (
+                pmtu.assume_init(),
+                initialized_address(&local_out, local_len),
+                initialized_address(&peer_out, peer_len),
+            )
+        };
+        assert_eq!(pmtu, 1400);
+        assert_eq!(decoded_local, Ok(local));
+        assert_eq!(decoded_peer, Ok(peer));
+        Ok(())
     }
 
     #[test]
-    fn optional_path_addresses_require_consistent_pointer_and_length() {
-        let address: SocketAddr = "127.0.0.1:443".parse().unwrap();
+    fn optional_path_addresses_require_consistent_pointer_and_length(
+    ) -> TestResult {
+        let address: SocketAddr = "127.0.0.1:443".parse()?;
         let (storage, len) = std_addr_to_c(&address);
         let raw = (&raw const storage).cast::<sockaddr>();
         // SAFETY: storage is live and initialized; null and zero lengths
@@ -3713,13 +3779,13 @@ mod tests {
             assert_eq!(optional_std_addr_from_c(raw, 0), Err(()));
         }
 
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+        let mut pipe = test_utils::Pipe::new("cubic")?;
         let mut output = [0u8; 1200];
         let mut info = MaybeUninit::<SendInfo>::uninit();
         let failure = ssize_t::from(FFI_ERR_INVALID_ARGUMENT);
         assert_eq!(
             quiche_conn_send_on_path(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 output.as_mut_ptr(),
                 output.len(),
                 ptr::null(),
@@ -3732,7 +3798,7 @@ mod tests {
         );
         assert_eq!(
             quiche_conn_send_on_path(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 output.as_mut_ptr(),
                 output.len(),
                 ptr::null(),
@@ -3745,7 +3811,7 @@ mod tests {
         );
         assert!(
             quiche_conn_send_on_path(
-                &mut pipe.client,
+                &raw mut pipe.client,
                 output.as_mut_ptr(),
                 output.len(),
                 ptr::null(),
@@ -3755,14 +3821,15 @@ mod tests {
                 info.as_mut_ptr(),
             ) > 0
         );
+        Ok(())
     }
 
     #[test]
-    fn ipv6_scope_and_raw_flowinfo_match_platform_fields() {
+    fn ipv6_scope_and_raw_flowinfo_match_platform_fields() -> TestResult {
         let flow = 0x000a_bcde_u32.to_be();
         let scope = 42;
         let address = SocketAddr::V6(SocketAddrV6::new(
-            "fe80::1".parse().unwrap(),
+            "fe80::1".parse()?,
             443,
             flow,
             scope,
@@ -3781,13 +3848,14 @@ mod tests {
             assert_eq!((*raw).Anonymous.sin6_scope_id, scope);
             assert_eq!(std_addr_from_c(raw.cast(), len), Ok(address));
         }
+        Ok(())
     }
 
     #[rstest::rstest]
     #[case("127.0.0.1:8080")]
     #[case("[2001:db8:85a3::8a2e:370:7334]:8080")]
-    fn address_round_trip(#[case] address: &str) {
-        let addr: SocketAddr = address.parse().unwrap();
+    fn address_round_trip(#[case] address: &str) -> TestResult {
+        let addr: SocketAddr = address.parse()?;
         let (out, len) = std_addr_to_c(&addr);
 
         // Independently verify the C layout using inet_ntop rather than only
@@ -3816,7 +3884,7 @@ mod tests {
                 },
             }
         };
-        assert_eq!(usize::try_from(len).unwrap(), expected_len);
+        assert_eq!(usize::try_from(len)?, expected_len);
         assert_eq!(u16::from_be(port), addr.port());
         // SAFETY: both the address and the output buffer have the required
         // size and remain valid for the call.
@@ -3825,24 +3893,24 @@ mod tests {
                 family as _,
                 source,
                 dst.as_mut_ptr().cast(),
-                dst.len() as _,
+                dst.len().try_into()?,
             )
         };
         assert!(!result.is_null());
         // SAFETY: successful inet_ntop writes a NUL-terminated string.
         let text = unsafe { ffi::CStr::from_ptr(dst.as_ptr().cast()) };
-        assert_eq!(text.to_str().unwrap(), addr.ip().to_string());
+        assert_eq!(text.to_str()?, addr.ip().to_string());
 
         // SAFETY: out contains the initialized address of length len.
-        assert_eq!(
-            unsafe { std_addr_from_c((&raw const out).cast(), len) },
-            Ok(addr)
-        );
+        let decoded = unsafe { std_addr_from_c((&raw const out).cast(), len) };
+        assert_eq!(decoded, Ok(addr));
+        Ok(())
     }
 
     #[test]
-    fn connection_id_outputs_borrow_live_storage_and_iterators_own_snapshots() {
-        let pipe = test_utils::Pipe::new("cubic").unwrap();
+    fn connection_id_outputs_borrow_live_storage_and_iterators_own_snapshots(
+    ) -> TestResult {
+        let pipe = test_utils::Pipe::new("cubic")?;
         let conn = &pipe.client;
         let mut ptr = ptr::null();
         let mut len = 0;
@@ -3853,7 +3921,7 @@ mod tests {
             ),
             (quiche_conn_destination_id, conn.destination_id()),
         ] {
-            get_id(conn, &mut ptr, &mut len);
+            get_id(conn, &raw mut ptr, &raw mut len);
             assert_eq!(ptr, expected.as_ptr());
             assert_eq!(len, expected.len());
         }
@@ -3862,12 +3930,21 @@ mod tests {
         let iter = quiche_conn_source_ids(conn);
         assert!(!iter.is_null());
         drop(pipe);
-        assert!(quiche_connection_id_iter_next(iter, &mut ptr, &mut len));
+        assert!(quiche_connection_id_iter_next(
+            iter,
+            &raw mut ptr,
+            &raw mut len
+        ));
         // SAFETY: the live iterator owns the returned CID storage.
         let bytes = unsafe { slice::from_raw_parts(ptr, len) };
         assert_eq!(bytes, expected.as_ref());
-        assert!(!quiche_connection_id_iter_next(iter, &mut ptr, &mut len));
+        assert!(!quiche_connection_id_iter_next(
+            iter,
+            &raw mut ptr,
+            &raw mut len
+        ));
         quiche_connection_id_iter_free(iter);
+        Ok(())
     }
 
     #[test]
@@ -3884,48 +3961,42 @@ mod tests {
 
         // First CID.
         assert!(quiche_connection_id_iter_next(
-            &mut iter,
-            &mut out,
-            &mut out_len
+            &raw mut iter,
+            &raw mut out,
+            &raw mut out_len
         ));
         assert_eq!(out_len, 4);
+        // SAFETY: successful next returned a view into the still-live iterator.
         let slice = unsafe { slice::from_raw_parts(out, out_len) };
         assert_eq!(slice, &[1, 2, 3, 4]);
 
         // Second CID.
         assert!(quiche_connection_id_iter_next(
-            &mut iter,
-            &mut out,
-            &mut out_len
+            &raw mut iter,
+            &raw mut out,
+            &raw mut out_len
         ));
         assert_eq!(out_len, 2);
+        // SAFETY: successful next returned a view into the still-live iterator.
         let slice = unsafe { slice::from_raw_parts(out, out_len) };
         assert_eq!(slice, &[5, 6]);
 
         // Exhausted.
         assert!(!quiche_connection_id_iter_next(
-            &mut iter,
-            &mut out,
-            &mut out_len
+            &raw mut iter,
+            &raw mut out,
+            &raw mut out_len
         ));
     }
 
     #[test]
-    fn retired_scid_iter() {
-        let mut config = Config::new(PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config
-            .set_application_protos(&[b"proto1", b"proto2"])
-            .unwrap();
+    fn retired_scid_iter() -> TestResult {
+        let mut config = test_utils::config_with_test_identity()?;
+        config.set_application_protos(&[b"proto1", b"proto2"])?;
         config.verify_peer(false);
         config.set_active_connection_id_limit(2);
 
-        let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+        let mut pipe = test_utils::Pipe::with_config(&mut config)?;
         assert_eq!(pipe.handshake(), Ok(()));
 
         let scid = pipe.client.source_id().clone();
@@ -3941,25 +4012,31 @@ mod tests {
         assert_eq!(pipe.advance(), Ok(()));
 
         // Use the FFI iterator to collect retired SCIDs.
-        let iter = quiche_conn_retired_scid_iter(&mut pipe.client);
-        let iter = unsafe { &mut *iter };
+        let iter = quiche_conn_retired_scid_iter(&raw mut pipe.client);
+        assert!(!iter.is_null());
 
         let mut out: *const u8 = ptr::null();
         let mut out_len: size_t = 0;
 
         // The initial SCID should have been retired.
-        assert!(quiche_connection_id_iter_next(iter, &mut out, &mut out_len));
+        assert!(quiche_connection_id_iter_next(
+            iter,
+            &raw mut out,
+            &raw mut out_len
+        ));
+        // SAFETY: successful next returned a view into the still-live iterator.
         let slice = unsafe { slice::from_raw_parts(out, out_len) };
         assert_eq!(slice, scid.as_ref());
 
         // No more retired SCIDs.
         assert!(!quiche_connection_id_iter_next(
             iter,
-            &mut out,
-            &mut out_len
+            &raw mut out,
+            &raw mut out_len
         ));
 
         quiche_connection_id_iter_free(iter);
+        Ok(())
     }
 
     #[test]
@@ -3992,59 +4069,67 @@ mod tests {
     }
 
     #[test]
-    fn checked_raw_pointers_reject_null_and_misalignment() {
-        // SAFETY: these helpers validate pointer metadata before dereference.
-        assert!(unsafe { ffi_ptr_ref::<u16>(ptr::null()) }.is_none());
-        assert!(unsafe { ffi_ptr_mut::<u16>(ptr::null_mut()) }.is_none());
+    fn checked_raw_pointers_reject_null_and_misalignment() -> TestResult {
+        // SAFETY: null pointers are rejected before dereference by both
+        // helpers.
+        unsafe {
+            assert!(ffi_ptr_ref::<u16>(ptr::null()).is_none());
+            assert!(ffi_ptr_mut::<u16>(ptr::null_mut()).is_none());
+        }
 
         let aligned = ptr::NonNull::<u16>::dangling().as_ptr();
-        let misaligned = aligned.cast::<u8>().wrapping_add(1).cast::<u16>();
-        assert!(unsafe { ffi_ptr_ref(misaligned) }.is_none());
-        assert!(unsafe { ffi_ptr_mut(misaligned) }.is_none());
+        let misaligned = aligned.with_addr(aligned.addr() + 1);
+        // SAFETY: misalignment is rejected before either helper dereferences
+        // the pointer.
+        unsafe {
+            assert!(ffi_ptr_ref(misaligned).is_none());
+            assert!(ffi_ptr_mut(misaligned).is_none());
+        }
 
         let addr = ptr::NonNull::<sockaddr>::dangling().as_ptr();
-        let misaligned_addr =
-            addr.cast::<u8>().wrapping_add(1).cast::<sockaddr>();
+        let misaligned_addr = addr.with_addr(addr.addr() + 1);
+        // SAFETY: the misaligned sockaddr is rejected before reading memory.
         assert!(unsafe {
             optional_std_addr_from_c(
                 misaligned_addr,
-                size_of::<sockaddr>() as socklen_t,
+                socklen_t::try_from(size_of::<sockaddr>())?,
             )
         }
         .is_err());
+        Ok(())
     }
 
     #[test]
-    fn checked_raw_slices_accept_null_zero_and_reject_invalid_parts() {
+    fn checked_raw_slices_accept_null_zero_and_reject_invalid_parts() -> TestResult
+    {
         // SAFETY: zero-length slices do not access their pointer.
-        let shared =
-            unsafe { ffi_slice_from_raw_parts::<u8>(ptr::null(), 0) }.unwrap();
-        assert!(shared.is_empty());
+        let shared = unsafe { ffi_slice_from_raw_parts::<u8>(ptr::null(), 0) }
+            .ok_or("null zero-length buffer was rejected")?;
+        assert_eq!(shared, [] as [u8; 0]);
 
         // SAFETY: zero-length slices do not access their pointer.
         let mutable =
             unsafe { ffi_slice_from_raw_parts_mut::<u8>(ptr::null_mut(), 0) }
-                .unwrap();
-        assert!(mutable.is_empty());
+                .ok_or("null zero-length buffer was rejected")?;
+        assert_eq!(mutable, [] as [u8; 0]);
 
-        // SAFETY: these calls only validate pointer metadata and return before
-        // dereferencing the deliberately invalid pointers.
-        assert!(
-            unsafe { ffi_slice_from_raw_parts::<u8>(ptr::null(), 1) }.is_none()
-        );
-        assert!(unsafe {
-            ffi_slice_from_raw_parts_mut::<u8>(ptr::null_mut(), 1)
+        // SAFETY: both helpers reject null nonempty slices before dereference.
+        unsafe {
+            assert!(ffi_slice_from_raw_parts::<u8>(ptr::null(), 1).is_none());
+            assert!(
+                ffi_slice_from_raw_parts_mut::<u8>(ptr::null_mut(), 1).is_none()
+            );
         }
-        .is_none());
 
         let aligned = ptr::NonNull::<u16>::dangling().as_ptr();
-        let misaligned = aligned.cast::<u8>().wrapping_add(1).cast::<u16>();
+        let misaligned = aligned.with_addr(aligned.addr() + 1);
         // SAFETY: the helper rejects the misaligned pointer before dereference.
         assert!(unsafe { ffi_slice_from_raw_parts(misaligned, 1) }.is_none());
 
         let too_long = (isize::MAX as usize / size_of::<u16>()) + 1;
         // SAFETY: the helper rejects the oversized slice before dereference.
         assert!(unsafe { ffi_slice_from_raw_parts(aligned, too_long) }.is_none());
+        Ok(())
     }
 
     #[test]
@@ -4060,7 +4145,7 @@ mod tests {
         // because an empty buffer contains no varint, rather than because the
         // pointer itself is null.
         assert_eq!(
-            quiche_get_varint(ptr::null(), 0, &mut value),
+            quiche_get_varint(ptr::null(), 0, &raw mut value),
             ssize_t::from(Error::BufferTooShort.to_c())
         );
         assert_eq!(
@@ -4120,15 +4205,13 @@ mod foreign_ownership_tests {
 
     #[cfg(unix)]
     #[test]
-    fn keylog_descriptor_ownership_is_transferred_only_on_acceptance() {
+    fn keylog_descriptor_ownership_is_transferred_only_on_acceptance(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         use std::os::fd::AsRawFd;
         use std::os::fd::IntoRawFd;
 
-        let mut pipe = test_utils::Pipe::new("cubic").unwrap();
-        let file = std::fs::File::options()
-            .write(true)
-            .open("/dev/null")
-            .unwrap();
+        let mut pipe = test_utils::Pipe::new("cubic")?;
+        let file = std::fs::File::options().write(true).open("/dev/null")?;
         assert!(!quiche_conn_set_keylog_fd(
             ptr::null_mut(),
             file.as_raw_fd()
@@ -4137,10 +4220,11 @@ mod foreign_ownership_tests {
         // it.
         assert!(file.metadata().is_ok());
         assert!(quiche_conn_set_keylog_fd(
-            &mut pipe.client,
+            &raw mut pipe.client,
             file.into_raw_fd()
         ));
-        assert!(!quiche_conn_set_keylog_fd(&mut pipe.client, -1));
+        assert!(!quiche_conn_set_keylog_fd(&raw mut pipe.client, -1));
+        Ok(())
     }
 
     #[cfg(unix)]
