@@ -2934,16 +2934,9 @@ impl<F: BufFactory> Connection<F> {
     pub fn set_max_idle_timeout_in_handshake(
         ssl: &mut btls::ssl::SslRef, v: u64,
     ) -> Result<()> {
-        let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
-
-        ex_data.local_transport_params.max_idle_timeout =
-            cmp::min(v, octets::MAX_VAR_INT);
-
-        Self::set_transport_parameters_in_handshake(
-            ex_data.local_transport_params.clone(),
-            ex_data.is_server,
-            ssl,
-        )
+        tls::update_transport_params_in_handshake(ssl, |params| {
+            params.max_idle_timeout = cmp::min(v, octets::MAX_VAR_INT);
+        })
     }
 
     /// Sets the `initial_max_streams_bidi` transport parameter.
@@ -2966,42 +2959,9 @@ impl<F: BufFactory> Connection<F> {
     pub fn set_initial_max_streams_bidi_in_handshake(
         ssl: &mut btls::ssl::SslRef, v: u64,
     ) -> Result<()> {
-        let ex_data = tls::ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
-
-        ex_data.local_transport_params.initial_max_streams_bidi =
-            cmp::min(v, MAX_STREAM_COUNT);
-
-        Self::set_transport_parameters_in_handshake(
-            ex_data.local_transport_params.clone(),
-            ex_data.is_server,
-            ssl,
-        )
-    }
-
-    #[cfg(feature = "boringssl-btls-crate")]
-    fn set_transport_parameters_in_handshake(
-        params: TransportParams, is_server: bool, ssl: &mut btls::ssl::SslRef,
-    ) -> Result<()> {
-        use foreign_types_shared::ForeignTypeRef;
-        use std::mem::ManuallyDrop;
-
-        // In order to apply the new parameter to the TLS state before TPs are
-        // written into a TLS message, we need to re-encode all TPs immediately.
-        //
-        // Since we don't have direct access to the main `Connection` object, we
-        // need to re-create the `Handshake` state from the `SslRef`.
-        //
-        // Wrap the temporary `Handshake` in `ManuallyDrop` because this is only
-        // a borrowed view of `ssl`. The caller retains ownership of the
-        // underlying BoringSSL object.
-        // SAFETY: `ssl` is a live, uniquely borrowed SSL object. The
-        // temporary Handshake only borrows its pointer; ManuallyDrop prevents
-        // it from freeing the caller-owned SSL object on scope exit.
-        let mut handshake = ManuallyDrop::new(unsafe {
-            tls::Handshake::from_ptr(ssl.as_ptr().cast())?
-        });
-
-        handshake.set_quic_transport_params(&params, is_server)
+        tls::update_transport_params_in_handshake(ssl, |params| {
+            params.initial_max_streams_bidi = cmp::min(v, MAX_STREAM_COUNT);
+        })
     }
 
     /// Processes QUIC packets received from the peer.

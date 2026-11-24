@@ -50,6 +50,7 @@ use crate::packet;
 const TLS1_3_VERSION: u16 = 0x0304;
 const TLS_ALERT_ERROR: u64 = 0x100;
 const INTERNAL_ERROR: u64 = 0x01;
+const ENCODED_TRANSPORT_PARAMS_CAPACITY: usize = 128;
 
 #[expect(
     non_camel_case_types,
@@ -368,12 +369,12 @@ impl Context {
     }
 
     pub fn set_alpn(&mut self, v: &[&[u8]]) -> Result<()> {
+        // The ALPN extension's u16 length includes the u16 list length.
+        const MAX_WIRE_LEN: usize = u16::MAX as usize - 2;
+
         if v.is_empty() {
             return Err(Error::TlsFail);
         }
-
-        // The ALPN extension's u16 length includes the u16 list length.
-        const MAX_WIRE_LEN: usize = u16::MAX as usize - 2;
         let mut protos: Vec<u8> = Vec::new();
 
         for proto in v {
@@ -452,6 +453,7 @@ impl Drop for Context {
     }
 }
 
+#[derive(Clone, Copy)]
 enum HandshakeOperation {
     Handshake,
     PostHandshake,
@@ -472,7 +474,7 @@ impl Handshake {
     /// # Safety
     /// The pointer must be null or a live, exclusively owned SSL reference
     /// transferred to this Handshake. It must not be freed by the caller.
-    #[cfg(any(feature = "ffi", feature = "boringssl-btls-crate"))]
+    #[cfg(feature = "ffi")]
     pub unsafe fn from_ptr(ssl: *mut c_void) -> Result<Self> {
         let ptr = NonNull::new(ssl.cast()).ok_or(Error::TlsFail)?;
 
@@ -588,7 +590,7 @@ impl Handshake {
     pub fn set_quic_transport_params(
         &mut self, params: &crate::TransportParams, is_server: bool,
     ) -> Result<()> {
-        let mut raw_params = [0; 128];
+        let mut raw_params = [0; ENCODED_TRANSPORT_PARAMS_CAPACITY];
 
         let raw_params =
             crate::TransportParams::encode(params, is_server, &mut raw_params)?;
@@ -914,6 +916,28 @@ impl ExData<'_> {
 
         ssl.ex_data_mut(idx)
     }
+}
+
+/// Update the callback's transport parameters and encode them before releasing
+/// the callback borrow. The borrowed SSL then copies the encoded bytes
+/// directly; no owned TLS handle or parameter clone is needed.
+#[cfg(feature = "boringssl-btls-crate")]
+pub fn update_transport_params_in_handshake(
+    ssl: &mut btls::ssl::SslRef, update: impl FnOnce(&mut crate::TransportParams),
+) -> Result<()> {
+    let mut buf = [0; ENCODED_TRANSPORT_PARAMS_CAPACITY];
+    let ex_data = ExData::from_ssl_ref(ssl).ok_or(Error::TlsFail)?;
+    update(&mut ex_data.local_transport_params);
+    let encoded = crate::TransportParams::encode(
+        &ex_data.local_transport_params,
+        ex_data.is_server,
+        &mut buf,
+    )?;
+
+    ssl.set_quic_transport_params(encoded).map_err(|err| {
+        trace!("{err}");
+        Error::TlsFail
+    })
 }
 
 /// # Safety
