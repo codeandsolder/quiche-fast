@@ -45,7 +45,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -54,7 +54,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -102,7 +102,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   qlog-dancer-wasm:
     if: github.event_name != 'workflow_dispatch' || !inputs.windows_only
@@ -117,7 +117,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -127,7 +127,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -147,14 +147,14 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   shared-sccache:
     name: Linux workspace (shared sccache)
     if: (github.event_name == 'workflow_dispatch' && !inputs.windows_only) || (github.event_name != 'workflow_dispatch' && github.ref == 'refs/heads/master')
     permissions:
       contents: read
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
     with:
       command: |
         sudo apt-get update -qq
@@ -182,7 +182,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -191,7 +191,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -205,7 +205,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   quiche_ios:
     if: startsWith(github.ref, 'refs/tags/')
@@ -221,7 +221,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -231,7 +231,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -247,7 +247,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   quiche_windows:
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.windows_only)
@@ -288,7 +288,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -298,7 +298,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -367,7 +367,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   quiche_multiarch:
     if: startsWith(github.ref, 'refs/tags/')
@@ -381,7 +381,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -407,7 +407,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -416,7 +416,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -428,7 +428,7 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
   docker:
     if: startsWith(github.ref, 'refs/tags/')
@@ -463,7 +463,7 @@ jobs:
 
       - name: Resolve quarantined compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
 
       - name: Install repository compiler
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
@@ -473,7 +473,7 @@ jobs:
           components: clippy,rustfmt
 
       - name: Setup mandatory sccache
-        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
 
@@ -485,4 +485,4 @@ jobs:
 
       - name: Finalize mandatory sccache
         if: always()
-        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@897ed74ce07d49589247952b8cd6a7ffa7debd59 # main
+        uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@83ceff49d93d152cd95a1c9d6addb5cf03169477 # main
