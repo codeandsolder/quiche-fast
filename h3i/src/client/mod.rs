@@ -434,10 +434,10 @@ pub(crate) fn parse_streams<F: quiche::BufFactory, C: Client>(
                 },
                 Err(e) => {
                     match e {
-                        Error::TransportError(quiche::Error::Done) => {
+                        Error::Transport(quiche::Error::Done) => {
                             log::debug!("stream {stream} exhausted");
                         },
-                        Error::TransportError(quiche::Error::StreamReset(
+                        Error::Transport(quiche::Error::StreamReset(
                             error_code,
                         )) => {
                             let frame = H3iFrame::ResetStream(ResetStream {

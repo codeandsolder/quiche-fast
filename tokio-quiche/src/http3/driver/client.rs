@@ -169,14 +169,13 @@ impl ClientHooks {
     /// * `StreamBlocked` — the QUIC stream's flow-control window is temporarily
     ///   exhausted; the stream entry is removed by `send_request` before
     ///   returning, so the stream ID is not consumed.
-    /// * `TransportError(StreamLimit)` — the peer's concurrent-stream limit has
-    ///   been reached; QUIC will deliver a MAX_STREAMS frame when credit opens
-    ///   up.
+    /// * `Transport(StreamLimit)` — the peer's concurrent-stream limit has been
+    ///   reached; QUIC will deliver a MAX_STREAMS frame when credit opens up.
     fn is_retriable_send_error(err: &h3::Error) -> bool {
         matches!(
             err,
             h3::Error::StreamBlocked |
-                h3::Error::TransportError(quiche::Error::StreamLimit)
+                h3::Error::Transport(quiche::Error::StreamLimit)
         )
     }
 

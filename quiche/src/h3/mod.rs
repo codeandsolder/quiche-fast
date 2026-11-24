@@ -374,7 +374,7 @@ pub enum Error {
     BufferTooShort,
 
     /// Internal error in the HTTP/3 stack.
-    InternalError,
+    Internal,
 
     /// Endpoint detected that the peer is exhibiting behavior that causes.
     /// excessive load.
@@ -383,11 +383,11 @@ pub enum Error {
     /// Stream ID or Push ID greater that current maximum was
     /// used incorrectly, such as exceeding a limit, reducing a limit,
     /// or being reused.
-    IdError,
+    InvalidId,
 
     /// The endpoint detected that its peer created a stream that it will not
     /// accept.
-    StreamCreationError,
+    StreamCreation,
 
     /// A required critical stream was closed.
     ClosedCriticalStream,
@@ -399,20 +399,20 @@ pub enum Error {
     FrameUnexpected,
 
     /// Frame violated layout or size rules.
-    FrameError,
+    MalformedFrame,
 
     /// QPACK Header block decompression failure.
     QpackDecompressionFailed,
 
     /// Error originated from the transport layer.
-    TransportError(crate::Error),
+    Transport(crate::Error),
 
     /// The underlying QUIC stream (or connection) doesn't have enough capacity
     /// for the operation to complete. The application should retry later on.
     StreamBlocked,
 
     /// Error in the payload of a SETTINGS frame.
-    SettingsError,
+    InvalidSettings,
 
     /// Server rejected request.
     RequestRejected,
@@ -425,11 +425,11 @@ pub enum Error {
     RequestIncomplete,
 
     /// An HTTP message was malformed and cannot be processed.
-    MessageError,
+    MalformedMessage,
 
     /// The TCP connection established in response to a CONNECT request was
     /// reset or abnormally closed.
-    ConnectError,
+    ConnectFailed,
 
     /// The requested operation cannot be served over HTTP/3. Peer should retry
     /// over HTTP/1.1.
@@ -493,25 +493,24 @@ impl Error {
     const fn to_wire(self) -> u64 {
         match self {
             Self::Done => WireErrorCode::NoError as u64,
-            Self::InternalError => WireErrorCode::InternalError as u64,
-            Self::StreamCreationError =>
-                WireErrorCode::StreamCreationError as u64,
+            Self::Internal => WireErrorCode::InternalError as u64,
+            Self::StreamCreation => WireErrorCode::StreamCreationError as u64,
             Self::ClosedCriticalStream =>
                 WireErrorCode::ClosedCriticalStream as u64,
             Self::FrameUnexpected => WireErrorCode::FrameUnexpected as u64,
-            Self::FrameError => WireErrorCode::FrameError as u64,
+            Self::MalformedFrame => WireErrorCode::FrameError as u64,
             Self::ExcessiveLoad => WireErrorCode::ExcessiveLoad as u64,
-            Self::IdError => WireErrorCode::IdError as u64,
+            Self::InvalidId => WireErrorCode::IdError as u64,
             Self::MissingSettings => WireErrorCode::MissingSettings as u64,
             Self::QpackDecompressionFailed => 0x200,
             Self::BufferTooShort => 0x999,
-            Self::TransportError { .. } | Self::StreamBlocked => 0xFF,
-            Self::SettingsError => WireErrorCode::SettingsError as u64,
+            Self::Transport { .. } | Self::StreamBlocked => 0xFF,
+            Self::InvalidSettings => WireErrorCode::SettingsError as u64,
             Self::RequestRejected => WireErrorCode::RequestRejected as u64,
             Self::RequestCancelled => WireErrorCode::RequestCancelled as u64,
             Self::RequestIncomplete => WireErrorCode::RequestIncomplete as u64,
-            Self::MessageError => WireErrorCode::MessageError as u64,
-            Self::ConnectError => WireErrorCode::ConnectError as u64,
+            Self::MalformedMessage => WireErrorCode::MessageError as u64,
+            Self::ConnectFailed => WireErrorCode::ConnectError as u64,
             Self::VersionFallback => WireErrorCode::VersionFallback as u64,
         }
     }
@@ -521,27 +520,65 @@ impl Error {
         match self {
             Self::Done => -1,
             Self::BufferTooShort => -2,
-            Self::InternalError => -3,
+            Self::Internal => -3,
             Self::ExcessiveLoad => -4,
-            Self::IdError => -5,
-            Self::StreamCreationError => -6,
+            Self::InvalidId => -5,
+            Self::StreamCreation => -6,
             Self::ClosedCriticalStream => -7,
             Self::MissingSettings => -8,
             Self::FrameUnexpected => -9,
-            Self::FrameError => -10,
+            Self::MalformedFrame => -10,
             Self::QpackDecompressionFailed => -11,
-            // -12 was previously used for TransportError, skip it
+            // -12 was previously used for the transport error, skip it
             Self::StreamBlocked => -13,
-            Self::SettingsError => -14,
+            Self::InvalidSettings => -14,
             Self::RequestRejected => -15,
             Self::RequestCancelled => -16,
             Self::RequestIncomplete => -17,
-            Self::MessageError => -18,
-            Self::ConnectError => -19,
+            Self::MalformedMessage => -18,
+            Self::ConnectFailed => -19,
             Self::VersionFallback => -20,
 
-            Self::TransportError(quic_error) => quic_error.to_c() - 1000,
+            Self::Transport(quic_error) => quic_error.to_c() - 1000,
         }
+    }
+}
+
+#[cfg(test)]
+mod error_code_tests {
+    use super::Error;
+    use super::WireErrorCode;
+
+    #[test]
+    fn rust_error_vocabulary_does_not_change_protocol_codes() {
+        let cases = [
+            (Error::Internal, WireErrorCode::InternalError, -3),
+            (Error::InvalidId, WireErrorCode::IdError, -5),
+            (
+                Error::StreamCreation,
+                WireErrorCode::StreamCreationError,
+                -6,
+            ),
+            (Error::MalformedFrame, WireErrorCode::FrameError, -10),
+            (Error::InvalidSettings, WireErrorCode::SettingsError, -14),
+            (Error::MalformedMessage, WireErrorCode::MessageError, -18),
+            (Error::ConnectFailed, WireErrorCode::ConnectError, -19),
+        ];
+        for (error, wire, c_code) in cases {
+            assert_eq!(error.to_wire(), wire as u64);
+            #[cfg(feature = "ffi")]
+            assert_eq!(error.to_c(), c_code);
+            #[cfg(not(feature = "ffi"))]
+            let _ = c_code;
+        }
+
+        let transport = crate::Error::StreamReset(42);
+        let wrapped = Error::from(transport);
+        assert_eq!(wrapped, Error::Transport(transport));
+        assert_eq!(wrapped.to_wire(), 0xff);
+        #[cfg(feature = "ffi")]
+        assert_eq!(wrapped.to_c(), transport.to_c() - 1000);
+        assert_eq!(Error::from(crate::Error::Done), Error::Done);
     }
 }
 
@@ -554,7 +591,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::TransportError(err) => Some(err),
+            Self::Transport(err) => Some(err),
             _ => None,
         }
     }
@@ -565,7 +602,7 @@ impl From<super::Error> for Error {
         match err {
             super::Error::Done => Self::Done,
 
-            _ => Self::TransportError(err),
+            _ => Self::Transport(err),
         }
     }
 }
@@ -669,19 +706,19 @@ impl Config {
     /// - `SETTINGS_H3_DATAGRAM_00`
     ///
     /// If such a setting is present in the `additional_settings`,
-    /// the method will return the [`Error::SettingsError`] error.
+    /// the method will return the [`Error::InvalidSettings`] error.
     ///
     /// If a setting identifier is present twice in `additional_settings`,
-    /// the method will return the [`Error::SettingsError`] error.
+    /// the method will return the [`Error::InvalidSettings`] error.
     ///
     /// # Errors
     ///
-    /// Returns `Error::SettingsError` if an identifier is duplicated,
+    /// Returns `Error::InvalidSettings` if an identifier is duplicated,
     /// reserved by HTTP/2, or managed by this library (including either
     /// DATAGRAM setting), or if an identifier or value exceeds the QUIC
     /// variable-length integer range.
     ///
-    /// [`Error::SettingsError`]: enum.Error.html#variant.SettingsError
+    /// [`Error::InvalidSettings`]: enum.Error.html#variant.InvalidSettings
     pub fn set_additional_settings(
         &mut self, additional_settings: Vec<(u64, u64)>,
     ) -> Result<()> {
@@ -701,7 +738,7 @@ impl Config {
                 ) ||
                 !identifiers.insert(id)
         }) {
-            return Err(Error::SettingsError);
+            return Err(Error::InvalidSettings);
         }
         self.additional_settings = Some(additional_settings);
         Ok(())
@@ -993,7 +1030,7 @@ impl QpackStreams {
         let bytes = match ty {
             Some(stream::Type::QpackEncoder) => &mut self.encoder_stream_bytes,
             Some(stream::Type::QpackDecoder) => &mut self.decoder_stream_bytes,
-            _ => return Err(Error::InternalError),
+            _ => return Err(Error::Internal),
         };
 
         // Dynamic table instructions are currently ignored.
@@ -1154,20 +1191,20 @@ impl Connection {
     ///
     /// # Errors
     ///
-    /// Returns `Error::InternalError` if the client transport is not
+    /// Returns `Error::Internal` if the client transport is not
     /// established or in early data, or if control-stream setup fails.
     /// Stream-creation and transport errors, including stream-limit errors, can
     /// also be propagated.
     ///
     /// [`StreamLimit`]: ../enum.Error.html#variant.StreamLimit
-    /// [`InternalError`]: ../enum.Error.html#variant.InternalError
+    /// [`InternalError`]: ../enum.Error.html#variant.Internal
     pub fn with_transport<F: BufFactory>(
         conn: &mut super::Connection<F>, config: &Config,
     ) -> Result<Self> {
         let is_client = !conn.is_server;
         if is_client && !(conn.is_established() || conn.is_in_early_data()) {
             trace!("{} QUIC connection must be established or in early data before creating an HTTP/3 connection", conn.trace_id());
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
 
         let mut http3_conn =
@@ -1285,7 +1322,7 @@ impl Connection {
         self.next_request_stream_id = self
             .next_request_stream_id
             .checked_add(4)
-            .ok_or(Error::IdError)?;
+            .ok_or(Error::InvalidId)?;
 
         Ok(stream_id)
     }
@@ -1552,8 +1589,7 @@ impl Connection {
             self.frames_greased = true;
         }
 
-        let header_block =
-            qpack::encode(headers).map_err(|_| Error::InternalError)?;
+        let header_block = qpack::encode(headers).map_err(|_| Error::Internal)?;
 
         let overhead = octets::varint_len(frame::HEADERS_FRAME_TYPE_ID) +
             octets::varint_len(header_block.len() as u64);
@@ -1686,7 +1722,7 @@ impl Connection {
     ///
     /// Returns the same body-send errors as [`Self::send_body`]. An unexpected
     /// partial write that cannot preserve the frame length is an
-    /// `Error::InternalError`.
+    /// `Error::Internal`.
     ///
     /// [`Done`]: enum.Error.html#variant.Done
     pub fn send_body_zc<F>(
@@ -1726,7 +1762,7 @@ impl Connection {
                     // `do_send_body()` checked capacity before this write, so
                     // `rem` should always be `None` or empty.
                     debug_assert!(false);
-                    return Err(Error::InternalError);
+                    return Err(Error::Internal);
                 }
 
                 if with_prefix {
@@ -1823,7 +1859,7 @@ impl Connection {
             // This should never happen. If it does, it means we wrote an
             // incorrect frame length and thus we can't really continue.
             debug_assert!(false);
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
 
         trace!(
@@ -1977,7 +2013,7 @@ impl Connection {
 
                 Err(Error::Done) => break,
 
-                Err(e @ Error::TransportError(crate::Error::StreamReset(_))) => {
+                Err(e @ Error::Transport(crate::Error::StreamReset(_))) => {
                     self.remove_finished_stream(conn, stream_id);
                     return Err(e);
                 },
@@ -2001,7 +2037,7 @@ impl Connection {
 
                 Err(Error::Done) => (),
 
-                Err(e @ Error::TransportError(crate::Error::StreamReset(_))) => {
+                Err(e @ Error::Transport(crate::Error::StreamReset(_))) => {
                     self.remove_finished_stream(conn, stream_id);
                     return Err(e);
                 },
@@ -2249,7 +2285,7 @@ impl Connection {
 
                 // Return early if the stream was reset, to avoid returning
                 // a Finished event later as well.
-                Err(Error::TransportError(crate::Error::StreamReset(e))) => {
+                Err(Error::Transport(crate::Error::StreamReset(e))) => {
                     self.remove_finished_stream(conn, s);
 
                     return Ok((s, Event::Reset(e)));
@@ -2290,7 +2326,7 @@ impl Connection {
     ///
     /// # Errors
     ///
-    /// Returns `Error::IdError` for an invalid server request-stream ID or an
+    /// Returns `Error::InvalidId` for an invalid server request-stream ID or an
     /// increase over the previously sent GOAWAY ID, `Error::StreamBlocked` for
     /// insufficient control-stream capacity, or a transport/encoding error.
     ///
@@ -2304,12 +2340,12 @@ impl Connection {
         let id = if self.is_server { id } else { 0 };
 
         if self.is_server && !id.is_multiple_of(4) {
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
 
         if let Some(sent_id) = self.local_goaway_id {
             if id > sent_id {
-                return Err(Error::IdError);
+                return Err(Error::InvalidId);
             }
         }
 
@@ -2364,9 +2400,9 @@ impl Connection {
     ) -> Result<u64> {
         let stream_id = self.next_uni_stream_id;
         if stream_id > octets::MAX_VAR_INT {
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
-        let next_id = stream_id.checked_add(4).ok_or(Error::IdError)?;
+        let next_id = stream_id.checked_add(4).ok_or(Error::InvalidId)?;
         let prefix = octets::EncodedVarint::new(ty)?;
         let len = prefix
             .as_ref()
@@ -2402,7 +2438,7 @@ impl Connection {
             smallvec::SmallVec::<[u8; 512]>::from_slice(prefix.as_ref());
         preface.extend_from_slice(initial_payload);
         if conn.stream_send(stream_id, &preface, fin)? != len {
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
 
         self.next_uni_stream_id = next_id;
@@ -2415,7 +2451,7 @@ impl Connection {
         let stream_type = match kind {
             stream::Type::QpackEncoder => stream::QPACK_ENCODER_STREAM_TYPE_ID,
             stream::Type::QpackDecoder => stream::QPACK_DECODER_STREAM_TYPE_ID,
-            _ => return Err(Error::InternalError),
+            _ => return Err(Error::Internal),
         };
         let stream_id = self.open_uni_stream(conn, stream_type, &[], false)?;
 
@@ -2426,7 +2462,7 @@ impl Connection {
             stream::Type::QpackDecoder => {
                 self.local_qpack_streams.decoder_stream_id = Some(stream_id);
             },
-            _ => return Err(Error::InternalError),
+            _ => return Err(Error::Internal),
         }
 
         qlog_with_type!(QLOG_STREAM_TYPE_SET, conn.qlog, q, {
@@ -2477,7 +2513,7 @@ impl Connection {
             return Ok(());
         }
         if conn.stream_send(stream_id, &d[..off], false)? != off {
-            return Err(Error::InternalError);
+            return Err(Error::Internal);
         }
 
         trace!("{} tx frm GREASE stream={stream_id} len=0", conn.trace_id());
@@ -2545,9 +2581,9 @@ impl Connection {
             },
 
             Err(
-                Error::IdError |
+                Error::InvalidId |
                 Error::Done |
-                Error::TransportError(super::Error::StreamLimit),
+                Error::Transport(super::Error::StreamLimit),
             ) => {
                 trace!("{} GREASE stream blocked", conn.trace_id());
 
@@ -2623,7 +2659,7 @@ impl Connection {
 
                 Err(Error::Done | Error::BufferTooShort) => {
                     trace!("{} Control stream blocked", conn.trace_id());
-                    return Err(Error::InternalError);
+                    return Err(Error::Internal);
                 },
 
                 Err(e) => return Err(e),
@@ -2706,20 +2742,16 @@ impl Connection {
             stream::Type::Push | stream::Type::Request => {
                 conn.close(
                     true,
-                    Error::StreamCreationError.to_wire(),
+                    Error::StreamCreation.to_wire(),
                     b"Unexpected unidirectional stream type.",
                 )?;
-                return Err(Error::StreamCreationError);
+                return Err(Error::StreamCreation);
             },
         };
 
         if slot.is_some() {
-            conn.close(
-                true,
-                Error::StreamCreationError.to_wire(),
-                duplicate_reason,
-            )?;
-            return Err(Error::StreamCreationError);
+            conn.close(true, Error::StreamCreation.to_wire(), duplicate_reason)?;
+            return Err(Error::StreamCreation);
         }
 
         close_conn_if_critical_stream_finished(conn, stream_id)?;
@@ -3154,10 +3186,10 @@ impl Connection {
                 // RFC 9218 requires H3_ID_ERROR for an unpromised push ID.
                 conn.close(
                     true,
-                    Error::IdError.to_wire(),
+                    Error::InvalidId.to_wire(),
                     b"PRIORITY_UPDATE for an unpromised push ID",
                 )?;
-                return Err(Error::IdError);
+                return Err(Error::InvalidId);
             },
         }
 
@@ -3174,10 +3206,10 @@ impl Connection {
         {
             conn.close(
                 true,
-                Error::SettingsError.to_wire(),
+                Error::InvalidSettings.to_wire(),
                 b"H3_DATAGRAM sent with value 1 but max_datagram_frame_size TP not set.",
             )?;
-            return Err(Error::SettingsError);
+            return Err(Error::InvalidSettings);
         }
 
         self.peer_settings = settings;
@@ -3271,11 +3303,11 @@ impl Connection {
         if push_id < self.max_push_id {
             conn.close(
                 true,
-                Error::IdError.to_wire(),
+                Error::InvalidId.to_wire(),
                 b"MAX_PUSH_ID reduced limit",
             )?;
 
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
 
         self.max_push_id = push_id;
@@ -3289,22 +3321,22 @@ impl Connection {
         if !self.is_server && id % 4 != 0 {
             conn.close(
                 true,
-                Error::IdError.to_wire(),
+                Error::InvalidId.to_wire(),
                 b"GOAWAY received with ID of non-request stream",
             )?;
 
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
 
         if let Some(received_id) = self.peer_goaway_id {
             if id > received_id {
                 conn.close(
                     true,
-                    Error::IdError.to_wire(),
+                    Error::InvalidId.to_wire(),
                     b"GOAWAY received with ID larger than previously received",
                 )?;
 
-                return Err(Error::IdError);
+                return Err(Error::InvalidId);
             }
         }
 
@@ -3339,11 +3371,11 @@ impl Connection {
         if prioritized_element_id % 4 != 0 {
             conn.close(
                 true,
-                Error::IdError.to_wire(),
+                Error::InvalidId.to_wire(),
                 b"PRIORITY_UPDATE for request stream type with wrong ID",
             )?;
 
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
 
         // MAX_STREAMS_BIDI is a count: the first forbidden request
@@ -3351,11 +3383,11 @@ impl Connection {
         if prioritized_element_id >= conn.streams.max_streams_bidi() * 4 {
             conn.close(
                 true,
-                Error::IdError.to_wire(),
+                Error::InvalidId.to_wire(),
                 b"PRIORITY_UPDATE for request stream beyond max streams limit",
             )?;
 
-            return Err(Error::IdError);
+            return Err(Error::InvalidId);
         }
 
         // PRIORITY_UPDATE can arrive before the request stream exists,
@@ -3896,7 +3928,7 @@ mod tests {
         // to have made sufficient early data progress.
         assert!(matches!(
             Connection::with_transport(&mut pipe.client, &h3_config),
-            Err(Error::InternalError)
+            Err(Error::Internal)
         ));
 
         // Client sends initial flight.
@@ -4971,7 +5003,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.poll_server(), Err(Error::IdError));
+        assert_eq!(s.poll_server(), Err(Error::InvalidId));
     }
 
     #[test]
@@ -5036,7 +5068,7 @@ mod tests {
 
         s.advance().ok();
 
-        assert_eq!(s.poll_server(), Err(Error::StreamCreationError));
+        assert_eq!(s.poll_server(), Err(Error::StreamCreation));
     }
 
     #[test]
@@ -5057,7 +5089,7 @@ mod tests {
 
         s.advance().ok();
 
-        assert_eq!(s.poll_client(), Err(Error::StreamCreationError));
+        assert_eq!(s.poll_client(), Err(Error::StreamCreation));
     }
 
     #[test]
@@ -5131,7 +5163,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.poll_client(), Err(Error::IdError));
+        assert_eq!(s.poll_client(), Err(Error::InvalidId));
         assert_eq!(
             s.pipe.client.local_error().map(|err| err.error_code),
             Some(WireErrorCode::IdError as u64),
@@ -5154,7 +5186,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(s.poll_client(), Err(Error::FrameError));
+        assert_eq!(s.poll_client(), Err(Error::MalformedFrame));
     }
 
     #[test]
@@ -5180,7 +5212,7 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((0, Event::GoAway)));
 
-        assert_eq!(s.poll_client(), Err(Error::IdError));
+        assert_eq!(s.poll_client(), Err(Error::InvalidId));
     }
 
     #[test]
@@ -5746,7 +5778,7 @@ mod tests {
             }
         };
         s.send_frame_client(&frame, control, false).unwrap();
-        assert_eq!(s.poll_server(), Err(Error::IdError));
+        assert_eq!(s.poll_server(), Err(Error::InvalidId));
         assert_eq!(
             s.pipe.server.local_error().map(|err| err.error_code),
             Some(WireErrorCode::IdError as u64)
@@ -5861,7 +5893,7 @@ mod tests {
 
         s.advance().ok();
 
-        assert_eq!(s.poll_server(), Err(Error::StreamCreationError));
+        assert_eq!(s.poll_server(), Err(Error::StreamCreation));
     }
 
     #[test]
@@ -6386,16 +6418,16 @@ mod tests {
         use std::error::Error as _;
 
         let transport = crate::Error::StreamLimit;
-        let wrapped = Error::TransportError(transport);
+        let wrapped = Error::Transport(transport);
         let source = wrapped.source().expect("transport error cause");
         assert_eq!(source.downcast_ref::<crate::Error>(), Some(&transport));
         assert!(Error::Done.source().is_none());
-        assert!(Error::FrameError.source().is_none());
+        assert!(Error::MalformedFrame.source().is_none());
         assert!(Error::from(crate::Error::Done).source().is_none());
     }
 
     #[test]
-    /// Tests that Error::TransportError contains a transport error.
+    /// Tests that Error::Transport contains a transport error.
     fn transport_error() {
         let mut s = Session::new().unwrap();
         s.handshake().unwrap();
@@ -6426,7 +6458,7 @@ mod tests {
 
         assert_eq!(
             s.client.send_request(&mut s.pipe.client, &req, true),
-            Err(Error::TransportError(crate::Error::StreamLimit))
+            Err(Error::Transport(crate::Error::StreamLimit))
         );
     }
 
@@ -7322,7 +7354,10 @@ mod tests {
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
-        assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::SettingsError));
+        assert_eq!(
+            s.server.poll(&mut s.pipe.server),
+            Err(Error::InvalidSettings)
+        );
         assert_eq!(
             s.pipe.server.local_error().map(|err| err.error_code),
             Some(WireErrorCode::SettingsError as u64)
@@ -7392,9 +7427,15 @@ mod tests {
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
-        assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::SettingsError));
+        assert_eq!(
+            s.server.poll(&mut s.pipe.server),
+            Err(Error::InvalidSettings)
+        );
 
-        assert_eq!(s.client.poll(&mut s.pipe.client), Err(Error::SettingsError));
+        assert_eq!(
+            s.client.poll(&mut s.pipe.client),
+            Err(Error::InvalidSettings)
+        );
     }
 
     #[test]
@@ -7406,33 +7447,33 @@ mod tests {
                 frame::SETTINGS_QPACK_MAX_TABLE_CAPACITY,
                 43
             )]),
-            Err(Error::SettingsError)
+            Err(Error::InvalidSettings)
         );
         assert_eq!(
             h3_config.set_additional_settings(vec![(
                 frame::SETTINGS_MAX_FIELD_SECTION_SIZE,
                 43
             )]),
-            Err(Error::SettingsError)
+            Err(Error::InvalidSettings)
         );
         assert_eq!(
             h3_config.set_additional_settings(vec![(
                 frame::SETTINGS_QPACK_BLOCKED_STREAMS,
                 43
             )]),
-            Err(Error::SettingsError)
+            Err(Error::InvalidSettings)
         );
         assert_eq!(
             h3_config.set_additional_settings(vec![(
                 frame::SETTINGS_ENABLE_CONNECT_PROTOCOL,
                 43
             )]),
-            Err(Error::SettingsError)
+            Err(Error::InvalidSettings)
         );
         assert_eq!(
             h3_config
                 .set_additional_settings(vec![(frame::SETTINGS_H3_DATAGRAM, 43)]),
-            Err(Error::SettingsError)
+            Err(Error::InvalidSettings)
         );
     }
 
@@ -7537,7 +7578,7 @@ mod tests {
                     Some(expected.as_slice())
                 );
             } else {
-                assert_eq!(sent, Err(Error::InternalError));
+                assert_eq!(sent, Err(Error::Internal));
                 assert_eq!(s.client.control_stream_id, None);
                 assert_eq!(s.client.next_uni_stream_id, stream_id);
                 assert_eq!(s.pipe.client.stream_capacity(stream_id), Ok(259));
@@ -7560,7 +7601,7 @@ mod tests {
         ] {
             assert_eq!(
                 config.set_additional_settings(invalid),
-                Err(Error::SettingsError)
+                Err(Error::InvalidSettings)
             );
             assert_eq!(config.additional_settings.as_ref(), Some(&original));
         }
@@ -8585,7 +8626,7 @@ mod tests {
         assert!(writables.contains(&stream));
         assert_eq!(
             s.send_body_server(stream, false),
-            Err(Error::TransportError(crate::Error::StreamStopped(42)))
+            Err(Error::Transport(crate::Error::StreamStopped(42)))
         );
 
         // Client needs to finish its side by sending a fin
@@ -8727,7 +8768,7 @@ mod tests {
         // attempting to read.
         assert_eq!(
             s.recv_body_server(stream, &mut [0; 100]),
-            Err(Error::TransportError(crate::Error::StreamReset(0)))
+            Err(Error::Transport(crate::Error::StreamReset(0)))
         );
 
         // No more events and there are no more readable streams.
@@ -8775,7 +8816,7 @@ mod tests {
 
         assert_eq!(
             s.recv_body_server(stream, &mut [0; 100]),
-            Err(Error::TransportError(crate::Error::StreamReset(0)))
+            Err(Error::Transport(crate::Error::StreamReset(0)))
         );
         assert_eq!(s.server.streams.len(), init_streams_server);
     }
