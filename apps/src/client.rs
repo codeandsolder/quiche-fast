@@ -59,13 +59,25 @@ pub fn connect(
     let mut events = mio::Events::with_capacity(1024);
 
     // We'll only connect to the first server provided in URL list.
-    let connect_url = &args.urls[0];
+    let connect_url = args
+        .urls
+        .first()
+        .ok_or_else(|| ClientError::Other("no request URL".into()))?;
 
     // Resolve server address.
-    let peer_addr = if let Some(addr) = &args.connect_to {
-        addr.parse().expect("--connect-to is expected to be a string containing an IPv4 or IPv6 address with a port. E.g. 192.0.2.0:443")
+    let peer_addr = if let Some(addr) = args.connect_to {
+        addr
     } else {
-        *connect_url.socket_addrs(|| None).unwrap().first().unwrap()
+        connect_url
+            .socket_addrs(|| None)
+            .map_err(|error| {
+                ClientError::Other(format!("resolve {connect_url}: {error}"))
+            })?
+            .into_iter()
+            .next()
+            .ok_or_else(|| {
+                ClientError::Other(format!("no addresses for {connect_url}"))
+            })?
     };
 
     // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
@@ -109,26 +121,11 @@ pub fn connect(
 
     config.verify_peer(!args.no_verify);
 
-    config.set_application_protos(&conn_args.alpns).unwrap();
-
-    config.set_initial_rtt(conn_args.initial_rtt);
-    config.set_max_idle_timeout(conn_args.idle_timeout);
-    config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(conn_args.max_data);
-    config.set_initial_max_stream_data_bidi_local(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_bidi_remote(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_uni(conn_args.max_stream_data);
-    config.set_initial_max_streams_bidi(conn_args.max_streams_bidi);
-    config.set_initial_max_streams_uni(conn_args.max_streams_uni);
-    config.set_disable_active_migration(!conn_args.enable_active_migration);
-    config.set_active_connection_id_limit(conn_args.max_active_cids);
-    config.set_initial_congestion_window_packets(
-        usize::try_from(conn_args.initial_cwnd_packets).unwrap(),
-    );
-
-    config.set_max_connection_window(conn_args.max_window);
-    config.set_max_stream_window(conn_args.max_stream_window);
+    conn_args
+        .configure(&mut config, MAX_DATAGRAM_SIZE)
+        .map_err(|error| {
+            ClientError::Other(format!("connection configuration: {error}"))
+        })?;
 
     let mut keylog = None;
 
@@ -142,26 +139,6 @@ pub fn connect(
         keylog = Some(file);
 
         config.log_keys();
-    }
-
-    if conn_args.no_grease {
-        config.grease(false);
-    }
-
-    if conn_args.early_data {
-        config.enable_early_data();
-    }
-
-    config
-        .set_cc_algorithm_name(&conn_args.cc_algorithm)
-        .unwrap();
-
-    if conn_args.disable_hystart {
-        config.enable_hystart(false);
-    }
-
-    if conn_args.dgrams_enabled {
-        config.enable_dgram(true, 1000, 1000);
     }
 
     let mut http_conn: Option<Box<dyn HttpConn>> = None;
@@ -398,15 +375,13 @@ pub fn connect(
 
                 app_proto_selected = true;
             } else if alpns::HTTP_3.contains(&app_proto) {
-                let dgram_sender = if conn_args.dgrams_enabled {
-                    Some(Http3DgramSender::new(
-                        conn_args.dgram_count,
-                        conn_args.dgram_data.clone(),
+                let dgram_sender = conn_args.datagrams.as_ref().map(|settings| {
+                    Http3DgramSender::new(
+                        settings.count,
+                        settings.data.clone(),
                         0,
-                    ))
-                } else {
-                    None
-                };
+                    )
+                });
 
                 http_conn = Some(Http3Conn::with_urls(
                     &mut conn,

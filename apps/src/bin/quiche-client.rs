@@ -34,17 +34,24 @@ fn main() {
     env_logger::builder().format_timestamp_nanos().init();
 
     // Parse CLI parameters.
-    let docopt = docopt::Docopt::new(CLIENT_USAGE).unwrap();
-    let conn_args = CommonArgs::with_docopt(&docopt);
-    let args = ClientArgs::with_docopt(&docopt);
+    let parsed = docopt::Docopt::new(CLIENT_USAGE)
+        .and_then(|parser| parser.parse())
+        .unwrap_or_else(|error| error.exit());
+    let conn_args =
+        CommonArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
+    let args =
+        ClientArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
 
     match connect(args, conn_args, stdout_sink) {
         Err(ClientError::HandshakeFail) => std::process::exit(-1),
 
         Err(ClientError::HttpFail) => std::process::exit(-2),
 
-        Err(ClientError::Other(e)) => panic!("{}", e),
+        Err(ClientError::Other(e)) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        },
 
-        Ok(_) => (),
+        Ok(()) => (),
     }
 }

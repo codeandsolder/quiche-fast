@@ -27,11 +27,73 @@
 use super::common::alpns;
 use std::time::Duration;
 
-pub trait Args {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self;
+use docopt::ArgvMap;
+use docopt::Error;
+use std::net::SocketAddr;
+use std::str::FromStr;
+
+/// Convert an already parsed command line into application settings.
+pub trait Args: Sized {
+    /// Decode and validate the arguments.
+    ///
+    /// # Errors
+    /// Returns a descriptive argument error for invalid values.
+    fn from_args(args: &ArgvMap) -> Result<Self, Error>;
 }
 
-/// Contains commons arguments for creating a quiche QUIC connection.
+fn invalid(option: &str, error: impl std::fmt::Display) -> Error {
+    Error::Argv(format!("{option}: {error}"))
+}
+
+fn number<T: FromStr>(args: &ArgvMap, option: &str) -> Result<T, Error>
+where
+    T::Err: std::fmt::Display,
+{
+    args.get_str(option)
+        .parse()
+        .map_err(|error| invalid(option, error))
+}
+
+fn optional(args: &ArgvMap, option: &str) -> Option<String> {
+    let value = args.get_str(option);
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn optional_number<T: FromStr>(
+    args: &ArgvMap, option: &str,
+) -> Result<Option<T>, Error>
+where
+    T::Err: std::fmt::Display,
+{
+    if args.get_str(option).is_empty() {
+        Ok(None)
+    } else {
+        number(args, option).map(Some)
+    }
+}
+
+/// Connection behavior independent of the selected congestion algorithm.
+pub struct ConnectionBehavior {
+    pub early_data: bool,
+    pub grease: bool,
+    pub active_migration: bool,
+}
+
+/// Congestion-control configuration.
+pub struct CongestionSettings {
+    pub algorithm: quiche::CongestionControlAlgorithm,
+    pub hystart: bool,
+    pub initial_rtt: Duration,
+    pub initial_cwnd_packets: usize,
+}
+
+/// Enabled one-way DATAGRAM workload.
+pub struct DatagramSettings {
+    pub count: u64,
+    pub data: String,
+}
+
+/// Shared arguments for creating a QUIC connection.
 pub struct CommonArgs {
     pub alpns: Vec<&'static [u8]>,
     pub max_data: u64,
@@ -41,218 +103,150 @@ pub struct CommonArgs {
     pub max_streams_bidi: u64,
     pub max_streams_uni: u64,
     pub idle_timeout: u64,
-    pub early_data: bool,
+    pub behavior: ConnectionBehavior,
+    pub congestion: CongestionSettings,
+    pub datagrams: Option<DatagramSettings>,
     pub dump_packet_path: Option<String>,
-    pub no_grease: bool,
-    pub cc_algorithm: String,
-    pub disable_hystart: bool,
-    pub dgrams_enabled: bool,
-    pub dgram_count: u64,
-    pub dgram_data: String,
     pub max_active_cids: u64,
-    pub enable_active_migration: bool,
     pub max_field_section_size: Option<u64>,
     pub qpack_max_table_capacity: Option<u64>,
     pub qpack_blocked_streams: Option<u64>,
-    pub initial_rtt: Duration,
-    pub initial_cwnd_packets: u64,
 }
 
-/// Creates a new `CommonArgs` structure using the provided [`Docopt`].
-///
-/// The `Docopt` usage String needs to include the following:
-///
-/// --http-version VERSION      HTTP version to use.
-/// --max-data BYTES            Connection-wide flow control limit.
-/// --max-window BYTES          Connection-wide max receiver window.
-/// --max-stream-data BYTES     Per-stream flow control limit.
-/// --max-stream-window BYTES   Per-stream max receiver window.
-/// --max-streams-bidi STREAMS  Number of allowed concurrent streams.
-/// --max-streams-uni STREAMS   Number of allowed concurrent streams.
-/// --dump-packets PATH         Dump the incoming packets in PATH.
-/// --no-grease                 Don't send GREASE.
-/// --cc-algorithm NAME         Set a congestion control algorithm.
-/// --disable-hystart           Disable HyStart++.
-/// --dgram-proto PROTO         DATAGRAM application protocol.
-/// --dgram-count COUNT         Number of DATAGRAMs to send.
-/// --dgram-data DATA           DATAGRAM data to send.
-/// --max-active-cids NUM       Maximum number of active Connection IDs.
-/// --enable-active-migration   Enable active connection migration.
-/// --max-field-section-size BYTES  Max size of uncompressed field section.
-/// --qpack-max-table-capacity BYTES  Max capacity of dynamic QPACK decoding.
-/// --qpack-blocked-streams STREAMS  Limit of blocked streams while decoding.
-/// --initial-cwnd-packets      Size of initial congestion window, in packets.
-///
-/// [`Docopt`]: https://docs.rs/docopt/1.1.0/docopt/
 impl Args for CommonArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
-
-        let http_version = args.get_str("--http-version");
-        let dgram_proto = args.get_str("--dgram-proto");
-        let (alpns, dgrams_enabled) = match (http_version, dgram_proto) {
-            ("HTTP/0.9", "none") => (alpns::HTTP_09.to_vec(), false),
-
-            ("HTTP/0.9", _) => {
-                panic!("Unsupported HTTP version and DATAGRAM protocol.")
-            },
-
-            ("HTTP/3", "none") => (alpns::HTTP_3.to_vec(), false),
-
-            ("HTTP/3", "oneway") => (alpns::HTTP_3.to_vec(), true),
-
-            ("all", "none") => (
-                [alpns::HTTP_3.as_slice(), &alpns::HTTP_09]
-                    .concat()
-                    .to_vec(),
-                false,
-            ),
-
-            (..) => panic!("Unsupported HTTP version and DATAGRAM protocol."),
+    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
+        let http = args.get_str("--http-version");
+        let protocol = args.get_str("--dgram-proto");
+        let alpns = match (http, protocol) {
+            ("HTTP/0.9", "none") => alpns::HTTP_09.to_vec(),
+            ("HTTP/3", "none" | "oneway") => alpns::HTTP_3.to_vec(),
+            ("all", "none") =>
+                [alpns::HTTP_3.as_slice(), &alpns::HTTP_09].concat(),
+            _ =>
+                return Err(invalid(
+                    "--http-version/--dgram-proto",
+                    format!("unsupported combination {http}/{protocol}"),
+                )),
         };
-
-        let dgram_count = args.get_str("--dgram-count");
-        let dgram_count = dgram_count.parse::<u64>().unwrap();
-
-        let dgram_data = args.get_str("--dgram-data").to_string();
-
-        let max_data = args.get_str("--max-data");
-        let max_data = max_data.parse::<u64>().unwrap();
-
-        let max_window = args.get_str("--max-window");
-        let max_window = max_window.parse::<u64>().unwrap();
-
-        let max_stream_data = args.get_str("--max-stream-data");
-        let max_stream_data = max_stream_data.parse::<u64>().unwrap();
-
-        let max_stream_window = args.get_str("--max-stream-window");
-        let max_stream_window = max_stream_window.parse::<u64>().unwrap();
-
-        let max_streams_bidi = args.get_str("--max-streams-bidi");
-        let max_streams_bidi = max_streams_bidi.parse::<u64>().unwrap();
-
-        let max_streams_uni = args.get_str("--max-streams-uni");
-        let max_streams_uni = max_streams_uni.parse::<u64>().unwrap();
-
-        let idle_timeout = args.get_str("--idle-timeout");
-        let idle_timeout = idle_timeout.parse::<u64>().unwrap();
-
-        let early_data = args.get_bool("--early-data");
-
-        let dump_packet_path = if !args.get_str("--dump-packets").is_empty() {
-            Some(args.get_str("--dump-packets").to_string())
-        } else {
-            None
-        };
-
-        let no_grease = args.get_bool("--no-grease");
-
-        let cc_algorithm = args.get_str("--cc-algorithm");
-
-        let disable_hystart = args.get_bool("--disable-hystart");
-
-        let max_active_cids = args.get_str("--max-active-cids");
-        let max_active_cids = max_active_cids.parse::<u64>().unwrap();
-
-        let enable_active_migration = args.get_bool("--enable-active-migration");
-
-        let max_field_section_size =
-            if !args.get_str("--max-field-section-size").is_empty() {
-                Some(
-                    args.get_str("--max-field-section-size")
-                        .parse::<u64>()
-                        .unwrap(),
-                )
-            } else {
-                None
-            };
-
-        let qpack_max_table_capacity =
-            if !args.get_str("--qpack-max-table-capacity").is_empty() {
-                Some(
-                    args.get_str("--qpack-max-table-capacity")
-                        .parse::<u64>()
-                        .unwrap(),
-                )
-            } else {
-                None
-            };
-
-        let qpack_blocked_streams =
-            if !args.get_str("--qpack-blocked-streams").is_empty() {
-                Some(
-                    args.get_str("--qpack-blocked-streams")
-                        .parse::<u64>()
-                        .unwrap(),
-                )
-            } else {
-                None
-            };
-
-        let initial_rtt_millis =
-            args.get_str("--initial-rtt").parse::<u64>().unwrap();
-        let initial_rtt = Duration::from_millis(initial_rtt_millis);
-
-        let initial_cwnd_packets = args
-            .get_str("--initial-cwnd-packets")
-            .parse::<u64>()
-            .unwrap();
-
-        CommonArgs {
+        let count = number(args, "--dgram-count")?;
+        let datagrams = (protocol == "oneway").then(|| DatagramSettings {
+            count,
+            data: args.get_str("--dgram-data").to_owned(),
+        });
+        let algorithm = args
+            .get_str("--cc-algorithm")
+            .parse()
+            .map_err(|error| invalid("--cc-algorithm", error))?;
+        Ok(Self {
             alpns,
-            max_data,
-            max_window,
-            max_stream_data,
-            max_stream_window,
-            max_streams_bidi,
-            max_streams_uni,
-            idle_timeout,
-            early_data,
-            dump_packet_path,
-            no_grease,
-            cc_algorithm: cc_algorithm.to_string(),
-            disable_hystart,
-            dgrams_enabled,
-            dgram_count,
-            dgram_data,
-            max_active_cids,
-            enable_active_migration,
-            max_field_section_size,
-            qpack_max_table_capacity,
-            qpack_blocked_streams,
-            initial_rtt,
-            initial_cwnd_packets,
-        }
+            max_data: number(args, "--max-data")?,
+            max_window: number(args, "--max-window")?,
+            max_stream_data: number(args, "--max-stream-data")?,
+            max_stream_window: number(args, "--max-stream-window")?,
+            max_streams_bidi: number(args, "--max-streams-bidi")?,
+            max_streams_uni: number(args, "--max-streams-uni")?,
+            idle_timeout: number(args, "--idle-timeout")?,
+            behavior: ConnectionBehavior {
+                early_data: args.get_bool("--early-data"),
+                grease: !args.get_bool("--no-grease"),
+                active_migration: args.get_bool("--enable-active-migration"),
+            },
+            congestion: CongestionSettings {
+                algorithm,
+                hystart: !args.get_bool("--disable-hystart"),
+                initial_rtt: Duration::from_millis(number(
+                    args,
+                    "--initial-rtt",
+                )?),
+                initial_cwnd_packets: number(args, "--initial-cwnd-packets")?,
+            },
+            datagrams,
+            dump_packet_path: optional(args, "--dump-packets"),
+            max_active_cids: number(args, "--max-active-cids")?,
+            max_field_section_size: optional_number(
+                args,
+                "--max-field-section-size",
+            )?,
+            qpack_max_table_capacity: optional_number(
+                args,
+                "--qpack-max-table-capacity",
+            )?,
+            qpack_blocked_streams: optional_number(
+                args,
+                "--qpack-blocked-streams",
+            )?,
+        })
     }
 }
 
 impl Default for CommonArgs {
     fn default() -> Self {
-        CommonArgs {
+        Self {
             alpns: alpns::HTTP_3.to_vec(),
-            max_data: 10000000,
-            max_window: 25165824,
-            max_stream_data: 1000000,
-            max_stream_window: 16777216,
+            max_data: 10_000_000,
+            max_window: 25_165_824,
+            max_stream_data: 1_000_000,
+            max_stream_window: 16_777_216,
             max_streams_bidi: 100,
             max_streams_uni: 100,
-            idle_timeout: 30000,
-            early_data: false,
+            idle_timeout: 30_000,
+            behavior: ConnectionBehavior {
+                early_data: false,
+                grease: true,
+                active_migration: false,
+            },
+            congestion: CongestionSettings {
+                algorithm: quiche::CongestionControlAlgorithm::Cubic,
+                hystart: true,
+                initial_rtt: Duration::from_millis(333),
+                initial_cwnd_packets: 10,
+            },
+            datagrams: None,
             dump_packet_path: None,
-            no_grease: false,
-            cc_algorithm: "cubic".to_string(),
-            disable_hystart: false,
-            dgrams_enabled: false,
-            dgram_count: 0,
-            dgram_data: "quack".to_string(),
             max_active_cids: 2,
-            enable_active_migration: false,
             max_field_section_size: None,
             qpack_max_table_capacity: None,
             qpack_blocked_streams: None,
-            initial_rtt: Duration::from_millis(333),
-            initial_cwnd_packets: 10,
         }
+    }
+}
+
+impl CommonArgs {
+    /// Apply shared transport settings to a client or server configuration.
+    ///
+    /// # Errors
+    /// Returns an error if the application protocols cannot be configured.
+    pub fn configure(
+        &self, config: &mut quiche::Config, datagram_size: usize,
+    ) -> quiche::Result<()> {
+        config.set_application_protos(&self.alpns)?;
+        config.set_initial_rtt(self.congestion.initial_rtt);
+        config.set_max_idle_timeout(self.idle_timeout);
+        config.set_max_recv_udp_payload_size(datagram_size);
+        config.set_max_send_udp_payload_size(datagram_size);
+        config.set_initial_max_data(self.max_data);
+        config.set_initial_max_stream_data_bidi_local(self.max_stream_data);
+        config.set_initial_max_stream_data_bidi_remote(self.max_stream_data);
+        config.set_initial_max_stream_data_uni(self.max_stream_data);
+        config.set_initial_max_streams_bidi(self.max_streams_bidi);
+        config.set_initial_max_streams_uni(self.max_streams_uni);
+        config.set_disable_active_migration(!self.behavior.active_migration);
+        config.set_active_connection_id_limit(self.max_active_cids);
+        config.set_initial_congestion_window_packets(
+            self.congestion.initial_cwnd_packets,
+        );
+        config.set_max_connection_window(self.max_window);
+        config.set_max_stream_window(self.max_stream_window);
+        config.grease(self.behavior.grease);
+        if self.behavior.early_data {
+            config.enable_early_data();
+        }
+        config.set_cc_algorithm(self.congestion.algorithm);
+        config.enable_hystart(self.congestion.hystart);
+        if self.datagrams.is_some() {
+            config.enable_dgram(true, 1000, 1000);
+        }
+        Ok(())
     }
 }
 
@@ -302,7 +296,7 @@ Options:
   -h --help                Show this screen.
 ";
 
-/// Application-specific arguments that compliment the `CommonArgs`.
+/// Application-specific arguments that complement the `CommonArgs`.
 pub struct ClientArgs {
     pub version: u32,
     pub dump_response_path: Option<String>,
@@ -314,7 +308,7 @@ pub struct ClientArgs {
     pub trust_origin_ca_pem: Option<String>,
     pub body: Option<Vec<u8>>,
     pub method: String,
-    pub connect_to: Option<String>,
+    pub connect_to: Option<SocketAddr>,
     pub session_file: Option<String>,
     pub source_port: u16,
     pub perform_migration: bool,
@@ -322,104 +316,60 @@ pub struct ClientArgs {
 }
 
 impl Args for ClientArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
-
-        let version = args.get_str("--wire-version");
-        let version = u32::from_str_radix(version, 16).unwrap();
-
-        let dump_response_path = if !args.get_str("--dump-responses").is_empty() {
-            Some(args.get_str("--dump-responses").to_string())
-        } else {
-            None
-        };
-
-        let dump_json = args.get_bool("--dump-json");
-        let dump_json = if dump_json {
-            let max_payload = args.get_str("--max-json-payload");
-            let max_payload = max_payload.parse::<usize>().unwrap();
-            Some(max_payload)
-        } else {
-            None
-        };
-
-        // URLs (can be multiple).
-        let urls: Vec<url::Url> = args
+    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
+        let version = u32::from_str_radix(args.get_str("--wire-version"), 16)
+            .map_err(|error| invalid("--wire-version", error))?;
+        let urls = args
             .get_vec("URL")
             .into_iter()
-            .map(|x| url::Url::parse(x).unwrap())
-            .collect();
-
-        // Request headers (can be multiple).
-        let req_headers = args
-            .get_vec("--header")
-            .into_iter()
-            .map(|x| x.to_string())
-            .collect();
-
-        let reqs_cardinal = args.get_str("--requests");
-        let reqs_cardinal = reqs_cardinal.parse::<u64>().unwrap();
-
-        let no_verify = args.get_bool("--no-verify");
-
-        let trust_origin_ca_pem = args.get_str("--trust-origin-ca-pem");
-        let trust_origin_ca_pem = if !trust_origin_ca_pem.is_empty() {
-            Some(trust_origin_ca_pem.to_string())
-        } else {
-            None
-        };
-
-        let body = if args.get_bool("--body") {
-            std::fs::read(args.get_str("--body")).ok()
-        } else {
-            None
-        };
-
-        let method = args.get_str("--method").to_string();
-
-        let connect_to = if args.get_bool("--connect-to") {
-            Some(args.get_str("--connect-to").to_string())
-        } else {
-            None
-        };
-
-        let session_file = if args.get_bool("--session-file") {
-            Some(args.get_str("--session-file").to_string())
-        } else {
-            None
-        };
-
-        let source_port = args.get_str("--source-port");
-        let source_port = source_port.parse::<u16>().unwrap();
-
-        let perform_migration = args.get_bool("--perform-migration");
-
-        let send_priority_update = args.get_bool("--send-priority-update");
-
-        ClientArgs {
+            .map(|value| {
+                let url = url::Url::parse(value)
+                    .map_err(|error| invalid("URL", error))?;
+                if url.host().is_none() || url.port_or_known_default().is_none() {
+                    return Err(invalid("URL", "expected a host and port"));
+                }
+                Ok(url)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let body = optional(args, "--body")
+            .map(|path| {
+                std::fs::read(&path).map_err(|error| {
+                    invalid("--body", format!("{path}: {error}"))
+                })
+            })
+            .transpose()?;
+        Ok(Self {
             version,
-            dump_response_path,
-            dump_json,
+            dump_response_path: optional(args, "--dump-responses"),
+            dump_json: if args.get_bool("--dump-json") {
+                Some(number(args, "--max-json-payload")?)
+            } else {
+                None
+            },
             urls,
-            reqs_cardinal,
-            req_headers,
-            no_verify,
-            trust_origin_ca_pem,
+            reqs_cardinal: number(args, "--requests")?,
+            req_headers: args
+                .get_vec("--header")
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            no_verify: args.get_bool("--no-verify"),
+            trust_origin_ca_pem: optional(args, "--trust-origin-ca-pem"),
             body,
-            method,
-            connect_to,
-            session_file,
-            source_port,
-            perform_migration,
-            send_priority_update,
-        }
+            method: args.get_str("--method").to_owned(),
+            connect_to: optional_number(args, "--connect-to")?,
+            session_file: optional(args, "--session-file"),
+            source_port: number(args, "--source-port")?,
+            perform_migration: args.get_bool("--perform-migration"),
+            send_priority_update: args.get_bool("--send-priority-update"),
+        })
     }
 }
 
 impl Default for ClientArgs {
     fn default() -> Self {
-        ClientArgs {
-            version: 0xbabababa,
+        Self {
+            version: 0xbaba_baba,
             dump_response_path: None,
             dump_json: None,
             urls: vec![],
@@ -473,48 +423,181 @@ Options:
   --qpack-blocked-streams STREAMS   Limit of streams that can be blocked while decoding. Any value other that 0 is currently unsupported.
   --disable-gso               Disable GSO (linux only).
   --disable-pacing            Disable pacing (linux only).
+  --enable-pmtud              Enable path MTU discovery.
   --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
   --initial-cwnd-packets PACKETS      The initial congestion window size in terms of packet count [default: 10].
   -h --help                   Show this screen.
 ";
 
-// Application-specific arguments that compliment the `CommonArgs`.
+/// UDP send acceleration settings for the server.
+pub struct SocketSettings {
+    pub gso: bool,
+    pub pacing: bool,
+}
+
+/// Server-specific arguments.
 pub struct ServerArgs {
-    pub listen: String,
+    pub listen: SocketAddr,
     pub no_retry: bool,
     pub root: String,
     pub index: String,
     pub cert: String,
     pub key: String,
-    pub disable_gso: bool,
-    pub disable_pacing: bool,
+    pub socket: SocketSettings,
     pub enable_pmtud: bool,
 }
 
 impl Args for ServerArgs {
-    fn with_docopt(docopt: &docopt::Docopt) -> Self {
-        let args = docopt.parse().unwrap_or_else(|e| e.exit());
+    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
+        Ok(Self {
+            listen: number(args, "--listen")?,
+            no_retry: args.get_bool("--no-retry"),
+            root: args.get_str("--root").to_owned(),
+            index: args.get_str("--index").to_owned(),
+            cert: args.get_str("--cert").to_owned(),
+            key: args.get_str("--key").to_owned(),
+            socket: SocketSettings {
+                gso: !args.get_bool("--disable-gso"),
+                pacing: !args.get_bool("--disable-pacing"),
+            },
+            enable_pmtud: args.get_bool("--enable-pmtud"),
+        })
+    }
+}
 
-        let listen = args.get_str("--listen").to_string();
-        let no_retry = args.get_bool("--no-retry");
-        let root = args.get_str("--root").to_string();
-        let index = args.get_str("--index").to_string();
-        let cert = args.get_str("--cert").to_string();
-        let key = args.get_str("--key").to_string();
-        let disable_gso = args.get_bool("--disable-gso");
-        let disable_pacing = args.get_bool("--disable-pacing");
-        let enable_pmtud = args.get_bool("--enable-pmtud");
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use super::ClientArgs;
+    use super::CommonArgs;
+    use super::ServerArgs;
+    use super::CLIENT_USAGE;
+    use super::SERVER_USAGE;
+    use docopt::ArgvMap;
+    use docopt::Docopt;
+    use docopt::Error;
 
-        ServerArgs {
-            listen,
-            no_retry,
-            root,
-            index,
-            cert,
-            key,
-            disable_gso,
-            disable_pacing,
-            enable_pmtud,
+    fn parse(usage: &str, argv: &[&str]) -> Result<ArgvMap, Error> {
+        Docopt::new(usage)?.argv(argv.iter().copied()).parse()
+    }
+
+    #[test]
+    fn shared_options_and_datagram_workload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let parsed = parse(CLIENT_USAGE, &[
+            "quiche-client",
+            "--http-version=HTTP/3",
+            "--dgram-proto=oneway",
+            "--dgram-count=12",
+            "--dgram-data=hello",
+            "--cc-algorithm=bbr",
+            "--early-data",
+            "--no-grease",
+            "--disable-hystart",
+            "--enable-active-migration",
+            "--initial-cwnd-packets=32",
+            "--max-field-section-size=0",
+            "https://example.org/",
+        ])?;
+        let common = CommonArgs::from_args(&parsed)?;
+        assert_eq!(common.alpns, [b"h3".as_slice()]);
+        assert!(common.behavior.early_data);
+        assert!(!common.behavior.grease);
+        assert!(common.behavior.active_migration);
+        assert!(!common.congestion.hystart);
+        assert_eq!(
+            common.congestion.algorithm,
+            quiche::CongestionControlAlgorithm::Bbr2Gcongestion
+        );
+        assert_eq!(common.congestion.initial_cwnd_packets, 32);
+        assert_eq!(common.max_field_section_size, Some(0));
+        let datagrams = common.datagrams.as_ref().ok_or("missing workload")?;
+        assert_eq!(datagrams.count, 12);
+        assert_eq!(datagrams.data, "hello");
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+        common.configure(&mut config, 1350)?;
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_connection_options_identify_argument() -> Result<(), Error> {
+        for (flag, expected) in [
+            ("--max-data=bad", "--max-data"),
+            ("--max-streams-bidi=-1", "--max-streams-bidi"),
+            (
+                "--initial-cwnd-packets=18446744073709551616",
+                "--initial-cwnd-packets",
+            ),
+            ("--cc-algorithm=invalid", "--cc-algorithm"),
+            ("--dgram-proto=oneway", "--http-version/--dgram-proto"),
+            ("--qpack-blocked-streams=no", "--qpack-blocked-streams"),
+        ] {
+            let parsed = parse(CLIENT_USAGE, &[
+                "quiche-client",
+                flag,
+                "https://example.org/",
+            ])?;
+            assert!(
+                matches!(CommonArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with(expected))
+            );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_client_options_are_errors_not_panics() -> Result<(), Error> {
+        for (flag, expected) in [
+            ("--source-port=65536", "--source-port"),
+            ("--wire-version=no", "--wire-version"),
+            ("--connect-to=not-an-address", "--connect-to"),
+            ("--body=Cargo.toml/missing", "--body"),
+        ] {
+            let parsed = parse(CLIENT_USAGE, &[
+                "quiche-client",
+                flag,
+                "https://example.org/",
+            ])?;
+            assert!(
+                matches!(ClientArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with(expected))
+            );
+        }
+        let parsed =
+            parse(CLIENT_USAGE, &["quiche-client", "mailto:local@example.org"])?;
+        assert!(
+            matches!(ClientArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with("URL"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn server_socket_options_and_client_address_are_typed() -> Result<(), Error> {
+        let parsed = parse(SERVER_USAGE, &[
+            "quiche-server",
+            "--listen=[::1]:4433",
+            "--enable-pmtud",
+            "--disable-gso",
+            "--disable-pacing",
+        ])?;
+        let args = ServerArgs::from_args(&parsed)?;
+        assert!(args.listen.is_ipv6());
+        assert_eq!(args.listen.port(), 4433);
+        assert!(args.enable_pmtud);
+        assert!(!args.socket.gso);
+        assert!(!args.socket.pacing);
+        let common = CommonArgs::from_args(&parsed)?;
+        assert_eq!(common.alpns, [b"h3".as_slice(), b"hq-interop", b"http/0.9"]);
+        assert!(common.datagrams.is_none());
+        let parsed = parse(CLIENT_USAGE, &[
+            "quiche-client",
+            "--connect-to=127.0.0.1:4433",
+            "--dump-json",
+            "--max-json-payload=42",
+            "https://example.org/path",
+        ])?;
+        let args = ClientArgs::from_args(&parsed)?;
+        assert_eq!(args.connect_to.map(|addr| addr.port()), Some(4433));
+        assert_eq!(args.dump_json, Some(42));
+        assert_eq!(args.urls[0].path(), "/path");
+        Ok(())
     }
 }

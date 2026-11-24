@@ -35,8 +35,6 @@ use std::io::prelude::*;
 
 use std::collections::HashMap;
 
-use std::convert::TryFrom;
-
 use std::rc::Rc;
 
 use std::cell::RefCell;
@@ -62,21 +60,24 @@ fn main() {
     env_logger::builder().format_timestamp_nanos().init();
 
     // Parse CLI parameters.
-    let docopt = docopt::Docopt::new(SERVER_USAGE).unwrap();
-    let conn_args = CommonArgs::with_docopt(&docopt);
-    let args = ServerArgs::with_docopt(&docopt);
+    let parsed = docopt::Docopt::new(SERVER_USAGE)
+        .and_then(|parser| parser.parse())
+        .unwrap_or_else(|error| error.exit());
+    let conn_args =
+        CommonArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
+    let args =
+        ServerArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP listening socket, and register it with the event loop.
-    let mut socket =
-        mio::net::UdpSocket::bind(args.listen.parse().unwrap()).unwrap();
+    let mut socket = mio::net::UdpSocket::bind(args.listen).unwrap();
 
     // Set SO_TXTIME socket option on the listening UDP socket for pacing
     // outgoing packets.
-    if !args.disable_pacing {
+    if args.socket.pacing {
         match set_txtime_sockopt(&socket) {
             Ok(_) => {
                 pacing = true;
@@ -93,11 +94,7 @@ fn main() {
         .unwrap();
 
     let max_datagram_size = MAX_DATAGRAM_SIZE;
-    let enable_gso = if args.disable_gso {
-        false
-    } else {
-        detect_gso(&socket, max_datagram_size)
-    };
+    let enable_gso = args.socket.gso && detect_gso(&socket, max_datagram_size);
 
     trace!("GSO detected: {enable_gso}");
 
@@ -107,28 +104,13 @@ fn main() {
     config.load_cert_chain_from_pem_file(&args.cert).unwrap();
     config.load_priv_key_from_pem_file(&args.key).unwrap();
 
-    config.set_application_protos(&conn_args.alpns).unwrap();
-
+    conn_args
+        .configure(&mut config, max_datagram_size)
+        .unwrap_or_else(|error| {
+            docopt::Error::Argv(format!("connection configuration: {error}"))
+                .exit()
+        });
     config.discover_pmtu(args.enable_pmtud);
-    config.set_initial_rtt(conn_args.initial_rtt);
-    config.set_max_idle_timeout(conn_args.idle_timeout);
-    config.set_max_recv_udp_payload_size(max_datagram_size);
-    config.set_max_send_udp_payload_size(max_datagram_size);
-    config.set_initial_max_data(conn_args.max_data);
-    config.set_initial_max_stream_data_bidi_local(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_bidi_remote(conn_args.max_stream_data);
-    config.set_initial_max_stream_data_uni(conn_args.max_stream_data);
-    config.set_initial_max_streams_bidi(conn_args.max_streams_bidi);
-    config.set_initial_max_streams_uni(conn_args.max_streams_uni);
-    config.set_disable_active_migration(!conn_args.enable_active_migration);
-    config.set_active_connection_id_limit(conn_args.max_active_cids);
-    config.set_initial_congestion_window_packets(
-        usize::try_from(conn_args.initial_cwnd_packets).unwrap(),
-    );
-
-    config.set_max_connection_window(conn_args.max_window);
-    config.set_max_stream_window(conn_args.max_stream_window);
-
     config.enable_pacing(pacing);
 
     let mut keylog = None;
@@ -143,26 +125,6 @@ fn main() {
         keylog = Some(file);
 
         config.log_keys();
-    }
-
-    if conn_args.early_data {
-        config.enable_early_data();
-    }
-
-    if conn_args.no_grease {
-        config.grease(false);
-    }
-
-    config
-        .set_cc_algorithm_name(&conn_args.cc_algorithm)
-        .unwrap();
-
-    if conn_args.disable_hystart {
-        config.enable_hystart(false);
-    }
-
-    if conn_args.dgrams_enabled {
-        config.enable_dgram(true, 1000, 1000);
     }
 
     let rng = SystemRandom::new();
@@ -470,15 +432,14 @@ fn main() {
 
                     client.app_proto_selected = true;
                 } else if alpns::HTTP_3.contains(&app_proto) {
-                    let dgram_sender = if conn_args.dgrams_enabled {
-                        Some(Http3DgramSender::new(
-                            conn_args.dgram_count,
-                            conn_args.dgram_data.clone(),
-                            1,
-                        ))
-                    } else {
-                        None
-                    };
+                    let dgram_sender =
+                        conn_args.datagrams.as_ref().map(|settings| {
+                            Http3DgramSender::new(
+                                settings.count,
+                                settings.data.clone(),
+                                1,
+                            )
+                        });
 
                     client.http_conn = match Http3Conn::with_conn(
                         &mut client.conn,
