@@ -35,43 +35,43 @@ use super::Acked;
 use super::Congestion;
 use super::Sent;
 use crate::recovery::PacketFlight;
+use crate::recovery::RecoveryConfig;
 use crate::CongestionControlAlgorithm;
 use crate::DEFAULT_INITIAL_RTT;
 
-pub(crate) struct TestSender {
+pub(super) type FixtureResult = std::result::Result<(), &'static str>;
+
+pub(super) struct TestSender {
     cc: Congestion,
-    pub(crate) next_pkt: u64,
-    pub(crate) next_ack: u64,
-    pub(crate) bytes_in_flight: usize,
-    pub(crate) time: Instant,
+    pub(super) next_pkt: u64,
+    pub(super) bytes_in_flight: usize,
+    pub(super) time: Instant,
     rtt_stats: RttStats,
     sent_packets: VecDeque<Sent>,
 }
 
 impl TestSender {
-    pub(crate) fn new(algo: CongestionControlAlgorithm, hystart: bool) -> Self {
-        let mut cfg = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        cfg.set_cc_algorithm(algo);
-        cfg.enable_hystart(hystart);
+    pub(super) fn new(algo: CongestionControlAlgorithm, hystart: bool) -> Self {
+        let cfg = RecoveryConfig {
+            cc_algorithm: algo,
+            hystart,
+            ..RecoveryConfig::default()
+        };
 
         TestSender {
             next_pkt: 0,
-            next_ack: 0,
             bytes_in_flight: 0,
             time: Instant::now(),
-            rtt_stats: RttStats::new(
-                DEFAULT_INITIAL_RTT,
-                Duration::from_micros(0),
-            ),
-            cc: Congestion::from_config(&cfg.recovery),
+            rtt_stats: RttStats::new(DEFAULT_INITIAL_RTT, Duration::ZERO),
+            cc: Congestion::from_config(&cfg),
             sent_packets: VecDeque::new(),
         }
     }
 
-    pub(crate) fn send_packet(&mut self, bytes: usize) {
+    pub(super) fn send_packet(&mut self, bytes: usize) {
         let mut sent = Sent {
             pkt_num: self.next_pkt,
-            frames: Default::default(),
+            frames: smallvec::SmallVec::new(),
             transmitted_at: self.time,
             acked_at: None,
             lost_at: None,
@@ -100,9 +100,9 @@ impl TestSender {
         self.next_pkt += 1;
     }
 
-    pub(crate) fn inject_ack(&mut self, acked: Acked, now: Instant) {
-        let _ = self.sent_packets.pop_front().unwrap();
-
+    /// Inject a synthetic ACK event into the congestion controller without
+    /// pretending that it acknowledged an unrelated queued packet.
+    pub(super) fn inject_ack(&mut self, acked: Acked, now: Instant) {
         self.cc.on_packets_acked(
             self.bytes_in_flight,
             &mut vec![acked],
@@ -111,26 +111,31 @@ impl TestSender {
         );
     }
 
-    pub(crate) fn ack_n_packets(&mut self, n: usize, bytes: usize) {
-        let mut acked = Vec::new();
+    /// Acknowledge the oldest packets, deriving byte accounting from their
+    /// recorded sizes instead of requiring a uniform packet size.
+    pub(super) fn ack_n_packets(&mut self, n: usize) -> FixtureResult {
+        if n > self.sent_packets.len() {
+            return Err("ACK exceeds outstanding packet count");
+        }
+        if n == 0 {
+            return Ok(());
+        }
 
-        for _ in 0..n {
-            let unacked = self.sent_packets.pop_front().unwrap();
-
+        let mut acknowledged_bytes = 0;
+        let mut acked = Vec::with_capacity(n);
+        for unacked in self.sent_packets.drain(..n) {
+            acknowledged_bytes += unacked.size;
             acked.push(Acked {
                 pkt_num: unacked.pkt_num,
                 transmitted_at: unacked.transmitted_at,
                 size: unacked.size,
                 in_flight: unacked.flight.in_flight(),
-
                 rtt: self.time.saturating_duration_since(unacked.transmitted_at),
                 delivered: unacked.delivered,
                 delivered_time: unacked.delivered_time,
                 first_sent_time: unacked.first_sent_time,
                 is_app_limited: unacked.is_app_limited,
             });
-
-            self.next_ack += 1;
         }
 
         self.cc.on_packets_acked(
@@ -140,20 +145,30 @@ impl TestSender {
             self.time,
         );
 
-        self.bytes_in_flight -= n * bytes;
+        self.bytes_in_flight -= acknowledged_bytes;
+        Ok(())
     }
 
-    pub(crate) fn lose_n_packets(
-        &mut self, n: usize, bytes: usize, transmitted_at: Option<Instant>,
-    ) {
-        let mut unacked = None;
-
-        for _ in 0..n {
-            self.next_ack += 1;
-            unacked = self.sent_packets.pop_front();
+    /// Report a batch of lost packets. The last packet defines the recovery
+    /// cutoff; tests can explicitly inject a synthetic transmission time.
+    pub(super) fn lose_n_packets(
+        &mut self, n: usize, transmitted_at: Option<Instant>,
+    ) -> FixtureResult {
+        if n == 0 || n > self.sent_packets.len() {
+            return Err("loss requires a nonempty batch of outstanding packets");
         }
 
-        let mut unacked = unacked.unwrap();
+        let lost_bytes = self
+            .sent_packets
+            .iter()
+            .take(n)
+            .map(|packet| packet.size)
+            .sum::<usize>();
+        let mut unacked = self
+            .sent_packets
+            .drain(..n)
+            .last()
+            .ok_or("loss batch has no final packet")?;
         if let Some(time) = transmitted_at {
             unacked.transmitted_at = time;
         }
@@ -162,24 +177,25 @@ impl TestSender {
             (self.cc.cc_ops.checkpoint)(&mut self.cc);
         }
 
-        (self.cc_ops.congestion_event)(
+        (self.cc.cc_ops.congestion_event)(
             &mut self.cc,
             self.bytes_in_flight,
-            n * bytes,
+            lost_bytes,
             &unacked,
             self.time,
         );
 
         self.cc.lost_count += n;
-        self.bytes_in_flight -= n * bytes;
+        self.bytes_in_flight -= lost_bytes;
+        Ok(())
     }
 
-    pub(crate) fn update_rtt(&mut self, rtt: Duration) {
+    pub(super) fn update_rtt(&mut self, rtt: Duration) {
         self.rtt_stats
             .update_rtt(rtt, Duration::ZERO, self.time, true)
     }
 
-    pub(crate) fn advance_time(&mut self, period: Duration) {
+    pub(super) fn advance_time(&mut self, period: Duration) {
         self.time += period;
     }
 }
@@ -196,4 +212,27 @@ impl DerefMut for TestSender {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.cc
     }
+}
+
+#[test]
+fn mixed_packet_sizes_and_invalid_batches_preserve_flight_accounting(
+) -> FixtureResult {
+    let mut sender = TestSender::new(CongestionControlAlgorithm::Reno, false);
+    for size in [1200, 300, 500, 700] {
+        sender.send_packet(size);
+    }
+    assert_eq!(sender.bytes_in_flight, 2700);
+    assert!(sender.ack_n_packets(5).is_err());
+    assert!(sender.lose_n_packets(0, None).is_err());
+    assert!(sender.lose_n_packets(5, None).is_err());
+    assert_eq!(sender.bytes_in_flight, 2700);
+    assert_eq!(sender.sent_packets.len(), 4);
+    sender.ack_n_packets(2)?;
+    assert_eq!(sender.bytes_in_flight, 1200);
+    assert_eq!(sender.sent_packets.len(), 2);
+    sender.lose_n_packets(2, None)?;
+    assert_eq!(sender.bytes_in_flight, 0);
+    assert!(sender.sent_packets.is_empty());
+    assert_eq!(sender.lost_count, 2);
+    Ok(())
 }

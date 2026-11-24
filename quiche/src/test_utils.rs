@@ -657,38 +657,33 @@ pub fn stream_recv_discard<F: BufFactory>(
 #[cfg(test)]
 pub fn trigger_ack_based_loss<F: BufFactory>(
     sender: &mut Connection<F>, receiver: &mut Connection<F>,
-) {
-    let mut buf = [0; 65535];
+) -> Result<()> {
+    let mut buf = vec![0; 65535];
 
-    // Use the active path's packet loss threshold.
-    let pkt_thresh = sender
+    let threshold = sender
         .paths
-        .get_active()
-        .unwrap()
+        .get_active()?
         .recovery
         .pkt_thresh()
-        .unwrap();
+        .ok_or(Error::InvalidState)?;
 
-    for _ in 0..pkt_thresh {
-        sender.send_ack_eliciting().unwrap();
-        let (len, _) = sender.send(&mut buf).unwrap();
-
-        let info = RecvInfo {
-            to: receiver.paths.get_active().unwrap().local_addr(),
-            from: receiver.paths.get_active().unwrap().peer_addr(),
-        };
-        receiver.recv(&mut buf[..len], info).unwrap();
+    // Deliver each probe on the path selected by its sender, rather than
+    // inferring socket addresses from the receiver's currently active path.
+    for _ in 0..threshold {
+        sender.send_ack_eliciting()?;
+        let (length, info) = sender.send(&mut buf)?;
+        receiver.recv(&mut buf[..length], RecvInfo {
+            to: info.to,
+            from: info.from,
+        })?;
     }
 
-    // Receiver sends ACK for the new packets.
-    let (ack_len, _) = receiver.send(&mut buf).unwrap();
-
-    // Sender receives ACK, triggering loss detection.
-    let info = RecvInfo {
-        to: sender.paths.get_active().unwrap().local_addr(),
-        from: sender.paths.get_active().unwrap().peer_addr(),
-    };
-    sender.recv(&mut buf[..ack_len], info).unwrap();
+    let (length, info) = receiver.send(&mut buf)?;
+    sender.recv(&mut buf[..length], RecvInfo {
+        to: info.to,
+        from: info.from,
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -699,17 +694,18 @@ mod fixture_tests {
     use crate::Error;
 
     #[test]
-    fn fixture_errors_are_returned() {
+    fn fixture_errors_are_returned() -> crate::Result<()> {
         assert!(matches!(
             Pipe::default_config("no-such-algorithm"),
             Err(Error::CongestionControl)
         ));
-        let mut pipe = Pipe::new("cubic").unwrap();
+        let mut pipe = Pipe::new("cubic")?;
         assert_eq!(pipe.client_update_key(), Err(Error::InvalidState));
         assert!(decode_pkt(&pipe.client, &mut []).is_err());
         assert_eq!(
             recv_send(&mut pipe.client, &mut [], 1),
             Err(Error::BufferTooShort)
         );
+        Ok(())
     }
 }
