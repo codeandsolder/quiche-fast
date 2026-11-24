@@ -1509,7 +1509,7 @@ mod tests {
                         .get_or_create(
                             stream_id,
                             &conn.local_transport_params,
-                            &conn.peer_transport_params,
+                            conn.peer_parameters.effective(),
                             !conn.is_server,
                             conn.is_server,
                         )

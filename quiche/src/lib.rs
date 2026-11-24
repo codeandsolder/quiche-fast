@@ -1343,6 +1343,38 @@ enum ConnectionLifecycle {
     Closed(CloseCause),
 }
 
+/// Effective limits may be defaults, remembered 0-RTT limits, or freshly
+/// validated peer parameters. Only the last state is a negotiated result.
+#[derive(Clone, Debug, PartialEq)]
+enum PeerParameters {
+    Defaults(TransportParams),
+    Remembered(TransportParams),
+    Negotiated(TransportParams),
+}
+
+impl Default for PeerParameters {
+    fn default() -> Self {
+        Self::Defaults(TransportParams::default())
+    }
+}
+
+impl PeerParameters {
+    const fn effective(&self) -> &TransportParams {
+        match self {
+            Self::Defaults(params) |
+            Self::Remembered(params) |
+            Self::Negotiated(params) => params,
+        }
+    }
+
+    const fn negotiated(&self) -> Option<&TransportParams> {
+        match self {
+            Self::Negotiated(params) => Some(params),
+            Self::Defaults(_) | Self::Remembered(_) => None,
+        }
+    }
+}
+
 /// Progress of the initial CID/key exchange, distinct from TLS completion.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InitialExchange {
@@ -1620,7 +1652,7 @@ where
     pkt_num_manager: packet::PktNumManager,
 
     /// Peer's transport parameters.
-    peer_transport_params: TransportParams,
+    peer_parameters: PeerParameters,
 
     /// If tracking unknown transport parameters from a peer, how much space to
     /// use in bytes.
@@ -1660,9 +1692,6 @@ where
 
     /// Receiver flow controller.
     flow_control: flowcontrol::FlowControl,
-
-    /// Whether we send `MAX_DATA` frame.
-    should_send_max_data: bool,
 
     /// Number of stream data bytes that can be buffered.
     tx_cap: usize,
@@ -1731,9 +1760,6 @@ where
 
     /// Whether the peer verified our initial address.
     peer_verified_initial_address: bool,
-
-    /// Whether the peer's transport parameters were parsed.
-    parsed_peer_transport_params: bool,
 
     /// TLS completion and handshake confirmation.
     handshake_progress: HandshakeProgress,
@@ -2337,7 +2363,7 @@ impl<F: BufFactory> Connection<F> {
 
             pkt_num_manager: packet::PktNumManager::new(),
 
-            peer_transport_params: TransportParams::default(),
+            peer_parameters: PeerParameters::default(),
 
             peer_transport_params_track_unknown: config
                 .track_unknown_transport_params,
@@ -2364,7 +2390,6 @@ impl<F: BufFactory> Connection<F> {
                 initial_flow_control_window,
                 config.max_connection_window,
             ),
-            should_send_max_data: false,
 
             tx_cap: 0,
             tx_cap_factor: config.tx_cap_factor,
@@ -2409,8 +2434,6 @@ impl<F: BufFactory> Connection<F> {
 
             // Assume clients validate the server's address implicitly.
             peer_verified_initial_address: is_server,
-
-            parsed_peer_transport_params: false,
 
             handshake_progress: HandshakeProgress::default(),
 
@@ -2539,7 +2562,8 @@ impl<F: BufFactory> Connection<F> {
                 crypto::CounterInitialization::FirstPacket,
             )?;
 
-            let reset_token = self.peer_transport_params.stateless_reset_token;
+            let reset_token =
+                self.peer_parameters.effective().stateless_reset_token;
             self.set_initial_dcid(dcid, reset_token, active_path_id)?;
 
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
@@ -2705,7 +2729,7 @@ impl<F: BufFactory> Connection<F> {
         // In particular, a malformed transport-parameter suffix must not
         // leave a usable resumption ticket configured on error.
         self.handshake.set_session(session_bytes.as_ref())?;
-        self.process_peer_transport_params(peer_params)?;
+        self.apply_peer_parameters(PeerParameters::Remembered(peer_params))?;
 
         Ok(())
     }
@@ -3292,7 +3316,7 @@ impl<F: BufFactory> Connection<F> {
         // learned after the handshake through NEW_CONNECTION_ID frames.
         self.ids.matches_reset_token(
             &buf[buf_len - size_of::<u128>()..],
-            self.peer_transport_params.stateless_reset_token,
+            self.peer_parameters.effective().stateless_reset_token,
         )
     }
 
@@ -3877,7 +3901,7 @@ impl<F: BufFactory> Connection<F> {
             // the one supplied by the server.
             self.set_initial_dcid(
                 hdr.scid.clone(),
-                self.peer_transport_params.stateless_reset_token,
+                self.peer_parameters.effective().stateless_reset_token,
                 recv_pid,
             )?;
         }
@@ -3934,7 +3958,9 @@ impl<F: BufFactory> Connection<F> {
                                 length: data.buf().len(),
                             }
                             .to_qlog(
-                                self.peer_transport_params.ack_delay_exponent,
+                                self.peer_parameters
+                                    .effective()
+                                    .ack_delay_exponent,
                             ),
                         );
                     });
@@ -3960,9 +3986,9 @@ impl<F: BufFactory> Connection<F> {
             };
 
             qlog_with_type!(QLOG_PACKET_RX, self.qlog, _q, {
-                qlog_frames.push(
-                    frame.to_qlog(self.peer_transport_params.ack_delay_exponent),
-                );
+                qlog_frames.push(frame.to_qlog(
+                    self.peer_parameters.effective().ack_delay_exponent,
+                ));
             });
 
             if frame.ack_eliciting() {
@@ -4052,7 +4078,7 @@ impl<F: BufFactory> Connection<F> {
         if self.is_established() {
             qlog_with_type!(QLOG_PARAMS_SET, self.qlog, q, {
                 if !self.qlog.logged_peer_params {
-                    let ev_data = self.peer_transport_params.to_qlog(
+                    let ev_data = self.peer_parameters.effective().to_qlog(
                         TransportInitiator::Remote,
                         self.handshake.cipher(),
                     );
@@ -4546,10 +4572,11 @@ impl<F: BufFactory> Connection<F> {
             _ => self.get_send_path_id(from, to)?,
         };
 
-        let peer_limit =
-            usize::try_from(self.peer_transport_params.max_udp_payload_size)
-                .unwrap_or(usize::MAX)
-                .min(MAX_SEND_UDP_PAYLOAD_SIZE);
+        let peer_limit = usize::try_from(
+            self.peer_parameters.effective().max_udp_payload_size,
+        )
+        .unwrap_or(usize::MAX)
+        .min(MAX_SEND_UDP_PAYLOAD_SIZE);
         let mut left =
             out.cap()
                 .min(self.paths.get_mut(send_pid)?.datagram_send_limit(
@@ -4766,7 +4793,7 @@ impl<F: BufFactory> Connection<F> {
                         self.streams.requeue_receive_credit(stream_id),
 
                     frame::Frame::MaxData { .. } => {
-                        self.should_send_max_data = true;
+                        self.flow_control.request_update();
                     },
 
                     frame::Frame::MaxStreams { direction, .. } => {
@@ -6047,25 +6074,10 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        // Create MAX_DATA frame as needed.
-        if self.flow_control.should_update_max_data() &&
-            self.flow_control.max_data() < self.flow_control.max_data_next()
-        {
-            // Autotune the connection window size. We only tune the window
-            // if we are sending an "organic" update, not on retransmits.
-            self.flow_control.autotune_window(now, rtt);
-            self.should_send_max_data = true;
-        }
-
-        if self.should_send_max_data {
-            let frame = frame::Frame::MaxData {
-                max: self.flow_control.max_data_next(),
-            };
-
-            if push_frame_to_pkt(b, frames, frame, left)? {
-                self.should_send_max_data = false;
-
-                // Commits the new max_rx_data limit.
+        // Prepare and commit connection credit only if the frame fits.
+        if let Some(max) = self.flow_control.prepare_update(now, rtt) {
+            if push_frame_to_pkt(b, frames, frame::Frame::MaxData { max }, left)?
+            {
                 self.flow_control.update_max_data(now);
             }
         }
@@ -7325,7 +7337,7 @@ impl<F: BufFactory> Connection<F> {
         if let Some(max_datagram_size) = max_datagram_size {
             if self.is_established() {
                 let peer = usize::try_from(
-                    self.peer_transport_params.max_udp_payload_size,
+                    self.peer_parameters.effective().max_udp_payload_size,
                 )
                 .unwrap_or(usize::MAX);
                 return max_datagram_size
@@ -7656,7 +7668,7 @@ impl<F: BufFactory> Connection<F> {
     #[inline]
     #[must_use = "the result bounds the next outgoing datagram payload"]
     pub fn dgram_max_writable_len(&self) -> Option<usize> {
-        match self.peer_transport_params.max_datagram_frame_size {
+        match self.peer_parameters.effective().max_datagram_frame_size {
             None => None,
             Some(peer_frame_len) => {
                 let dcid = self.destination_id();
@@ -8662,11 +8674,7 @@ impl<F: BufFactory> Connection<F> {
     /// have not yet processed the peer's transport parameters.
     #[must_use = "the returned parameters describe negotiated peer limits"]
     pub const fn peer_transport_params(&self) -> Option<&TransportParams> {
-        if !self.parsed_peer_transport_params {
-            return None;
-        }
-
-        Some(&self.peer_transport_params)
+        self.peer_parameters.negotiated()
     }
 
     /// Returns the peer's raw QUIC transport parameters in wire order.
@@ -8677,8 +8685,9 @@ impl<F: BufFactory> Connection<F> {
     /// lives.
     #[must_use = "the returned bytes contain the peer transport parameter encoding"]
     pub fn peer_transport_params_wire(&self) -> Option<&[u8]> {
-        self.parsed_peer_transport_params
-            .then(|| self.handshake.quic_transport_params())
+        self.peer_parameters
+            .negotiated()
+            .map(|_| self.handshake.quic_transport_params())
     }
 
     /// Collects and returns statistics about each known path for the
@@ -8738,16 +8747,13 @@ impl<F: BufFactory> Connection<F> {
             _ => return Err(Error::InvalidTransportParam),
         }
 
-        self.process_peer_transport_params(peer_params)?;
-
-        self.parsed_peer_transport_params = true;
-
-        Ok(())
+        self.apply_peer_parameters(PeerParameters::Negotiated(peer_params))
     }
 
-    fn process_peer_transport_params(
-        &mut self, peer_params: TransportParams,
+    fn apply_peer_parameters(
+        &mut self, parameters: PeerParameters,
     ) -> Result<()> {
+        let peer_params = parameters.effective();
         self.max_tx_data = peer_params.initial_max_data;
 
         // Update send capacity.
@@ -8786,7 +8792,7 @@ impl<F: BufFactory> Connection<F> {
         self.ids
             .set_source_conn_id_limit(peer_params.active_conn_id_limit);
 
-        self.peer_transport_params = peer_params;
+        self.peer_parameters = parameters;
 
         Ok(())
     }
@@ -8818,7 +8824,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Decode and apply peer parameters once TLS makes them available.
     fn parse_available_peer_transport_params(&mut self) -> Result<()> {
-        if self.parsed_peer_transport_params {
+        if self.peer_parameters.negotiated().is_some() {
             return Ok(());
         }
 
@@ -8955,7 +8961,7 @@ impl<F: BufFactory> Connection<F> {
                    self.handshake.curve(),
                    self.handshake.sigalg(),
                    self.handshake.is_resumed(),
-                   self.peer_transport_params);
+                   self.peer_parameters.effective());
         }
 
         Ok(())
@@ -9041,8 +9047,7 @@ impl<F: BufFactory> Connection<F> {
         let send_path = self.paths.get(send_pid)?;
         if (self.is_established() || self.is_in_early_data()) &&
             (self.should_send_handshake_done() ||
-                self.flow_control.should_update_max_data() ||
-                self.should_send_max_data ||
+                self.flow_control.needs_update() ||
                 self.blocked_limit.is_some() ||
                 self.streams.has_pending_count_control() ||
                 self.dgram_send_queue.has_pending() ||
@@ -9082,7 +9087,7 @@ impl<F: BufFactory> Connection<F> {
         self.streams.get_or_create(
             id,
             &self.local_transport_params,
-            &self.peer_transport_params,
+            self.peer_parameters.effective(),
             local,
             self.is_server,
         )
@@ -9304,7 +9309,7 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         let ack_delay = decode_ack_delay(
             ack_delay,
-            self.peer_transport_params.ack_delay_exponent,
+            self.peer_parameters.effective().ack_delay_exponent,
         )?;
 
         let skip_pn = self.pkt_num_manager.skip_pn();
@@ -9770,7 +9775,7 @@ impl<F: BufFactory> Connection<F> {
         // decided to disable the idle timeout. If both are disabled we should
         // not set any timeout.
         if self.local_transport_params.max_idle_timeout == 0 &&
-            self.peer_transport_params.max_idle_timeout == 0
+            self.peer_parameters.effective().max_idle_timeout == 0
         {
             return None;
         }
@@ -9778,13 +9783,13 @@ impl<F: BufFactory> Connection<F> {
         // If the local endpoint or the peer disabled the idle timeout, use the
         // other peer's value, otherwise use the minimum of the two values.
         let idle_timeout = if self.local_transport_params.max_idle_timeout == 0 {
-            self.peer_transport_params.max_idle_timeout
-        } else if self.peer_transport_params.max_idle_timeout == 0 {
+            self.peer_parameters.effective().max_idle_timeout
+        } else if self.peer_parameters.effective().max_idle_timeout == 0 {
             self.local_transport_params.max_idle_timeout
         } else {
             cmp::min(
                 self.local_transport_params.max_idle_timeout,
-                self.peer_transport_params.max_idle_timeout,
+                self.peer_parameters.effective().max_idle_timeout,
             )
         };
 
@@ -10450,6 +10455,7 @@ pub use crate::path::PathEvent;
 pub use crate::path::PathStats;
 pub use crate::path::SocketAddrIter;
 
+pub use crate::recovery::BbrAckCompensation;
 pub use crate::recovery::BbrBwLoReductionStrategy;
 pub use crate::recovery::BbrParams;
 #[cfg(feature = "internal")]

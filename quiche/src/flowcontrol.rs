@@ -54,6 +54,9 @@ pub struct FlowControl {
 
     /// Last update time of `max_data` for autotuning the window.
     last_update: Option<Instant>,
+
+    /// An update that could not fit or whose transmission was lost.
+    pending_update: bool,
 }
 
 impl FlowControl {
@@ -111,10 +114,32 @@ impl FlowControl {
             .max(self.max_data)
     }
 
+    /// A lost credit advertisement must be sent again even without new data.
+    pub(crate) const fn request_update(&mut self) {
+        self.pending_update = true;
+    }
+
+    pub(crate) fn needs_update(&self) -> bool {
+        self.pending_update || self.should_update_max_data()
+    }
+
+    /// Prepare credit for the next packet. Organic window updates are
+    /// autotuned; retransmission alone never tunes the receive window.
+    pub(crate) fn prepare_update(
+        &mut self, now: Instant, rtt: Duration,
+    ) -> Option<u64> {
+        if self.should_update_max_data() {
+            self.autotune_window(now, rtt);
+            self.request_update();
+        }
+        self.pending_update.then(|| self.max_data_next())
+    }
+
     /// Commits the new `max_data` limit.
     pub fn update_max_data(&mut self, now: Instant) {
         self.max_data = self.max_data_next();
         self.last_update = Some(now);
+        self.pending_update = false;
     }
 
     /// Autotune the window size. When there is an another update
@@ -150,6 +175,30 @@ impl FlowControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pending_credit_survives_failed_emission_and_retransmission() {
+        let now = Instant::now();
+        let rtt = Duration::from_millis(100);
+        let mut fc = FlowControl::new(100, 100, 1000);
+        assert!(!fc.needs_update());
+        fc.request_update();
+        assert_eq!(fc.prepare_update(now, rtt), Some(100));
+        assert!(fc.needs_update());
+        assert_eq!(fc.prepare_update(now, rtt), Some(100));
+        fc.update_max_data(now);
+        assert!(!fc.needs_update());
+
+        fc.add_consumed(60);
+        assert_eq!(fc.prepare_update(now + rtt, rtt), Some(260));
+        assert!(fc.needs_update());
+        fc.update_max_data(now + rtt);
+        assert_eq!(fc.max_data(), 260);
+        assert!(!fc.needs_update());
+        fc.request_update();
+        assert_eq!(fc.prepare_update(now + rtt, rtt), Some(260));
+        assert_eq!(fc.window(), 200);
+    }
 
     #[test]
     fn max_window_in_new() {

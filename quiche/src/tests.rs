@@ -349,7 +349,10 @@ fn stateless_reset_recognizes_rotated_peer_cid_tokens() {
     client
         .ids
         .set_initial_dcid(vec![1, 2, 3].into(), None, Some(0));
-    client.peer_transport_params.stateless_reset_token = Some(initial_token);
+    client.peer_parameters = PeerParameters::Remembered(TransportParams {
+        stateless_reset_token: Some(initial_token),
+        ..TransportParams::default()
+    });
     let mut retired_path_ids = SmallVec::new();
     client
         .ids
@@ -1025,16 +1028,16 @@ fn change_idle_timeout(
 
     let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
     assert_eq!(pipe.client.local_transport_params.max_idle_timeout, 999999);
-    assert_eq!(pipe.client.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.client.peer_parameters.effective().max_idle_timeout, 0);
     assert_eq!(pipe.server.local_transport_params.max_idle_timeout, 0);
-    assert_eq!(pipe.server.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.server.peer_parameters.effective().max_idle_timeout, 0);
 
     pipe.client.set_max_idle_timeout(456000).unwrap();
     pipe.server.set_max_idle_timeout(234000).unwrap();
     assert_eq!(pipe.client.local_transport_params.max_idle_timeout, 456000);
-    assert_eq!(pipe.client.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.client.peer_parameters.effective().max_idle_timeout, 0);
     assert_eq!(pipe.server.local_transport_params.max_idle_timeout, 234000);
-    assert_eq!(pipe.server.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.server.peer_parameters.effective().max_idle_timeout, 0);
 
     assert_eq!(pipe.handshake(), Ok(()));
 
@@ -1224,9 +1227,9 @@ fn handshake_resumption(
     ] {
         let mut rejected =
             test_utils::Pipe::with_server_config(&mut config).unwrap();
-        let original_params = rejected.client.peer_transport_params.clone();
+        let original_params = rejected.client.peer_parameters.clone();
         assert_eq!(rejected.client.set_session(malformed), Err(expected),);
-        assert_eq!(rejected.client.peer_transport_params, original_params);
+        assert_eq!(rejected.client.peer_parameters, original_params);
         rejected.handshake().unwrap();
         assert!(!rejected.client.is_resumed());
         assert!(!rejected.server.is_resumed());
@@ -9873,11 +9876,14 @@ fn large_peer_datagram_limits_do_not_truncate(
     pipe.advance().unwrap();
 
     assert_eq!(
-        pipe.client.peer_transport_params.max_udp_payload_size,
+        pipe.client.peer_parameters.effective().max_udp_payload_size,
         LARGE_LIMIT
     );
     assert_eq!(
-        pipe.client.peer_transport_params.max_datagram_frame_size,
+        pipe.client
+            .peer_parameters
+            .effective()
+            .max_datagram_frame_size,
         Some(LARGE_LIMIT)
     );
     assert_eq!(pipe.client.max_send_udp_payload_size(), 1400);
@@ -11740,7 +11746,7 @@ fn large_advertised_connection_id_limit_preserves_slots(
         .unwrap_or(usize::MAX)
         .min(usize::MAX / 2);
     assert_eq!(
-        pipe.client.peer_transport_params.active_conn_id_limit,
+        pipe.client.peer_parameters.effective().active_conn_id_limit,
         LIMIT
     );
     assert_eq!(pipe.client.scids_left(), limit - 1);
@@ -15526,6 +15532,30 @@ fn alpn_rejects_empty_and_oversized_protocol_lists() {
     }
     assert!(config.set_application_protos_wire_format(&wire).is_err());
     assert_eq!(config.application_protos, previous);
+}
+
+#[test]
+fn remembered_peer_limits_are_not_negotiated_parameters() {
+    let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    assert!(pipe.client.peer_transport_params().is_none());
+    let mut remembered = TransportParams::default();
+    remembered.initial_max_data = 1234;
+    pipe.client
+        .apply_peer_parameters(PeerParameters::Remembered(remembered))
+        .unwrap();
+    assert_eq!(
+        pipe.client.peer_parameters.effective().initial_max_data,
+        1234
+    );
+    assert!(pipe.client.peer_transport_params().is_none());
+    assert!(pipe.client.peer_transport_params_wire().is_none());
+    pipe.handshake().unwrap();
+    assert!(pipe.client.peer_transport_params().is_some());
+    assert!(pipe.client.peer_transport_params_wire().is_some());
+    assert_ne!(
+        pipe.client.peer_parameters.effective().initial_max_data,
+        1234
+    );
 }
 
 #[test]
