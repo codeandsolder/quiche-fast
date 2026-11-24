@@ -3995,88 +3995,76 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    /// Send a request with no body, get a response with one DATA frame.
-    fn request_no_body_response_one_chunk() -> TestResult {
+    #[rstest::rstest]
+    fn message_body_chunks(
+        #[values(false, true)] response: bool, #[values(1, 4)] chunks: usize,
+    ) -> TestResult {
         let mut s = Session::new()?;
         s.handshake()?;
-
-        let (stream, req) = s.send_request(true)?;
+        let (stream, request) = s.send_request(response)?;
         assert_eq!(stream, 0);
 
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: false,
+        let headers = if response {
+            assert_eq!(
+                s.poll_server(),
+                Ok((stream, Event::Headers {
+                    list: request,
+                    more_frames: false,
+                }))
+            );
+            assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+            s.send_response(stream, false)?
+        } else {
+            request
         };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let resp = s.send_response(stream, false)?;
-
-        let body = s.send_body_server(stream, true)?;
-
-        let mut recv_buf = vec![0; body.len()];
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-
-        assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
-        assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(body.len()));
-
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        Ok(())
-    }
-
-    #[test]
-    /// Send a request with no body, get a response with multiple DATA frames.
-    fn request_no_body_response_many_chunks() -> TestResult {
-        let mut s = Session::new()?;
-        s.handshake()?;
-
-        let (stream, req) = s.send_request(true)?;
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let total_data_frames = 4;
-
-        let resp = s.send_response(stream, false)?;
-
-        for _ in 0..total_data_frames - 1 {
-            s.send_body_server(stream, false)?;
+        let mut body = Vec::new();
+        for i in 0..chunks {
+            let fin = i + 1 == chunks;
+            body = if response {
+                s.send_body_server(stream, fin)?
+            } else {
+                s.send_body_client(stream, fin)?
+            };
         }
-
-        let body = s.send_body_server(stream, true)?;
-
-        let mut recv_buf = vec![0; body.len()];
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: true,
+        let (receiver, transport) = if response {
+            (&mut s.client, &mut s.pipe.client)
+        } else {
+            (&mut s.server, &mut s.pipe.server)
         };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-
-        for _ in 0..total_data_frames {
-            assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(body.len()));
+        assert_eq!(
+            receiver.poll(transport),
+            Ok((stream, Event::Headers {
+                list: headers,
+                more_frames: true,
+            }))
+        );
+        assert_eq!(receiver.poll(transport), Ok((stream, Event::Data)));
+        assert_eq!(receiver.poll(transport), Err(Error::Done));
+        let mut received = vec![0; body.len()];
+        for _ in 0..chunks {
+            assert_eq!(
+                receiver.recv_body(transport, stream, &mut received),
+                Ok(body.len())
+            );
+            assert_eq!(received, body);
         }
-
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        assert_eq!(receiver.poll(transport), Ok((stream, Event::Finished)));
+        assert_eq!(
+            receiver.recv_body(transport, stream, &mut received),
+            Err(Error::Done)
+        );
+        assert_eq!(receiver.poll(transport), Err(Error::Done));
+        if !response {
+            let headers = s.send_response(stream, true)?;
+            assert_eq!(
+                s.poll_client(),
+                Ok((stream, Event::Headers {
+                    list: headers,
+                    more_frames: false,
+                }))
+            );
+            assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        }
         Ok(())
     }
 
@@ -4165,87 +4153,6 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
-        Ok(())
-    }
-
-    #[test]
-    /// Send a request with one DATA frame, get a response with no body.
-    fn request_one_chunk_response_no_body() -> TestResult {
-        let mut s = Session::new()?;
-        s.handshake()?;
-
-        let (stream, req) = s.send_request(false)?;
-
-        let body = s.send_body_client(stream, true)?;
-
-        let mut recv_buf = vec![0; body.len()];
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-
-        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
-        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
-
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let resp = s.send_response(stream, true)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
-        Ok(())
-    }
-
-    #[test]
-    /// Send a request with multiple DATA frames, get a response with no body.
-    fn request_many_chunks_response_no_body() -> TestResult {
-        let mut s = Session::new()?;
-        s.handshake()?;
-
-        let (stream, req) = s.send_request(false)?;
-
-        let total_data_frames = 4;
-
-        for _ in 0..total_data_frames - 1 {
-            s.send_body_client(stream, false)?;
-        }
-
-        let body = s.send_body_client(stream, true)?;
-
-        let mut recv_buf = vec![0; body.len()];
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-
-        for _ in 0..total_data_frames {
-            assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
-        }
-
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let resp = s.send_response(stream, true)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         Ok(())
     }
 
@@ -4579,33 +4486,46 @@ mod tests {
         Ok(())
     }
 
+    fn receive_request_headers(s: &mut Session, fin: bool) -> TestResult<u64> {
+        let (stream, headers) = s.send_request(fin)?;
+        assert_eq!(
+            s.poll_server(),
+            Ok((stream, Event::Headers {
+                list: headers,
+                more_frames: !fin,
+            }))
+        );
+        if fin {
+            assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+        }
+        Ok(stream)
+    }
+
+    fn informational_headers() -> (Vec<Header>, Vec<Header>) {
+        (
+            vec![
+                Header::new(b":status", b"103"),
+                Header::new(
+                    b"link",
+                    b"<https://example.com>; rel=\"preconnect\"",
+                ),
+            ],
+            vec![
+                Header::new(b":status", b"200"),
+                Header::new(b"server", b"quiche-test"),
+            ],
+        )
+    }
+
     #[test]
     /// Server responds with a 103, then a 200 with no body.
     fn informational_response() -> TestResult {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        let (stream, req) = s.send_request(true)?;
-
+        let stream = receive_request_headers(&mut s, true)?;
         assert_eq!(stream, 0);
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let info_resp = vec![
-            Header::new(b":status", b"103"),
-            Header::new(b"link", b"<https://example.com>; rel=\"preconnect\""),
-        ];
-
-        let resp = vec![
-            Header::new(b":status", b"200"),
-            Header::new(b"server", b"quiche-test"),
-        ];
+        let (info_resp, resp) = informational_headers();
 
         assert_eq!(
             s.server
@@ -4676,27 +4596,9 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        let (stream, req) = s.send_request(true)?;
-
+        let stream = receive_request_headers(&mut s, true)?;
         assert_eq!(stream, 0);
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        let info_resp = vec![
-            Header::new(b":status", b"103"),
-            Header::new(b"link", b"<https://example.com>; rel=\"preconnect\""),
-        ];
-
-        let resp = vec![
-            Header::new(b":status", b"200"),
-            Header::new(b"server", b"quiche-test"),
-        ];
+        let (info_resp, resp) = informational_headers();
 
         s.server
             .send_response(&mut s.pipe.server, stream, &info_resp, false)?;
@@ -5304,17 +5206,7 @@ mod tests {
     /// Send a `PRIORITY_UPDATE` for request stream from the client that is too
     /// large.
     fn priority_update_request_max_size_limit_default() -> TestResult {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
-        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        config.load_priv_key_from_pem_file("examples/cert.key")?;
-        config.set_application_protos(&[b"h3"])?;
-        config.set_initial_max_data(1500);
-        config.set_initial_max_stream_data_bidi_local(1500);
-        config.set_initial_max_stream_data_bidi_remote(1500);
-        config.set_initial_max_stream_data_uni(1500);
-        config.set_initial_max_streams_bidi(5);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
+        let mut config = symmetric_transport(1500)?;
 
         let h3_config = Config::new();
 
@@ -6128,6 +6020,18 @@ mod tests {
         Ok(())
     }
 
+    fn send_oversized_frame_prefix(s: &mut Session, ty: u64) -> TestResult {
+        let mut data = [42; 128];
+        let mut writer = octets::OctetsMut::with_slice(&mut data);
+        let frame_type = writer.put_varint(ty)?;
+        s.pipe.client.stream_send(0, frame_type, false)?;
+        let frame_len = writer.put_varint(1 << 24)?;
+        s.pipe.client.stream_send(0, frame_len, false)?;
+        s.pipe.client.stream_send(0, &data, false)?;
+        s.advance()?;
+        Ok(())
+    }
+
     #[test]
     /// Tests limits for the stream state buffer maximum size.
     fn max_state_buf_size() -> TestResult {
@@ -6157,18 +6061,7 @@ mod tests {
         assert_eq!(s.server.poll(&mut s.pipe.server), Ok((0, ev_headers)));
 
         // DATA frames don't consume the state buffer, so can be of any size.
-        let mut d = [42; 128];
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-
-        let frame_type = b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
-        s.pipe.client.stream_send(0, frame_type, false)?;
-
-        let frame_len = b.put_varint(1 << 24)?;
-        s.pipe.client.stream_send(0, frame_len, false)?;
-
-        s.pipe.client.stream_send(0, &d, false)?;
-
-        s.advance()?;
+        send_oversized_frame_prefix(&mut s, frame::DATA_FRAME_TYPE_ID)?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Ok((0, Event::Data)));
 
@@ -6176,18 +6069,7 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        let mut d = [42; 128];
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-
-        let frame_type = b.put_varint(148_764_065_110_560_899)?;
-        s.pipe.client.stream_send(0, frame_type, false)?;
-
-        let frame_len = b.put_varint(1 << 24)?;
-        s.pipe.client.stream_send(0, frame_len, false)?;
-
-        s.pipe.client.stream_send(0, &d, false)?;
-
-        s.advance()?;
+        send_oversized_frame_prefix(&mut s, 148_764_065_110_560_899)?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::ExcessiveLoad));
         Ok(())
@@ -6275,17 +6157,7 @@ mod tests {
     /// Tests that the max header list size setting allows larger headers than
     /// default.
     fn request_max_header_size_limit_accepts_large_headers() -> TestResult {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
-        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        config.load_priv_key_from_pem_file("examples/cert.key")?;
-        config.set_application_protos(&[b"h3"])?;
-        config.set_initial_max_data(150_000_000);
-        config.set_initial_max_stream_data_bidi_local(150_000_000);
-        config.set_initial_max_stream_data_bidi_remote(150_000_000);
-        config.set_initial_max_stream_data_uni(150_000_000);
-        config.set_initial_max_streams_bidi(5);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
+        let mut config = symmetric_transport(150_000_000)?;
         config.set_initial_congestion_window_packets(100);
 
         let mut h3_config = Config::new();
@@ -6377,17 +6249,7 @@ mod tests {
     /// Tests that the max header list size setting is enforced when observing
     /// frame size before decode.
     fn request_max_header_size_limit_default_abort_before_decode() -> TestResult {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
-        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
-        config.load_priv_key_from_pem_file("examples/cert.key")?;
-        config.set_application_protos(&[b"h3"])?;
-        config.set_initial_max_data(150_000);
-        config.set_initial_max_stream_data_bidi_local(150_000);
-        config.set_initial_max_stream_data_bidi_remote(150_000);
-        config.set_initial_max_stream_data_uni(150_000);
-        config.set_initial_max_streams_bidi(5);
-        config.set_initial_max_streams_uni(5);
-        config.verify_peer(false);
+        let mut config = symmetric_transport(150_000)?;
 
         let h3_config = Config::new();
 
@@ -6505,24 +6367,20 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        let mut d = [42; 128];
-        let mut b = octets::OctetsMut::with_slice(&mut d);
-
-        let frame_type = b.put_varint(148_764_065_110_560_899)?;
-        s.pipe.client.stream_send(0, frame_type, false)?;
-
-        let frame_len = b.put_varint(1 << 24)?;
-        s.pipe.client.stream_send(0, frame_len, false)?;
-
-        s.pipe.client.stream_send(0, &d, false)?;
-
-        s.advance()?;
+        send_oversized_frame_prefix(&mut s, 148_764_065_110_560_899)?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::ExcessiveLoad));
 
         // Try to call poll() again after an error occurred.
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
         Ok(())
+    }
+
+    fn symmetric_transport(credit: u64) -> TestResult<crate::Config> {
+        let mut config = limited_transport(credit, credit, credit)?;
+        config.set_initial_max_stream_data_uni(credit);
+        config.set_initial_max_streams_bidi(5);
+        Ok(config)
     }
 
     fn limited_transport(
@@ -7779,33 +7637,6 @@ mod tests {
     }
 
     #[test]
-    /// Tests that streams are marked as finished only once.
-    fn finished_once() -> TestResult {
-        let mut s = Session::new()?;
-        s.handshake()?;
-
-        let (stream, req) = s.send_request(false)?;
-        let body = s.send_body_client(stream, true)?;
-
-        let mut recv_buf = vec![0; body.len()];
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
-
-        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-
-        assert_eq!(s.recv_body_server(stream, &mut recv_buf), Err(Error::Done));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        Ok(())
-    }
-
-    #[test]
     /// Tests that the Data event is properly re-armed.
     fn data_event_rearm() -> TestResult {
         let bytes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -8085,6 +7916,31 @@ mod tests {
         Ok(())
     }
 
+    fn exchange_headers(s: &mut Session, response_fin: bool) -> TestResult<u64> {
+        let (stream, req) = s.send_request(false)?;
+        assert_eq!(
+            s.poll_server(),
+            Ok((stream, Event::Headers {
+                list: req,
+                more_frames: true,
+            }))
+        );
+        assert_eq!(s.poll_server(), Err(Error::Done));
+        let resp = s.send_response(stream, response_fin)?;
+        assert_eq!(
+            s.poll_client(),
+            Ok((stream, Event::Headers {
+                list: resp,
+                more_frames: !response_fin,
+            }))
+        );
+        if response_fin {
+            assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        }
+        assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(stream)
+    }
+
     #[test]
     fn reset_stream() -> TestResult {
         let mut buf = vec![0; 65_535];
@@ -8092,28 +7948,7 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        // Client sends request.
-        let (stream, req) = s.send_request(false)?;
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        // Server sends response and closes stream.
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-
-        let resp = s.send_response(stream, true)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        let stream = exchange_headers(&mut s, true)?;
 
         // Client sends RESET_STREAM, closing stream.
         let frames = [crate::frame::Frame::ResetStream {
@@ -8143,28 +7978,7 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        // Client sends request.
-        let (stream, req) = s.send_request(false)?;
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        // Server sends response and closes stream.
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-
-        let resp = s.send_response(stream, true)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: false,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        let stream = exchange_headers(&mut s, true)?;
 
         // Client shuts down stream ==> sends RESET_STREAM
         assert_eq!(
@@ -8183,29 +7997,7 @@ mod tests {
         assert!(s.pipe.server.streams.is_collected(stream));
         assert!(s.pipe.client.streams.is_collected(stream));
 
-        // Client sends another request, server sends response without fin
-        //
-        let (stream, req) = s.send_request(false)?;
-
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        // Check that server has received the request.
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-
-        // Server sends reponse without closing the stream.
-        let resp = s.send_response(stream, false)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        let stream = exchange_headers(&mut s, false)?;
 
         // Client shuts down stream ==> sends RESET_STREAM
         assert_eq!(
@@ -8242,27 +8034,8 @@ mod tests {
         let mut s = Session::new()?;
         s.handshake()?;
 
-        // Client sends request and leaves stream open.
-        let (stream, req) = s.send_request(false)?;
+        let stream = exchange_headers(&mut s, false)?;
 
-        let ev_headers = Event::Headers {
-            list: req,
-            more_frames: true,
-        };
-
-        // Server sends response and leaves stream open.
-        assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-
-        let resp = s.send_response(stream, false)?;
-
-        let ev_headers = Event::Headers {
-            list: resp,
-            more_frames: true,
-        };
-
-        assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
-        assert_eq!(s.poll_client(), Err(Error::Done));
         // Client shuts down read
         assert_eq!(
             s.pipe
