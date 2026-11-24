@@ -1,6 +1,36 @@
-use super::*;
+use std::ffi;
+use std::ptr;
+use std::ptr::NonNull;
+use std::slice;
 
+use libc::c_char;
+use libc::c_int;
 use libc::c_long;
+use libc::c_void;
+
+use crate::crypto;
+use crate::Error;
+use crate::Result;
+
+use super::add_handshake_data;
+use super::flush_flight;
+use super::map_result;
+use super::send_alert;
+use super::set_read_secret;
+use super::set_write_secret;
+#[cfg(test)]
+use super::ssl_private_key_result_t;
+use super::Context;
+use super::Handshake;
+use super::OPENSSL_free;
+use super::SSL_SESSION_free;
+use super::SSL_get_SSL_CTX;
+use super::SSL_set_session;
+use super::SSL;
+use super::SSL_CIPHER;
+use super::SSL_CTX;
+use super::SSL_SESSION;
+use super::STACK_OF;
 
 #[expect(
     non_camel_case_types,
