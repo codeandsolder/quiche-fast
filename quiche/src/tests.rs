@@ -32,6 +32,72 @@ use crate::Header;
 
 use rstest::rstest;
 
+/// Pending control frames survive a full packet and are committed only when
+/// they fit, in the same order as the packet scheduler.
+#[test]
+fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
+    let mut config = test_utils::Pipe::default_config("cubic").unwrap();
+    let mut pipe = test_utils::Pipe::with_config(&mut config).unwrap();
+    assert_eq!(pipe.handshake(), Ok(()));
+    let conn = &mut pipe.client;
+    conn.should_send_max_streams_bidi = true;
+    conn.should_send_max_streams_uni = true;
+    conn.blocked_limit = Some(17);
+    conn.streams_blocked_bidi_state.update_at(3);
+    conn.streams_blocked_uni_state.update_at(4);
+
+    let expected = [
+        frame::Frame::MaxStreamsBidi {
+            max: conn.streams.max_streams_bidi_next(),
+        },
+        frame::Frame::MaxStreamsUni {
+            max: conn.streams.max_streams_uni_next(),
+        },
+        frame::Frame::DataBlocked { limit: 17 },
+        frame::Frame::StreamsBlockedBidi { limit: 3 },
+        frame::Frame::StreamsBlockedUni { limit: 4 },
+    ];
+    let previous_blocked_count = conn.data_blocked_sent_count;
+    for expected_frame in expected {
+        // First try without enough room for any of the pending frames.
+        for capacity in [0, 1, expected_frame.wire_len().unwrap()] {
+            let mut storage = [0; 16];
+            let mut writer =
+                packet::PacketWriter::from_initialized(&mut storage[..capacity]);
+            let mut frames = SmallVec::new();
+            let mut left = capacity;
+            conn.emit_stream_count_control_frames(
+                &mut writer,
+                &mut frames,
+                &mut left,
+            )
+            .unwrap();
+            if capacity < expected_frame.wire_len().unwrap() {
+                assert!(frames.is_empty());
+                assert_eq!(left, capacity);
+                assert_eq!(writer.off(), 0);
+            } else {
+                assert_eq!(
+                    frames.as_slice(),
+                    std::slice::from_ref(&expected_frame)
+                );
+                assert_eq!(left, 0);
+                assert_eq!(writer.off(), capacity);
+            }
+        }
+    }
+    assert!(!conn.should_send_max_streams_bidi);
+    assert!(!conn.should_send_max_streams_uni);
+    assert_eq!(conn.blocked_limit, None);
+    assert_eq!(conn.data_blocked_sent_count, previous_blocked_count + 1);
+    assert!(!conn
+        .streams_blocked_bidi_state
+        .has_pending_stream_blocked_frame());
+    assert!(!conn
+        .streams_blocked_uni_state
+        .has_pending_stream_blocked_frame());
+}
+
 /// A PATH_CHALLENGE must remain queued if its nine-byte response does not
 /// fit in the current packet. Packet construction can then retry later, and
 /// consecutive challenges must keep their original order.

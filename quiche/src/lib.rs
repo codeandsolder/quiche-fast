@@ -4755,7 +4755,6 @@ impl<F: BufFactory> Connection<F> {
         }
 
         let path = self.paths.get_mut(send_pid)?;
-        let flow_control = &mut self.flow_control;
         let pkt_space = &mut self.pkt_num_spaces[epoch];
         let crypto_ctx = &mut self.crypto_ctx[epoch];
 
@@ -4763,7 +4762,7 @@ impl<F: BufFactory> Connection<F> {
         let mut left = path
             .pmtud
             .as_ref()
-            .map_or(b.cap(), |pmtud| cmp::min(pmtud.get_current_mtu(), b.cap()));
+            .map_or(out_len, |pmtud| cmp::min(pmtud.get_current_mtu(), out_len));
 
         // The AEAD overhead at the current encryption level.
         let crypto_overhead = crypto_ctx.crypto_overhead().ok_or(Error::Done)?;
@@ -5046,329 +5045,51 @@ impl<F: BufFactory> Connection<F> {
             }
         }
 
-        let path = self.paths.get_mut(send_pid)?;
-
         if pkt_type == Type::Short && !is_closing {
-            // Create NEW_CONNECTION_ID frames as needed.
-            while let Some(seq_num) = self.ids.next_advertise_new_scid_seq() {
-                let frame = self.ids.get_new_connection_id_frame_for(seq_num)?;
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.ids.mark_advertise_new_scid_seq(seq_num, false);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                } else {
-                    break;
-                }
+            let previous_frame_count = frames.len();
+            self.emit_short_header_control_frames(
+                b,
+                &mut frames,
+                &mut left,
+                send_pid,
+                now,
+            )?;
+            if frames.len() != previous_frame_count {
+                ack_eliciting = true;
+                in_flight = true;
             }
         }
 
-        if pkt_type == Type::Short && !is_closing && path.active() {
-            // Create HANDSHAKE_DONE frame.
-            // self.should_send_handshake_done() but without the need to borrow
-            if self.handshake_completed &&
-                matches!(self.handshake_done, HandshakeDoneState::Pending) &&
-                self.is_server
-            {
-                let frame = frame::Frame::HandshakeDone;
+        let path = self.paths.get_mut(send_pid)?;
+        let crypto_ctx = &mut self.crypto_ctx[epoch];
 
+        // Try to send closure on the active path, unless it is the last path.
+        if let Some(conn_err) = self
+            .local_error
+            .as_ref()
+            .filter(|_| path.active() || n_paths == 1)
+        {
+            let frame = match (conn_err.is_app, pkt_type) {
+                (false, _) => Some(frame::Frame::ConnectionClose {
+                    error_code: conn_err.error_code,
+                    frame_type: 0,
+                    reason: conn_err.reason.clone(),
+                }),
+                (true, Type::Short) => Some(frame::Frame::ApplicationClose {
+                    error_code: conn_err.error_code,
+                    reason: conn_err.reason.clone(),
+                }),
+                (true, _) => None,
+            };
+
+            if let Some(frame) = frame {
                 if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.handshake_done = HandshakeDoneState::InFlight;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create MAX_STREAMS_BIDI frame.
-            if self.streams.should_update_max_streams_bidi() ||
-                self.should_send_max_streams_bidi
-            {
-                let frame = frame::Frame::MaxStreamsBidi {
-                    max: self.streams.max_streams_bidi_next(),
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.streams.update_max_streams_bidi();
-                    self.should_send_max_streams_bidi = false;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create MAX_STREAMS_UNI frame.
-            if self.streams.should_update_max_streams_uni() ||
-                self.should_send_max_streams_uni
-            {
-                let frame = frame::Frame::MaxStreamsUni {
-                    max: self.streams.max_streams_uni_next(),
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.streams.update_max_streams_uni();
-                    self.should_send_max_streams_uni = false;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create DATA_BLOCKED frame.
-            if let Some(limit) = self.blocked_limit {
-                let frame = frame::Frame::DataBlocked { limit };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.blocked_limit = None;
-                    self.data_blocked_sent_count =
-                        self.data_blocked_sent_count.saturating_add(1);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create STREAMS_BLOCKED (bidi) frame when the local endpoint has
-            // exhausted the peer's bidirectional stream count limit.
-            if self
-                .streams_blocked_bidi_state
-                .has_pending_stream_blocked_frame()
-            {
-                if let Some(limit) = self.streams_blocked_bidi_state.blocked_at {
-                    let frame = frame::Frame::StreamsBlockedBidi { limit };
-
-                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                        // Record the limit we just notified the peer about so
-                        // that redundant frames for the same limit are
-                        // suppressed.
-                        self.streams_blocked_bidi_state.blocked_sent =
-                            Some(limit);
-
-                        ack_eliciting = true;
-                        in_flight = true;
-                    }
-                }
-            }
-
-            // Create STREAMS_BLOCKED (uni) frame when the local endpoint has
-            // exhausted the peer's unidirectional stream count limit.
-            if self
-                .streams_blocked_uni_state
-                .has_pending_stream_blocked_frame()
-            {
-                if let Some(limit) = self.streams_blocked_uni_state.blocked_at {
-                    let frame = frame::Frame::StreamsBlockedUni { limit };
-
-                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                        // Record the limit we just notified the peer about so
-                        // that redundant frames for the same limit are
-                        // suppressed.
-                        self.streams_blocked_uni_state.blocked_sent = Some(limit);
-
-                        ack_eliciting = true;
-                        in_flight = true;
-                    }
-                }
-            }
-
-            // Create MAX_STREAM_DATA frames as needed.
-            for stream_id in self.streams.almost_full() {
-                let stream = if let Some(v) = self.streams.get_mut(stream_id) {
-                    v
-                } else {
-                    // The stream doesn't exist anymore, so remove it from
-                    // the almost full set.
-                    self.streams.remove_almost_full(stream_id);
-                    continue;
-                };
-
-                // Autotune the stream window size, but only if this is not a
-                // retransmission (on a retransmit the stream will be in
-                // `self.streams.almost_full()` but it's `almost_full()`
-                // method returns false.
-                if stream.recv.almost_full() {
-                    stream.recv.autotune_window(now, path.recovery.rtt());
-                }
-
-                let frame = frame::Frame::MaxStreamData {
-                    stream_id,
-                    max: stream.recv.max_data_next(),
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    let recv_win = stream.recv.window();
-
-                    stream.recv.update_max_data(now);
-
-                    self.streams.remove_almost_full(stream_id);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-
-                    // Make sure the connection window always has some
-                    // room compared to the stream window.
-                    // Keep the connection window 50% larger, using exact
-                    // integer arithmetic rather than rounding a wire offset.
-                    flow_control.ensure_window_lower_bound(
-                        recv_win.saturating_add(recv_win / 2),
-                    );
-                }
-            }
-
-            // Create MAX_DATA frame as needed.
-            if flow_control.should_update_max_data() &&
-                flow_control.max_data() < flow_control.max_data_next()
-            {
-                // Autotune the connection window size. We only tune the window
-                // if we are sending an "organic" update, not on retransmits.
-                flow_control.autotune_window(now, path.recovery.rtt());
-                self.should_send_max_data = true;
-            }
-
-            if self.should_send_max_data {
-                let frame = frame::Frame::MaxData {
-                    max: flow_control.max_data_next(),
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.should_send_max_data = false;
-
-                    // Commits the new max_rx_data limit.
-                    flow_control.update_max_data(now);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create STOP_SENDING frames as needed.
-            for (stream_id, error_code) in self
-                .streams
-                .stopped()
-                .map(|(&k, &v)| (k, v))
-                .collect::<Vec<(u64, u64)>>()
-            {
-                let frame = frame::Frame::StopSending {
-                    stream_id,
-                    error_code,
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.streams.remove_stopped(stream_id);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create RESET_STREAM frames as needed.
-            for (stream_id, (error_code, final_size)) in self
-                .streams
-                .reset()
-                .map(|(&k, &v)| (k, v))
-                .collect::<Vec<(u64, (u64, u64))>>()
-            {
-                let frame = frame::Frame::ResetStream {
-                    stream_id,
-                    error_code,
-                    final_size,
-                };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.streams.remove_reset(stream_id);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create STREAM_DATA_BLOCKED frames as needed.
-            for (stream_id, limit) in self
-                .streams
-                .blocked()
-                .map(|(&k, &v)| (k, v))
-                .collect::<Vec<(u64, u64)>>()
-            {
-                let frame = frame::Frame::StreamDataBlocked { stream_id, limit };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.streams.remove_blocked(stream_id);
-                    self.stream_data_blocked_sent_count =
-                        self.stream_data_blocked_sent_count.saturating_add(1);
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                }
-            }
-
-            // Create RETIRE_CONNECTION_ID frames as needed.
-            let retire_dcid_seqs = self.ids.retire_dcid_seqs();
-
-            for seq_num in retire_dcid_seqs {
-                // The sequence number specified in a RETIRE_CONNECTION_ID frame
-                // MUST NOT refer to the Destination Connection ID field of the
-                // packet in which the frame is contained.
-                let dcid_seq = path.active_dcid_seq.ok_or(Error::InvalidState)?;
-
-                if seq_num == dcid_seq {
-                    continue;
-                }
-
-                let frame = frame::Frame::RetireConnectionId { seq_num };
-
-                if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                    self.ids.mark_retire_dcid_seq(seq_num, false)?;
-
-                    ack_eliciting = true;
-                    in_flight = true;
-                } else {
-                    break;
-                }
-            }
-        }
-
-        // Create CONNECTION_CLOSE frame. Try to send this only on the active
-        // path, unless it is the last one available.
-        if path.active() || n_paths == 1 {
-            if let Some(conn_err) = self.local_error.as_ref() {
-                if conn_err.is_app {
-                    // Create ApplicationClose frame.
-                    if pkt_type == Type::Short {
-                        let frame = frame::Frame::ApplicationClose {
-                            error_code: conn_err.error_code,
-                            reason: conn_err.reason.clone(),
-                        };
-
-                        if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                            let pto = path.recovery.pto();
-                            self.lifecycle = ConnectionLifecycle::Draining {
-                                deadline: now + (pto * 3),
-                                origin: CloseOrigin::Local,
-                            };
-
-                            ack_eliciting = true;
-                            in_flight = true;
-                        }
-                    }
-                } else {
-                    // Create ConnectionClose frame.
-                    let frame = frame::Frame::ConnectionClose {
-                        error_code: conn_err.error_code,
-                        frame_type: 0,
-                        reason: conn_err.reason.clone(),
+                    self.lifecycle = ConnectionLifecycle::Draining {
+                        deadline: now + (path.recovery.pto() * 3),
+                        origin: CloseOrigin::Local,
                     };
-
-                    if push_frame_to_pkt(b, &mut frames, frame, &mut left)? {
-                        let pto = path.recovery.pto();
-                        self.lifecycle = ConnectionLifecycle::Draining {
-                            deadline: now + (pto * 3),
-                            origin: CloseOrigin::Local,
-                        };
-
-                        ack_eliciting = true;
-                        in_flight = true;
-                    }
+                    ack_eliciting = true;
+                    in_flight = true;
                 }
             }
         }
@@ -5906,6 +5627,287 @@ impl<F: BufFactory> Connection<F> {
         }
 
         Ok((pkt_type, written))
+    }
+
+    /// Emit connection control frames in their wire scheduling order.
+    fn emit_short_header_control_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+        send_pid: usize, now: Instant,
+    ) -> Result<()> {
+        let path = self.paths.get(send_pid)?;
+        let active = path.active();
+        let rtt = path.recovery.rtt();
+        let active_dcid_seq = path.active_dcid_seq;
+
+        // Create NEW_CONNECTION_ID frames as needed.
+        while let Some(seq_num) = self.ids.next_advertise_new_scid_seq() {
+            let frame = self.ids.get_new_connection_id_frame_for(seq_num)?;
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.ids.mark_advertise_new_scid_seq(seq_num, false);
+            } else {
+                break;
+            }
+        }
+
+        if active {
+            self.emit_stream_count_control_frames(b, frames, left)?;
+            self.emit_receive_credit_frames(b, frames, left, now, rtt)?;
+            self.emit_stream_signal_frames(b, frames, left)?;
+            self.emit_retired_dcid_frames(b, frames, left, active_dcid_seq)?;
+        }
+
+        Ok(())
+    }
+
+    fn emit_stream_count_control_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+    ) -> Result<()> {
+        // Create HANDSHAKE_DONE frame.
+        if self.should_send_handshake_done() {
+            let frame = frame::Frame::HandshakeDone;
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.handshake_done = HandshakeDoneState::InFlight;
+            }
+        }
+
+        // Create MAX_STREAMS_BIDI frame.
+        if self.streams.should_update_max_streams_bidi() ||
+            self.should_send_max_streams_bidi
+        {
+            let frame = frame::Frame::MaxStreamsBidi {
+                max: self.streams.max_streams_bidi_next(),
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.streams.update_max_streams_bidi();
+                self.should_send_max_streams_bidi = false;
+            }
+        }
+
+        // Create MAX_STREAMS_UNI frame.
+        if self.streams.should_update_max_streams_uni() ||
+            self.should_send_max_streams_uni
+        {
+            let frame = frame::Frame::MaxStreamsUni {
+                max: self.streams.max_streams_uni_next(),
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.streams.update_max_streams_uni();
+                self.should_send_max_streams_uni = false;
+            }
+        }
+
+        // Create DATA_BLOCKED frame.
+        if let Some(limit) = self.blocked_limit {
+            let frame = frame::Frame::DataBlocked { limit };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.blocked_limit = None;
+                self.data_blocked_sent_count =
+                    self.data_blocked_sent_count.saturating_add(1);
+            }
+        }
+
+        // Create STREAMS_BLOCKED (bidi) frame when the local endpoint has
+        // exhausted the peer's bidirectional stream count limit.
+        if self
+            .streams_blocked_bidi_state
+            .has_pending_stream_blocked_frame()
+        {
+            if let Some(limit) = self.streams_blocked_bidi_state.blocked_at {
+                let frame = frame::Frame::StreamsBlockedBidi { limit };
+
+                if push_frame_to_pkt(b, frames, frame, left)? {
+                    // Record the limit we just notified the peer about so
+                    // that redundant frames for the same limit are
+                    // suppressed.
+                    self.streams_blocked_bidi_state.blocked_sent = Some(limit);
+                }
+            }
+        }
+
+        // Create STREAMS_BLOCKED (uni) frame when the local endpoint has
+        // exhausted the peer's unidirectional stream count limit.
+        if self
+            .streams_blocked_uni_state
+            .has_pending_stream_blocked_frame()
+        {
+            if let Some(limit) = self.streams_blocked_uni_state.blocked_at {
+                let frame = frame::Frame::StreamsBlockedUni { limit };
+
+                if push_frame_to_pkt(b, frames, frame, left)? {
+                    // Record the limit we just notified the peer about so
+                    // that redundant frames for the same limit are
+                    // suppressed.
+                    self.streams_blocked_uni_state.blocked_sent = Some(limit);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_receive_credit_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize, now: Instant,
+        rtt: Duration,
+    ) -> Result<()> {
+        // Create MAX_STREAM_DATA frames as needed.
+        for stream_id in self.streams.almost_full() {
+            let Some(stream) = self.streams.get_mut(stream_id) else {
+                // The stream doesn't exist anymore, so remove it from
+                // the almost full set.
+                self.streams.remove_almost_full(stream_id);
+                continue;
+            };
+
+            // Autotune the stream window size, but only if this is not a
+            // retransmission (on a retransmit the stream will be in
+            // `self.streams.almost_full()` but it's `almost_full()`
+            // method returns false.
+            if stream.recv.almost_full() {
+                stream.recv.autotune_window(now, rtt);
+            }
+
+            let frame = frame::Frame::MaxStreamData {
+                stream_id,
+                max: stream.recv.max_data_next(),
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                let recv_win = stream.recv.window();
+
+                stream.recv.update_max_data(now);
+
+                self.streams.remove_almost_full(stream_id);
+
+                // Make sure the connection window always has some
+                // room compared to the stream window.
+                // Keep the connection window 50% larger, using exact
+                // integer arithmetic rather than rounding a wire offset.
+                self.flow_control.ensure_window_lower_bound(
+                    recv_win.saturating_add(recv_win / 2),
+                );
+            }
+        }
+
+        // Create MAX_DATA frame as needed.
+        if self.flow_control.should_update_max_data() &&
+            self.flow_control.max_data() < self.flow_control.max_data_next()
+        {
+            // Autotune the connection window size. We only tune the window
+            // if we are sending an "organic" update, not on retransmits.
+            self.flow_control.autotune_window(now, rtt);
+            self.should_send_max_data = true;
+        }
+
+        if self.should_send_max_data {
+            let frame = frame::Frame::MaxData {
+                max: self.flow_control.max_data_next(),
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.should_send_max_data = false;
+
+                // Commits the new max_rx_data limit.
+                self.flow_control.update_max_data(now);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_stream_signal_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+    ) -> Result<()> {
+        // Create STOP_SENDING frames as needed.
+        for (stream_id, error_code) in self
+            .streams
+            .stopped()
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<(u64, u64)>>()
+        {
+            let frame = frame::Frame::StopSending {
+                stream_id,
+                error_code,
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.streams.remove_stopped(stream_id);
+            }
+        }
+
+        // Create RESET_STREAM frames as needed.
+        for (stream_id, (error_code, final_size)) in self
+            .streams
+            .reset()
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<(u64, (u64, u64))>>()
+        {
+            let frame = frame::Frame::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.streams.remove_reset(stream_id);
+            }
+        }
+
+        // Create STREAM_DATA_BLOCKED frames as needed.
+        for (stream_id, limit) in self
+            .streams
+            .blocked()
+            .map(|(&k, &v)| (k, v))
+            .collect::<Vec<(u64, u64)>>()
+        {
+            let frame = frame::Frame::StreamDataBlocked { stream_id, limit };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.streams.remove_blocked(stream_id);
+                self.stream_data_blocked_sent_count =
+                    self.stream_data_blocked_sent_count.saturating_add(1);
+            }
+        }
+
+        Ok(())
+    }
+
+    fn emit_retired_dcid_frames(
+        &mut self, b: &mut packet::PacketWriter<'_>,
+        frames: &mut SmallVec<[frame::Frame; 1]>, left: &mut usize,
+        active_dcid_seq: Option<u64>,
+    ) -> Result<()> {
+        // Create RETIRE_CONNECTION_ID frames as needed.
+        let retire_dcid_seqs = self.ids.retire_dcid_seqs();
+
+        for seq_num in retire_dcid_seqs {
+            // The sequence number specified in a RETIRE_CONNECTION_ID frame
+            // MUST NOT refer to the Destination Connection ID field of the
+            // packet in which the frame is contained.
+            let dcid_seq = active_dcid_seq.ok_or(Error::InvalidState)?;
+
+            if seq_num == dcid_seq {
+                continue;
+            }
+
+            let frame = frame::Frame::RetireConnectionId { seq_num };
+
+            if push_frame_to_pkt(b, frames, frame, left)? {
+                self.ids.mark_retire_dcid_seq(seq_num, false)?;
+            } else {
+                break;
+            }
+        }
+
+        Ok(())
     }
 
     fn on_packet_sent(
