@@ -704,7 +704,7 @@ impl BBRv2NetworkModel {
     /// The start time of the most recently confirmed persistent RTT jump
     /// episode, if any.
     #[cfg(test)]
-    pub(super) fn last_persistent_jump_time(&self) -> Option<Instant> {
+    pub(super) const fn last_persistent_jump_time(&self) -> Option<Instant> {
         self.rtt_jump_detector.last_persistent_jump_time()
     }
 

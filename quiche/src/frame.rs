@@ -1744,27 +1744,40 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn max_data() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxData { max: 128_318_273 };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn max_stream_data() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreamData {
+    #[rstest::rstest]
+    #[case::max_data(Frame::MaxData { max: 128_318_273 }, 5)]
+    #[case::max_stream_data(Frame::MaxStreamData {
             stream_id: 12_321,
             max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT])?;
-        Ok(())
+        }, 7)]
+    #[case::max_streams_bidi(Frame::MaxStreams {
+            direction: StreamDirection::Bidirectional,
+            max: 128_318_273,
+        }, 5)]
+    #[case::max_streams_uni(Frame::MaxStreams {
+            direction: StreamDirection::Unidirectional,
+            max: 128_318_273,
+        }, 5)]
+    #[case::data_blocked(Frame::DataBlocked { limit: 128_318_273 }, 5)]
+    #[case::stream_data_blocked(Frame::StreamDataBlocked {
+            stream_id: 12_321,
+            limit: 128_318_273,
+        }, 7)]
+    #[case::streams_blocked_bidi(Frame::StreamsBlocked {
+            direction: StreamDirection::Bidirectional,
+            limit: 128_318_273,
+        }, 5)]
+    #[case::streams_blocked_uni(Frame::StreamsBlocked {
+            direction: StreamDirection::Unidirectional,
+            limit: 128_318_273,
+        }, 5)]
+    fn flow_control_frame_roundtrips(
+        #[case] frame: Frame, #[case] expected_len: usize,
+    ) -> Result<()> {
+        let mut wire = [42; 128];
+        assert_roundtrip(&frame, &mut wire, expected_len, &[
+            packet::Type::ZeroRTT,
+        ])
     }
 
     #[test]
@@ -1794,84 +1807,6 @@ mod tests {
                 );
             }
         }
-        Ok(())
-    }
-
-    #[test]
-    fn max_streams_bidi() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreams {
-            direction: StreamDirection::Bidirectional,
-            max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn max_streams_uni() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreams {
-            direction: StreamDirection::Unidirectional,
-            max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn data_blocked() -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::DataBlocked { limit: 128_318_273 };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn stream_data_blocked() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamDataBlocked {
-            stream_id: 12_321,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn streams_blocked_bidi(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamsBlocked {
-            direction: StreamDirection::Bidirectional,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
-        Ok(())
-    }
-
-    #[test]
-    fn streams_blocked_uni() -> std::result::Result<(), Box<dyn std::error::Error>>
-    {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamsBlocked {
-            direction: StreamDirection::Unidirectional,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT])?;
         Ok(())
     }
 

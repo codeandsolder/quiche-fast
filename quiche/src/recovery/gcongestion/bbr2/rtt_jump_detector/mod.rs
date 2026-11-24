@@ -29,6 +29,12 @@ use std::time::Instant;
 
 use crate::recovery::gcongestion::BbrRttJumpDetector;
 
+/// Retain the minimum observed RTT until a detector explicitly resets its
+/// baseline.
+fn record_minimum_baseline(baseline: &mut Option<Duration>, sample: Duration) {
+    *baseline = Some(baseline.map_or(sample, |minimum| minimum.min(sample)));
+}
+
 mod global_min;
 mod hmm;
 
@@ -122,7 +128,7 @@ impl RttJumpDetector {
 
     /// Whether an RTT jump episode is currently active.
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         match &self.detector {
             ActiveRttJumpDetector::Disabled => false,
             ActiveRttJumpDetector::GlobalMin(detector) =>
@@ -133,7 +139,7 @@ impl RttJumpDetector {
 
     /// Whether the current RTT jump episode has been confirmed as persistent.
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         match &self.detector {
             ActiveRttJumpDetector::Disabled => false,
             ActiveRttJumpDetector::GlobalMin(detector) =>

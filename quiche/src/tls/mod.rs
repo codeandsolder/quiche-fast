@@ -1450,7 +1450,7 @@ mod tests {
 
     #[test]
     fn offered_alpn_selection_preserves_peer_order_and_validates_entire_list(
-    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let supported = vec![b"h3".to_vec(), b"hq".to_vec()];
         let offered = b"\x02hq\x02h3";
         let selected = select_offered_alpn(offered, &supported)

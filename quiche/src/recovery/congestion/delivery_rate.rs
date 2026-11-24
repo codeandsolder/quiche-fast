@@ -257,14 +257,14 @@ mod tests {
         let baseline = u64::from(u32::MAX) - 100;
         r.congestion.delivery_rate.delivered = baseline;
         let interval = Duration::from_millis(100);
-        helper_send_and_ack_packets(&mut r, 0..2, now, interval, mss);
+        helper_send_and_ack_packets(&mut r, 0..2, now, interval, mss)?;
         let delivered = 2 * mss as u64;
         assert_eq!(r.congestion.delivery_rate.delivered(), baseline + delivered);
         assert_eq!(
             r.delivery_rate(),
             Bandwidth::from_bytes_and_time_delta(delivered, interval)
         );
-        helper_send_and_ack_packets(&mut r, 2..4, now + interval, interval, mss);
+        helper_send_and_ack_packets(&mut r, 2..4, now + interval, interval, mss)?;
         assert_eq!(
             r.congestion.delivery_rate.delivered(),
             baseline + 2 * delivered
@@ -294,7 +294,7 @@ mod tests {
 
         // Generate a delivery-rate sample from the first batch.
         let rtt = Duration::from_secs(2);
-        helper_send_and_ack_packets(&mut r, 0..4, now, rtt, mss);
+        helper_send_and_ack_packets(&mut r, 0..4, now, rtt, mss)?;
 
         // Mark `Rate` as app-limited.
         r.delivery_rate_update_app_limited(true);
@@ -307,7 +307,7 @@ mod tests {
 
         // Send and acknowledge the second batch to generate another sample.
         now += rtt;
-        helper_send_and_ack_packets(&mut r, 4..8, now, rtt, mss);
+        helper_send_and_ack_packets(&mut r, 4..8, now, rtt, mss)?;
 
         // `Rate` is no longer app-limited after sending a packet beyond
         // `end_of_app_limited`.
@@ -335,7 +335,7 @@ mod tests {
 
         // Generate a delivery-rate sample from the first batch.
         let mut rtt = Duration::from_secs(2);
-        helper_send_and_ack_packets(&mut r, 0..2, now, rtt, mss);
+        helper_send_and_ack_packets(&mut r, 0..2, now, rtt, mss)?;
 
         // Mark `Rate` as app-limited.
         r.delivery_rate_update_app_limited(true);
@@ -352,7 +352,7 @@ mod tests {
         // the app-limited sample.
         now += rtt;
         rtt = Duration::from_secs(4);
-        helper_send_and_ack_packets(&mut r, 2..4, now, rtt, mss);
+        helper_send_and_ack_packets(&mut r, 2..4, now, rtt, mss)?;
 
         // `Rate` is no longer app-limited after sending a packet beyond
         // `end_of_app_limited`.
@@ -378,7 +378,7 @@ mod tests {
         // previous value even while app-limited.
         now += rtt;
         rtt = Duration::from_secs(1);
-        helper_send_and_ack_packets(&mut r, 4..6, now, rtt, mss);
+        helper_send_and_ack_packets(&mut r, 4..6, now, rtt, mss)?;
 
         // `Rate` is no longer app-limited after sending a packet beyond
         // `end_of_app_limited`.
