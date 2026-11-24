@@ -704,6 +704,24 @@ fn parse_priority_update(
 mod tests {
     use super::*;
 
+    fn round_trip(
+        frame: &Frame, frame_type: u64, payload_len: usize, header_len: usize,
+    ) -> Result<Result<Frame>> {
+        let mut storage = vec![0x2a; header_len + payload_len];
+        let written =
+            frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut storage))?;
+        assert_eq!(written, header_len + payload_len);
+        let mut wire = octets::Octets::with_slice(&storage);
+        assert_eq!(wire.get_varint()?, frame_type);
+        assert_eq!(wire.get_varint()?, payload_len as u64);
+        assert_eq!(wire.off(), header_len);
+        Ok(Frame::from_bytes(
+            frame_type,
+            payload_len as u64,
+            &storage[header_len..],
+        ))
+    }
+
     #[cfg(feature = "qlog")]
     #[test]
     fn qlog_settings_preserve_order_and_omit_absent_values() {
@@ -739,7 +757,7 @@ mod tests {
     }
 
     #[test]
-    fn frame_encoding_does_not_write_partial_frames() {
+    fn frame_encoding_does_not_write_partial_frames() -> Result<()> {
         // All variants must leave both the cursor and caller's buffer intact
         // if the frame cannot be written in full. Test every truncation
         // boundary, including a pre-existing nonzero writer offset.
@@ -782,14 +800,13 @@ mod tests {
         ];
         for frame in frames {
             let mut full = [0xA5; 512];
-            let total = frame
-                .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))
-                .unwrap();
+            let total =
+                frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut full))?;
             for capacity in 0..total {
                 let mut storage = [0xA5; 512];
                 let mut writer =
-                    octets::OctetsMut::with_slice(&mut storage[..1 + capacity]);
-                writer.put_u8(0x5A).unwrap();
+                    octets::OctetsMut::with_slice(&mut storage[..=capacity]);
+                writer.put_u8(0x5A)?;
                 assert_eq!(
                     frame.to_bytes(&mut writer),
                     Err(super::super::Error::BufferTooShort),
@@ -804,10 +821,11 @@ mod tests {
                 assert!(storage[1..].iter().all(|&byte| byte == 0xA5));
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn payload_varint_width_transitions_are_atomic() {
+    fn payload_varint_width_transitions_are_atomic() -> Result<()> {
         for len in [0, 63, 64, 16_383, 16_384] {
             let payload = vec![0x31; len];
             for frame in [
@@ -825,8 +843,7 @@ mod tests {
             ] {
                 let mut full = vec![0xA5; len + 32];
                 let total = frame
-                    .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))
-                    .unwrap();
+                    .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))?;
                 for available in [0, 1, total - 1] {
                     let mut storage = vec![0xA5; available];
                     let mut writer = octets::OctetsMut::with_slice(&mut storage);
@@ -840,6 +857,7 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 
     #[test]
@@ -869,90 +887,66 @@ mod tests {
     }
 
     #[test]
-    fn data() {
-        let mut d = [42; 128];
-
+    fn data() -> Result<()> {
         let payload = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let frame_payload_len = payload.len();
         let frame_header_len = 2;
 
         let frame = Frame::Data { payload };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 DATA_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn headers() {
-        let mut d = [42; 128];
-
+    fn headers() -> Result<()> {
         let header_block = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let frame_payload_len = header_block.len();
         let frame_header_len = 2;
 
         let frame = Frame::Headers { header_block };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 HEADERS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn cancel_push() {
-        let mut d = [42; 128];
-
+    fn cancel_push() -> Result<()> {
         let frame = Frame::CancelPush { push_id: 0 };
 
         let frame_payload_len = 1;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 CANCEL_PUSH_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_reject_duplicate_wire_identifiers() {
+    fn settings_reject_duplicate_wire_identifiers() -> Result<()> {
         for id in [
             SETTINGS_MAX_FIELD_SECTION_SIZE,
             SETTINGS_QPACK_MAX_TABLE_CAPACITY,
@@ -965,10 +959,10 @@ mod tests {
         ] {
             let mut bytes = [0; 32];
             let mut out = octets::OctetsMut::with_slice(&mut bytes);
-            out.put_varint(id).unwrap();
-            out.put_varint(0).unwrap();
-            out.put_varint_with_len(id, 8).unwrap();
-            out.put_varint(1).unwrap();
+            out.put_varint(id)?;
+            out.put_varint(0)?;
+            out.put_varint_with_len(id, 8)?;
+            out.put_varint(1)?;
             let len = out.off();
             assert_eq!(
                 Frame::from_bytes(
@@ -980,35 +974,34 @@ mod tests {
                 "duplicate {id}"
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn standard_datagram_setting_takes_precedence_in_either_order() {
+    fn standard_datagram_setting_takes_precedence_in_either_order() -> Result<()>
+    {
         for bytes in [[0x42, 0x76, 1, 0x33, 0], [0x33, 0, 0x42, 0x76, 1]] {
             let parsed = Frame::from_bytes(
                 SETTINGS_FRAME_TYPE_ID,
                 bytes.len() as u64,
                 &bytes,
-            )
-            .unwrap();
+            )?;
             assert!(matches!(parsed, Frame::Settings {
                 h3_datagram: Some(0),
                 ..
             }));
         }
         let parsed =
-            Frame::from_bytes(SETTINGS_FRAME_TYPE_ID, 3, &[0x42, 0x76, 1])
-                .unwrap();
+            Frame::from_bytes(SETTINGS_FRAME_TYPE_ID, 3, &[0x42, 0x76, 1])?;
         assert!(matches!(parsed, Frame::Settings {
             h3_datagram: Some(1),
             ..
         }));
+        Ok(())
     }
 
     #[test]
-    fn settings_all_no_grease() {
-        let mut d = [42; 128];
-
+    fn settings_all_no_grease() -> Result<()> {
         let raw_settings = vec![
             (SETTINGS_MAX_FIELD_SECTION_SIZE, 0),
             (SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0),
@@ -1032,28 +1025,20 @@ mod tests {
         let frame_payload_len = 13;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_all_grease() {
-        let mut d = [42; 128];
-
+    fn settings_all_grease() -> Result<()> {
         let frame = Frame::Settings {
             max_field_section_size: Some(0),
             qpack_max_table_capacity: Some(0),
@@ -1061,7 +1046,7 @@ mod tests {
             connect_protocol_enabled: Some(0),
             h3_datagram: Some(0),
             grease: Some((33, 33)),
-            raw: Default::default(),
+            raw: None,
             additional_settings: None,
         };
 
@@ -1091,28 +1076,20 @@ mod tests {
         let frame_payload_len = 15;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame_parsed
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame_parsed),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_h3_only() {
-        let mut d = [42; 128];
-
+    fn settings_h3_only() -> Result<()> {
         let raw_settings = vec![(SETTINGS_MAX_FIELD_SECTION_SIZE, 1024)];
 
         let frame = Frame::Settings {
@@ -1129,28 +1106,20 @@ mod tests {
         let frame_payload_len = 3;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_h3_connect_protocol_enabled() {
-        let mut d = [42; 128];
-
+    fn settings_h3_connect_protocol_enabled() -> Result<()> {
         let raw_settings = vec![(SETTINGS_ENABLE_CONNECT_PROTOCOL, 1)];
 
         let frame = Frame::Settings {
@@ -1167,28 +1136,20 @@ mod tests {
         let frame_payload_len = 2;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_h3_connect_protocol_enabled_bad() {
-        let mut d = [42; 128];
-
+    fn settings_h3_connect_protocol_enabled_bad() -> Result<()> {
         let raw_settings = vec![(SETTINGS_ENABLE_CONNECT_PROTOCOL, 9)];
 
         let frame = Frame::Settings {
@@ -1205,27 +1166,20 @@ mod tests {
         let frame_payload_len = 2;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Err(crate::h3::Error::InvalidSettings),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_h3_dgram_only() {
-        let mut d = [42; 128];
-
+    fn settings_h3_dgram_only() -> Result<()> {
         let raw_settings =
             vec![(SETTINGS_H3_DATAGRAM_00, 1), (SETTINGS_H3_DATAGRAM, 1)];
 
@@ -1243,28 +1197,20 @@ mod tests {
         let frame_payload_len = 5;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_h3_dgram_bad() {
-        let mut d = [42; 128];
-
+    fn settings_h3_dgram_bad() -> Result<()> {
         let frame = Frame::Settings {
             max_field_section_size: None,
             qpack_max_table_capacity: None,
@@ -1272,34 +1218,27 @@ mod tests {
             connect_protocol_enabled: None,
             h3_datagram: Some(5),
             grease: None,
-            raw: Default::default(),
+            raw: None,
             additional_settings: None,
         };
 
         let frame_payload_len = 5;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Err(crate::h3::Error::InvalidSettings),
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_qpack_only() {
-        let mut d = [42; 128];
-
+    fn settings_qpack_only() -> Result<()> {
         let raw_settings = vec![
             (SETTINGS_QPACK_MAX_TABLE_CAPACITY, 0),
             (SETTINGS_QPACK_BLOCKED_STREAMS, 0),
@@ -1319,120 +1258,45 @@ mod tests {
         let frame_payload_len = 4;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
     fn settings_h2_prohibited() {
-        // Test prohibited values manually because the quiche API cannot create
-        // them. `d[frame_header_len]` contains the SETTINGS type.
-        let frame_payload_len = 2u64;
-        let frame_header_len = 2;
-        let mut d = [
-            SETTINGS_FRAME_TYPE_ID as u8,
-            frame_payload_len as u8,
-            0x0,
-            1,
-        ];
-
-        assert_eq!(
-            Frame::from_bytes(
-                SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
-        );
-
-        d[frame_header_len] = 0x2;
-
-        assert_eq!(
-            Frame::from_bytes(
-                SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
-        );
-
-        d[frame_header_len] = 0x3;
-
-        assert_eq!(
-            Frame::from_bytes(
-                SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
-        );
-
-        d[frame_header_len] = 0x4;
-
-        assert_eq!(
-            Frame::from_bytes(
-                SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
-        );
-
-        d[frame_header_len] = 0x5;
-
-        assert_eq!(
-            Frame::from_bytes(
-                SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len,
-                &d[frame_header_len..]
-            ),
-            Err(crate::h3::Error::InvalidSettings)
-        );
+        for prohibited in [0, 2, 3, 4, 5] {
+            assert_eq!(
+                Frame::from_bytes(SETTINGS_FRAME_TYPE_ID, 2, &[prohibited, 1]),
+                Err(crate::h3::Error::InvalidSettings),
+                "prohibited setting {prohibited}",
+            );
+        }
     }
 
     #[test]
     fn settings_too_big() {
-        // We need to test a SETTINGS frame that exceeds
-        // MAX_SETTINGS_PAYLOAD_SIZE, so just craft a special buffer that look
-        // likes the frame. The payload content doesn't matter since quiche
-        // should abort before then.
-        let frame_payload_len = MAX_SETTINGS_PAYLOAD_SIZE + 1;
-        let frame_header_len = 2;
-        let d = [
-            SETTINGS_FRAME_TYPE_ID as u8,
-            frame_payload_len as u8,
-            0x1,
-            1,
-        ];
-
+        // Payload content is immaterial: reject the oversized declaration
+        // before reading a setting.
         assert_eq!(
             Frame::from_bytes(
                 SETTINGS_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
+                (MAX_SETTINGS_PAYLOAD_SIZE + 1) as u64,
+                &[1, 1]
             ),
-            Err(crate::h3::Error::ExcessiveLoad)
+            Err(crate::h3::Error::ExcessiveLoad),
         );
     }
 
     #[test]
-    fn push_promise() {
-        let mut d = [42; 128];
-
+    fn push_promise() -> Result<()> {
         let header_block = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let frame_payload_len = 1 + header_block.len();
         let frame_header_len = 2;
@@ -1442,26 +1306,20 @@ mod tests {
             header_block,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 PUSH_PROMISE_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn push_promise_non_minimal_varint() {
+    fn push_promise_non_minimal_varint() -> Result<()> {
         // A regression test for a bug handling varints in frame processing.
 
         // Value 37 minimally encodes as 1 byte [0x25]. Non-minimal
@@ -1474,66 +1332,50 @@ mod tests {
             PUSH_PROMISE_FRAME_TYPE_ID,
             payload_length,
             &payload,
-        )
-        .expect("non-minimal varint was parsed correctly");
+        )?;
         assert_eq!(frame, Frame::PushPromise {
             push_id: 37,
             header_block: header_block.to_vec(),
         });
+        Ok(())
     }
 
     #[test]
-    fn goaway() {
-        let mut d = [42; 128];
-
+    fn goaway() -> Result<()> {
         let frame = Frame::GoAway { id: 32 };
 
         let frame_payload_len = 1;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 GOAWAY_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn max_push_id() {
-        let mut d = [42; 128];
-
+    fn max_push_id() -> Result<()> {
         let frame = Frame::MaxPushId { push_id: 128 };
 
         let frame_payload_len = 2;
         let frame_header_len = 2;
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 MAX_PUSH_FRAME_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
@@ -1554,9 +1396,7 @@ mod tests {
     }
 
     #[test]
-    fn priority_update_request() {
-        let mut d = [42; 128];
-
+    fn priority_update_request() -> Result<()> {
         let prioritized_element_id = 4;
         let priority_field_value = b"abcdefghijklm".to_vec();
         let frame_payload_len = 1 + priority_field_value.len();
@@ -1567,28 +1407,20 @@ mod tests {
             priority_field_value,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn priority_update_push() {
-        let mut d = [42; 128];
-
+    fn priority_update_push() -> Result<()> {
         let prioritized_element_id = 6;
         let priority_field_value = b"abcdefghijklm".to_vec();
         let frame_payload_len = 1 + priority_field_value.len();
@@ -1599,26 +1431,20 @@ mod tests {
             priority_field_value,
         };
 
-        let wire_len = {
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            frame.to_bytes(&mut b).unwrap()
-        };
-
-        assert_eq!(wire_len, frame_header_len + frame_payload_len);
-
         assert_eq!(
-            Frame::from_bytes(
+            round_trip(
+                &frame,
                 PRIORITY_UPDATE_FRAME_PUSH_TYPE_ID,
-                frame_payload_len as u64,
-                &d[frame_header_len..]
-            )
-            .unwrap(),
-            frame
+                frame_payload_len,
+                frame_header_len
+            )?,
+            Ok(frame),
         );
+        Ok(())
     }
 
     #[test]
-    fn priority_update_non_minimal_varint() {
+    fn priority_update_non_minimal_varint() -> Result<()> {
         // A regression test for a bug handling varints in frame processing.
 
         // Value 37 minimally encodes as 1 byte [0x25]. Non-minimal
@@ -1632,13 +1458,13 @@ mod tests {
             PRIORITY_UPDATE_FRAME_REQUEST_TYPE_ID,
             payload_length,
             &payload,
-        )
-        .expect("non-minimal varint was parsed correctly");
+        )?;
 
         assert_eq!(frame, Frame::PriorityUpdateRequest {
             prioritized_element_id: 37,
             priority_field_value: priority_field.to_vec(),
         });
+        Ok(())
     }
 
     #[test]
