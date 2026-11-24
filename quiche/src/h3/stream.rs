@@ -1810,8 +1810,8 @@ mod tests {
         assert_eq!(stream.state, State::FramePayload);
         assert_eq!(stream.state_buf.capacity(), MAX_STATE_BUF_ALLOC_SIZE);
         assert!(stream.state_buf.is_empty());
-        let offset = usize::try_from(cursor.position())
-            .map_err(|_| Error::InternalError)?;
+        let offset =
+            usize::try_from(cursor.position()).map_err(|_| Error::Internal)?;
         assert_eq!(offset, 5);
         Ok((
             stream,
