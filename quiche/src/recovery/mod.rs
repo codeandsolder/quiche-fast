@@ -910,7 +910,7 @@ mod tests {
 
     fn assert_application_ack(
         recovery: &mut Recovery, ranges: &[std::ops::Range<u64>], delay: u64,
-        now: Instant, expected: OnAckReceivedOutcome,
+        now: Instant, expected: &OnAckReceivedOutcome,
     ) -> Result<()> {
         let mut acked = RangeSet::default();
         for range in ranges {
@@ -926,7 +926,7 @@ mod tests {
                 None,
                 ""
             )?,
-            expected
+            *expected
         );
         Ok(())
     }
@@ -1004,10 +1004,10 @@ mod tests {
         let now = start + between_thresholds;
         assert_application_ack(
             &mut recovery,
-            &[1..2],
+            std::slice::from_ref(&(1..2)),
             25,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 1,
                 lost_bytes: 1000,
                 acked_bytes: 1000,
@@ -1020,10 +1020,10 @@ mod tests {
         // The late ACK of packet 0 is spurious; the policies now diverge.
         assert_application_ack(
             &mut recovery,
-            &[0..1],
+            std::slice::from_ref(&(0..1)),
             25,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 0,
@@ -1354,12 +1354,18 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Only the first 2 packets are acked.
-        assert_application_ack(&mut r, &[0..2], 25, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 2 * 1000,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(0..2)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 2 * 1000,
+                spurious_losses: 0,
+            },
+        )?;
 
         assert_application_flight(&r, 2, 2000, Duration::from_millis(10));
         assert_eq!(r.lost_count(), 0);
@@ -1402,12 +1408,18 @@ mod tests {
         now += Duration::from_millis(10);
 
         // PTO packets are acked.
-        assert_application_ack(&mut r, &[4..6], 25, now, OnAckReceivedOutcome {
-            lost_packets: 2,
-            lost_bytes: 2000,
-            acked_bytes: 2 * 1000,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(4..6)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 2,
+                lost_bytes: 2000,
+                acked_bytes: 2 * 1000,
+                spurious_losses: 0,
+            },
+        )?;
 
         assert_application_flight(&r, 4, 0, Duration::from_millis(40));
 
@@ -1482,7 +1494,7 @@ mod tests {
             &[0..2, 3..4],
             25,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 3 * 1000,
@@ -1548,12 +1560,18 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Recieve reordered ACKs, i.e. pkt_num [2, 3]
-        assert_application_ack(&mut r, &[2..4], 25, now, OnAckReceivedOutcome {
-            lost_packets: 1,
-            lost_bytes: 1000,
-            acked_bytes: 1000 * 2,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(2..4)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 1,
+                lost_bytes: 1000,
+                acked_bytes: 1000 * 2,
+                spurious_losses: 0,
+            },
+        )?;
         // Since we only remove packets from the back to avoid compaction, the
         // send length remains the same after receiving reordered ACKs
         assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
@@ -1564,12 +1582,18 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Recieve remaining ACKs, i.e. pkt_num [0, 1]
-        assert_application_ack(&mut r, &[0..2], 25, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 1000,
-            spurious_losses: 1,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(0..2)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 1000,
+                spurious_losses: 1,
+            },
+        )?;
         assert_application_flight(&r, 0, 0, Duration::from_millis(20));
 
         // Spurious loss.
@@ -1625,12 +1649,18 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //     ^
-        assert_application_ack(&mut r, &[3..4], 25, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 1000,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(3..4)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 1000,
+                spurious_losses: 0,
+            },
+        )?;
 
         // Wait for and additional `plus_overhead` to trigger loss based on the
         // new time threshold.
@@ -1640,12 +1670,18 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //     x  ^
-        assert_application_ack(&mut r, &[4..5], 25, now, OnAckReceivedOutcome {
-            lost_packets: 1,
-            lost_bytes: 1000,
-            acked_bytes: 1000,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(4..5)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 1,
+                lost_bytes: 1000,
+                acked_bytes: 1000,
+                spurious_losses: 0,
+            },
+        )?;
         Ok(())
     }
 
@@ -1676,12 +1712,18 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //     ^
-        assert_application_ack(&mut r, &[3..4], 25, now, OnAckReceivedOutcome {
-            lost_packets: 1,
-            lost_bytes: 1000,
-            acked_bytes: 1000,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(3..4)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 1,
+                lost_bytes: 1000,
+                acked_bytes: 1000,
+                spurious_losses: 0,
+            },
+        )?;
         // Thresholds after 2nd loss.
         assert_eq!(r.pkt_thresh(), None);
         assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
@@ -1694,12 +1736,18 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //  ^  x
-        assert_application_ack(&mut r, &[2..3], 25, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 0,
-            spurious_losses: 1,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(2..3)),
+            25,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 0,
+                spurious_losses: 1,
+            },
+        )?;
         // Thresholds after 2nd spurious loss.
         //
         // Time threshold overhead should double.
@@ -1774,10 +1822,10 @@ mod tests {
 
         assert_application_ack(
             &mut r,
-            &[0..10],
+            std::slice::from_ref(&(0..10)),
             10,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 12000,
@@ -1872,10 +1920,10 @@ mod tests {
 
         assert_application_ack(
             &mut r,
-            &[10..11],
+            std::slice::from_ref(&(10..11)),
             0,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 6000,
@@ -1890,10 +1938,10 @@ mod tests {
 
         assert_application_ack(
             &mut r,
-            &[11..12],
+            std::slice::from_ref(&(11..12)),
             0,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 6000,
@@ -1923,10 +1971,10 @@ mod tests {
 
         assert_application_ack(
             &mut r,
-            &[12..13],
+            std::slice::from_ref(&(12..13)),
             0,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 1000,
@@ -2016,12 +2064,18 @@ mod tests {
         // Wait 1 rtt for ACK.
         now += rtt;
 
-        assert_application_ack(&mut r, &[0..2], 10, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 2400,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(0..2)),
+            10,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 2400,
+                spurious_losses: 0,
+            },
+        )?;
 
         assert_application_flight(&r, 0, 0, rtt);
         assert_eq!(r.rtt(), rtt);
@@ -2242,7 +2296,7 @@ mod tests {
             &[0..1, 2..3],
             25,
             now,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 2 * 1000,
@@ -2546,10 +2600,10 @@ mod tests {
         let interval = Duration::from_secs(10);
         assert_application_ack(
             &mut r,
-            &[0..10],
+            std::slice::from_ref(&(0..10)),
             25,
             now + interval,
-            OnAckReceivedOutcome {
+            &OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: total_bytes_sent,
@@ -2612,12 +2666,18 @@ mod tests {
         // Wait 1 rtt for ACK.
         now += rtt;
 
-        assert_application_ack(&mut r, &[0..3], 10, now, OnAckReceivedOutcome {
-            lost_packets: 0,
-            lost_bytes: 0,
-            acked_bytes: 3600,
-            spurious_losses: 0,
-        })?;
+        assert_application_ack(
+            &mut r,
+            std::slice::from_ref(&(0..3)),
+            10,
+            now,
+            &OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 3600,
+                spurious_losses: 0,
+            },
+        )?;
 
         assert_application_flight(&r, 0, 0, rtt);
         assert_eq!(r.rtt(), rtt);
@@ -2652,10 +2712,10 @@ mod tests {
 
             assert_application_ack(
                 &mut r,
-                &[iter..(iter + 1)],
+                std::slice::from_ref(&(iter..(iter + 1))),
                 10,
                 now,
-                OnAckReceivedOutcome {
+                &OnAckReceivedOutcome {
                     lost_packets: 0,
                     lost_bytes: 0,
                     acked_bytes: 0,
