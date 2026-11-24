@@ -25,6 +25,7 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::ffi;
+use std::mem::offset_of;
 use std::mem::MaybeUninit;
 use std::ptr;
 use std::slice;
@@ -123,6 +124,45 @@ use crate::SocketAddrIter;
 use crate::StreamIter;
 use crate::TxBufferTrackingState;
 use crate::Type;
+
+// These values are properties of the target socket ABI, not runtime
+// inputs. Prove representability and storage layout during compilation.
+#[cfg(not(windows))]
+const IPV4_FAMILY: sa_family_t = {
+    assert!(AF_INET >= 0 && AF_INET <= sa_family_t::MAX as c_int);
+    AF_INET as sa_family_t
+};
+#[cfg(not(windows))]
+const IPV6_FAMILY: sa_family_t = {
+    assert!(AF_INET6 >= 0 && AF_INET6 <= sa_family_t::MAX as c_int);
+    AF_INET6 as sa_family_t
+};
+#[cfg(windows)]
+const IPV4_FAMILY: sa_family_t = AF_INET;
+#[cfg(windows)]
+const IPV6_FAMILY: sa_family_t = AF_INET6;
+
+const IPV4_ADDR_LEN: socklen_t = {
+    assert!(size_of::<sockaddr_in>() <= socklen_t::MAX as usize);
+    size_of::<sockaddr_in>() as socklen_t
+};
+const IPV6_ADDR_LEN: socklen_t = {
+    assert!(size_of::<sockaddr_in6>() <= socklen_t::MAX as usize);
+    size_of::<sockaddr_in6>() as socklen_t
+};
+
+const _: () = {
+    assert!(size_of::<sockaddr_in>() <= size_of::<sockaddr_storage>());
+    assert!(size_of::<sockaddr_in6>() <= size_of::<sockaddr_storage>());
+    assert!(align_of::<sockaddr_in>() <= align_of::<sockaddr_storage>());
+    assert!(align_of::<sockaddr_in6>() <= align_of::<sockaddr_storage>());
+    assert!(
+        offset_of!(sockaddr, sa_family) == offset_of!(sockaddr_in, sin_family)
+    );
+    assert!(
+        offset_of!(sockaddr, sa_family) == offset_of!(sockaddr_in6, sin6_family)
+    );
+};
 
 const FFI_ERR_INVALID_ARGUMENT: i16 = -24;
 
@@ -2731,11 +2771,8 @@ unsafe fn std_addr_from_c(
     // SAFETY: both accepted layouts contain sa_family at the sockaddr offset;
     // the caller guarantees the corresponding field is readable.
     let family = unsafe { (&raw const (*addr).sa_family).read() };
-    // `AF_INET` is a c_int on Unix but an ADDRESS_FAMILY (u16) on Windows.
-    // Normalize both the incoming family and the platform constants before
-    // comparing; no lossy narrowing or inferred match-pattern types.
-    match c_int::from(family) {
-        found if found == c_int::from(AF_INET) => {
+    match family {
+        IPV4_FAMILY => {
             let in4 = addr.cast::<sockaddr_in>();
             if len != size_of::<sockaddr_in>() || !in4.is_aligned() {
                 return Err(());
@@ -2771,7 +2808,7 @@ unsafe fn std_addr_from_c(
             Ok(out.into())
         },
 
-        found if found == c_int::from(AF_INET6) => {
+        IPV6_FAMILY => {
             let in6 = addr.cast::<sockaddr_in6>();
             if len != size_of::<sockaddr_in6>() || !in6.is_aligned() {
                 return Err(());
@@ -2824,7 +2861,6 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
 
     let len = match addr {
         SocketAddr::V4(addr) => {
-            let sa_len = size_of::<sockaddr_in>();
             let out_in = (&raw mut out).cast::<sockaddr_in>();
 
             let s_addr = u32::from_ne_bytes(addr.ip().octets());
@@ -2837,8 +2873,7 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             };
 
             let address = sockaddr_in {
-                sin_family: sa_family_t::try_from(AF_INET)
-                    .expect("IPv4 family fits sa_family_t"),
+                sin_family: IPV4_FAMILY,
 
                 sin_addr,
 
@@ -2851,8 +2886,10 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
                     target_os = "openbsd",
                     target_os = "netbsd"
                 ))]
-                sin_len: u8::try_from(sa_len)
-                    .expect("sockaddr_in size fits in u8"),
+                sin_len: const {
+                    assert!(size_of::<sockaddr_in>() <= u8::MAX as usize);
+                    size_of::<sockaddr_in>() as u8
+                },
 
                 sin_port,
 
@@ -2862,12 +2899,10 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             // SAFETY: sockaddr_storage has sufficient size and alignment
             // for sockaddr_in; the raw pointer comes from this local object.
             unsafe { out_in.write(address) };
-            socklen_t::try_from(sa_len)
-                .expect("socket address size fits socklen_t")
+            IPV4_ADDR_LEN
         },
 
         SocketAddr::V6(addr) => {
-            let sa_len = size_of::<sockaddr_in6>();
             let out_in6 = (&raw mut out).cast::<sockaddr_in6>();
 
             #[cfg(not(windows))]
@@ -2882,8 +2917,7 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             };
 
             let address = sockaddr_in6 {
-                sin6_family: sa_family_t::try_from(AF_INET6)
-                    .expect("IPv6 family fits sa_family_t"),
+                sin6_family: IPV6_FAMILY,
 
                 sin6_addr,
 
@@ -2896,8 +2930,10 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
                     target_os = "openbsd",
                     target_os = "netbsd"
                 ))]
-                sin6_len: u8::try_from(sa_len)
-                    .expect("sockaddr_in6 size fits in u8"),
+                sin6_len: const {
+                    assert!(size_of::<sockaddr_in6>() <= u8::MAX as usize);
+                    size_of::<sockaddr_in6>() as u8
+                },
 
                 sin6_port: sin_port,
 
@@ -2914,8 +2950,7 @@ fn std_addr_to_c(addr: &SocketAddr) -> (sockaddr_storage, socklen_t) {
             // SAFETY: sockaddr_storage has sufficient size and alignment
             // for sockaddr_in6; the raw pointer comes from this local object.
             unsafe { out_in6.write(address) };
-            socklen_t::try_from(sa_len)
-                .expect("socket address size fits socklen_t")
+            IPV6_ADDR_LEN
         },
     };
     (out, len)
@@ -3539,6 +3574,38 @@ mod tests {
             ),
             ssize_t::from(FFI_ERR_INVALID_ARGUMENT)
         );
+    }
+
+    #[test]
+    fn socket_address_layout_roundtrips_both_families() {
+        let cases = [
+            (
+                SocketAddr::V4(SocketAddrV4::new(
+                    Ipv4Addr::new(192, 0, 2, 1),
+                    65535,
+                )),
+                IPV4_FAMILY,
+                IPV4_ADDR_LEN,
+            ),
+            (
+                SocketAddr::V6(SocketAddrV6::new(
+                    Ipv6Addr::LOCALHOST,
+                    12345,
+                    0x12345678,
+                    42,
+                )),
+                IPV6_FAMILY,
+                IPV6_ADDR_LEN,
+            ),
+        ];
+        for (address, family, expected_len) in cases {
+            let (storage, len) = std_addr_to_c(&address);
+            assert_eq!(len, expected_len);
+            let ptr = (&raw const storage).cast::<sockaddr>();
+            // SAFETY: std_addr_to_c initialized this supported sockaddr layout.
+            assert_eq!(unsafe { (&raw const (*ptr).sa_family).read() }, family);
+            assert_eq!(unsafe { std_addr_from_c(ptr, len) }, Ok(address));
+        }
     }
 
     #[test]
