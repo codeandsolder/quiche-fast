@@ -906,6 +906,133 @@ mod tests {
         Ok(cfg)
     }
 
+    const REORDER_THRESHOLD_GAP: Duration = Duration::from_millis(30);
+
+    fn assert_application_ack(
+        recovery: &mut Recovery, ranges: &[std::ops::Range<u64>], delay: u64,
+        now: Instant, expected: OnAckReceivedOutcome,
+    ) -> Result<()> {
+        let mut acked = RangeSet::default();
+        for range in ranges {
+            acked.insert(range.clone());
+        }
+        assert_eq!(
+            recovery.on_ack_received(
+                &acked,
+                delay,
+                packet::Epoch::Application,
+                HandshakeStatus::default(),
+                now,
+                None,
+                ""
+            )?,
+            expected
+        );
+        Ok(())
+    }
+
+    fn assert_application_flight(
+        recovery: &Recovery, packets: usize, bytes: usize, duration: Duration,
+    ) {
+        assert_eq!(
+            recovery.sent_packets_len(packet::Epoch::Application),
+            packets
+        );
+        assert_eq!(recovery.bytes_in_flight(), bytes);
+        assert_eq!(recovery.bytes_in_flight_duration(), duration);
+    }
+
+    fn assert_lost_history_drained(
+        recovery: &mut Recovery, now: Instant, cc_algorithm_name: &str,
+    ) -> TestResult {
+        assert_eq!(
+            recovery.detect_lost_packets_for_test(
+                packet::Epoch::Application,
+                now + recovery.rtt()
+            ),
+            (0, 0)
+        );
+        assert_eq!(recovery.sent_packets_len(packet::Epoch::Application), 0);
+        if matches!(cc_algorithm_name, "reno" | "cubic") {
+            assert_eq!(
+                recovery
+                    .startup_exit()
+                    .ok_or("expected startup exit observation")?
+                    .reason,
+                StartupExitReason::Loss
+            );
+        } else {
+            assert_eq!(recovery.startup_exit(), None);
+        }
+        Ok(())
+    }
+
+    fn reordering_after_spurious_loss(
+        cc_algorithm_name: &str, relaxed: bool,
+    ) -> TestResult<(Recovery, Instant, Duration)> {
+        let mut cfg = recovery_config(cc_algorithm_name)?;
+        cfg.set_enable_relaxed_loss_threshold(relaxed);
+        let start = Instant::now();
+        let mut recovery = Recovery::new(&cfg);
+        assert_eq!(recovery.rtt(), DEFAULT_INITIAL_RTT);
+
+        let initial_threshold =
+            DEFAULT_INITIAL_RTT.mul_f64(INITIAL_TIME_THRESHOLD);
+        let reordered_threshold =
+            DEFAULT_INITIAL_RTT.mul_f64(PACKET_REORDER_TIME_THRESHOLD);
+        let between_thresholds = initial_threshold + REORDER_THRESHOLD_GAP;
+        assert!(between_thresholds > initial_threshold);
+        assert!(between_thresholds < reordered_threshold);
+        assert!(between_thresholds + REORDER_THRESHOLD_GAP > reordered_threshold);
+
+        for i in 0..6 {
+            let sent = start + i * between_thresholds;
+            recovery.on_packet_sent(
+                test_utils::helper_packet_sent(i.into(), sent, 1000),
+                packet::Epoch::Application,
+                HandshakeStatus::default(),
+                sent,
+                "",
+            );
+        }
+        assert_eq!(recovery.sent_packets_len(packet::Epoch::Application), 6);
+        assert_eq!(recovery.bytes_in_flight(), 6 * 1000);
+        assert_eq!(recovery.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
+        assert_eq!(recovery.time_thresh(), INITIAL_TIME_THRESHOLD);
+
+        // Ack packet 1 after the initial time threshold, declaring 0 lost.
+        let now = start + between_thresholds;
+        assert_application_ack(
+            &mut recovery,
+            &[1..2],
+            25,
+            now,
+            OnAckReceivedOutcome {
+                lost_packets: 1,
+                lost_bytes: 1000,
+                acked_bytes: 1000,
+                spurious_losses: 0,
+            },
+        )?;
+        assert_eq!(recovery.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
+        assert_eq!(recovery.time_thresh(), INITIAL_TIME_THRESHOLD);
+
+        // The late ACK of packet 0 is spurious; the policies now diverge.
+        assert_application_ack(
+            &mut recovery,
+            &[0..1],
+            25,
+            now,
+            OnAckReceivedOutcome {
+                lost_packets: 0,
+                lost_bytes: 0,
+                acked_bytes: 0,
+                spurious_losses: 1,
+            },
+        )?;
+        Ok((recovery, now, between_thresholds))
+    }
+
     #[test]
     fn spurious_packet_threshold_excludes_local_gaps() {
         assert_eq!(spurious_packet_threshold(9, 3, &[2, 4, 7, 10]), 5);
@@ -1227,30 +1354,14 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Only the first 2 packets are acked.
-        let mut acked = RangeSet::default();
-        acked.insert(0..2);
+        assert_application_ack(&mut r, &[0..2], 25, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 2 * 1000,
+            spurious_losses: 0,
+        })?;
 
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 2 * 1000,
-                spurious_losses: 0,
-            }
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(10));
+        assert_application_flight(&r, 2, 2000, Duration::from_millis(10));
         assert_eq!(r.lost_count(), 0);
 
         // Wait until loss detection timer expires.
@@ -1273,9 +1384,7 @@ mod tests {
             now,
             "",
         );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(30));
+        assert_application_flight(&r, 3, 3000, Duration::from_millis(30));
 
         let p = sent_fixture(5, now, 1000, PacketFlight::AckEliciting);
 
@@ -1286,62 +1395,25 @@ mod tests {
             now,
             "",
         );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 4000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(30));
+        assert_application_flight(&r, 4, 4000, Duration::from_millis(30));
         assert_eq!(r.lost_count(), 0);
 
         // Wait for 10ms.
         now += Duration::from_millis(10);
 
         // PTO packets are acked.
-        let mut acked = RangeSet::default();
-        acked.insert(4..6);
+        assert_application_ack(&mut r, &[4..6], 25, now, OnAckReceivedOutcome {
+            lost_packets: 2,
+            lost_bytes: 2000,
+            acked_bytes: 2 * 1000,
+            spurious_losses: 0,
+        })?;
 
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 2,
-                lost_bytes: 2000,
-                acked_bytes: 2 * 1000,
-                spurious_losses: 0,
-            }
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(40));
+        assert_application_flight(&r, 4, 0, Duration::from_millis(40));
 
         assert_eq!(r.lost_count(), 2);
 
-        // Wait 1 RTT.
-        now += r.rtt();
-
-        assert_eq!(
-            r.detect_lost_packets_for_test(packet::Epoch::Application, now),
-            (0, 0)
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        if cc_algorithm_name == "reno" || cc_algorithm_name == "cubic" {
-            assert!(r.startup_exit().is_some());
-            assert_eq!(
-                r.startup_exit()
-                    .ok_or("expected startup exit observation")?
-                    .reason,
-                StartupExitReason::Loss
-            );
-        } else {
-            assert_eq!(r.startup_exit(), None);
-        }
+        assert_lost_history_drained(&mut r, now, cc_algorithm_name)?;
         Ok(())
     }
 
@@ -1405,31 +1477,20 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Only the first 2 packets and the last one are acked.
-        let mut acked = RangeSet::default();
-        acked.insert(0..2);
-        acked.insert(3..4);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[0..2, 3..4],
+            25,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 3 * 1000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(10));
+        assert_application_flight(&r, 2, 1000, Duration::from_millis(10));
         assert_eq!(r.lost_count(), 0);
 
         // Wait until loss detection timer expires.
@@ -1441,32 +1502,11 @@ mod tests {
         r.on_loss_detection_timeout(HandshakeStatus::default(), now, "");
         assert_eq!(r.loss_probes(packet::Epoch::Application), 0);
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_micros(11250));
+        assert_application_flight(&r, 2, 0, Duration::from_micros(11250));
 
         assert_eq!(r.lost_count(), 1);
 
-        // Wait 1 RTT.
-        now += r.rtt();
-
-        assert_eq!(
-            r.detect_lost_packets_for_test(packet::Epoch::Application, now),
-            (0, 0)
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        if cc_algorithm_name == "reno" || cc_algorithm_name == "cubic" {
-            assert!(r.startup_exit().is_some());
-            assert_eq!(
-                r.startup_exit()
-                    .ok_or("expected startup exit observation")?
-                    .reason,
-                StartupExitReason::Loss
-            );
-        } else {
-            assert_eq!(r.startup_exit(), None);
-        }
+        assert_lost_history_drained(&mut r, now, cc_algorithm_name)?;
         Ok(())
     }
 
@@ -1496,34 +1536,24 @@ mod tests {
             );
 
             let pkt_count = usize::try_from(i + 1)?;
-            assert_eq!(r.sent_packets_len(packet::Epoch::Application), pkt_count);
-            assert_eq!(r.bytes_in_flight(), pkt_count * 1000);
-            assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+            assert_application_flight(
+                &r,
+                pkt_count,
+                pkt_count * 1000,
+                Duration::ZERO,
+            );
         }
 
         // Wait for 10ms after sending.
         now += Duration::from_millis(10);
 
         // Recieve reordered ACKs, i.e. pkt_num [2, 3]
-        let mut acked = RangeSet::default();
-        acked.insert(2..4);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 1,
-                lost_bytes: 1000,
-                acked_bytes: 1000 * 2,
-                spurious_losses: 0,
-            }
-        );
+        assert_application_ack(&mut r, &[2..4], 25, now, OnAckReceivedOutcome {
+            lost_packets: 1,
+            lost_bytes: 1000,
+            acked_bytes: 1000 * 2,
+            spurious_losses: 0,
+        })?;
         // Since we only remove packets from the back to avoid compaction, the
         // send length remains the same after receiving reordered ACKs
         assert_eq!(r.sent_packets_len(packet::Epoch::Application), 4);
@@ -1534,28 +1564,13 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Recieve remaining ACKs, i.e. pkt_num [0, 1]
-        let mut acked = RangeSet::default();
-        acked.insert(0..2);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 1000,
-                spurious_losses: 1,
-            }
-        );
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(20));
+        assert_application_ack(&mut r, &[0..2], 25, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 1000,
+            spurious_losses: 1,
+        })?;
+        assert_application_flight(&r, 0, 0, Duration::from_millis(20));
 
         // Spurious loss.
         assert_eq!(r.lost_count(), 1);
@@ -1597,110 +1612,8 @@ mod tests {
     fn time_thresholds_on_reordering(
         #[values("bbr2_gcongestion")] cc_algorithm_name: &str,
     ) -> TestResult {
-        const THRESH_GAP: Duration = Duration::from_millis(30);
-
-        let cfg = recovery_config(cc_algorithm_name)?;
-
-        let mut now = Instant::now();
-        let mut r = Recovery::new(&cfg);
-        assert_eq!(r.rtt(), DEFAULT_INITIAL_RTT);
-
-        // Choose times around the threshold to test its increase.
-        //
-        // ```
-        //              between_thresh_ms
-        //                         |
-        //    initial_thresh_ms    |     spurious_thresh_ms
-        //      v                  v             v
-        // --------------------------------------------------
-        //      | ................ | ..................... |
-        //            THRESH_GAP         THRESH_GAP
-        // ```
-        //
-        // Threshold gap time.
-        // Initial time theshold based on inital RTT.
-        let initial_thresh_ms =
-            DEFAULT_INITIAL_RTT.mul_f64(INITIAL_TIME_THRESHOLD);
-        // The time threshold after spurious loss.
-        let spurious_thresh_ms: Duration =
-            DEFAULT_INITIAL_RTT.mul_f64(PACKET_REORDER_TIME_THRESHOLD);
-        // Time between the two thresholds
-        let between_thresh_ms = initial_thresh_ms + THRESH_GAP;
-        assert!(between_thresh_ms > initial_thresh_ms);
-        assert!(between_thresh_ms < spurious_thresh_ms);
-        assert!(between_thresh_ms + THRESH_GAP > spurious_thresh_ms);
-
-        for i in 0..6 {
-            let send_time = now + i * between_thresh_ms;
-
-            let p = test_utils::helper_packet_sent(i.into(), send_time, 1000);
-            r.on_packet_sent(
-                p,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                send_time,
-                "",
-            );
-        }
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 6);
-        assert_eq!(r.bytes_in_flight(), 6 * 1000);
-        assert_eq!(r.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
-        assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
-
-        // Wait for `between_thresh_ms` after sending to trigger loss based on
-        // loss threshold.
-        now += between_thresh_ms;
-
-        // Ack packet: 1
-        //
-        // [0, 1, 2, 3, 4, 5]
-        //     ^
-        let mut acked = RangeSet::default();
-        acked.insert(1..2);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 1,
-                lost_bytes: 1000,
-                acked_bytes: 1000,
-                spurious_losses: 0,
-            }
-        );
-        assert_eq!(r.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
-        assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
-
-        // Ack packet: 0
-        //
-        // [0, 1, 2, 3, 4, 5]
-        //  ^  x
-        let mut acked = RangeSet::default();
-        acked.insert(0..1);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 0,
-                spurious_losses: 1,
-            }
-        );
+        let (mut r, mut now, between_thresh_ms) =
+            reordering_after_spurious_loss(cc_algorithm_name, false)?;
         // The time_thresh after spurious loss
         assert_eq!(r.time_thresh(), PACKET_REORDER_TIME_THRESHOLD);
 
@@ -1712,53 +1625,27 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //     ^
-        let mut acked = RangeSet::default();
-        acked.insert(3..4);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 1000,
-                spurious_losses: 0,
-            }
-        );
+        assert_application_ack(&mut r, &[3..4], 25, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 1000,
+            spurious_losses: 0,
+        })?;
 
         // Wait for and additional `plus_overhead` to trigger loss based on the
         // new time threshold.
-        now += THRESH_GAP;
+        now += REORDER_THRESHOLD_GAP;
 
         // Ack packet: 4
         //
         // [2, 3, 4, 5]
         //     x  ^
-        let mut acked = RangeSet::default();
-        acked.insert(4..5);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 1,
-                lost_bytes: 1000,
-                acked_bytes: 1000,
-                spurious_losses: 0,
-            }
-        );
+        assert_application_ack(&mut r, &[4..5], 25, now, OnAckReceivedOutcome {
+            lost_packets: 1,
+            lost_bytes: 1000,
+            acked_bytes: 1000,
+            spurious_losses: 0,
+        })?;
         Ok(())
     }
 
@@ -1768,112 +1655,8 @@ mod tests {
     fn relaxed_thresholds_on_reordering(
         #[values("bbr2_gcongestion")] cc_algorithm_name: &str,
     ) -> TestResult {
-        const THRESH_GAP: Duration = Duration::from_millis(30);
-
-        let mut cfg = recovery_config(cc_algorithm_name)?;
-        cfg.set_enable_relaxed_loss_threshold(true);
-
-        let mut now = Instant::now();
-        let mut r = Recovery::new(&cfg);
-        assert_eq!(r.rtt(), DEFAULT_INITIAL_RTT);
-
-        // Choose times around the threshold to test its increase.
-        //
-        // ```
-        //              between_thresh_ms
-        //                         |
-        //    initial_thresh_ms    |     spurious_thresh_ms
-        //      v                  v             v
-        // --------------------------------------------------
-        //      | ................ | ..................... |
-        //            THRESH_GAP         THRESH_GAP
-        // ```
-        // Threshold gap time.
-        // Initial time theshold based on inital RTT.
-        let initial_thresh_ms =
-            DEFAULT_INITIAL_RTT.mul_f64(INITIAL_TIME_THRESHOLD);
-        // The time threshold after spurious loss.
-        let spurious_thresh_ms: Duration =
-            DEFAULT_INITIAL_RTT.mul_f64(PACKET_REORDER_TIME_THRESHOLD);
-        // Time between the two thresholds
-        let between_thresh_ms = initial_thresh_ms + THRESH_GAP;
-        assert!(between_thresh_ms > initial_thresh_ms);
-        assert!(between_thresh_ms < spurious_thresh_ms);
-        assert!(between_thresh_ms + THRESH_GAP > spurious_thresh_ms);
-
-        for i in 0..6 {
-            let send_time = now + i * between_thresh_ms;
-
-            let p = test_utils::helper_packet_sent(i.into(), send_time, 1000);
-            r.on_packet_sent(
-                p,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                send_time,
-                "",
-            );
-        }
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 6);
-        assert_eq!(r.bytes_in_flight(), 6 * 1000);
-        // Intitial thresholds
-        assert_eq!(r.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
-        assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
-
-        // Wait for `between_thresh_ms` after sending to trigger loss based on
-        // loss threshold.
-        now += between_thresh_ms;
-
-        // Ack packet: 1
-        //
-        // [0, 1, 2, 3, 4, 5]
-        //     ^
-        let mut acked = RangeSet::default();
-        acked.insert(1..2);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 1,
-                lost_bytes: 1000,
-                acked_bytes: 1000,
-                spurious_losses: 0,
-            }
-        );
-        // Thresholds after 1st loss
-        assert_eq!(r.pkt_thresh(), Some(INITIAL_PACKET_THRESHOLD));
-        assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
-
-        // Ack packet: 0
-        //
-        // [0, 1, 2, 3, 4, 5]
-        //  ^  x
-        let mut acked = RangeSet::default();
-        acked.insert(0..1);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 0,
-                spurious_losses: 1,
-            }
-        );
+        let (mut r, mut now, between_thresh_ms) =
+            reordering_after_spurious_loss(cc_algorithm_name, true)?;
         // Thresholds after 1st spurious loss
         //
         // Packet threshold should be disabled. Time threshold overhead should
@@ -1893,56 +1676,30 @@ mod tests {
         //
         // [2, 3, 4, 5]
         //     ^
-        let mut acked = RangeSet::default();
-        acked.insert(3..4);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 1,
-                lost_bytes: 1000,
-                acked_bytes: 1000,
-                spurious_losses: 0,
-            }
-        );
+        assert_application_ack(&mut r, &[3..4], 25, now, OnAckReceivedOutcome {
+            lost_packets: 1,
+            lost_bytes: 1000,
+            acked_bytes: 1000,
+            spurious_losses: 0,
+        })?;
         // Thresholds after 2nd loss.
         assert_eq!(r.pkt_thresh(), None);
         assert_eq!(r.time_thresh(), INITIAL_TIME_THRESHOLD);
 
         // Wait for and additional `plus_overhead` to trigger loss based on the
         // new time threshold.
-        // now += THRESH_GAP;
+        // now += REORDER_THRESHOLD_GAP;
 
         // Ack packet: 2
         //
         // [2, 3, 4, 5]
         //  ^  x
-        let mut acked = RangeSet::default();
-        acked.insert(2..3);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 0,
-                spurious_losses: 1,
-            }
-        );
+        assert_application_ack(&mut r, &[2..3], 25, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 0,
+            spurious_losses: 1,
+        })?;
         // Thresholds after 2nd spurious loss.
         //
         // Time threshold overhead should double.
@@ -2003,9 +1760,7 @@ mod tests {
             );
         }
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 10);
-        assert_eq!(r.bytes_in_flight(), 12000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        assert_application_flight(&r, 10, 12000, Duration::ZERO);
 
         assert_eq!(r.pacing_rate(), if pacing_enabled { 103_963 } else { 0 });
         assert_eq!(r.get_packet_send_time(now), now);
@@ -2017,30 +1772,20 @@ mod tests {
         let initial_rtt = Duration::from_millis(50);
         now += initial_rtt;
 
-        let mut acked = RangeSet::default();
-        acked.insert(0..10);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                10,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[0..10],
+            10,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 12000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
+        assert_application_flight(&r, 0, 0, initial_rtt);
         assert_eq!(r.min_rtt(), Some(initial_rtt));
         assert_eq!(r.rtt(), initial_rtt);
 
@@ -2058,9 +1803,7 @@ mod tests {
             "",
         );
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 6000);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
+        assert_application_flight(&r, 1, 6000, initial_rtt);
 
         assert_eq!(r.get_packet_send_time(now) != now, pacing_enabled);
 
@@ -2075,9 +1818,7 @@ mod tests {
             "",
         );
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 12000);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
+        assert_application_flight(&r, 2, 12000, initial_rtt);
 
         // Send the fourth packet burst.
         let p = sent_fixture(12, now, 1000, PacketFlight::Data);
@@ -2090,9 +1831,7 @@ mod tests {
             "",
         );
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 13000);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt);
+        assert_application_flight(&r, 3, 13000, initial_rtt);
 
         // We pace this outgoing packet. as all conditions for pacing
         // are passed.
@@ -2131,54 +1870,36 @@ mod tests {
         let reduced_rtt = Duration::from_millis(40);
         now += reduced_rtt;
 
-        let mut acked = RangeSet::default();
-        acked.insert(10..11);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                0,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[10..11],
+            0,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 6000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
         let expected_srtt = (7 * initial_rtt + reduced_rtt) / 8;
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 7000);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt + reduced_rtt);
+        assert_application_flight(&r, 2, 7000, initial_rtt + reduced_rtt);
         assert_eq!(r.min_rtt(), Some(reduced_rtt));
         assert_eq!(r.rtt(), expected_srtt);
 
-        let mut acked = RangeSet::default();
-        acked.insert(11..12);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                0,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[11..12],
+            0,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 6000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
         // When enabled, the pacer adds a 25msec delay to the packet
         // sends which will be applied to the sent times tracked by
@@ -2194,34 +1915,24 @@ mod tests {
             reduced_rtt
         };
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt + reduced_rtt);
+        assert_application_flight(&r, 1, 1000, initial_rtt + reduced_rtt);
         assert_eq!(r.min_rtt(), Some(expected_min_rtt));
 
         let expected_srtt = (7 * expected_srtt + expected_min_rtt) / 8;
         assert_eq!(r.rtt(), expected_srtt);
 
-        let mut acked = RangeSet::default();
-        acked.insert(12..13);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                0,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[12..13],
+            0,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 1000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
         // Pacer adds 50msec delay to the second packet, resulting in
         // an effective RTT of 0.
@@ -2233,9 +1944,7 @@ mod tests {
         } else {
             reduced_rtt
         };
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), initial_rtt + reduced_rtt);
+        assert_application_flight(&r, 0, 0, initial_rtt + reduced_rtt);
         assert_eq!(r.min_rtt(), Some(expected_min_rtt));
 
         let expected_srtt = (7 * expected_srtt + expected_min_rtt) / 8;
@@ -2292,9 +2001,7 @@ mod tests {
             );
         }
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 2400);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        assert_application_flight(&r, 2, 2400, Duration::ZERO);
 
         // Initial pacing rate matches the override value.
         assert_eq!(
@@ -2309,30 +2016,14 @@ mod tests {
         // Wait 1 rtt for ACK.
         now += rtt;
 
-        let mut acked = RangeSet::default();
-        acked.insert(0..2);
+        assert_application_ack(&mut r, &[0..2], 10, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 2400,
+            spurious_losses: 0,
+        })?;
 
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                10,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 2400,
-                spurious_losses: 0,
-            }
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), rtt);
+        assert_application_flight(&r, 0, 0, rtt);
         assert_eq!(r.rtt(), rtt);
 
         // Pacing rate is recalculated based on initial cwnd when the
@@ -2516,9 +2207,7 @@ mod tests {
         );
 
         assert_eq!(r.in_flight_count(packet::Epoch::Application), 1);
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 1);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        assert_application_flight(&r, 1, 1000, Duration::ZERO);
 
         let p = sent_fixture(1, now, 1000, PacketFlight::PmtuProbe);
 
@@ -2548,31 +2237,20 @@ mod tests {
         now += Duration::from_millis(10);
 
         // Only the first  packets and the last one are acked.
-        let mut acked = RangeSet::default();
-        acked.insert(0..1);
-        acked.insert(2..3);
-
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[0..1, 2..3],
+            25,
+            now,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: 2 * 1000,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 2);
-        assert_eq!(r.bytes_in_flight(), 1000);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::from_millis(10));
+        assert_application_flight(&r, 2, 1000, Duration::from_millis(10));
         assert_eq!(r.lost_count(), 0);
 
         // Wait until loss detection timer expires.
@@ -2866,25 +2544,18 @@ mod tests {
 
         // Ack
         let interval = Duration::from_secs(10);
-        let mut acked = RangeSet::default();
-        acked.insert(0..10);
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                25,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now + interval,
-                None,
-                "",
-            )?,
+        assert_application_ack(
+            &mut r,
+            &[0..10],
+            25,
+            now + interval,
             OnAckReceivedOutcome {
                 lost_packets: 0,
                 lost_bytes: 0,
                 acked_bytes: total_bytes_sent,
                 spurious_losses: 0,
-            }
-        );
+            },
+        )?;
         assert_eq!(r.delivery_rate().to_bytes_per_second(), 1000);
         assert_eq!(r.min_rtt(), Some(interval));
         // delivery rate should be in units bytes/sec
@@ -2924,9 +2595,7 @@ mod tests {
             );
         }
 
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 3);
-        assert_eq!(r.bytes_in_flight(), 3600);
-        assert_eq!(r.bytes_in_flight_duration(), Duration::ZERO);
+        assert_application_flight(&r, 3, 3600, Duration::ZERO);
 
         assert_eq!(
             r.pacing_rate(),
@@ -2943,30 +2612,14 @@ mod tests {
         // Wait 1 rtt for ACK.
         now += rtt;
 
-        let mut acked = RangeSet::default();
-        acked.insert(0..3);
+        assert_application_ack(&mut r, &[0..3], 10, now, OnAckReceivedOutcome {
+            lost_packets: 0,
+            lost_bytes: 0,
+            acked_bytes: 3600,
+            spurious_losses: 0,
+        })?;
 
-        assert_eq!(
-            r.on_ack_received(
-                &acked,
-                10,
-                packet::Epoch::Application,
-                HandshakeStatus::default(),
-                now,
-                None,
-                "",
-            )?,
-            OnAckReceivedOutcome {
-                lost_packets: 0,
-                lost_bytes: 0,
-                acked_bytes: 3600,
-                spurious_losses: 0,
-            }
-        );
-
-        assert_eq!(r.sent_packets_len(packet::Epoch::Application), 0);
-        assert_eq!(r.bytes_in_flight(), 0);
-        assert_eq!(r.bytes_in_flight_duration(), rtt);
+        assert_application_flight(&r, 0, 0, rtt);
         assert_eq!(r.rtt(), rtt);
 
         // Pacing rate is recalculated based on initial cwnd when the
@@ -2997,26 +2650,18 @@ mod tests {
 
             now += rtt;
 
-            let mut acked = RangeSet::default();
-            acked.insert(iter..(iter + 1));
-
-            assert_eq!(
-                r.on_ack_received(
-                    &acked,
-                    10,
-                    packet::Epoch::Application,
-                    HandshakeStatus::default(),
-                    now,
-                    None,
-                    "",
-                )?,
+            assert_application_ack(
+                &mut r,
+                &[iter..(iter + 1)],
+                10,
+                now,
                 OnAckReceivedOutcome {
                     lost_packets: 0,
                     lost_bytes: 0,
                     acked_bytes: 0,
                     spurious_losses: 0,
-                }
-            );
+                },
+            )?;
 
             // Verify that connection has not exited startup.
             assert_eq!(r.startup_exit(), None, "{iter}");
