@@ -36,8 +36,6 @@ use std::collections::HashMap;
 #[cfg(feature = "sfv")]
 use std::convert::TryFrom;
 
-use std::fmt::Write as _;
-
 use std::rc::Rc;
 
 use std::cell::RefCell;
