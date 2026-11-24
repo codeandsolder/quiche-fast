@@ -520,6 +520,20 @@ impl Path {
             .then_some(size)
     }
 
+    /// A failed MTU probe can invalidate previously confirmed MTU evidence.
+    /// Keep recovery's datagram limit synchronized and publish the change.
+    pub(crate) fn on_pmtu_probe_lost(
+        &mut self, size: usize,
+    ) -> Option<PathEvent> {
+        let pmtud = self.pmtud.as_mut()?;
+        let old = pmtud.get_current_mtu();
+        pmtud.failed_probe(size);
+        let new = pmtud.get_current_mtu();
+        let event = pmtu_event(self.local_addr, self.peer_addr, old, new)?;
+        self.recovery.pmtud_update_max_datagram_size(new);
+        Some(event)
+    }
+
     /// Handles the sending of `PATH_CHALLENGE`.
     pub fn add_challenge_sent(
         &mut self, data: [u8; 8], pkt_size: usize, sent_time: Instant,

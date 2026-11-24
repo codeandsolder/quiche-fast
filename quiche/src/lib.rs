@@ -4065,6 +4065,30 @@ impl<F: BufFactory> Connection<F> {
         }
     }
 
+    #[cfg(feature = "qlog")]
+    fn log_dropped_stream_range(
+        qlog: &mut QlogInfo, stream_id: u64, offset: u64, length: usize,
+        now: Instant,
+    ) {
+        qlog_with_type!(QLOG_DATA_MV, qlog, q, {
+            let ev_data = EventData::QuicStreamDataMoved(
+                qlog::events::quic::StreamDataMoved {
+                    stream_id: Some(stream_id),
+                    offset: Some(offset),
+                    raw: Some(RawInfo {
+                        length: Some(length as u64),
+                        ..Default::default()
+                    }),
+                    from: Some(DataRecipient::Transport),
+                    to: Some(DataRecipient::Dropped),
+                    ..Default::default()
+                },
+            );
+
+            q.add_event_data_with_instant(ev_data, now).ok();
+        });
+    }
+
     /// Retire acknowledged frames across every path in the packet number space.
     fn acknowledge_sent_frames(&mut self, epoch: packet::Epoch, now: Instant) {
         #[cfg(not(feature = "qlog"))]
@@ -4118,42 +4142,18 @@ impl<F: BufFactory> Connection<F> {
                         // The client does need to ACK frames that were received
                         // after the client sends a ResetStream.
 
-                        qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-                            let ev_data = EventData::QuicStreamDataMoved(
-                                qlog::events::quic::StreamDataMoved {
-                                    stream_id: Some(stream_id),
-                                    offset: Some(offset),
-                                    raw: Some(RawInfo {
-                                        length: Some(length as u64),
-                                        ..Default::default()
-                                    }),
-                                    from: Some(DataRecipient::Transport),
-                                    to: Some(DataRecipient::Dropped),
-                                    ..Default::default()
-                                },
-                            );
+                        #[cfg(feature = "qlog")]
+                        Self::log_dropped_stream_range(
+                            &mut self.qlog,
+                            stream_id,
+                            offset,
+                            length,
+                            now,
+                        );
 
-                            q.add_event_data_with_instant(ev_data, now).ok();
-                        });
-
-                        let Some(stream) = self.streams.get_mut(stream_id) else {
-                            continue;
-                        };
-
-                        let dropped = stream.send.ack_and_drop(offset, length);
-
-                        if fin {
-                            stream.send.ack_fin();
-                        }
-
-                        self.streams.try_collect(stream_id);
-
-                        // Update `tx_buffered` for data dropped from stream
-                        // buffers, such as retransmission data acknowledged
-                        // before it could be resent.
-                        if dropped > 0 {
-                            self.streams.sub_tx_buffered(dropped);
-                        }
+                        self.streams.acknowledge_sent_range(
+                            stream_id, offset, length, fin,
+                        );
                     },
 
                     frame::Frame::HandshakeDone => {
@@ -4747,64 +4747,19 @@ impl<F: BufFactory> Connection<F> {
                         length,
                         fin,
                     } => {
-                        let stream = match self.streams.get_mut(stream_id) {
-                            // Only retransmit data if the stream is not closed
-                            // or stopped.
-                            Some(v) if !v.send.is_stopped() => v,
-
-                            // Data on a closed stream will not be retransmitted
-                            // or acked after it is declared lost, so just drop
-                            // it.
-                            _ => {
-                                qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-                                    let ev_data = EventData::QuicStreamDataMoved(
-                                        qlog::events::quic::StreamDataMoved {
-                                            stream_id: Some(stream_id),
-                                            offset: Some(offset),
-                                            raw: Some(RawInfo {
-                                                length: Some(length as u64),
-                                                ..Default::default()
-                                            }),
-                                            from: Some(DataRecipient::Transport),
-                                            to: Some(DataRecipient::Dropped),
-                                            ..Default::default()
-                                        },
-                                    );
-
-                                    q.add_event_data_with_instant(ev_data, now)
-                                        .ok();
-                                });
-
-                                continue;
-                            },
-                        };
-
-                        let was_flushable = stream.is_flushable();
-
-                        let retransmitted =
-                            stream.send.retransmit(offset, length);
-
-                        if fin {
-                            stream.send.retransmit_fin();
-                        }
-
-                        // If the stream is now flushable push it to the
-                        // flushable queue, but only if it wasn't already
-                        // queued.
-                        if stream.is_flushable() && !was_flushable {
-                            let priority_key = Arc::clone(stream.priority_key());
-                            self.streams.enqueue(
-                                &priority_key,
-                                stream::PriorityQueue::Flushable,
+                        if !self
+                            .streams
+                            .requeue_sent_range(stream_id, offset, length, fin)
+                        {
+                            #[cfg(feature = "qlog")]
+                            Self::log_dropped_stream_range(
+                                &mut self.qlog,
+                                stream_id,
+                                offset,
+                                length,
+                                now,
                             );
                         }
-
-                        // Update tx_buffered when data is marked for
-                        // retransmission (it was decremented when emitted).
-                        // Only increment by the actual amount retransmitted,
-                        // which may be less than `length` if some data was
-                        // already acked.
-                        self.streams.add_tx_buffered(retransmitted);
                     },
 
                     frame::Frame::Ack { .. } => {
@@ -4888,20 +4843,10 @@ impl<F: BufFactory> Connection<F> {
                         if let Some(failed_probe) = mtu_probe {
                             trace!("pmtud probe dropped: {failed_probe}");
 
-                            let local = p.local_addr();
-                            let peer = p.peer_addr();
-                            if let Some(pmtud) = p.pmtud.as_mut() {
-                                let old_pmtu = pmtud.get_current_mtu();
-                                pmtud.failed_probe(failed_probe);
-                                let new_pmtu = pmtud.get_current_mtu();
-
-                                if let Some(event) = path::pmtu_event(
-                                    local, peer, old_pmtu, new_pmtu,
-                                ) {
-                                    p.recovery
-                                        .pmtud_update_max_datagram_size(new_pmtu);
-                                    path_events.push_back(event);
-                                }
+                            if let Some(event) =
+                                p.on_pmtu_probe_lost(failed_probe)
+                            {
+                                path_events.push_back(event);
                             }
                         }
                     },

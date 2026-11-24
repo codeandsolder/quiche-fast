@@ -899,6 +899,49 @@ impl<F: BufFactory> StreamMap<F> {
         self.streams.len()
     }
 
+    /// Acknowledging a sent range retires pending retransmission bytes and
+    /// can complete the stream, including its independently acknowledged FIN.
+    pub(crate) fn acknowledge_sent_range(
+        &mut self, stream_id: u64, offset: u64, length: usize, fin: bool,
+    ) {
+        let Some(stream) = self.get_mut(stream_id) else {
+            return;
+        };
+        let dropped = stream.send.ack_and_drop(offset, length);
+        if fin {
+            stream.send.ack_fin();
+        }
+        // Keep the aggregate consistent before collection or any other
+        // operation that might observe the stream map.
+        if dropped != 0 {
+            self.sub_tx_buffered(dropped);
+        }
+        self.try_collect(stream_id);
+    }
+
+    /// Requeue lost data and FIN if the stream is still eligible. Return
+    /// false if the stream has been closed or stopped, for loss diagnostics.
+    pub(crate) fn requeue_sent_range(
+        &mut self, stream_id: u64, offset: u64, length: usize, fin: bool,
+    ) -> bool {
+        let Some(stream) =
+            self.get_mut(stream_id).filter(|s| !s.send.is_stopped())
+        else {
+            return false;
+        };
+        let was_flushable = stream.is_flushable();
+        let retransmitted = stream.send.retransmit(offset, length);
+        if fin {
+            stream.send.retransmit_fin();
+        }
+        if stream.is_flushable() && !was_flushable {
+            let priority_key = Arc::clone(stream.priority_key());
+            self.enqueue(&priority_key, PriorityQueue::Flushable);
+        }
+        self.add_tx_buffered(retransmitted);
+        true
+    }
+
     /// Returns the total number of bytes buffered across all streams.
     pub(crate) const fn tx_buffered(&self) -> u64 {
         self.tx_buffered
@@ -2719,25 +2762,19 @@ mod tests {
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
 
-        // Retransmitting raises both values by the amount retransmitted.
-        let retransmitted = {
-            let stream = streams.get_mut(stream_id).unwrap();
-            stream.send.retransmit(0, 5)
-        };
-        assert_eq!(retransmitted, 5);
-        streams.add_tx_buffered(retransmitted);
+        // Duplicate loss notifications must not increase aggregate bytes twice.
+        assert!(streams.requeue_sent_range(stream_id, 0, 5, false));
+        assert!(streams.requeue_sent_range(stream_id, 0, 5, false));
         assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 5);
         assert_eq!(streams.tx_buffered(), 5);
         assert!(streams.tx_buffered_is_consistent());
 
-        // Ack and drop: both stream.send.buffered_bytes() and tx_buffered
-        // decrease by actual amount dropped.
-        let dropped = {
-            let stream = streams.get_mut(stream_id).unwrap();
-            stream.send.ack_and_drop(0, 5)
-        };
-        assert_eq!(dropped, 5);
-        streams.sub_tx_buffered(dropped);
+        // Sparse and duplicate ACKs account only the actual removed bytes.
+        streams.acknowledge_sent_range(stream_id, 1, 2, false);
+        assert_eq!(streams.tx_buffered(), 3);
+        streams.acknowledge_sent_range(stream_id, 1, 2, false);
+        assert_eq!(streams.tx_buffered(), 3);
+        streams.acknowledge_sent_range(stream_id, 0, 5, false);
         assert_eq!(streams.get(stream_id).unwrap().send.buffered_bytes(), 0);
         assert_eq!(streams.tx_buffered(), 0);
         assert!(streams.tx_buffered_is_consistent());
