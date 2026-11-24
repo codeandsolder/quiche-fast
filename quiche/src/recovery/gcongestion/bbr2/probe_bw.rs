@@ -136,8 +136,6 @@ impl ProbeBW<'_> {
             CyclePhase::Cruise => model
                 .inflight_lo()
                 .min(model.inflight_hi_with_headroom(params)),
-            CyclePhase::Up if params.probe_up_ignore_inflight_hi =>
-                model.inflight_lo(),
             _ => model.inflight_lo().min(model.inflight_hi()),
         };
         Limits::no_greater_than(limit)
@@ -340,7 +338,7 @@ impl ProbeBW<'_> {
             return;
         }
 
-        self.probe_inflight_high_upward(congestion_event, params);
+        self.probe_inflight_high_upward(congestion_event);
 
         let mut is_risky = false;
         let mut is_queuing = false;
@@ -363,12 +361,8 @@ impl ProbeBW<'_> {
                     }
                 }
             } else {
-                let mut queuing_threshold_extra_bytes =
+                let queuing_threshold_extra_bytes =
                     congestion_event.max_datagram_size.saturating_mul(2);
-                if params.add_ack_height_to_queueing_threshold {
-                    queuing_threshold_extra_bytes = queuing_threshold_extra_bytes
-                        .saturating_add(self.model.max_ack_height());
-                }
                 let queuing_threshold = crate::scale::scale_usize(
                     self.model.bdp0(),
                     f64::from(params.full_bw_threshold),
@@ -444,15 +438,9 @@ impl ProbeBW<'_> {
                         crate::scale::Rounding::Down,
                     );
 
-                    let mut new_inflight_hi =
-                        inflight_at_send.max(inflight_target);
-
-                    if params.limit_inflight_hi_by_max_delivered {
-                        new_inflight_hi = self
-                            .model
-                            .max_bytes_delivered_in_round()
-                            .max(new_inflight_hi);
-                    }
+                    let new_inflight_hi = inflight_at_send
+                        .max(inflight_target)
+                        .max(self.model.max_bytes_delivered_in_round());
 
                     self.model.set_inflight_hi(new_inflight_hi);
                 }
@@ -495,15 +483,15 @@ impl ProbeBW<'_> {
         &self, target_bytes_inflight: usize,
         congestion_event: &BBRv2CongestionEvent, params: &Params,
     ) -> bool {
-        if !params.enable_reno_coexistence {
+        let Some(reno) = params.reno_coexistence else {
             return false;
-        }
+        };
 
-        let mut rounds = params.probe_bw_probe_max_rounds;
-        if params.probe_bw_probe_reno_gain > 0.0 {
+        let mut rounds = reno.max_rounds;
+        if reno.bdp_gain > 0.0 {
             let reno_rounds = usize::try_from(crate::scale::scale_gain_div_u64(
                 u64::try_from(target_bytes_inflight).unwrap_or(u64::MAX),
-                f64::from(params.probe_bw_probe_reno_gain),
+                f64::from(reno.bdp_gain),
                 congestion_event.max_datagram_size as u64,
             ))
             .unwrap_or(usize::MAX);
@@ -543,13 +531,8 @@ impl ProbeBW<'_> {
     }
 
     fn probe_inflight_high_upward(
-        &mut self, congestion_event: &BBRv2CongestionEvent, params: &Params,
+        &mut self, congestion_event: &BBRv2CongestionEvent,
     ) {
-        if params.probe_up_ignore_inflight_hi {
-            // When inflight_hi is disabled in PROBE_UP, it increases when
-            // the number of bytes delivered in a round is larger inflight_hi.
-            return;
-        }
         // TODO(vlad): probe_up_simplify_inflight_hi?
         // A full DATAGRAM cannot be split to fill the last bytes of cwnd.
         // Treat a sub-packet remainder as congestion-window limited, using
@@ -629,7 +612,7 @@ mod tests {
         outcome: ProbeOutcome,
     ) {
         let mut params = DEFAULT_PARAMS;
-        params.enable_reno_coexistence = false;
+        params.reno_coexistence = None;
         let now = Instant::now();
         let mut probe = ProbeBW {
             model: &mut BBRv2NetworkModel::new(
@@ -679,15 +662,13 @@ mod tests {
             }
         };
 
-        let do_probe_up = |probe_bw: &mut ProbeBW<'_>,
-                           params: &Params,
-                           total_bytes: usize| {
+        let do_probe_up = |probe_bw: &mut ProbeBW<'_>, total_bytes: usize| {
             let mut remaining = total_bytes;
             loop {
                 let congestion_event =
                     test_event(probe_bw, step.min(remaining), false);
 
-                probe_bw.probe_inflight_high_upward(&congestion_event, params);
+                probe_bw.probe_inflight_high_upward(&congestion_event);
 
                 if remaining > step {
                     remaining -= step;
@@ -711,30 +692,24 @@ mod tests {
         assert_eq!(probe_bw.cycle.probe_up_bytes, Some(100_000));
 
         assert_eq!(probe_bw.model.inflight_hi(), 100_000);
-        do_probe_up(&mut probe_bw, params, 1_000_000);
+        do_probe_up(&mut probe_bw, 1_000_000);
         // End inflight_hi should be independent of step size.
         assert_eq!(probe_bw.model.inflight_hi(), 113_000);
 
         // Slope is increased at the end of round by decreasing probe_up_bytes.
-        probe_bw.probe_inflight_high_upward(
-            &test_event(&probe_bw, 10_000, true),
-            params,
-        );
+        probe_bw.probe_inflight_high_upward(&test_event(&probe_bw, 10_000, true));
         assert_eq!(probe_bw.cycle.probe_up_rounds, 2);
         assert_eq!(probe_bw.cycle.probe_up_bytes, Some(56500));
 
-        do_probe_up(&mut probe_bw, params, 1_000_000);
+        do_probe_up(&mut probe_bw, 1_000_000);
         // End inflight_hi should be independent of step size.
         assert_eq!(probe_bw.model.inflight_hi(), 135_100);
 
-        probe_bw.probe_inflight_high_upward(
-            &test_event(&probe_bw, 10_000, true),
-            params,
-        );
+        probe_bw.probe_inflight_high_upward(&test_event(&probe_bw, 10_000, true));
         assert_eq!(probe_bw.cycle.probe_up_rounds, 3);
         assert_eq!(probe_bw.cycle.probe_up_bytes, Some(33775));
 
-        do_probe_up(&mut probe_bw, params, 1_000_000);
+        do_probe_up(&mut probe_bw, 1_000_000);
         // End inflight_hi should be independent of step size.
         assert_eq!(probe_bw.model.inflight_hi(), 174_100);
     }
@@ -777,7 +752,7 @@ mod datagram_cwnd_tests {
         );
         event.bytes_acked = mss - 5;
         for _ in 0..20 {
-            probe.probe_inflight_high_upward(&event, &DEFAULT_PARAMS);
+            probe.probe_inflight_high_upward(&event);
         }
         (initial_hi, probe.model.inflight_hi())
     }
@@ -785,9 +760,10 @@ mod datagram_cwnd_tests {
     #[test]
     fn probe_calculations_use_current_path_mss() {
         let mut params = DEFAULT_PARAMS;
-        params.probe_bw_probe_reno_gain = 1.0;
-        params.enable_reno_coexistence = true;
-        params.probe_bw_probe_max_rounds = 100;
+        params.reno_coexistence = Some(super::super::RenoCoexistence {
+            bdp_gain: 1.0,
+            max_rounds: 100,
+        });
         let now = Instant::now();
         let mut probe = ProbeBW {
             model: &mut BBRv2NetworkModel::new(
@@ -838,7 +814,7 @@ mod datagram_cwnd_tests {
             DEFAULT_MSS,
         );
         event.bytes_acked = 10;
-        probe.probe_inflight_high_upward(&event, &DEFAULT_PARAMS);
+        probe.probe_inflight_high_upward(&event);
         assert_eq!(probe.cycle.probe_up_acked, 9);
         assert_eq!(probe.model.inflight_hi(), usize::MAX);
     }

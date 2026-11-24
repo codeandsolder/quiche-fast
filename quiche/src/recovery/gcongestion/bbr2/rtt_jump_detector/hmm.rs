@@ -179,7 +179,7 @@ fn hmm_forward_step(
     for (j, next_j) in next.iter_mut().enumerate() {
         let mut predicted = 0.0f32;
         for (i, &alpha_i) in alpha.iter().enumerate() {
-            predicted += alpha_i * transition[i][j];
+            predicted = alpha_i.mul_add(transition[i][j], predicted);
         }
         *next_j = predicted * emission[j][bin];
     }
@@ -375,7 +375,8 @@ impl HmmDetector {
         if matches!(self.episode, HmmEpisode::Idle) &&
             self.pending_start_time.is_none()
         {
-            self.dispersion += HMM_DISP_EWMA_ALPHA * (rel - self.dispersion);
+            self.dispersion = HMM_DISP_EWMA_ALPHA
+                .mul_add(rel - self.dispersion, self.dispersion);
         }
     }
 

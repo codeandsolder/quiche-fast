@@ -127,7 +127,7 @@ impl Context {
     pub fn set_early_data_enabled(&mut self, enabled: bool) {
         // SAFETY: The live context is exclusively borrowed.
         unsafe {
-            SSL_CTX_set_early_data_enabled(self.as_mut_ptr(), i32::from(enabled));
+            SSL_CTX_set_early_data_enabled(self.0.as_ptr(), i32::from(enabled));
         }
     }
 }
@@ -138,7 +138,7 @@ impl Handshake {
         // copies the supplied early-data context bytes.
         map_result(unsafe {
             SSL_set_quic_early_data_context(
-                self.as_mut_ptr(),
+                self.ptr.as_ptr(),
                 context.as_ptr(),
                 context.len(),
             )
@@ -163,7 +163,7 @@ impl Handshake {
                 return Err(Error::TlsFail);
             }
 
-            let rc = SSL_set_session(self.as_mut_ptr(), session);
+            let rc = SSL_set_session(self.ptr.as_ptr(), session);
             SSL_SESSION_free(session);
 
             map_result(rc)
@@ -173,7 +173,7 @@ impl Handshake {
     pub fn reset_early_data_reject(&mut self) {
         // SAFETY: The live SSL is exclusively borrowed and the operation
         // is called after the backend reports early-data rejection.
-        unsafe { SSL_reset_early_data_reject(self.as_mut_ptr()) };
+        unsafe { SSL_reset_early_data_reject(self.ptr.as_ptr()) };
     }
 
     pub fn curve(&self) -> Option<String> {
@@ -280,7 +280,7 @@ impl Handshake {
 
         unsafe {
             SSL_set_private_key_method(
-                self.as_mut_ptr(),
+                self.ptr.as_ptr(),
                 &QUICHE_PRIVATE_KEY_METHOD,
             );
         }

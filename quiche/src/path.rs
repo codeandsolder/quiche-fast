@@ -509,6 +509,47 @@ impl Path {
             .then_some(size)
     }
 
+    /// Bound the next datagram by negotiated limits, validated MTU and
+    /// anti-amplification credit. A probe may reserve extra output capacity,
+    /// but must not increase recovery's confirmed MSS before acknowledgement.
+    pub(crate) fn datagram_send_limit(
+        &mut self, peer_limit: usize, progress: crate::HandshakeProgress,
+        is_server: bool,
+    ) -> usize {
+        let handshake_ready = progress == crate::HandshakeProgress::Confirmed;
+        let mut limit = if progress.completed() {
+            self.recovery.max_datagram_size().min(peer_limit)
+        } else {
+            crate::MIN_CLIENT_INITIAL_LEN
+        };
+
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            if handshake_ready {
+                pmtud.limit_maximum(peer_limit);
+            }
+            limit = pmtud.get_current_mtu().min(peer_limit);
+            if self.recovery.max_datagram_size() != limit {
+                self.recovery.pmtud_update_max_datagram_size(limit);
+            }
+            if handshake_ready && pmtud.should_probe() {
+                limit = limit.max(pmtud.get_probe_size().min(peer_limit));
+            }
+        }
+        if is_server && !self.verified_peer_address {
+            limit = limit.min(self.max_send_bytes);
+        }
+        limit
+    }
+
+    /// PING itself is not retransmitted; a lost probe updates PMTU state.
+    pub(crate) fn on_lost_ping(
+        &mut self, mtu_probe: Option<usize>,
+    ) -> Option<PathEvent> {
+        let size = mtu_probe?;
+        trace!("pmtud probe dropped: {size}");
+        self.on_pmtu_probe_lost(size)
+    }
+
     /// A failed MTU probe can invalidate previously confirmed MTU evidence.
     /// Keep recovery's datagram limit synchronized and publish the change.
     pub(crate) fn on_pmtu_probe_lost(
@@ -1309,7 +1350,7 @@ mod tests {
             local,
             first,
             &recovery,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1329,7 +1370,7 @@ mod tests {
             local,
             second,
             &recovery,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1474,7 +1515,7 @@ mod tests {
             local,
             old_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1502,7 +1543,7 @@ mod tests {
             local,
             new_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1518,7 +1559,7 @@ mod tests {
             local,
             third_peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1543,7 +1584,7 @@ mod tests {
                     local,
                     third_peer,
                     &recovery_config,
-                    config.path_challenge_recv_max_queue_len,
+                    config.options.path_challenge_recv_max_queue_len,
                     false,
                     None,
                 ),
@@ -1687,7 +1728,7 @@ mod tests {
             "127.0.0.1:1234".parse().unwrap(),
             "127.0.0.1:4321".parse().unwrap(),
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1716,7 +1757,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             Some(&config),
         );
@@ -1740,7 +1781,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             Some(&config),
         );
@@ -1777,7 +1818,7 @@ mod tests {
             local,
             peer,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             Some(&config),
         );
@@ -1811,7 +1852,7 @@ mod tests {
             client_addr,
             server_addr,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             true,
             None,
         );
@@ -1821,7 +1862,7 @@ mod tests {
             client_addr_2,
             server_addr,
             &recovery_config,
-            config.path_challenge_recv_max_queue_len,
+            config.options.path_challenge_recv_max_queue_len,
             false,
             None,
         );
@@ -1898,7 +1939,7 @@ mod tests {
         let client_addr = "127.0.0.1:1234".parse().unwrap();
         let server_addr = "127.0.0.1:4321".parse().unwrap();
         let config = Config::new(crate::PROTOCOL_VERSION).unwrap();
-        let queue_limit = config.path_challenge_recv_max_queue_len;
+        let queue_limit = config.options.path_challenge_recv_max_queue_len;
         let path = Path::new(
             client_addr,
             server_addr,

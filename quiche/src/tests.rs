@@ -126,7 +126,7 @@ fn packet_data_falls_back_to_stream_without_consuming_datagram() {
     let datagram = b"abcde";
     assert_eq!(conn.dgram_send(datagram), Ok(()));
     assert_eq!(conn.stream_send(0, b"s", true), Ok(1));
-    conn.emit_dgram = true;
+    conn.payload_preference = PayloadPreference::Datagram;
 
     // STREAM uses type, stream ID, offset, two-byte length, one payload byte.
     // DATAGRAM uses type, two-byte length, five payload bytes.
@@ -199,7 +199,10 @@ fn packet_data_falls_back_to_stream_without_consuming_datagram() {
             _ => unreachable!(),
         }
         assert_eq!(conn.dgram_send_queue.is_empty(), capacity == 8);
-        assert_eq!(conn.emit_dgram, capacity != 8);
+        assert_eq!(
+            conn.payload_preference == PayloadPreference::Datagram,
+            capacity != 8
+        );
     }
 }
 
@@ -238,7 +241,7 @@ fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
             limit: 4,
         },
     ];
-    let previous_blocked_count = conn.data_blocked_sent_count;
+    let previous_blocked_count = conn.counters.data_blocked_sent_count;
     for expected_frame in expected {
         // First try without enough room for any of the pending frames.
         for capacity in [0, 1, expected_frame.wire_len().unwrap()] {
@@ -270,7 +273,10 @@ fn stream_count_control_frames_preserve_order_across_packet_boundaries() {
     assert!(!conn.streams.quota(Bidirectional).credit_retransmit);
     assert!(!conn.streams.quota(Unidirectional).credit_retransmit);
     assert_eq!(conn.blocked_limit, None);
-    assert_eq!(conn.data_blocked_sent_count, previous_blocked_count + 1);
+    assert_eq!(
+        conn.counters.data_blocked_sent_count,
+        previous_blocked_count + 1
+    );
     assert!(!conn
         .streams
         .quota(Bidirectional)
@@ -346,7 +352,10 @@ fn stateless_reset_recognizes_rotated_peer_cid_tokens() {
     client
         .ids
         .set_initial_dcid(vec![1, 2, 3].into(), None, Some(0));
-    client.peer_transport_params.stateless_reset_token = Some(initial_token);
+    client.peer_parameters = PeerParameters::Remembered(TransportParams {
+        stateless_reset_token: Some(initial_token),
+        ..TransportParams::default()
+    });
     let mut retired_path_ids = SmallVec::new();
     client
         .ids
@@ -391,8 +400,9 @@ fn retry_source_cid_transport_parameter_matches_retry_history() {
         let mut pipe = test_utils::Pipe::new("cubic").unwrap();
         let client = &mut pipe.client;
         let original_dcid = ConnectionId::from(b"original".to_vec());
-        client.odcid = Some(original_dcid.clone());
-        client.rscid = observed_retry.map(|id| ConnectionId::from(id.to_vec()));
+        client.initial.odcid = Some(original_dcid.clone());
+        client.initial.rscid =
+            observed_retry.map(|id| ConnectionId::from(id.to_vec()));
         let params = TransportParams {
             initial_source_connection_id: Some(client.destination_id().clone()),
             original_destination_connection_id: Some(original_dcid),
@@ -1022,16 +1032,16 @@ fn change_idle_timeout(
 
     let mut pipe = test_utils::Pipe::with_client_config(&mut config).unwrap();
     assert_eq!(pipe.client.local_transport_params.max_idle_timeout, 999999);
-    assert_eq!(pipe.client.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.client.peer_parameters.effective().max_idle_timeout, 0);
     assert_eq!(pipe.server.local_transport_params.max_idle_timeout, 0);
-    assert_eq!(pipe.server.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.server.peer_parameters.effective().max_idle_timeout, 0);
 
     pipe.client.set_max_idle_timeout(456000).unwrap();
     pipe.server.set_max_idle_timeout(234000).unwrap();
     assert_eq!(pipe.client.local_transport_params.max_idle_timeout, 456000);
-    assert_eq!(pipe.client.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.client.peer_parameters.effective().max_idle_timeout, 0);
     assert_eq!(pipe.server.local_transport_params.max_idle_timeout, 234000);
-    assert_eq!(pipe.server.peer_transport_params.max_idle_timeout, 0);
+    assert_eq!(pipe.server.peer_parameters.effective().max_idle_timeout, 0);
 
     assert_eq!(pipe.handshake(), Ok(()));
 
@@ -1221,9 +1231,9 @@ fn handshake_resumption(
     ] {
         let mut rejected =
             test_utils::Pipe::with_server_config(&mut config).unwrap();
-        let original_params = rejected.client.peer_transport_params.clone();
+        let original_params = rejected.client.peer_parameters.clone();
         assert_eq!(rejected.client.set_session(malformed), Err(expected),);
-        assert_eq!(rejected.client.peer_transport_params, original_params);
+        assert_eq!(rejected.client.peer_parameters, original_params);
         rejected.handshake().unwrap();
         assert!(!rejected.client.is_resumed());
         assert!(!rejected.server.is_resumed());
@@ -1265,7 +1275,7 @@ fn handshake_alpn_mismatch(
     assert_eq!(len, 1200);
 
     assert_eq!(pipe.server.send(&mut buf), Err(Error::Done));
-    assert_eq!(pipe.server.sent_count, 1);
+    assert_eq!(pipe.server.counters.sent_count, 1);
 }
 
 #[rstest]
@@ -1486,7 +1496,7 @@ fn assert_rejected_packet(
     );
     let (written, _) = pipe.server.send(buf).unwrap();
     let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..written]).unwrap();
+        test_utils::decode_pkt(&pipe.client, &mut buf[..written]).unwrap();
     assert_eq!(
         frames.first(),
         Some(&frame::Frame::ConnectionClose {
@@ -1939,8 +1949,7 @@ fn assert_stream_packet_acknowledged(
 ) {
     let pn = pipe.client.next_pkt_num;
     let len = pipe.send_pkt_to_server(Type::Short, frames, buf).unwrap();
-    let response =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let response = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     assert!(
         response.iter().any(|frame| matches!(
             frame,
@@ -2421,7 +2430,7 @@ fn zero_length_stream_frame_not_sent(
         match pipe.client.send(&mut buf[..cap]) {
             Ok((written, _)) => {
                 let frames =
-                    test_utils::decode_pkt(&mut pipe.server, &mut buf[..written])
+                    test_utils::decode_pkt(&pipe.server, &mut buf[..written])
                         .unwrap();
 
                 for frame in &frames {
@@ -2498,7 +2507,7 @@ fn zero_length_stream_frame_skip_rotates_incremental(
         match pipe.client.send(&mut buf[..cap]) {
             Ok((written, _)) => {
                 let frames =
-                    test_utils::decode_pkt(&mut pipe.server, &mut buf[..written])
+                    test_utils::decode_pkt(&pipe.server, &mut buf[..written])
                         .unwrap();
 
                 first_stream_id = frames.iter().find_map(|frame| match frame {
@@ -2562,8 +2571,7 @@ fn flow_control_update(
 
     assert!(len > 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let mut iter = frames.iter();
 
     // Ignore ACK.
@@ -2906,8 +2914,7 @@ fn stream_flow_control_update(
 
     assert!(len > 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let mut iter = frames.iter();
 
     // Ignore ACK.
@@ -3718,8 +3725,7 @@ fn path_challenge(
 
     assert_eq!(len, MIN_CLIENT_INITIAL_LEN);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let mut iter = frames.iter();
 
     // Ignore ACK.
@@ -3814,12 +3820,12 @@ fn packet_number_exhaustion_closes_without_sending_close_frame(
     pipe.handshake().unwrap();
     let max = octets::MAX_VAR_INT;
     pipe.client.next_pkt_num = max;
-    let sent = pipe.client.sent_count;
+    let sent = pipe.client.counters.sent_count;
     let mut out = [0x5a; 1500];
     assert!(matches!(pipe.client.send(&mut out), Err(Error::Done)));
     assert!(pipe.client.is_closed());
     assert!(pipe.client.local_error().is_none());
-    assert_eq!(pipe.client.sent_count, sent);
+    assert_eq!(pipe.client.counters.sent_count, sent);
     assert_eq!(out, [0x5a; 1500]);
 }
 
@@ -3897,8 +3903,7 @@ fn stop_sending(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -3949,8 +3954,7 @@ fn stop_sending(
         .send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(frames.len(), 1);
 
@@ -4015,8 +4019,7 @@ fn stop_sending_fin(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -4577,8 +4580,7 @@ fn stop_sending_ack_race(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -4631,8 +4633,7 @@ fn stop_sending_ack_race(
         .send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(frames.len(), 1);
 
@@ -4699,8 +4700,7 @@ fn stop_sending_stream_ack_race(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -4754,8 +4754,7 @@ fn stop_sending_stream_ack_race(
         .send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(frames.len(), 1);
 
@@ -4800,8 +4799,7 @@ fn stream_shutdown_read(
 
     let mut dummy = buf[..len].to_vec();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut dummy[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut dummy[..len]).unwrap();
     // make sure the pkt contains the expected StopSending frame
     assert!(frames.iter().any(|f| {
         *f == frame::Frame::StopSending {
@@ -5160,8 +5158,7 @@ fn stream_shutdown_write(
 
     let mut dummy = buf[..len].to_vec();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut dummy[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut dummy[..len]).unwrap();
     let mut iter = frames.iter();
 
     assert_eq!(
@@ -5309,8 +5306,7 @@ fn stream_round_robin(
 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -5327,8 +5323,7 @@ fn stream_round_robin(
 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -5340,8 +5335,7 @@ fn stream_round_robin(
 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -5618,15 +5612,15 @@ fn flow_control_limit_send(
     assert!(r.next().is_some());
     assert!(r.next().is_none());
 
-    assert_eq!(pipe.server.data_blocked_sent_count, 0);
-    assert_eq!(pipe.server.stream_data_blocked_sent_count, 0);
-    assert_eq!(pipe.server.data_blocked_recv_count, 1);
-    assert_eq!(pipe.server.stream_data_blocked_recv_count, 0);
+    assert_eq!(pipe.server.counters.data_blocked_sent_count, 0);
+    assert_eq!(pipe.server.counters.stream_data_blocked_sent_count, 0);
+    assert_eq!(pipe.server.counters.data_blocked_recv_count, 1);
+    assert_eq!(pipe.server.counters.stream_data_blocked_recv_count, 0);
 
-    assert_eq!(pipe.client.data_blocked_sent_count, 1);
-    assert_eq!(pipe.client.stream_data_blocked_sent_count, 0);
-    assert_eq!(pipe.client.data_blocked_recv_count, 0);
-    assert_eq!(pipe.client.stream_data_blocked_recv_count, 0);
+    assert_eq!(pipe.client.counters.data_blocked_sent_count, 1);
+    assert_eq!(pipe.client.counters.stream_data_blocked_sent_count, 0);
+    assert_eq!(pipe.client.counters.data_blocked_recv_count, 0);
+    assert_eq!(pipe.client.counters.stream_data_blocked_recv_count, 0);
 }
 
 #[rstest]
@@ -5700,7 +5694,7 @@ fn invalid_initial_client(
     assert!(!pipe.client.is_closed());
 
     // ...and the idle timeout should be armed.
-    assert!(pipe.client.idle_timer.is_some());
+    assert!(pipe.client.idle.deadline.is_some());
 }
 
 #[rstest]
@@ -5731,12 +5725,12 @@ fn invalid_coalesced_initial_does_not_hide_valid_initial(
     )
     .unwrap();
 
-    assert_eq!(pipe.client.recv_count, 0);
+    assert_eq!(pipe.client.counters.recv_count, 0);
     assert_eq!(
         pipe.client_recv(&mut buf[..first + second]),
         Ok(first + second)
     );
-    assert_eq!(pipe.client.recv_count, 1);
+    assert_eq!(pipe.client.counters.recv_count, 1);
     assert!(!pipe.client.is_closed());
 }
 
@@ -5767,7 +5761,7 @@ fn invalid_initial_payload(
         scid: ConnectionId::from_ref(scid.as_ref()),
         pkt_num: 0,
         pkt_num_len: pn_len,
-        token: pipe.client.token.clone(),
+        token: pipe.client.initial.token.clone(),
         versions: None,
         key_phase: false,
     };
@@ -5911,8 +5905,7 @@ fn stop_sending_before_flushed_packets(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -6021,15 +6014,15 @@ fn reset_before_flushed_packets(
     // Client has ACK'd the RESET_STREAM so the stream is collected.
     assert_eq!(pipe.server.streams.len(), 0);
 
-    assert_eq!(pipe.server.data_blocked_sent_count, 0);
-    assert_eq!(pipe.server.stream_data_blocked_sent_count, 1);
-    assert_eq!(pipe.server.data_blocked_recv_count, 0);
-    assert_eq!(pipe.server.stream_data_blocked_recv_count, 0);
+    assert_eq!(pipe.server.counters.data_blocked_sent_count, 0);
+    assert_eq!(pipe.server.counters.stream_data_blocked_sent_count, 1);
+    assert_eq!(pipe.server.counters.data_blocked_recv_count, 0);
+    assert_eq!(pipe.server.counters.stream_data_blocked_recv_count, 0);
 
-    assert_eq!(pipe.client.data_blocked_sent_count, 0);
-    assert_eq!(pipe.client.stream_data_blocked_sent_count, 0);
-    assert_eq!(pipe.client.data_blocked_recv_count, 0);
-    assert_eq!(pipe.client.stream_data_blocked_recv_count, 1);
+    assert_eq!(pipe.client.counters.data_blocked_sent_count, 0);
+    assert_eq!(pipe.client.counters.stream_data_blocked_sent_count, 0);
+    assert_eq!(pipe.client.counters.data_blocked_recv_count, 0);
+    assert_eq!(pipe.client.counters.stream_data_blocked_recv_count, 1);
 }
 
 #[rstest]
@@ -6863,8 +6856,8 @@ fn client_sent_new_token(
     let pn = pipe.client.next_pkt_num;
     let epoch = packet::Epoch::Application;
     let largest_rx = pipe.server.pkt_num_spaces[epoch].largest_rx_pkt_num;
-    let recv_count = pipe.server.recv_count;
-    let recv_bytes = pipe.server.recv_bytes;
+    let recv_count = pipe.server.counters.recv_count;
+    let recv_bytes = pipe.server.counters.recv_bytes;
     let written =
         test_utils::encode_pkt(&mut pipe.client, pkt_type, &frames, &mut buf)
             .unwrap();
@@ -6879,8 +6872,8 @@ fn client_sent_new_token(
     assert_eq!(space.largest_rx_pkt_num, largest_rx);
     assert!(!space.recv_pkt_num.contains(pn));
     assert!(!space.recv_pkt_need_ack.contains(pn));
-    assert_eq!(pipe.server.recv_count, recv_count);
-    assert_eq!(pipe.server.recv_bytes, recv_bytes);
+    assert_eq!(pipe.server.counters.recv_count, recv_count);
+    assert_eq!(pipe.server.counters.recv_bytes, recv_bytes);
     assert!(pipe.server.local_error.is_some());
 }
 
@@ -6943,8 +6936,7 @@ fn data_blocked(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     assert_eq!(pipe.client.blocked_limit, None);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -6977,7 +6969,7 @@ fn stream_data_blocked_validates_stream_opening_and_direction(
         0 | 2 => {
             assert!(result.is_ok());
             assert!(pipe.server.streams.get(stream_id).is_some());
-            assert_eq!(pipe.server.stream_data_blocked_recv_count, 1);
+            assert_eq!(pipe.server.counters.stream_data_blocked_recv_count, 1);
         },
         1 | 3 => assert_eq!(result, Err(Error::InvalidStreamState(stream_id))),
         _ => assert_eq!(result, Err(Error::StreamLimit)),
@@ -7069,8 +7061,7 @@ fn stream_data_blocked(
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     assert_eq!(pipe.client.streams.blocked().len(), 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -7102,8 +7093,7 @@ fn stream_data_blocked(
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     assert_eq!(pipe.client.streams.blocked().len(), 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -7180,8 +7170,7 @@ fn stream_data_blocked_unblocked_flow_control(
     let (len, _) = pipe.client.send(&mut buf).unwrap();
     assert_eq!(pipe.client.streams.blocked().len(), 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -7611,8 +7600,7 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited(
 
     assert_ne!(sent, 0, "the client should at least send a pure ACK packet");
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..sent]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..sent]).unwrap();
     assert_eq!(1, frames.len());
     assert!(
         matches!(frames[0], frame::Frame::Ack { .. }),
@@ -7681,7 +7669,7 @@ fn sends_ack_only_pkt_when_full_cwnd_and_ack_elicited_despite_max_unacknowledgin
         assert_ne!(sent, 0, "the client should at least send a pure ACK packet");
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.server, &mut buf[..sent]).unwrap();
+            test_utils::decode_pkt(&pipe.server, &mut buf[..sent]).unwrap();
 
         assert_eq!(1, frames.len());
 
@@ -7707,7 +7695,7 @@ fn reject_ack_for_unsent_packet_number_space(
     let mut pipe = test_utils::Pipe::new(cc_algorithm_name).unwrap();
     let epoch = packet::Epoch::Handshake;
     assert_eq!(pipe.client.pkt_num_spaces[epoch].largest_tx_pkt_num, None);
-    assert!(!pipe.client.peer_verified_initial_address);
+    assert!(!pipe.client.initial.peer_verified_address);
     let hdr = Header {
         ty: Type::Handshake,
         version: PROTOCOL_VERSION,
@@ -7731,7 +7719,7 @@ fn reject_ack_for_unsent_packet_number_space(
             .process_frame(frame, &hdr, 0, epoch, Instant::now()),
         Err(Error::InvalidAckRange)
     );
-    assert!(!pipe.client.peer_verified_initial_address);
+    assert!(!pipe.client.initial.peer_verified_address);
     assert_eq!(
         pipe.client
             .paths
@@ -8241,14 +8229,14 @@ fn limit_ack_ranges(
     let mut last_packet_sent = 0;
 
     for _ in 0..512 {
-        let recv_count = pipe.server.recv_count;
+        let recv_count = pipe.server.counters.recv_count;
 
         last_packet_sent = pipe.client.next_pkt_num;
 
         pipe.send_pkt_to_server(pkt_type, &frames, &mut buf)
             .unwrap();
 
-        assert_eq!(pipe.server.recv_count, recv_count + 1);
+        assert_eq!(pipe.server.counters.recv_count, recv_count + 1);
 
         // Skip packet number.
         pipe.client.next_pkt_num += 1;
@@ -8373,7 +8361,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let stream = frames.first().unwrap();
 
         assert_eq!(stream, &frame::Frame::Stream {
@@ -8396,7 +8384,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let stream = frames.first().unwrap();
 
         assert_eq!(stream, &frame::Frame::Stream {
@@ -8419,7 +8407,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let stream = frames.first().unwrap();
 
         assert_eq!(stream, &frame::Frame::Stream {
@@ -8442,7 +8430,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
         assert_eq!(
             frames.first(),
@@ -8456,7 +8444,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
         let stream = frames.first().unwrap();
 
@@ -8480,7 +8468,7 @@ fn stream_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let stream = frames.first().unwrap();
 
         assert_eq!(stream, &frame::Frame::Stream {
@@ -8562,8 +8550,7 @@ fn stream_reprioritize(
     // First is stream 8.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -8576,8 +8563,7 @@ fn stream_reprioritize(
     // Then is stream 0.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -8590,8 +8576,7 @@ fn stream_reprioritize(
     // Then are stream 12 and 4, with the same priority.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -8603,8 +8588,7 @@ fn stream_reprioritize(
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -8689,7 +8673,7 @@ fn stream_datagram_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let mut frame_iter = frames.iter();
 
         assert_eq!(frame_iter.next().unwrap(), &frame::Frame::Datagram {
@@ -8702,7 +8686,7 @@ fn stream_datagram_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let mut frame_iter = frames.iter();
         let stream = frame_iter.next().unwrap();
 
@@ -8723,7 +8707,7 @@ fn stream_datagram_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let mut frame_iter = frames.iter();
 
         assert_eq!(frame_iter.next().unwrap(), &frame::Frame::Datagram {
@@ -8736,7 +8720,7 @@ fn stream_datagram_priority(
             pipe.server.send(&mut buf[..MAX_TEST_PACKET_SIZE]).unwrap();
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         let mut frame_iter = frames.iter();
         let stream = frame_iter.next().unwrap();
 
@@ -8813,8 +8797,7 @@ fn early_retransmit(
         0,
     );
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -9015,8 +8998,7 @@ fn max_data_frames_retransmit(
     assert_eq!(pipe.server.max_rx_data(), 30);
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     // Ensure that the server tried to send MAX_DATA and STREAM_MAX_DATA frames.
     let mut max_data_seen = false;
@@ -9049,8 +9031,7 @@ fn max_data_frames_retransmit(
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     // Make sure the server retransmitted MAX_DATA and STREAM_MAX_DATA
     // frames
@@ -9200,8 +9181,14 @@ fn coalesce_padding_short(
     assert_eq!(pipe.server_recv(&mut buf[..len]), Ok(len));
 
     // None of the sent packets should have been dropped.
-    assert_eq!(pipe.client.sent_count, pipe.server.recv_count);
-    assert_eq!(pipe.server.sent_count, pipe.client.recv_count);
+    assert_eq!(
+        pipe.client.counters.sent_count,
+        pipe.server.counters.recv_count
+    );
+    assert_eq!(
+        pipe.server.counters.sent_count,
+        pipe.client.counters.recv_count
+    );
 }
 
 #[rstest]
@@ -9893,11 +9880,14 @@ fn large_peer_datagram_limits_do_not_truncate(
     pipe.advance().unwrap();
 
     assert_eq!(
-        pipe.client.peer_transport_params.max_udp_payload_size,
+        pipe.client.peer_parameters.effective().max_udp_payload_size,
         LARGE_LIMIT
     );
     assert_eq!(
-        pipe.client.peer_transport_params.max_datagram_frame_size,
+        pipe.client
+            .peer_parameters
+            .effective()
+            .max_datagram_frame_size,
         Some(LARGE_LIMIT)
     );
     assert_eq!(pipe.client.max_send_udp_payload_size(), 1400);
@@ -10069,7 +10059,7 @@ fn terminal_connection_lifecycle(
         };
         CloseCause::Explicit(CloseOrigin::Local)
     } else {
-        conn.idle_timer = Some(past);
+        conn.idle.deadline = Some(past);
         CloseCause::IdleTimeout
     };
     assert_eq!(conn.timeout_instant(), Some(past));
@@ -10080,7 +10070,7 @@ fn terminal_connection_lifecycle(
     assert_eq!(conn.is_timed_out(), !drain);
     assert_eq!(conn.timeout(), None);
     // A stale timer or repeated event must not change the terminal cause.
-    conn.idle_timer = Some(past);
+    conn.idle.deadline = Some(past);
     conn.on_timeout();
     conn.mark_closed(CloseCause::NoViablePath);
     assert_eq!(conn.lifecycle, ConnectionLifecycle::Closed(cause));
@@ -10108,7 +10098,7 @@ fn close_qlog_reports_actual_terminal_cause() {
     let now = Instant::now();
     pipe.client
         .set_qlog(Box::new(std::io::sink()), String::new(), String::new());
-    pipe.client.idle_timer = Some(now);
+    pipe.client.idle.deadline = Some(now);
     pipe.client.on_timeout();
     assert!(pipe.client.is_timed_out());
     assert_eq!(
@@ -10133,8 +10123,7 @@ fn close(#[values("cubic", "bbr2_gcongestion")] cc_algorithm_name: &str) {
 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -10162,14 +10151,14 @@ fn close_only_packet_does_not_elicit_ack(
     assert!(path.validated());
     path.needs_ack_eliciting = true;
     let before = path.recovery.bytes_in_flight();
-    let idle_timer = conn.idle_timer;
-    conn.ack_eliciting_sent = false;
+    let idle_timer = conn.idle.deadline;
+    conn.idle.ack_eliciting_sent = false;
 
     assert_eq!(conn.close(application, 42, b"closing"), Ok(()));
     let mut buf = [0; 1500];
     let (written, _) = conn.send(&mut buf).unwrap();
     let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..written]).unwrap();
+        test_utils::decode_pkt(&pipe.server, &mut buf[..written]).unwrap();
     assert_eq!(frames.len(), 1);
     assert!(matches!(
         frames[0],
@@ -10180,8 +10169,8 @@ fn close_only_packet_does_not_elicit_ack(
     let path = pipe.client.paths.get_active().unwrap();
     assert_eq!(path.recovery.bytes_in_flight(), before);
     assert!(path.needs_ack_eliciting);
-    assert!(!pipe.client.ack_eliciting_sent);
-    assert_eq!(pipe.client.idle_timer, idle_timer);
+    assert!(!pipe.client.idle.ack_eliciting_sent);
+    assert_eq!(pipe.client.idle.deadline, idle_timer);
     assert!(pipe.client.is_draining());
 }
 
@@ -10239,8 +10228,7 @@ fn app_close_by_client(
 
     let (len, _) = pipe.client.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.server, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.server, &mut buf[..len]).unwrap();
 
     assert_eq!(
         frames.first(),
@@ -11222,7 +11210,7 @@ fn initial_max_data_is_flow_control_win() {
     // Stream flow control windows equal initial_max_stream_data.
     assert_eq!(
         pipe.client
-            .get_or_create_stream(0, true)
+            .get_or_create_stream(0, stream::StreamOpenIntent::Local)
             .unwrap()
             .recv
             .flow_control_for_tests()
@@ -11231,7 +11219,7 @@ fn initial_max_data_is_flow_control_win() {
     );
     assert_eq!(
         pipe.server
-            .get_or_create_stream(0, false)
+            .get_or_create_stream(0, stream::StreamOpenIntent::Peer)
             .unwrap()
             .recv
             .flow_control_for_tests()
@@ -11762,7 +11750,7 @@ fn large_advertised_connection_id_limit_preserves_slots(
         .unwrap_or(usize::MAX)
         .min(usize::MAX / 2);
     assert_eq!(
-        pipe.client.peer_transport_params.active_conn_id_limit,
+        pipe.client.peer_parameters.effective().active_conn_id_limit,
         LIMIT
     );
     assert_eq!(pipe.client.scids_left(), limit - 1);
@@ -13337,7 +13325,7 @@ fn consecutive_non_ack_eliciting(
         assert!(len > 0);
 
         let frames =
-            test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+            test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         assert!(
             frames
                 .iter()
@@ -13352,8 +13340,7 @@ fn consecutive_non_ack_eliciting(
         .unwrap();
     assert!(len > 0);
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     assert!(
         frames
             .iter()
@@ -13377,8 +13364,7 @@ fn send_ack_eliciting_causes_ping(
     let mut buf = [0; 1500];
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let mut iter = frames.iter();
 
     assert_eq!(iter.next(), Some(&frame::Frame::Ping { mtu_probe: None }));
@@ -13403,8 +13389,7 @@ fn send_ack_eliciting_no_ping(
     let mut buf = [0; 1500];
     let (len, _) = pipe.server.send(&mut buf).unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let mut iter = frames.iter();
 
     assert!(matches!(
@@ -13527,8 +13512,7 @@ fn stop_sending_stream_send_after_reset_stream_ack(
         .unwrap();
 
     // Server sent a RESET_STREAM frame in response.
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     let mut iter = frames.iter();
 
@@ -13584,8 +13568,7 @@ fn stop_sending_stream_send_after_reset_stream_ack(
         .send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert_eq!(frames.len(), 1);
 
@@ -13744,7 +13727,7 @@ fn challenge_no_cids(
         scid: ConnectionId::from_ref(&[5, 4, 3, 2, 1]),
         pkt_num: 0,
         pkt_num_len: pn_len,
-        token: pipe.client.token.clone(),
+        token: pipe.client.initial.token.clone(),
         versions: None,
         key_phase: pipe.client.key_phase,
     };
@@ -13947,7 +13930,7 @@ fn pmtud_no_duplicate_probes(
         let mut buf = [0; 1400];
         let (len, _) = pipe.client.send(&mut buf).unwrap();
         frames.append(
-            test_utils::decode_pkt(&mut pipe.server, &mut buf[..len])
+            test_utils::decode_pkt(&pipe.server, &mut buf[..len])
                 .unwrap()
                 .as_mut(),
         );
@@ -14497,8 +14480,7 @@ fn reset_stream_retransmit_after_stream_collected(
         .send_pkt_to_server(pkt_type, &frames, &mut buf)
         .unwrap();
 
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let has_reset_stream = frames.iter().any(|f| {
         matches!(f, frame::Frame::ResetStream {
             stream_id: 0,
@@ -14523,8 +14505,7 @@ fn reset_stream_retransmit_after_stream_collected(
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let has_reset_stream = frames.iter().any(|f| {
         matches!(f, frame::Frame::ResetStream {
             stream_id: 0,
@@ -14563,8 +14544,7 @@ fn stop_sending_retransmit(
 
     // Server sends STOP_SENDING, but we don't deliver it (simulating loss).
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let has_stop_sending = frames.iter().any(|f| {
         matches!(f, frame::Frame::StopSending {
             stream_id: 4,
@@ -14578,8 +14558,7 @@ fn stop_sending_retransmit(
 
     // Server should retransmit STOP_SENDING.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     let has_stop_sending = frames.iter().any(|f| {
         matches!(f, frame::Frame::StopSending {
             stream_id: 4,
@@ -14615,8 +14594,7 @@ fn stop_sending_no_retransmit_after_fin(
 
     // Server sends STOP_SENDING, but we don't deliver it (simulating loss).
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     // Verify STOP_SENDING is in the packet.
     let has_stop_sending = frames.iter().any(|f| {
@@ -14674,8 +14652,7 @@ fn stream_empty_fin_is_not_complete_until_fin_acked(
     let mut frames = Vec::new();
 
     for (mut pkt, _) in flight {
-        frames
-            .extend(test_utils::decode_pkt(&mut pipe.client, &mut pkt).unwrap());
+        frames.extend(test_utils::decode_pkt(&pipe.client, &mut pkt).unwrap());
     }
 
     assert!(frames.iter().any(|f| matches!(
@@ -14707,8 +14684,7 @@ fn stream_empty_fin_is_retransmitted(
     assert_eq!(pipe.server.stream_send(4, b"", true), Ok(0));
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert!(frames.iter().any(|f| matches!(
         f,
@@ -14719,8 +14695,7 @@ fn stream_empty_fin_is_retransmitted(
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert!(frames.iter().any(|f| matches!(
         f,
@@ -14756,8 +14731,7 @@ fn stream_fin_is_retransmitted_after_data_acked_separately(
     assert_eq!(pipe.server.stream_send(4, b"", true), Ok(0));
 
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert!(frames.iter().any(|f| matches!(
         f,
@@ -14785,8 +14759,7 @@ fn stream_fin_is_retransmitted_after_data_acked_separately(
     let mut frames = Vec::new();
 
     for (mut pkt, _) in flight.clone() {
-        frames
-            .extend(test_utils::decode_pkt(&mut pipe.client, &mut pkt).unwrap());
+        frames.extend(test_utils::decode_pkt(&pipe.client, &mut pkt).unwrap());
     }
 
     assert!(frames.iter().any(|f| matches!(
@@ -14843,8 +14816,7 @@ fn stream_fin_is_sent_after_retransmission_before_acked_tail(
     let mut frames = Vec::new();
 
     for (mut pkt, _) in flight.clone() {
-        frames
-            .extend(test_utils::decode_pkt(&mut pipe.client, &mut pkt).unwrap());
+        frames.extend(test_utils::decode_pkt(&pipe.client, &mut pkt).unwrap());
     }
 
     assert!(frames.iter().any(|f| matches!(
@@ -14891,14 +14863,14 @@ fn stream_inflight_fin_is_not_resent_after_data_retransmission(
     let fin = flight.pop().unwrap();
 
     let mut lost_pkt = lost.0.clone();
-    let frames = test_utils::decode_pkt(&mut pipe.client, &mut lost_pkt).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut lost_pkt).unwrap();
     assert!(frames.iter().any(|f| matches!(
         f,
         frame::Frame::Stream { stream_id: 4, data } if !data.fin()
     )));
 
     let mut fin_pkt = fin.0.clone();
-    let frames = test_utils::decode_pkt(&mut pipe.client, &mut fin_pkt).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut fin_pkt).unwrap();
     assert!(frames.iter().any(|f| matches!(
         f,
         frame::Frame::Stream { stream_id: 4, data } if data.fin()
@@ -14913,7 +14885,7 @@ fn stream_inflight_fin_is_not_resent_after_data_retransmission(
         .iter()
         .flat_map(|(pkt, _)| {
             let mut pkt = pkt.clone();
-            test_utils::decode_pkt(&mut pipe.client, &mut pkt).unwrap()
+            test_utils::decode_pkt(&pipe.client, &mut pkt).unwrap()
         })
         .collect::<Vec<_>>();
 
@@ -14963,8 +14935,7 @@ fn stream_lost_fin_is_not_retransmitted_after_reset(
 
     // Lose the FIN-bearing packet.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
 
     assert!(frames.iter().any(|f| matches!(
         f,
@@ -14980,8 +14951,7 @@ fn stream_lost_fin_is_not_retransmitted_after_reset(
     let mut frames = Vec::new();
 
     for (mut pkt, _) in flight {
-        frames
-            .extend(test_utils::decode_pkt(&mut pipe.client, &mut pkt).unwrap());
+        frames.extend(test_utils::decode_pkt(&pipe.client, &mut pkt).unwrap());
     }
 
     assert!(
@@ -15059,8 +15029,7 @@ fn max_streams_frame_retransmit(
 
     // Drop the original packet without processing it at the peer.
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     assert!(
         frames.contains(&expected),
         "missing {expected:?}: {frames:?}"
@@ -15070,8 +15039,7 @@ fn max_streams_frame_retransmit(
     test_utils::trigger_ack_based_loss(&mut pipe.server, &mut pipe.client);
     assert_eq!(pipe.server.send(&mut buf[..1]), Err(Error::Done));
     let (len, _) = pipe.server.send(&mut buf).unwrap();
-    let frames =
-        test_utils::decode_pkt(&mut pipe.client, &mut buf[..len]).unwrap();
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
     assert!(
         frames.contains(&expected),
         "missing {expected:?}: {frames:?}"
@@ -15568,6 +15536,30 @@ fn alpn_rejects_empty_and_oversized_protocol_lists() {
     }
     assert!(config.set_application_protos_wire_format(&wire).is_err());
     assert_eq!(config.application_protos, previous);
+}
+
+#[test]
+fn remembered_peer_limits_are_not_negotiated_parameters() {
+    let mut pipe = test_utils::Pipe::new("cubic").unwrap();
+    assert!(pipe.client.peer_transport_params().is_none());
+    let mut remembered = TransportParams::default();
+    remembered.initial_max_data = 1234;
+    pipe.client
+        .apply_peer_parameters(PeerParameters::Remembered(remembered))
+        .unwrap();
+    assert_eq!(
+        pipe.client.peer_parameters.effective().initial_max_data,
+        1234
+    );
+    assert!(pipe.client.peer_transport_params().is_none());
+    assert!(pipe.client.peer_transport_params_wire().is_none());
+    pipe.handshake().unwrap();
+    assert!(pipe.client.peer_transport_params().is_some());
+    assert!(pipe.client.peer_transport_params_wire().is_some());
+    assert_ne!(
+        pipe.client.peer_parameters.effective().initial_max_data,
+        1234
+    );
 }
 
 #[test]

@@ -29,8 +29,11 @@ use std::sync::Arc;
 use std::collections::hash_map;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::ptr::NonNull;
 
-use intrusive_collections::intrusive_adapter;
+use intrusive_collections::Adapter;
+use intrusive_collections::DefaultLinkOps;
+use intrusive_collections::DefaultPointerOps;
 use intrusive_collections::KeyAdapter;
 use intrusive_collections::RBTree;
 use intrusive_collections::RBTreeAtomicLink;
@@ -120,6 +123,29 @@ pub enum PriorityQueue {
     Flushable,
 }
 
+/// Opening a stream for a send may signal exhausted local stream credit;
+/// priority changes and receive-side processing do not request that signal.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum StreamOpenIntent {
+    Local,
+    LocalSend,
+    Peer,
+}
+
+impl StreamOpenIntent {
+    pub(crate) const fn from_local(local: bool) -> Self {
+        if local {
+            Self::Local
+        } else {
+            Self::Peer
+        }
+    }
+
+    const fn is_local(self) -> bool {
+        !matches!(self, Self::Peer)
+    }
+}
+
 /// Direction of QUIC stream-count credit, independent of the initiator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamDirection {
@@ -167,7 +193,7 @@ impl StreamDirection {
 /// Stream-count credit and its signaling, for one direction. A stream's
 /// ordinal implicitly opens all lower ordinals of the same initiator.
 #[derive(Default)]
-pub(super) struct StreamQuota {
+pub struct StreamQuota {
     peer_limit: u64,
     peer_opened: u64,
     local_limit: u64,
@@ -402,8 +428,8 @@ impl<F: BufFactory> StreamMap<F> {
     /// Returns the mutable stream with the given ID if it exists, or creates
     /// a new one otherwise.
     ///
-    /// The `local` parameter indicates whether the stream is locally
-    /// initiated. It validates the stream ID and selects the initial flow
+    /// The opening intent identifies the initiator and whether a failed
+    /// local open should advertise exhaustion. It selects the initial flow
     /// control values from the local and remote transport parameters.
     ///
     /// This also takes care of enforcing both local and the peer's stream
@@ -411,8 +437,10 @@ impl<F: BufFactory> StreamMap<F> {
     /// error is returned.
     pub(crate) fn get_or_create(
         &mut self, id: u64, local_params: &crate::TransportParams,
-        peer_params: &crate::TransportParams, local: bool, is_server: bool,
+        peer_params: &crate::TransportParams, intent: StreamOpenIntent,
+        is_server: bool,
     ) -> Result<&mut Stream<F>> {
+        let local = intent.is_local();
         let (stream, is_new_and_writable) = match self.streams.entry(id) {
             hash_map::Entry::Vacant(v) => {
                 // Stream has already been closed and garbage collected.
@@ -424,7 +452,7 @@ impl<F: BufFactory> StreamMap<F> {
                     return Err(Error::InvalidStreamState(id));
                 }
 
-                let (max_rx_data, max_tx_data) = match (local, is_bidi(id)) {
+                let (receive_limit, send_limit) = match (local, is_bidi(id)) {
                     // Locally-initiated bidirectional stream.
                     (true, true) => (
                         local_params.initial_max_stream_data_bidi_local,
@@ -452,18 +480,24 @@ impl<F: BufFactory> StreamMap<F> {
 
                 // Enforce the same quota rule for both directions and
                 // initiators.
-                self.quotas[StreamDirection::from_id(id).index()]
-                    .open(local, stream_sequence + 1)?;
+                let quota =
+                    &mut self.quotas[StreamDirection::from_id(id).index()];
+                if let Err(error) = quota.open(local, stream_sequence + 1) {
+                    if intent == StreamOpenIntent::LocalSend {
+                        quota.note_blocked();
+                    }
+                    return Err(error);
+                }
 
-                let initial_window = max_rx_data;
+                let initial_window = receive_limit;
                 let s = Stream::new(
                     StreamPriorityKey {
                         id,
                         owner: Some(Arc::clone(&self.owner)),
                         ..Default::default()
                     },
-                    max_rx_data,
-                    max_tx_data,
+                    receive_limit,
+                    send_limit,
                     local,
                     initial_window,
                     self.max_stream_window,
@@ -724,6 +758,25 @@ impl<F: BufFactory> StreamMap<F> {
     /// If the stream was already in the list, this does nothing.
     pub fn insert_stopped(&mut self, stream_id: u64, error_code: u64) {
         self.stopped.insert(stream_id, error_code);
+    }
+
+    /// Reissue `STOP_SENDING` only while the receive side lacks a final size.
+    pub(crate) fn requeue_stop_sending(
+        &mut self, stream_id: u64, error_code: u64,
+    ) {
+        if self
+            .get(stream_id)
+            .is_some_and(|stream| !stream.recv.is_fin())
+        {
+            self.insert_stopped(stream_id, error_code);
+        }
+    }
+
+    /// Lost `MAX_STREAM_DATA` matters only while the stream still exists.
+    pub(crate) fn requeue_receive_credit(&mut self, stream_id: u64) {
+        if self.get(stream_id).is_some() {
+            self.insert_almost_full(stream_id);
+        }
     }
 
     /// Removes the stream ID from the stopped streams set.
@@ -1010,15 +1063,19 @@ pub struct Stream<F: BufFactory = DefaultBufFactory> {
 impl<F: BufFactory> Stream<F> {
     /// Creates a new stream with the given flow control limits.
     pub fn new(
-        priority: StreamPriorityKey, max_rx_data: u64, max_tx_data: u64,
+        priority: StreamPriorityKey, receive_limit: u64, send_limit: u64,
         local: bool, initial_window: u64, max_window: u64,
     ) -> Self {
         let id = priority.id;
         let priority_key = Arc::new(priority);
 
         Self {
-            recv: recv_buf::RecvBuf::new(max_rx_data, initial_window, max_window),
-            send: send_buf::SendBuf::new(max_tx_data),
+            recv: recv_buf::RecvBuf::new(
+                receive_limit,
+                initial_window,
+                max_window,
+            ),
+            send: send_buf::SendBuf::new(send_limit),
             send_lowat: 1,
             bidi: is_bidi(id),
             local,
@@ -1149,9 +1206,73 @@ impl StreamPriorityKey {
     }
 }
 
-intrusive_adapter!(StreamWritablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { writable => RBTreeAtomicLink });
+/// One statically selected link per priority queue. The tree's adapter type
+/// fixes the link for its entire lifetime, so no queue can inadvertently
+/// interpret a different link as one of its own nodes.
+#[derive(Clone, Copy, Default)]
+struct StreamPriorityAdapter<const OFFSET: usize> {
+    link_ops: <RBTreeAtomicLink as DefaultLinkOps>::Ops,
+    pointer_ops: DefaultPointerOps<Arc<StreamPriorityKey>>,
+}
 
-impl KeyAdapter<'_> for StreamWritablePriorityAdapter {
+impl<const OFFSET: usize> StreamPriorityAdapter<OFFSET> {
+    // Ensure every instantiated adapter refers to an actual link field.
+    const LINK_OFFSET: usize = {
+        assert!(
+            OFFSET == std::mem::offset_of!(StreamPriorityKey, readable) ||
+                OFFSET == std::mem::offset_of!(StreamPriorityKey, writable) ||
+                OFFSET ==
+                    std::mem::offset_of!(
+                        StreamPriorityKey,
+                        stopped_writable
+                    ) ||
+                OFFSET == std::mem::offset_of!(StreamPriorityKey, flushable)
+        );
+        OFFSET
+    };
+}
+
+// SAFETY: LINK_OFFSET is the compile-time offset of one RBTreeAtomicLink
+// within StreamPriorityKey. get_link and get_value are inverse operations,
+// retaining the allocation's provenance. Arc owns the stable allocation;
+// DefaultPointerOps transfers that ownership to and from the collection.
+unsafe impl<const OFFSET: usize> Adapter for StreamPriorityAdapter<OFFSET> {
+    type LinkOps = <RBTreeAtomicLink as DefaultLinkOps>::Ops;
+    type PointerOps = DefaultPointerOps<Arc<StreamPriorityKey>>;
+
+    unsafe fn get_value(
+        &self, link: NonNull<RBTreeAtomicLink>,
+    ) -> *const StreamPriorityKey {
+        // SAFETY: Adapter requires a link previously obtained by get_link.
+        unsafe { link.as_ptr().cast::<u8>().sub(Self::LINK_OFFSET).cast() }
+    }
+
+    unsafe fn get_link(
+        &self, value: *const StreamPriorityKey,
+    ) -> NonNull<RBTreeAtomicLink> {
+        // SAFETY: Adapter requires a valid value. The offset is in bounds,
+        // aligned, and addresses a non-null link within that allocation.
+        unsafe {
+            NonNull::new_unchecked(
+                value.cast::<u8>().add(Self::LINK_OFFSET).cast_mut().cast(),
+            )
+        }
+    }
+
+    fn link_ops(&self) -> &Self::LinkOps {
+        &self.link_ops
+    }
+
+    fn link_ops_mut(&mut self) -> &mut Self::LinkOps {
+        &mut self.link_ops
+    }
+
+    fn pointer_ops(&self) -> &Self::PointerOps {
+        &self.pointer_ops
+    }
+}
+
+impl<const OFFSET: usize> KeyAdapter<'_> for StreamPriorityAdapter<OFFSET> {
     type Key = (u8, bool, u64);
 
     fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
@@ -1159,35 +1280,15 @@ impl KeyAdapter<'_> for StreamWritablePriorityAdapter {
     }
 }
 
-intrusive_adapter!(StreamStoppedWritablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { stopped_writable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamStoppedWritablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
-
-intrusive_adapter!(StreamReadablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { readable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamReadablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
-
-intrusive_adapter!(StreamFlushablePriorityAdapter = Arc<StreamPriorityKey>: StreamPriorityKey { flushable => RBTreeAtomicLink });
-
-impl KeyAdapter<'_> for StreamFlushablePriorityAdapter {
-    type Key = (u8, bool, u64);
-
-    fn get_key(&self, s: &StreamPriorityKey) -> Self::Key {
-        s.scheduling_key()
-    }
-}
+type StreamReadablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, readable) }>;
+type StreamWritablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, writable) }>;
+type StreamStoppedWritablePriorityAdapter = StreamPriorityAdapter<
+    { std::mem::offset_of!(StreamPriorityKey, stopped_writable) },
+>;
+type StreamFlushablePriorityAdapter =
+    StreamPriorityAdapter<{ std::mem::offset_of!(StreamPriorityKey, flushable) }>;
 
 /// An iterator over QUIC streams.
 #[derive(Default)]
@@ -1259,6 +1360,62 @@ mod tests {
         let mut streams = StreamMap::<DefaultBufFactory>::new(4, 4, 4);
         streams.tx_buffered = 1;
         streams.debug_check_tx_buffered_consistency();
+    }
+
+    #[test]
+    fn only_send_intent_signals_local_stream_count_exhaustion() {
+        let params = crate::TransportParams::default();
+        let mut map = StreamMap::<DefaultBufFactory>::new(1, 1, 1024);
+        map.quota_mut(Bidirectional).update_peer_limit(1);
+        assert!(map
+            .get_or_create(0, &params, &params, StreamOpenIntent::Local, false)
+            .is_ok());
+        assert_eq!(
+            map.get_or_create(
+                4,
+                &params,
+                &params,
+                StreamOpenIntent::Local,
+                false
+            )
+            .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Bidirectional).pending_blocked_limit(), None);
+        assert_eq!(
+            map.get_or_create(
+                4,
+                &params,
+                &params,
+                StreamOpenIntent::LocalSend,
+                false
+            )
+            .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Bidirectional).pending_blocked_limit(), Some(1));
+
+        assert!(map
+            .get_or_create(3, &params, &params, StreamOpenIntent::Peer, false)
+            .is_ok());
+        assert_eq!(
+            map.get_or_create(7, &params, &params, StreamOpenIntent::Peer, false)
+                .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Unidirectional).pending_blocked_limit(), None);
+        assert_eq!(
+            map.get_or_create(
+                7,
+                &params,
+                &params,
+                StreamOpenIntent::LocalSend,
+                false
+            )
+            .err(),
+            Some(Error::InvalidStreamState(7))
+        );
+        assert_eq!(map.quota(Unidirectional).pending_blocked_limit(), None);
     }
 
     #[test]
@@ -1486,8 +1643,8 @@ mod tests {
                         .get_or_create(
                             stream_id,
                             &conn.local_transport_params,
-                            &conn.peer_transport_params,
-                            !conn.is_server,
+                            conn.peer_parameters.effective(),
+                            StreamOpenIntent::from_local(!conn.is_server),
                             conn.is_server,
                         )
                         .err(),
@@ -1613,7 +1770,13 @@ mod tests {
         let mut streams = <StreamMap>::new(max, max, DEFAULT_STREAM_WINDOW);
         let is_server = stream_type & 1 == 0;
         streams
-            .get_or_create(stream_type, &params, &params, false, is_server)
+            .get_or_create(
+                stream_type,
+                &params,
+                &params,
+                StreamOpenIntent::Peer,
+                is_server,
+            )
             .unwrap();
         // Collect one peer-created stream. No additional stream ID in this
         // type exists once the maximum has already been advertised.
@@ -1636,7 +1799,13 @@ mod tests {
         let is_server = (stream_type & 1 != 0) == local;
         streams.collect(stream_type);
         streams
-            .get_or_create(stream_type, &params, &params, local, is_server)
+            .get_or_create(
+                stream_type,
+                &params,
+                &params,
+                StreamOpenIntent::from_local(local),
+                is_server,
+            )
             .unwrap();
         streams.collect(stream_type);
         streams.collect(stream_type);
@@ -1666,7 +1835,13 @@ mod tests {
         let is_server = (stream_type & 1 != 0) == local;
         assert_eq!(
             streams
-                .get_or_create(stream_id, &params, &params, local, is_server)
+                .get_or_create(
+                    stream_id,
+                    &params,
+                    &params,
+                    StreamOpenIntent::from_local(local),
+                    is_server
+                )
                 .err(),
             Some(Error::StreamLimit)
         );
@@ -1685,7 +1860,13 @@ mod tests {
         }
 
         assert!(streams
-            .get_or_create(stream_id, &params, &params, local, is_server)
+            .get_or_create(
+                stream_id,
+                &params,
+                &params,
+                StreamOpenIntent::from_local(local),
+                is_server
+            )
             .is_ok());
         assert!(streams.collected.ranges.is_none());
     }
@@ -2243,7 +2424,13 @@ mod tests {
         assert!(is_bidi(stream_id), "stream id is bidirectional");
         assert_eq!(
             streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .err(),
             Some(Error::StreamLimit),
             "stream limit should be exceeded"
@@ -2263,7 +2450,13 @@ mod tests {
             assert!(is_local(stream_id, false), "stream id is client initiated");
             assert!(is_bidi(stream_id), "stream id is bidirectional");
             assert!(streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .is_ok());
         }
     }
@@ -2279,14 +2472,26 @@ mod tests {
         // Highest permitted
         let stream_id = 8;
         assert!(streams
-            .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+            .get_or_create(
+                stream_id,
+                &local_tp,
+                &peer_tp,
+                StreamOpenIntent::Peer,
+                true
+            )
             .is_ok());
 
         // One more than highest permitted
         let stream_id = 12;
         assert_eq!(
             streams
-                .get_or_create(stream_id, &local_tp, &peer_tp, false, true)
+                .get_or_create(
+                    stream_id,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true
+                )
                 .err(),
             Some(Error::StreamLimit)
         );
@@ -2298,87 +2503,53 @@ mod tests {
         streams.enqueue(&key, PriorityQueue::Writable);
     }
 
-    #[test]
-    fn writable_prioritized_default_priority() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
+    fn writable_priority_fixture(
+    ) -> (StreamMap, crate::TransportParams, crate::TransportParams) {
+        let local = crate::TransportParams::default();
+        let peer = crate::TransportParams {
             initial_max_stream_data_bidi_local: 100,
             initial_max_stream_data_uni: 100,
             ..Default::default()
         };
-
-        let mut streams = StreamMap::new(100, 100, 100);
-
-        for id in [0, 4, 8, 12] {
-            assert!(streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
-                .is_ok());
-        }
-
-        let walk_1: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_1.first().unwrap(), &mut streams);
-        let walk_2: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_2.first().unwrap(), &mut streams);
-        let walk_3: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_3.first().unwrap(), &mut streams);
-        let walk_4: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_4.first().unwrap(), &mut streams);
-        let walk_5: Vec<u64> = streams.writable().collect();
-
-        // All streams are incremental and same urgency by default. Multiple
-        // visits shuffle their order.
-        assert_eq!(walk_1, vec![0, 4, 8, 12]);
-        assert_eq!(walk_2, vec![4, 8, 12, 0]);
-        assert_eq!(walk_3, vec![8, 12, 0, 4]);
-        assert_eq!(walk_4, vec![12, 0, 4, 8,]);
-        assert_eq!(walk_5, vec![0, 4, 8, 12]);
+        (StreamMap::new(100, 100, 100), local, peer)
     }
 
-    #[test]
-    fn writable_prioritized_insert_order() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = StreamMap::new(100, 100, 100);
-
-        // Inserting same-urgency incremental streams in a "random" order yields
-        // same order to start with.
-        for id in [12, 4, 8, 0] {
-            assert!(streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
-                .is_ok());
+    /// Insertion order is FIFO for equal-urgency incremental streams,
+    /// regardless of numeric stream ID. Cycling the head rotates the queue.
+    #[rstest]
+    #[case([0, 4, 8, 12])]
+    #[case([12, 4, 8, 0])]
+    fn writable_prioritized_fifo(#[case] order: [u64; 4]) {
+        let (mut streams, local, peer) = writable_priority_fixture();
+        for id in order {
+            streams
+                .get_or_create(id, &local, &peer, StreamOpenIntent::Peer, true)
+                .unwrap();
         }
+        let mut expected = order;
+        for _ in 0..order.len() {
+            assert_eq!(streams.writable().collect::<Vec<_>>(), expected);
+            cycle_stream_priority(expected[0], &mut streams);
+            expected.rotate_left(1);
+        }
+        assert_eq!(streams.writable().collect::<Vec<_>>(), order);
+    }
 
-        let walk_1: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_1.first().unwrap(), &mut streams);
-        let walk_2: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_2.first().unwrap(), &mut streams);
-        let walk_3: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_3.first().unwrap(), &mut streams);
-        let walk_4: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_4.first().unwrap(), &mut streams);
-        let walk_5: Vec<u64> = streams.writable().collect();
-        assert_eq!(walk_1, vec![12, 4, 8, 0]);
-        assert_eq!(walk_2, vec![4, 8, 0, 12]);
-        assert_eq!(walk_3, vec![8, 0, 12, 4,]);
-        assert_eq!(walk_4, vec![0, 12, 4, 8]);
-        assert_eq!(walk_5, vec![12, 4, 8, 0]);
+    fn open_prioritized_streams(
+        streams: &mut StreamMap, local: &crate::TransportParams,
+        peer: &crate::TransportParams, input: &[(u64, u8)],
+    ) {
+        for &(id, urgency) in input {
+            streams
+                .get_or_create(id, local, peer, StreamOpenIntent::Peer, true)
+                .unwrap();
+            streams.set_priority(id, urgency, true);
+        }
     }
 
     #[test]
     fn writable_prioritized_mixed_urgency() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = <StreamMap>::new(100, 100, 100);
+        let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams where the urgency descends (becomes more important). No
         // stream shares an urgency.
@@ -2396,23 +2567,13 @@ mod tests {
             (40, 0),
         ];
 
-        for (id, urgency) in input.clone() {
-            streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_1: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_1, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
 
         // Re-applying priority to a stream does not cause duplication.
-        for (id, urgency) in input {
-            streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_2: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_2, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
@@ -2431,7 +2592,7 @@ mod tests {
 
         // Adding streams doesn't break expected ordering.
         streams
-            .get_or_create(44, &local_tp, &peer_tp, false, true)
+            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
             .unwrap();
 
         let walk_5: Vec<u64> = streams.writable().collect();
@@ -2440,14 +2601,7 @@ mod tests {
 
     #[test]
     fn writable_prioritized_mixed_urgencies_incrementals() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = StreamMap::new(100, 100, 100);
+        let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams that share some urgency level
         let input = vec![
@@ -2464,12 +2618,7 @@ mod tests {
             (40, 0),
         ];
 
-        for (id, urgency) in input.clone() {
-            streams
-                .get_or_create(id, &local_tp, &peer_tp, false, true)
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_1: Vec<u64> = streams.writable().collect();
         cycle_stream_priority(4, &mut streams);
@@ -2526,7 +2675,7 @@ mod tests {
 
         // Adding streams doesn't break expected ordering.
         streams
-            .get_or_create(44, &local_tp, &peer_tp, false, true)
+            .get_or_create(44, &local_tp, &peer_tp, StreamOpenIntent::Peer, true)
             .unwrap();
         streams.set_priority(44, 20, true);
 
@@ -2545,9 +2694,15 @@ mod tests {
         let mut right = StreamMap::<DefaultBufFactory>::new(100, 100, 100);
         let key = |map: &mut StreamMap| {
             Arc::clone(
-                map.get_or_create(0, &local_tp, &peer_tp, false, true)
-                    .unwrap()
-                    .priority_key(),
+                map.get_or_create(
+                    0,
+                    &local_tp,
+                    &peer_tp,
+                    StreamOpenIntent::Peer,
+                    true,
+                )
+                .unwrap()
+                .priority_key(),
             )
         };
         let left_key = key(&mut left);
@@ -2609,7 +2764,13 @@ mod tests {
         for id in [12, 4, 8, 0] {
             let key = Arc::clone(
                 streams
-                    .get_or_create(id, &local_tp, &peer_tp, false, true)
+                    .get_or_create(
+                        id,
+                        &local_tp,
+                        &peer_tp,
+                        StreamOpenIntent::Peer,
+                        true,
+                    )
                     .unwrap()
                     .priority_key(),
             );
@@ -2626,6 +2787,48 @@ mod tests {
         assert_eq!(streams.readable().collect::<Vec<_>>(), vec![8, 4, 0, 12]);
         assert_eq!(streams.writable().collect::<Vec<_>>(), vec![8, 12, 4, 0]);
         assert_eq!(streams.peek_flushable().map(|key| key.id), Some(8));
+    }
+
+    #[test]
+    fn priority_adapter_link_roundtrip_and_independence() {
+        fn roundtrip<const OFFSET: usize>(
+            key: &Arc<StreamPriorityKey>,
+        ) -> NonNull<RBTreeAtomicLink> {
+            let adapter = StreamPriorityAdapter::<OFFSET>::default();
+            let ptr = Arc::as_ptr(key);
+            // SAFETY: key is a live Arc allocation, and the adapter returns
+            // the exact link that is immediately converted back to it.
+            let link = unsafe { adapter.get_link(ptr) };
+            // SAFETY: The link was obtained from this adapter immediately
+            // above.
+            assert_eq!(unsafe { adapter.get_value(link) }, ptr);
+            link
+        }
+
+        let key = Arc::new(StreamPriorityKey::default());
+        let links = [
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, readable) }>(
+                &key,
+            ),
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, writable) }>(
+                &key,
+            ),
+            roundtrip::<
+                { std::mem::offset_of!(StreamPriorityKey, stopped_writable) },
+            >(&key),
+            roundtrip::<{ std::mem::offset_of!(StreamPriorityKey, flushable) }>(
+                &key,
+            ),
+        ];
+        for (i, link) in links.iter().enumerate() {
+            assert!(!links[..i].contains(link));
+        }
+        assert_eq!(links, [
+            NonNull::from(&key.readable),
+            NonNull::from(&key.writable),
+            NonNull::from(&key.stopped_writable),
+            NonNull::from(&key.flushable),
+        ]);
     }
 
     #[test]
@@ -2767,7 +2970,7 @@ mod tests {
                     stream_id,
                     &local_params,
                     &peer_params,
-                    true,
+                    StreamOpenIntent::Local,
                     false,
                 )
                 .unwrap();

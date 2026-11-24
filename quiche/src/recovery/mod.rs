@@ -44,6 +44,7 @@ use smallvec::SmallVec;
 
 use self::congestion::recovery::LegacyRecovery;
 use self::gcongestion::GRecovery;
+pub use gcongestion::BbrAckCompensation;
 pub use gcongestion::BbrBwLoReductionStrategy;
 pub use gcongestion::BbrParams;
 #[cfg(feature = "internal")]
@@ -530,22 +531,22 @@ pub enum PacketFlight {
 }
 
 impl PacketFlight {
-    #[must_use]
+    #[must_use = "the result controls congestion-window accounting"]
     pub const fn in_flight(self) -> bool {
         !matches!(self, Self::NotInFlight)
     }
 
-    #[must_use]
+    #[must_use = "the result determines whether acknowledgement and loss recovery are required"]
     pub const fn ack_eliciting(self) -> bool {
         matches!(self, Self::AckEliciting | Self::Data | Self::PmtuProbe)
     }
 
-    #[must_use]
+    #[must_use = "the result distinguishes data-bearing packets for congestion accounting"]
     pub const fn has_data(self) -> bool {
         matches!(self, Self::Data)
     }
 
-    #[must_use]
+    #[must_use = "the result selects path MTU probe accounting"]
     pub const fn is_pmtud_probe(self) -> bool {
         matches!(self, Self::PmtuProbe)
     }
@@ -569,11 +570,11 @@ pub struct Sent {
 
     pub frames: SmallVec<[frame::Frame; 1]>,
 
-    pub time_sent: Instant,
+    pub transmitted_at: Instant,
 
-    pub time_acked: Option<Instant>,
+    pub acked_at: Option<Instant>,
 
-    pub time_lost: Option<Instant>,
+    pub lost_at: Option<Instant>,
 
     pub size: usize,
 
@@ -595,7 +596,7 @@ pub struct Sent {
 impl std::fmt::Debug for Sent {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(f, "pkt_num={:?} ", self.pkt_num)?;
-        write!(f, "pkt_sent_time={:?} ", self.time_sent)?;
+        write!(f, "pkt_sent_time={:?} ", self.transmitted_at)?;
         write!(f, "pkt_size={:?} ", self.size)?;
         write!(f, "delivered={:?} ", self.delivered)?;
         write!(f, "delivered_time={:?} ", self.delivered_time)?;
@@ -1963,9 +1964,9 @@ mod tests {
             let p = Sent {
                 pkt_num: i,
                 frames: smallvec![],
-                time_sent: now,
-                time_acked: None,
-                time_lost: None,
+                transmitted_at: now,
+                acked_at: None,
+                lost_at: None,
                 size: 1200,
                 flight: PacketFlight::Data,
                 delivered: 0,
@@ -2622,12 +2623,12 @@ mod tests {
 
         // Three packets spanning ten seconds, none of which is acknowledged.
         for (pkt_num, offset) in [(1, 0), (2, 5), (3, 10)] {
-            let sent_at = start + Duration::from_secs(offset);
+            let transmitted_at = start + Duration::from_secs(offset);
             r.on_packet_sent(
-                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                test_utils::helper_packet_sent(pkt_num, transmitted_at, 1000),
                 epoch,
                 HandshakeStatus::default(),
-                sent_at,
+                transmitted_at,
                 "",
             );
         }
@@ -2677,12 +2678,12 @@ mod tests {
         // These two packets span long enough for persistent congestion, but
         // both predate the first RTT sample.
         for (pkt_num, offset) in [(0, 0), (1, 5)] {
-            let sent_at = start + Duration::from_secs(offset);
+            let transmitted_at = start + Duration::from_secs(offset);
             r.on_packet_sent(
-                test_utils::helper_packet_sent(pkt_num, sent_at, 1000),
+                test_utils::helper_packet_sent(pkt_num, transmitted_at, 1000),
                 epoch,
                 HandshakeStatus::default(),
-                sent_at,
+                transmitted_at,
                 "",
             );
         }
@@ -3127,9 +3128,9 @@ mod tests {
         let p_initial = Sent {
             pkt_num: 0,
             frames: smallvec::smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            transmitted_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::AckEliciting,
             delivered: 0,
@@ -3154,9 +3155,9 @@ mod tests {
         let p_app = Sent {
             pkt_num: 0, // Application space has its own packet numbers
             frames: smallvec::smallvec![],
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            transmitted_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::Data,
             delivered: 0,
@@ -3220,9 +3221,9 @@ mod tests {
         let p = Sent {
             pkt_num: 0,
             frames: frames.clone(),
-            time_sent: now,
-            time_acked: None,
-            time_lost: None,
+            transmitted_at: now,
+            acked_at: None,
+            lost_at: None,
             size: 1000,
             flight: PacketFlight::Data,
             delivered: 0,

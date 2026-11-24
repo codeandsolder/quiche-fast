@@ -47,6 +47,7 @@ use self::mode::Mode;
 
 use super::bbr::SendTimeState;
 use super::Acked;
+use super::BbrAckCompensation;
 use super::BbrBwLoReductionStrategy;
 use super::BbrParams;
 use super::BbrRttJumpDetector;
@@ -56,30 +57,81 @@ use super::RttStats;
 
 const MAX_MODE_CHANGES_PER_CONGESTION_EVENT: usize = 4;
 
+/// Reno-compatible bandwidth probe cadence.
+#[derive(Debug, Clone, Copy)]
+struct RenoCoexistence {
+    max_rounds: usize,
+    /// Zero disables BDP scaling while retaining the round limit.
+    bdp_gain: f32,
+}
+
+const DEFAULT_RENO_COEXISTENCE: RenoCoexistence = RenoCoexistence {
+    max_rounds: 63,
+    bdp_gain: 1.0,
+};
+
 #[derive(Debug)]
-struct Params {
-    // STARTUP parameters.
+struct StartupTuning {
     /// The gain for CWND in startup.
-    startup_cwnd_gain: f32,
+    cwnd_gain: f32,
 
-    startup_pacing_gain: f32,
-
-    /// STARTUP or `PROBE_UP` are exited if the total bandwidth growth is less
-    /// than `full_bw_threshold` in the last `startup_full_bw_rounds` round
-    /// trips.
-    full_bw_threshold: f32,
+    pacing_gain: f32,
 
     /// The number of rounds to stay in  STARTUP before exiting due to
     /// bandwidth plateau.
-    startup_full_bw_rounds: usize,
+    full_bw_rounds: usize,
 
     /// Number of rounds to stay in STARTUP when there's a sufficient queue that
     /// `bytes_in_flight` never drops below the target (1.75 * BDP).  0
     /// indicates the feature is disabled and we never exit due to queueing.
-    max_startup_queue_rounds: usize,
+    max_queue_rounds: usize,
 
     /// The minimum number of loss marking events to exit STARTUP.
-    startup_full_loss_count: usize,
+    full_loss_count: usize,
+
+    /// Set the pacing gain to 25% larger than the recent BW increase in
+    /// STARTUP.
+    decrease_pacing_at_end_of_round: bool,
+
+    /// Determines whether app limited rounds with no bandwidth growth count
+    /// towards the rounds threshold to exit startup.
+    ignore_app_limited_rounds: bool,
+}
+
+#[derive(Debug)]
+struct PacingTuning {
+    /// Initial pacing rate for a new connection before an RTT
+    /// estimate is available.  This rate serves as an upper bound on
+    /// the initial pacing rate, which is calculated by dividing the
+    /// initial cwnd by the first RTT estimate.
+    initial_rate_bytes_per_second: Option<u64>,
+
+    /// If true, scale the pacing rate when updating mss when doing pmtud.
+    scale_rate_by_mss: bool,
+
+    /// Set the expected send time for packets when using BBR to `now`
+    /// instead of `get_next_release_time()`.  Setting the time based
+    /// on `get_next_release_time()` can result in artificially low
+    /// RTT measurements due to the pacer's use of `burst_tokens` to
+    /// make up for lost time.  BBR has significant problems when
+    /// minRTT is under estimated, so it is better to have the RTT be
+    /// slightly over estimated.  The pacer can only schedule packets
+    /// 1/8th of an RTT into the future, so the error introduced by
+    /// setting `transmitted_at` to `now` is bounded.
+    time_sent_set_to_now: bool,
+}
+
+#[derive(Debug)]
+struct Params {
+    pacing: PacingTuning,
+
+    startup: StartupTuning,
+
+    // STARTUP parameters.
+    /// STARTUP or `PROBE_UP` are exited if the total bandwidth growth is less
+    /// than `full_bw_threshold` in the last `startup_full_bw_rounds` round
+    /// trips.
+    full_bw_threshold: f32,
 
     /// DRAIN parameters.
     drain_cwnd_gain: f32,
@@ -87,14 +139,7 @@ struct Params {
     drain_pacing_gain: f32,
 
     // PROBE_BW parameters.
-    /// Max number of rounds before probing for Reno-coexistence.
-    probe_bw_probe_max_rounds: usize,
-
-    enable_reno_coexistence: bool,
-
-    /// Multiplier to get Reno-style probe epoch duration as: k * BDP round
-    /// trips. If zero, disables Reno-style BDP-scaled coexistence mechanism.
-    probe_bw_probe_reno_gain: f32,
+    reno_coexistence: Option<RenoCoexistence>,
 
     /// Minimum duration for BBR-native probes.
     probe_bw_probe_base_duration: Duration,
@@ -114,8 +159,6 @@ struct Params {
     probe_bw_up_cwnd_gain: f32,
 
     // PROBE_UP parameters.
-    probe_up_ignore_inflight_hi: bool,
-
     /// Number of rounds to stay in `PROBE_UP` when there's a sufficient queue
     /// that `bytes_in_flight` never drops below the target.  0 indicates the
     /// feature is disabled and we never exit due to queueing.
@@ -149,68 +192,22 @@ struct Params {
     beta: f32,
 
     // Experimental flags.
-    add_ack_height_to_queueing_threshold: bool,
-
-    /// Don't run `PROBE_RTT` on the regular schedule
-    avoid_unnecessary_probe_rtt: bool,
-
-    /// When exiting STARTUP due to loss, set `inflight_hi` to the max of bdp
-    /// and max bytes delivered in round.
-    limit_inflight_hi_by_max_delivered: bool,
-
-    startup_loss_exit_use_max_delivered_for_inflight_hi: bool,
-
     /// Increase `inflight_hi` based on delivered, not inflight.
     use_bytes_delivered_for_inflight_hi: bool,
 
-    /// Set the pacing gain to 25% larger than the recent BW increase in
-    /// STARTUP.
-    decrease_startup_pacing_at_end_of_round: bool,
-
-    /// Avoid Overestimation in Bandwidth Sampler with ack aggregation.
-    /// This is an old experiment that we have found to under-perform the
-    /// algorithm described in the spec.  Use is not recommended.
-    enable_overestimate_avoidance: bool,
-
-    /// If true, apply the fix to A0 point selection logic so the
-    /// implementation is consistent with the behavior of the
-    /// google/quiche implementation.
-    choose_a0_point_fix: bool,
+    /// Optional experimental compensation in the bandwidth sampler.
+    ack_compensation: Option<BbrAckCompensation>,
 
     /// Controls the behavior of `BBRAdaptLowerBoundsFromCongestion()`.
     bw_lo_mode: BwLoMode,
-
-    /// Determines whether app limited rounds with no bandwidth growth count
-    /// towards the rounds threshold to exit startup.
-    ignore_app_limited_for_no_bandwidth_growth: bool,
-
-    /// Initial pacing rate for a new connection before an RTT
-    /// estimate is available.  This rate serves as an upper bound on
-    /// the initial pacing rate, which is calculated by dividing the
-    /// initial cwnd by the first RTT estimate.
-    initial_pacing_rate_bytes_per_second: Option<u64>,
 
     /// Lower bound on the congestion window in packets.  If not set,
     /// the initial congestion window is used as the lower bound.
     min_cwnd_packets: Option<usize>,
 
-    /// If true, scale the pacing rate when updating mss when doing pmtud.
-    scale_pacing_rate_by_mss: bool,
-
     /// Disable `has_stayed_long_enough_in_probe_down` which can cause
     /// `ProbeDown` to exit early.
     disable_probe_down_early_exit: bool,
-
-    /// Set the expected send time for packets when using BBR to `now`
-    /// instead of `get_next_release_time()`.  Setting the time based
-    /// on `get_next_release_time()` can result in artificially low
-    /// RTT measurements due to the pacer's use of `burst_tokens` to
-    /// make up for lost time.  BBR has significant problems when
-    /// minRTT is under estimated, so it is better to have the RTT be
-    /// slightly over estimated.  The pacer can only schedule packets
-    /// 1/8th of an RTT into the future, so the error introduced by
-    /// setting `time_sent` to `now` is bounded.
-    time_sent_set_to_now: bool,
 
     /// Selects the RTT jump detector implementation.
     rtt_jump_detector: BbrRttJumpDetector,
@@ -234,16 +231,25 @@ impl Params {
             };
         }
 
-        apply_override!(startup_cwnd_gain);
-        apply_override!(startup_pacing_gain);
+        if let Some(value) = custom_bbr_settings.startup_cwnd_gain {
+            self.startup.cwnd_gain = value;
+        }
+        if let Some(value) = custom_bbr_settings.startup_pacing_gain {
+            self.startup.pacing_gain = value;
+        }
         apply_override!(full_bw_threshold);
-        apply_override!(startup_full_bw_rounds);
-        apply_override!(startup_full_loss_count);
+        if let Some(value) = custom_bbr_settings.startup_full_bw_rounds {
+            self.startup.full_bw_rounds = value;
+        }
+        if let Some(value) = custom_bbr_settings.startup_full_loss_count {
+            self.startup.full_loss_count = value;
+        }
         apply_override!(drain_cwnd_gain);
         apply_override!(drain_pacing_gain);
-        apply_override!(enable_reno_coexistence);
-        apply_override!(enable_overestimate_avoidance);
-        apply_override!(choose_a0_point_fix);
+        if let Some(enabled) = custom_bbr_settings.enable_reno_coexistence {
+            self.reno_coexistence = enabled.then_some(DEFAULT_RENO_COEXISTENCE);
+        }
+        apply_optional_override!(ack_compensation);
         apply_override!(probe_bw_probe_up_pacing_gain);
         apply_override!(probe_bw_probe_down_pacing_gain);
         apply_override!(probe_bw_cwnd_gain);
@@ -253,12 +259,28 @@ impl Params {
         apply_override!(max_probe_up_queue_rounds);
         apply_override!(loss_threshold);
         apply_override!(use_bytes_delivered_for_inflight_hi);
-        apply_override!(decrease_startup_pacing_at_end_of_round);
-        apply_override!(ignore_app_limited_for_no_bandwidth_growth);
-        apply_override!(scale_pacing_rate_by_mss);
+        if let Some(value) =
+            custom_bbr_settings.decrease_startup_pacing_at_end_of_round
+        {
+            self.startup.decrease_pacing_at_end_of_round = value;
+        }
+        if let Some(value) =
+            custom_bbr_settings.ignore_app_limited_for_no_bandwidth_growth
+        {
+            self.startup.ignore_app_limited_rounds = value;
+        }
+        if let Some(value) = custom_bbr_settings.scale_pacing_rate_by_mss {
+            self.pacing.scale_rate_by_mss = value;
+        }
         apply_override!(disable_probe_down_early_exit);
-        apply_override!(time_sent_set_to_now);
-        apply_optional_override!(initial_pacing_rate_bytes_per_second);
+        if let Some(value) = custom_bbr_settings.time_sent_set_to_now {
+            self.pacing.time_sent_set_to_now = value;
+        }
+        if let Some(value) =
+            custom_bbr_settings.initial_pacing_rate_bytes_per_second
+        {
+            self.pacing.initial_rate_bytes_per_second = Some(value);
+        }
         apply_optional_override!(min_cwnd_packets);
 
         #[cfg(feature = "internal")]
@@ -277,27 +299,27 @@ impl Params {
 }
 
 const DEFAULT_PARAMS: Params = Params {
-    startup_cwnd_gain: 2.0,
-
-    startup_pacing_gain: 2.773,
-
+    pacing: PacingTuning {
+        initial_rate_bytes_per_second: None,
+        scale_rate_by_mss: false,
+        time_sent_set_to_now: true,
+    },
+    startup: StartupTuning {
+        cwnd_gain: 2.0,
+        pacing_gain: 2.773,
+        full_bw_rounds: 3,
+        max_queue_rounds: 0,
+        full_loss_count: 8,
+        decrease_pacing_at_end_of_round: true,
+        ignore_app_limited_rounds: true,
+    },
     full_bw_threshold: 1.25,
-
-    startup_full_bw_rounds: 3,
-
-    max_startup_queue_rounds: 0,
-
-    startup_full_loss_count: 8,
 
     drain_cwnd_gain: 2.0,
 
     drain_pacing_gain: 1.0 / 2.885,
 
-    probe_bw_probe_max_rounds: 63,
-
-    enable_reno_coexistence: true,
-
-    probe_bw_probe_reno_gain: 1.0,
+    reno_coexistence: Some(DEFAULT_RENO_COEXISTENCE),
 
     probe_bw_probe_base_duration: Duration::from_millis(2000),
 
@@ -312,8 +334,6 @@ const DEFAULT_PARAMS: Params = Params {
     probe_bw_cwnd_gain: 2.0, // BBRv3
 
     probe_bw_up_cwnd_gain: 2.25, // BBRv3
-
-    probe_up_ignore_inflight_hi: false,
 
     max_probe_up_queue_rounds: 2,
 
@@ -335,35 +355,15 @@ const DEFAULT_PARAMS: Params = Params {
 
     beta: 0.3,
 
-    add_ack_height_to_queueing_threshold: false,
-
-    avoid_unnecessary_probe_rtt: true,
-
-    limit_inflight_hi_by_max_delivered: true,
-
-    startup_loss_exit_use_max_delivered_for_inflight_hi: true,
-
     use_bytes_delivered_for_inflight_hi: true,
 
-    decrease_startup_pacing_at_end_of_round: true,
-
-    enable_overestimate_avoidance: false,
-
-    choose_a0_point_fix: false,
+    ack_compensation: None,
 
     bw_lo_mode: BwLoMode::Default,
 
-    ignore_app_limited_for_no_bandwidth_growth: true,
-
-    initial_pacing_rate_bytes_per_second: None,
-
     min_cwnd_packets: None,
 
-    scale_pacing_rate_by_mss: false,
-
     disable_probe_down_early_exit: false,
-
-    time_sent_set_to_now: true,
 
     rtt_jump_detector: BbrRttJumpDetector::Disabled,
 };
@@ -433,7 +433,7 @@ impl<T: Ord + Clone + Copy + From<u8>> Limits<T> {
 fn initial_pacing_rate(
     cwnd_in_bytes: usize, smoothed_rtt: Duration, params: &Params,
 ) -> Bandwidth {
-    if let Some(pacing_rate) = params.initial_pacing_rate_bytes_per_second {
+    if let Some(pacing_rate) = params.pacing.initial_rate_bytes_per_second {
         return Bandwidth::from_bytes_per_second(pacing_rate);
     }
 
@@ -553,7 +553,7 @@ impl BBRv2 {
     }
 
     pub const fn time_sent_set_to_now(&self) -> bool {
-        self.params.time_sent_set_to_now
+        self.params.pacing.time_sent_set_to_now
     }
 
     fn on_exit_quiescence(&mut self, now: Instant) {
@@ -584,7 +584,7 @@ impl BBRv2 {
             );
 
             if let Some(pacing_rate) =
-                self.params.initial_pacing_rate_bytes_per_second
+                self.params.pacing.initial_rate_bytes_per_second
             {
                 // Do not allow the pacing rate calculated from the first RTT
                 // measurement to be higher than the configured initial pacing
@@ -603,8 +603,8 @@ impl BBRv2 {
             return;
         }
 
-        if self.params.decrease_startup_pacing_at_end_of_round &&
-            network_model.pacing_gain() < self.params.startup_pacing_gain
+        if self.params.startup.decrease_pacing_at_end_of_round &&
+            network_model.pacing_gain() < self.params.startup.pacing_gain
         {
             self.pacing_rate = target_rate;
             return;
@@ -691,7 +691,7 @@ impl CongestionControl for BBRv2 {
         &mut self, sent_time: Instant, bytes_in_flight: usize,
         packet_number: u64, bytes: usize, is_retransmissible: bool,
     ) {
-        if bytes_in_flight == 0 && self.params.avoid_unnecessary_probe_rtt {
+        if bytes_in_flight == 0 {
             self.on_exit_quiescence(sent_time);
         }
 
@@ -752,9 +752,7 @@ impl CongestionControl for BBRv2 {
         if !self.last_sample_is_app_limited {
             self.has_non_app_limited_sample = true;
         }
-        if congestion_event.bytes_in_flight == 0 &&
-            self.params.avoid_unnecessary_probe_rtt
-        {
+        if congestion_event.bytes_in_flight == 0 {
             self.on_enter_quiescence(event_time);
         }
     }
@@ -805,7 +803,7 @@ impl CongestionControl for BBRv2 {
         self.cwnd_limits.lo = scale(self.cwnd_limits.lo);
         self.cwnd = scale(self.cwnd);
         self.initial_cwnd = scale(self.initial_cwnd);
-        if self.params.scale_pacing_rate_by_mss {
+        if self.params.pacing.scale_rate_by_mss {
             self.pacing_rate = self.pacing_rate.scale_ratio(new_mss, old_mss);
         }
         self.mss = new_mss;
@@ -856,6 +854,31 @@ mod tests {
         bbr.cwnd = usize::MAX - 1;
         bbr.update_congestion_window(10);
         assert_eq!(bbr.cwnd, usize::MAX);
+    }
+
+    #[rstest]
+    fn resolved_policies_do_not_carry_disabled_compensation_state(
+        #[values(
+            None,
+            Some(BbrAckCompensation::Legacy),
+            Some(BbrAckCompensation::Corrected)
+        )]
+        compensation: Option<BbrAckCompensation>,
+        #[values(false, true)] coexistence: bool,
+    ) {
+        let params = DEFAULT_PARAMS.with_overrides(&BbrParams {
+            ack_compensation: compensation,
+            enable_reno_coexistence: Some(coexistence),
+            startup_cwnd_gain: Some(2.5),
+            startup_full_bw_rounds: Some(5),
+            initial_pacing_rate_bytes_per_second: Some(42_000),
+            ..Default::default()
+        });
+        assert_eq!(params.ack_compensation, compensation);
+        assert_eq!(params.reno_coexistence.is_some(), coexistence);
+        assert_eq!(params.startup.cwnd_gain, 2.5);
+        assert_eq!(params.startup.full_bw_rounds, 5);
+        assert_eq!(params.pacing.initial_rate_bytes_per_second, Some(42_000));
     }
 
     #[rstest]

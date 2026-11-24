@@ -60,7 +60,7 @@ pub(super) fn on_congestion_event(
     }
 
     let check_persistent_queue =
-        params.max_startup_queue_rounds > 0 && !has_bandwidth_growth;
+        params.startup.max_queue_rounds > 0 && !has_bandwidth_growth;
     if check_persistent_queue {
         // https://github.com/google/quiche/blob/27eca0257490df89d2bd2c2a8bcea15565e7831c/quiche/quic/core/congestion_control/bbr2_startup.cc#L60-L62
         // 1.75 is less than the 2x CWND gain, but substantially more than
@@ -110,15 +110,11 @@ fn check_excessive_losses(
     // At the end of a round trip. Check if loss is too high in this round.
     if model.is_inflight_too_high(
         congestion_event,
-        params.startup_full_loss_count,
+        params.startup.full_loss_count,
         params,
     ) {
-        let mut new_inflight_hi = model.bdp0();
-
-        if params.startup_loss_exit_use_max_delivered_for_inflight_hi {
-            new_inflight_hi =
-                new_inflight_hi.max(model.max_bytes_delivered_in_round());
-        }
+        let new_inflight_hi =
+            model.bdp0().max(model.max_bytes_delivered_in_round());
 
         model.set_inflight_hi(new_inflight_hi);
         model.set_full_bandwidth_reached();

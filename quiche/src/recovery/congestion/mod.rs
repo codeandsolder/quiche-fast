@@ -212,7 +212,7 @@ impl Congestion {
             }
         }
 
-        pkt.time_sent = now;
+        pkt.transmitted_at = now;
 
         // bytes_in_flight is already updated. Use previous value.
         self.delivery_rate
