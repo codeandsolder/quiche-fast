@@ -17,8 +17,8 @@ jobs:
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
     with:
       # The smaller packages already enforce all-target strict policy.
-      # The core library has its own feature matrix below; #54 tracks
-      # remaining test/example scope, #52/#55 other packages.
+      # The quiche library and examples have their own feature matrix;
+      # #54 tracks remaining test targets, #52/#55 other packages.
       cargo-args: "--all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch --features qlog/nightly-clippy-expects,buffer-pool/nightly-clippy-expects,netlog/nightly-clippy-expects"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
       ban-python-outside-ci: true
@@ -30,9 +30,9 @@ jobs:
       matrix:
         include:
           - configuration: default
-            cargo-args: "--locked --no-deps -p quiche --lib"
+            cargo-args: "--locked --no-deps -p quiche --lib --examples"
           - configuration: expanded
-            cargo-args: "--locked --no-deps -p quiche --lib --features ffi,qlog,internal,custom-client-dcid,gcongestion"
+            cargo-args: "--locked --no-deps -p quiche --lib --examples --features ffi,qlog,internal,custom-client-dcid,gcongestion"
     name: "quiche core (${{ matrix.configuration }})"
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
     with:
