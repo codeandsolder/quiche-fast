@@ -658,13 +658,8 @@ impl Frame {
 
             Self::HandshakeDone => QuicFrame::HandshakeDone { raw: None },
 
-            Self::Datagram { data } => QuicFrame::Datagram {
-                raw: Some(Box::new(qlog_payload(data.len() as u64))),
-            },
-
-            Self::DatagramHeader { length } => QuicFrame::Datagram {
-                raw: Some(Box::new(qlog_payload(*length as u64))),
-            },
+            Self::Datagram { data } => qlog_datagram(data.len()),
+            Self::DatagramHeader { length } => qlog_datagram(*length),
         }
     }
 }
@@ -742,6 +737,13 @@ const fn qlog_payload(length: u64) -> qlog::events::RawInfo {
         length: None,
         payload_length: Some(length),
         data: None,
+    }
+}
+
+#[cfg(feature = "qlog")]
+fn qlog_datagram(length: usize) -> QuicFrame {
+    QuicFrame::Datagram {
+        raw: Some(Box::new(qlog_payload(length as u64))),
     }
 }
 

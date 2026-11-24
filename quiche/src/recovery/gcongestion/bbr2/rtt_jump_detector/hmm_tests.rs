@@ -483,3 +483,43 @@ fn hmm_forward_filter_is_deterministic_for_known_bins() {
 
     assert_eq!(hmm_argmax(&alpha), HmmState::Persistent);
 }
+
+/// The forward filter should remain normalized and track an independent
+/// double-precision reference over long mixed emission sequences.
+#[test]
+fn hmm_forward_filter_tracks_double_precision_reference() {
+    let mut alpha = [1.0_f32, 0.0, 0.0];
+    let mut reference = [1.0_f64, 0.0, 0.0];
+    let mut random = 0x48e7_a51c_u32;
+    for index in 0..10_000 {
+        random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        let bin = if index % 80 < 40 {
+            0
+        } else {
+            (random >> 16) as usize % HMM_BINS
+        };
+        hmm_forward_step(&mut alpha, bin, &HMM_TRANSITION, &HMM_EMISSION);
+
+        let mut next = [0.0_f64; HMM_STATE_COUNT];
+        for (j, probability) in next.iter_mut().enumerate() {
+            let predicted: f64 = reference
+                .iter()
+                .enumerate()
+                .map(|(i, prior)| prior * f64::from(HMM_TRANSITION[i][j]))
+                .sum();
+            *probability = predicted * f64::from(HMM_EMISSION[j][bin]);
+        }
+        let total: f64 = next.iter().sum();
+        reference = next.map(|probability| probability / total);
+
+        assert!((alpha.iter().sum::<f32>() - 1.0).abs() < 1e-6);
+        for (&actual, &expected) in alpha.iter().zip(&reference) {
+            assert!(actual >= 0.0);
+            assert!((f64::from(actual) - expected).abs() < 2e-6);
+        }
+        let best = hmm_argmax(&alpha).as_index();
+        assert!(reference
+            .iter()
+            .all(|&probability| probability <= reference[best] + 2e-6));
+    }
+}

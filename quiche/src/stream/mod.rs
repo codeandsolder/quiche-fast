@@ -1363,6 +1363,62 @@ mod tests {
     }
 
     #[test]
+    fn only_send_intent_signals_local_stream_count_exhaustion() {
+        let params = crate::TransportParams::default();
+        let mut map = StreamMap::<DefaultBufFactory>::new(1, 1, 1024);
+        map.quota_mut(Bidirectional).update_peer_limit(1);
+        assert!(map
+            .get_or_create(0, &params, &params, StreamOpenIntent::Local, false)
+            .is_ok());
+        assert_eq!(
+            map.get_or_create(
+                4,
+                &params,
+                &params,
+                StreamOpenIntent::Local,
+                false
+            )
+            .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Bidirectional).pending_blocked_limit(), None);
+        assert_eq!(
+            map.get_or_create(
+                4,
+                &params,
+                &params,
+                StreamOpenIntent::LocalSend,
+                false
+            )
+            .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Bidirectional).pending_blocked_limit(), Some(1));
+
+        assert!(map
+            .get_or_create(3, &params, &params, StreamOpenIntent::Peer, false)
+            .is_ok());
+        assert_eq!(
+            map.get_or_create(7, &params, &params, StreamOpenIntent::Peer, false)
+                .err(),
+            Some(Error::StreamLimit)
+        );
+        assert_eq!(map.quota(Unidirectional).pending_blocked_limit(), None);
+        assert_eq!(
+            map.get_or_create(
+                7,
+                &params,
+                &params,
+                StreamOpenIntent::LocalSend,
+                false
+            )
+            .err(),
+            Some(Error::InvalidStreamState(7))
+        );
+        assert_eq!(map.quota(Unidirectional).pending_blocked_limit(), None);
+    }
+
+    #[test]
     fn count_quota_preserves_independent_direction_and_reset_obligations() {
         let mut streams = StreamMap::<DefaultBufFactory>::new(3, 7, 1024);
         let quota = streams.quota_mut(Bidirectional);
@@ -2447,99 +2503,53 @@ mod tests {
         streams.enqueue(&key, PriorityQueue::Writable);
     }
 
-    #[test]
-    fn writable_prioritized_default_priority() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
+    fn writable_priority_fixture(
+    ) -> (StreamMap, crate::TransportParams, crate::TransportParams) {
+        let local = crate::TransportParams::default();
+        let peer = crate::TransportParams {
             initial_max_stream_data_bidi_local: 100,
             initial_max_stream_data_uni: 100,
             ..Default::default()
         };
-
-        let mut streams = StreamMap::new(100, 100, 100);
-
-        for id in [0, 4, 8, 12] {
-            assert!(streams
-                .get_or_create(
-                    id,
-                    &local_tp,
-                    &peer_tp,
-                    StreamOpenIntent::Peer,
-                    true
-                )
-                .is_ok());
-        }
-
-        let walk_1: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_1.first().unwrap(), &mut streams);
-        let walk_2: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_2.first().unwrap(), &mut streams);
-        let walk_3: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_3.first().unwrap(), &mut streams);
-        let walk_4: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_4.first().unwrap(), &mut streams);
-        let walk_5: Vec<u64> = streams.writable().collect();
-
-        // All streams are incremental and same urgency by default. Multiple
-        // visits shuffle their order.
-        assert_eq!(walk_1, vec![0, 4, 8, 12]);
-        assert_eq!(walk_2, vec![4, 8, 12, 0]);
-        assert_eq!(walk_3, vec![8, 12, 0, 4]);
-        assert_eq!(walk_4, vec![12, 0, 4, 8,]);
-        assert_eq!(walk_5, vec![0, 4, 8, 12]);
+        (StreamMap::new(100, 100, 100), local, peer)
     }
 
-    #[test]
-    fn writable_prioritized_insert_order() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = StreamMap::new(100, 100, 100);
-
-        // Inserting same-urgency incremental streams in a "random" order yields
-        // same order to start with.
-        for id in [12, 4, 8, 0] {
-            assert!(streams
-                .get_or_create(
-                    id,
-                    &local_tp,
-                    &peer_tp,
-                    StreamOpenIntent::Peer,
-                    true
-                )
-                .is_ok());
+    /// Insertion order is FIFO for equal-urgency incremental streams,
+    /// regardless of numeric stream ID. Cycling the head rotates the queue.
+    #[rstest]
+    #[case([0, 4, 8, 12])]
+    #[case([12, 4, 8, 0])]
+    fn writable_prioritized_fifo(#[case] order: [u64; 4]) {
+        let (mut streams, local, peer) = writable_priority_fixture();
+        for id in order {
+            streams
+                .get_or_create(id, &local, &peer, StreamOpenIntent::Peer, true)
+                .unwrap();
         }
+        let mut expected = order;
+        for _ in 0..order.len() {
+            assert_eq!(streams.writable().collect::<Vec<_>>(), expected);
+            cycle_stream_priority(expected[0], &mut streams);
+            expected.rotate_left(1);
+        }
+        assert_eq!(streams.writable().collect::<Vec<_>>(), order);
+    }
 
-        let walk_1: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_1.first().unwrap(), &mut streams);
-        let walk_2: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_2.first().unwrap(), &mut streams);
-        let walk_3: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_3.first().unwrap(), &mut streams);
-        let walk_4: Vec<u64> = streams.writable().collect();
-        cycle_stream_priority(*walk_4.first().unwrap(), &mut streams);
-        let walk_5: Vec<u64> = streams.writable().collect();
-        assert_eq!(walk_1, vec![12, 4, 8, 0]);
-        assert_eq!(walk_2, vec![4, 8, 0, 12]);
-        assert_eq!(walk_3, vec![8, 0, 12, 4,]);
-        assert_eq!(walk_4, vec![0, 12, 4, 8]);
-        assert_eq!(walk_5, vec![12, 4, 8, 0]);
+    fn open_prioritized_streams(
+        streams: &mut StreamMap, local: &crate::TransportParams,
+        peer: &crate::TransportParams, input: &[(u64, u8)],
+    ) {
+        for &(id, urgency) in input {
+            streams
+                .get_or_create(id, local, peer, StreamOpenIntent::Peer, true)
+                .unwrap();
+            streams.set_priority(id, urgency, true);
+        }
     }
 
     #[test]
     fn writable_prioritized_mixed_urgency() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = <StreamMap>::new(100, 100, 100);
+        let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams where the urgency descends (becomes more important). No
         // stream shares an urgency.
@@ -2557,35 +2567,13 @@ mod tests {
             (40, 0),
         ];
 
-        for (id, urgency) in input.clone() {
-            streams
-                .get_or_create(
-                    id,
-                    &local_tp,
-                    &peer_tp,
-                    StreamOpenIntent::Peer,
-                    true,
-                )
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_1: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_1, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
 
         // Re-applying priority to a stream does not cause duplication.
-        for (id, urgency) in input {
-            streams
-                .get_or_create(
-                    id,
-                    &local_tp,
-                    &peer_tp,
-                    StreamOpenIntent::Peer,
-                    true,
-                )
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_2: Vec<u64> = streams.writable().collect();
         assert_eq!(walk_2, vec![40, 36, 32, 28, 24, 20, 16, 12, 8, 4, 0]);
@@ -2613,14 +2601,7 @@ mod tests {
 
     #[test]
     fn writable_prioritized_mixed_urgencies_incrementals() {
-        let local_tp = crate::TransportParams::default();
-        let peer_tp = crate::TransportParams {
-            initial_max_stream_data_bidi_local: 100,
-            initial_max_stream_data_uni: 100,
-            ..Default::default()
-        };
-
-        let mut streams = StreamMap::new(100, 100, 100);
+        let (mut streams, local_tp, peer_tp) = writable_priority_fixture();
 
         // Streams that share some urgency level
         let input = vec![
@@ -2637,18 +2618,7 @@ mod tests {
             (40, 0),
         ];
 
-        for (id, urgency) in input.clone() {
-            streams
-                .get_or_create(
-                    id,
-                    &local_tp,
-                    &peer_tp,
-                    StreamOpenIntent::Peer,
-                    true,
-                )
-                .unwrap();
-            streams.set_priority(id, urgency, true);
-        }
+        open_prioritized_streams(&mut streams, &local_tp, &peer_tp, &input);
 
         let walk_1: Vec<u64> = streams.writable().collect();
         cycle_stream_priority(4, &mut streams);
@@ -2829,6 +2799,8 @@ mod tests {
             // SAFETY: key is a live Arc allocation, and the adapter returns
             // the exact link that is immediately converted back to it.
             let link = unsafe { adapter.get_link(ptr) };
+            // SAFETY: The link was obtained from this adapter immediately
+            // above.
             assert_eq!(unsafe { adapter.get_value(link) }, ptr);
             link
         }

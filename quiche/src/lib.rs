@@ -1561,6 +1561,25 @@ struct TxPathProbes {
     challenge: Option<[u8; 8]>,
 }
 
+/// Direction of a logged stream-data ownership transfer.
+#[cfg(feature = "qlog")]
+enum StreamDataRoute {
+    Write,
+    Read,
+    Drop,
+}
+
+#[cfg(feature = "qlog")]
+impl StreamDataRoute {
+    const fn recipients(self) -> (DataRecipient, DataRecipient) {
+        match self {
+            Self::Write => (DataRecipient::Application, DataRecipient::Transport),
+            Self::Read => (DataRecipient::Transport, DataRecipient::Application),
+            Self::Drop => (DataRecipient::Transport, DataRecipient::Dropped),
+        }
+    }
+}
+
 #[derive(Default)]
 struct TxPacketAssembly {
     frames: SmallVec<[frame::Frame; 1]>,
@@ -4107,26 +4126,31 @@ impl<F: BufFactory> Connection<F> {
     }
 
     #[cfg(feature = "qlog")]
-    fn log_dropped_stream_range(
-        qlog: &mut QlogInfo, stream_id: u64, offset: u64, length: usize,
-        now: Instant,
+    fn log_stream_data_movement(
+        qlog: &mut QlogInfo, stream_id: u64, offset: u64, length: u64,
+        route: StreamDataRoute, fin: bool, now: Option<Instant>,
     ) {
         qlog_with_type!(QLOG_DATA_MV, qlog, q, {
+            let (from, to) = route.recipients();
             let ev_data = EventData::QuicStreamDataMoved(
                 qlog::events::quic::StreamDataMoved {
                     stream_id: Some(stream_id),
                     offset: Some(offset),
                     raw: Some(RawInfo {
-                        length: Some(length as u64),
+                        length: Some(length),
                         ..Default::default()
                     }),
-                    from: Some(DataRecipient::Transport),
-                    to: Some(DataRecipient::Dropped),
-                    ..Default::default()
+                    from: Some(from),
+                    to: Some(to),
+                    additional_info: fin
+                        .then_some(DataMovedAdditionalInfo::FinSet),
                 },
             );
-
-            q.add_event_data_with_instant(ev_data, now).ok();
+            q.add_event_data_with_instant(
+                ev_data,
+                now.unwrap_or_else(Instant::now),
+            )
+            .ok();
         });
     }
 
@@ -4184,12 +4208,14 @@ impl<F: BufFactory> Connection<F> {
                         // after the client sends a ResetStream.
 
                         #[cfg(feature = "qlog")]
-                        Self::log_dropped_stream_range(
+                        Self::log_stream_data_movement(
                             &mut self.qlog,
                             stream_id,
                             offset,
-                            length,
-                            now,
+                            length as u64,
+                            StreamDataRoute::Drop,
+                            false,
+                            Some(now),
                         );
 
                         self.streams.acknowledge_sent_range(
@@ -4772,12 +4798,14 @@ impl<F: BufFactory> Connection<F> {
                             .requeue_sent_range(stream_id, offset, length, fin)
                         {
                             #[cfg(feature = "qlog")]
-                            Self::log_dropped_stream_range(
+                            Self::log_stream_data_movement(
                                 &mut self.qlog,
                                 stream_id,
                                 offset,
-                                length,
-                                now,
+                                length as u64,
+                                StreamDataRoute::Drop,
+                                false,
+                                Some(now),
                             );
                         }
                     },
@@ -6471,10 +6499,9 @@ impl<F: BufFactory> Connection<F> {
         let offset = stream.recv.off_front();
 
         #[cfg(feature = "qlog")]
-        let to = match action {
-            RecvAction::Emit { .. } => Some(DataRecipient::Application),
-
-            RecvAction::Discard { .. } => Some(DataRecipient::Dropped),
+        let route = match action {
+            RecvAction::Emit { .. } => StreamDataRoute::Read,
+            RecvAction::Discard { .. } => StreamDataRoute::Drop,
         };
 
         let (read, fin) = match stream.recv.emit_or_discard(action) {
@@ -6510,25 +6537,16 @@ impl<F: BufFactory> Connection<F> {
             self.streams.collect(stream_id);
         }
 
-        qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-            let ev_data = EventData::QuicStreamDataMoved(
-                qlog::events::quic::StreamDataMoved {
-                    stream_id: Some(stream_id),
-                    offset: Some(offset),
-                    raw: Some(RawInfo {
-                        length: Some(read as u64),
-                        ..Default::default()
-                    }),
-                    from: Some(DataRecipient::Transport),
-                    to,
-                    additional_info: fin
-                        .then_some(DataMovedAdditionalInfo::FinSet),
-                },
-            );
-
-            let now = Instant::now();
-            q.add_event_data_with_instant(ev_data, now).ok();
-        });
+        #[cfg(feature = "qlog")]
+        Self::log_stream_data_movement(
+            &mut self.qlog,
+            stream_id,
+            offset,
+            read as u64,
+            route,
+            fin,
+            None,
+        );
 
         if priority_key.incremental && readable {
             // Shuffle the incremental stream to the back of the queue.
@@ -6772,25 +6790,16 @@ impl<F: BufFactory> Connection<F> {
 
         self.streams.add_tx_buffered(sent as u64);
 
-        qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-            let ev_data = EventData::QuicStreamDataMoved(
-                qlog::events::quic::StreamDataMoved {
-                    stream_id: Some(stream_id),
-                    offset: Some(offset),
-                    raw: Some(RawInfo {
-                        length: Some(sent as u64),
-                        ..Default::default()
-                    }),
-                    from: Some(DataRecipient::Application),
-                    to: Some(DataRecipient::Transport),
-                    additional_info: fin
-                        .then_some(DataMovedAdditionalInfo::FinSet),
-                },
-            );
-
-            let now = Instant::now();
-            q.add_event_data_with_instant(ev_data, now).ok();
-        });
+        #[cfg(feature = "qlog")]
+        Self::log_stream_data_movement(
+            &mut self.qlog,
+            stream_id,
+            offset,
+            sent as u64,
+            StreamDataRoute::Write,
+            fin,
+            None,
+        );
 
         if sent == 0 && cap > 0 {
             return Err(Error::Done);
@@ -6936,23 +6945,16 @@ impl<F: BufFactory> Connection<F> {
                 // Match App-to-Transport moves with Transport-to-Dropped moves.
                 // A Network transition would distinguish sent bytes from drops
                 // before transmission.
-                qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-                    let ev_data = EventData::QuicStreamDataMoved(
-                        qlog::events::quic::StreamDataMoved {
-                            stream_id: Some(stream_id),
-                            offset: Some(final_size),
-                            raw: Some(RawInfo {
-                                length: Some(unsent),
-                                ..Default::default()
-                            }),
-                            from: Some(DataRecipient::Transport),
-                            to: Some(DataRecipient::Dropped),
-                            ..Default::default()
-                        },
-                    );
-
-                    q.add_event_data_with_instant(ev_data, Instant::now()).ok();
-                });
+                #[cfg(feature = "qlog")]
+                Self::log_stream_data_movement(
+                    &mut self.qlog,
+                    stream_id,
+                    final_size,
+                    unsent,
+                    StreamDataRoute::Drop,
+                    false,
+                    None,
+                );
 
                 // Update send capacity.
                 self.update_tx_cap();
@@ -9463,23 +9465,16 @@ impl<F: BufFactory> Connection<F> {
             // Transport to Dropped.
             // A Network transition would distinguish sent bytes from
             // drops before transmission.
-            qlog_with_type!(QLOG_DATA_MV, self.qlog, q, {
-                let ev_data = EventData::QuicStreamDataMoved(
-                    qlog::events::quic::StreamDataMoved {
-                        stream_id: Some(stream_id),
-                        offset: Some(final_size),
-                        raw: Some(RawInfo {
-                            length: Some(unsent),
-                            ..Default::default()
-                        }),
-                        from: Some(DataRecipient::Transport),
-                        to: Some(DataRecipient::Dropped),
-                        ..Default::default()
-                    },
-                );
-
-                q.add_event_data_with_instant(ev_data, now).ok();
-            });
+            #[cfg(feature = "qlog")]
+            Self::log_stream_data_movement(
+                &mut self.qlog,
+                stream_id,
+                final_size,
+                unsent,
+                StreamDataRoute::Drop,
+                false,
+                Some(now),
+            );
 
             self.streams.insert_reset(stream_id, error_code, final_size);
 
