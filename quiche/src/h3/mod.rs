@@ -3492,40 +3492,6 @@ pub mod testing {
         pub server: Connection,
     }
 
-    #[cfg(test)]
-    mod frame_encoding_tests {
-        use super::super::Error;
-        use super::*;
-
-        #[test]
-        fn test_frame_encoder_preserves_exact_65k_boundary() {
-            // DATA uses one type byte and four length bytes here. Preserve
-            // the old 65,535-byte test fixture bound without a stack array.
-            let data = vec![0xa5; 65_530];
-            let frame = frame::Frame::Data {
-                payload: data.clone(),
-            };
-            let wire =
-                Session::<DefaultBufFactory>::encode_test_frame(&frame).unwrap();
-            assert_eq!(wire.len(), 65_535);
-            let mut reader = octets::Octets::with_slice(&wire);
-            assert_eq!(reader.get_varint().unwrap(), frame::DATA_FRAME_TYPE_ID);
-            assert_eq!(reader.get_varint().unwrap(), data.len() as u64);
-            assert_eq!(
-                reader.get_bytes(data.len()).unwrap().as_ref(),
-                data.as_slice()
-            );
-
-            let too_big = frame::Frame::Data {
-                payload: vec![0; 65_531],
-            };
-            assert_eq!(
-                Session::<DefaultBufFactory>::encode_test_frame(&too_big),
-                Err(Error::BufferTooShort)
-            );
-        }
-    }
-
     impl Session {
         pub fn new() -> Result<Self> {
             Self::new_with_buf()
@@ -3874,6 +3840,36 @@ pub mod testing {
             Ok(())
         }
     }
+    #[cfg(test)]
+    mod frame_encoding_tests {
+        use super::super::Error;
+        use super::*;
+
+        #[test]
+        fn test_frame_encoder_preserves_exact_65k_boundary() -> Result<()> {
+            // DATA uses one type byte and four length bytes here. Preserve
+            // the old 65,535-byte test fixture bound without a stack array.
+            let data = vec![0xa5; 65_530];
+            let frame = frame::Frame::Data {
+                payload: data.clone(),
+            };
+            let wire = Session::<DefaultBufFactory>::encode_test_frame(&frame)?;
+            assert_eq!(wire.len(), 65_535);
+            let mut reader = octets::Octets::with_slice(&wire);
+            assert_eq!(reader.get_varint()?, frame::DATA_FRAME_TYPE_ID);
+            assert_eq!(reader.get_varint()?, data.len() as u64);
+            assert_eq!(reader.get_bytes(data.len())?.as_ref(), data.as_slice());
+
+            let too_big = frame::Frame::Data {
+                payload: vec![0; 65_531],
+            };
+            assert_eq!(
+                Session::<DefaultBufFactory>::encode_test_frame(&too_big),
+                Err(Error::BufferTooShort)
+            );
+            Ok(())
+        }
+    }
 }
 
 #[cfg(test)]
@@ -3884,6 +3880,10 @@ mod tests {
 
     use super::testing::*;
 
+    // Transport, HTTP/3, and test fixture failures retain their original
+    // error descriptions instead of aborting the test at an unwrap site.
+    type TestResult<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
+
     #[test]
     /// Make sure that random GREASE values is within the specified limit.
     fn grease_value_in_varint_limit() {
@@ -3891,22 +3891,16 @@ mod tests {
     }
 
     #[test]
-    fn h3_handshake_0rtt() {
-        let mut buf = [0; 65535];
+    fn h3_handshake_0rtt() -> TestResult {
+        let mut buf = vec![0; 65_535];
 
         // Test drives the handshake one Initial at a time; requires a
         // single-Initial ClientHello.
         let mut config =
-            crate::test_utils::config_no_pq(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config
-            .set_application_protos(&[b"proto1", b"proto2"])
-            .unwrap();
+            crate::test_utils::config_no_pq(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"proto1", b"proto2"])?;
         config.set_initial_max_data(30);
         config.set_initial_max_stream_data_bidi_local(15);
         config.set_initial_max_stream_data_bidi_remote(15);
@@ -3919,14 +3913,15 @@ mod tests {
         let h3_config = Config::new();
 
         // Perform initial handshake.
-        let mut pipe = crate::test_utils::Pipe::with_config(&mut config).unwrap();
+        let mut pipe = crate::test_utils::Pipe::with_config(&mut config)?;
         assert_eq!(pipe.handshake(), Ok(()));
 
         // Extract session,
-        let session = pipe.client.session().unwrap();
+        let session =
+            pipe.client.session().ok_or("TLS session was not issued")?;
 
         // Configure session on new connection.
-        let mut pipe = crate::test_utils::Pipe::with_config(&mut config).unwrap();
+        let mut pipe = crate::test_utils::Pipe::with_config(&mut config)?;
         assert_eq!(pipe.client.set_session(session), Ok(()));
 
         // Can't create an H3 connection until the QUIC connection is determined
@@ -3937,7 +3932,7 @@ mod tests {
         ));
 
         // Client sends initial flight.
-        let (len, _) = pipe.client.send(&mut buf).unwrap();
+        let (len, _) = pipe.client.send(&mut buf)?;
 
         // Now an H3 connection can be created.
         assert!(Connection::with_transport(&mut pipe.client, &h3_config).is_ok());
@@ -3966,15 +3961,16 @@ mod tests {
         let mut b = [0; 15];
         assert_eq!(pipe.server.stream_recv(6, &mut b), Ok((5, true)));
         assert_eq!(&b[..5], b"aaaaa");
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with no body.
-    fn request_no_body_response_no_body() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_no_body_response_no_body() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         assert_eq!(stream, 0);
 
@@ -3986,7 +3982,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -3996,15 +3992,16 @@ mod tests {
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with one DATA frame.
-    fn request_no_body_response_one_chunk() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_no_body_response_one_chunk() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
         assert_eq!(stream, 0);
 
         let ev_headers = Event::Headers {
@@ -4016,9 +4013,9 @@ mod tests {
 
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
-        let body = s.send_body_server(stream, true).unwrap();
+        let body = s.send_body_server(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -4034,15 +4031,16 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with multiple DATA frames.
-    fn request_no_body_response_many_chunks() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_no_body_response_many_chunks() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -4054,13 +4052,13 @@ mod tests {
 
         let total_data_frames = 4;
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         for _ in 0..total_data_frames - 1 {
-            s.send_body_server(stream, false).unwrap();
+            s.send_body_server(stream, false)?;
         }
 
-        let body = s.send_body_server(stream, true).unwrap();
+        let body = s.send_body_server(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -4079,21 +4077,22 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with multiple DATA frames.
-    fn request_no_body_response_many_chunks_with_buf() {
-        let (mut config, h3_config) = Session::default_configs().unwrap();
+    fn request_no_body_response_many_chunks_with_buf() -> TestResult {
+        let (mut config, h3_config) = Session::default_configs()?;
         // we don't want to be limited by flow or cong. control
         config.set_initial_congestion_window_packets(100);
         config.set_initial_max_data(200_000);
         config.set_initial_max_stream_data_bidi_local(200_000);
         config.set_initial_max_stream_data_bidi_remote(200_000);
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -4108,20 +4107,19 @@ mod tests {
         // Use a large body
         let data = vec![0xab_u8; 16 * 1024];
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         for _ in 0..total_data_frames - 1 {
             assert_eq!(
                 s.server.send_body(&mut s.pipe.server, stream, &data, false),
                 Ok(data.len())
             );
-            s.advance().ok();
+            s.advance()?;
         }
 
         s.server
-            .send_body(&mut s.pipe.server, stream, &data, true)
-            .unwrap();
-        s.advance().ok();
+            .send_body(&mut s.pipe.server, stream, &data, true)?;
+        s.advance()?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -4167,17 +4165,18 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with one DATA frame, get a response with no body.
-    fn request_one_chunk_response_no_body() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_one_chunk_response_no_body() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -4193,7 +4192,7 @@ mod tests {
 
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -4202,23 +4201,24 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        Ok(())
     }
 
     #[test]
     /// Send a request with multiple DATA frames, get a response with no body.
-    fn request_many_chunks_response_no_body() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_many_chunks_response_no_body() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let total_data_frames = 4;
 
         for _ in 0..total_data_frames - 1 {
-            s.send_body_client(stream, false).unwrap();
+            s.send_body_client(stream, false)?;
         }
 
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -4237,7 +4237,7 @@ mod tests {
 
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -4246,95 +4246,63 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
+        Ok(())
     }
 
     #[test]
     /// Send a request with multiple DATA frames, get a response with one DATA
     /// frame.
-    fn many_requests_many_chunks_response_one_chunk() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn many_requests_many_chunks_response_one_chunk() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let mut reqs = Vec::new();
+        let stream_ids = [0, 4, 8];
+        let mut requests = Vec::new();
+        for expected_id in stream_ids {
+            let (id, headers) = s.send_request(false)?;
+            assert_eq!(id, expected_id);
+            requests.push(headers);
+        }
 
-        let (stream1, req1) = s.send_request(false).unwrap();
-        assert_eq!(stream1, 0);
-        reqs.push(req1);
-
-        let (stream2, req2) = s.send_request(false).unwrap();
-        assert_eq!(stream2, 4);
-        reqs.push(req2);
-
-        let (stream3, req3) = s.send_request(false).unwrap();
-        assert_eq!(stream3, 8);
-        reqs.push(req3);
-
-        let body = s.send_body_client(stream1, false).unwrap();
-        s.send_body_client(stream2, false).unwrap();
-        s.send_body_client(stream3, false).unwrap();
+        let body = s.send_body_client(stream_ids[0], false)?;
+        for id in &stream_ids[1..] {
+            s.send_body_client(*id, false)?;
+        }
 
         let mut recv_buf = vec![0; body.len()];
 
         // Reverse order of writes.
+        for id in stream_ids.into_iter().rev() {
+            s.send_body_client(id, true)?;
+        }
 
-        s.send_body_client(stream3, true).unwrap();
-        s.send_body_client(stream2, true).unwrap();
-        s.send_body_client(stream1, true).unwrap();
+        for (id, headers) in stream_ids.into_iter().zip(requests) {
+            assert_eq!(
+                s.poll_server(),
+                Ok((id, Event::Headers {
+                    list: headers,
+                    more_frames: true,
+                }))
+            );
+        }
 
-        let (_, ev) = s.poll_server().unwrap();
-        let ev_headers = Event::Headers {
-            list: reqs[0].clone(),
-            more_frames: true,
-        };
-        assert_eq!(ev, ev_headers);
-
-        let (_, ev) = s.poll_server().unwrap();
-        let ev_headers = Event::Headers {
-            list: reqs[1].clone(),
-            more_frames: true,
-        };
-        assert_eq!(ev, ev_headers);
-
-        let (_, ev) = s.poll_server().unwrap();
-        let ev_headers = Event::Headers {
-            list: reqs[2].clone(),
-            more_frames: true,
-        };
-        assert_eq!(ev, ev_headers);
-
-        assert_eq!(s.poll_server(), Ok((0, Event::Data)));
-        assert_eq!(s.recv_body_server(0, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_body_server(0, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_server(), Ok((0, Event::Finished)));
-
-        assert_eq!(s.poll_server(), Ok((4, Event::Data)));
-        assert_eq!(s.recv_body_server(4, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_body_server(4, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_server(), Ok((4, Event::Finished)));
-
-        assert_eq!(s.poll_server(), Ok((8, Event::Data)));
-        assert_eq!(s.recv_body_server(8, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_body_server(8, &mut recv_buf), Ok(body.len()));
-        assert_eq!(s.poll_server(), Ok((8, Event::Finished)));
+        for id in stream_ids {
+            assert_eq!(s.poll_server(), Ok((id, Event::Data)));
+            assert_eq!(s.recv_body_server(id, &mut recv_buf), Ok(body.len()));
+            assert_eq!(s.poll_client(), Err(Error::Done));
+            assert_eq!(s.recv_body_server(id, &mut recv_buf), Ok(body.len()));
+            assert_eq!(s.poll_server(), Ok((id, Event::Finished)));
+        }
 
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         let mut resps = Vec::new();
-
-        let resp1 = s.send_response(stream1, true).unwrap();
-        resps.push(resp1);
-
-        let resp2 = s.send_response(stream2, true).unwrap();
-        resps.push(resp2);
-
-        let resp3 = s.send_response(stream3, true).unwrap();
-        resps.push(resp3);
+        for id in stream_ids {
+            resps.push(s.send_response(id, true)?);
+        }
 
         for _ in 0..resps.len() {
-            let (stream, ev) = s.poll_client().unwrap();
+            let (stream, ev) = s.poll_client()?;
             let ev_headers = Event::Headers {
                 list: resps[(stream / 4) as usize].clone(),
                 more_frames: false,
@@ -4344,16 +4312,17 @@ mod tests {
         }
 
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with one DATA frame and an
     /// empty FIN after reception from the client.
-    fn request_no_body_response_one_chunk_empty_fin() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_no_body_response_one_chunk_empty_fin() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -4363,9 +4332,9 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
-        let body = s.send_body_server(stream, false).unwrap();
+        let body = s.send_body_server(stream, false)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -4380,20 +4349,21 @@ mod tests {
         assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(body.len()));
 
         assert_eq!(s.pipe.server.stream_send(stream, &[], true), Ok(0));
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a request with no body, get a response with no body followed by
     /// GREASE that is STREAM frame with a FIN.
-    fn request_no_body_response_no_body_with_grease() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn request_no_body_response_no_body_with_grease() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         assert_eq!(stream, 0);
 
@@ -4405,7 +4375,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -4416,28 +4386,29 @@ mod tests {
         let mut d = [42; 10];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        let frame_type = b.put_varint(148_764_065_110_560_899).unwrap();
-        s.pipe.server.stream_send(0, frame_type, false).unwrap();
+        let frame_type = b.put_varint(148_764_065_110_560_899)?;
+        s.pipe.server.stream_send(0, frame_type, false)?;
 
-        let frame_len = b.put_varint(10).unwrap();
-        s.pipe.server.stream_send(0, frame_len, false).unwrap();
+        let frame_len = b.put_varint(10)?;
+        s.pipe.server.stream_send(0, frame_len, false)?;
 
-        s.pipe.server.stream_send(0, &d, true).unwrap();
+        s.pipe.server.stream_send(0, &d, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Try to send DATA frames before HEADERS.
-    fn body_response_before_headers() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn body_response_before_headers() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
         assert_eq!(stream, 0);
 
         let ev_headers = Event::Headers {
@@ -4455,6 +4426,7 @@ mod tests {
         );
 
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -4462,18 +4434,23 @@ mod tests {
     #[case(true)]
     /// DATA is invalid before a final response, even after informational
     /// HEADERS.
-    fn received_data_before_final_response(#[case] informational: bool) {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn received_data_before_final_response(
+        #[case] informational: bool,
+    ) -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, _) = s.send_request(true).unwrap();
+        let (stream, _) = s.send_request(true)?;
         if informational {
-            s.poll_server().unwrap();
+            s.poll_server()?;
             let headers = [Header::new(b":status", b"103")];
-            s.server
-                .send_response(&mut s.pipe.server, stream, &headers, false)
-                .unwrap();
-            s.advance().unwrap();
+            s.server.send_response(
+                &mut s.pipe.server,
+                stream,
+                &headers,
+                false,
+            )?;
+            s.advance()?;
             assert!(matches!(s.poll_client(), Ok((_, Event::Headers { .. }))));
         }
 
@@ -4481,32 +4458,29 @@ mod tests {
             &frame::Frame::Data { payload: vec![1] },
             stream,
             true,
-        )
-        .unwrap();
+        )?;
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
-    fn received_data_after_response_trailers_without_body() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
-        let (stream, _) = s.send_request(true).unwrap();
-        s.poll_server().unwrap();
+    fn received_data_after_response_trailers_without_body() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
+        let (stream, _) = s.send_request(true)?;
+        s.poll_server()?;
         let headers = [Header::new(b":status", b"200")];
         let trailers = [Header::new(b"foo", b"bar")];
         s.server
-            .send_response(&mut s.pipe.server, stream, &headers, false)
-            .unwrap();
-        s.server
-            .send_additional_headers(
-                &mut s.pipe.server,
-                stream,
-                &trailers,
-                true,
-                false,
-            )
-            .unwrap();
-        s.advance().unwrap();
+            .send_response(&mut s.pipe.server, stream, &headers, false)?;
+        s.server.send_additional_headers(
+            &mut s.pipe.server,
+            stream,
+            &trailers,
+            true,
+            false,
+        )?;
+        s.advance()?;
 
         assert_eq!(
             s.poll_client(),
@@ -4526,28 +4500,25 @@ mod tests {
             &frame::Frame::Data { payload: vec![1] },
             stream,
             true,
-        )
-        .unwrap();
+        )?;
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
     /// Try to send DATA frames on wrong streams, ensure the API returns an
     /// error before anything hits the transport layer.
-    fn send_body_invalid_client_stream() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn send_body_invalid_client_stream() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         assert_eq!(s.send_body_client(0, true), Err(Error::FrameUnexpected));
 
         assert_eq!(
-            s.send_body_client(s.client.control_stream_id.unwrap(), true),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
             s.send_body_client(
-                s.client.local_qpack_streams.encoder_stream_id.unwrap(),
+                s.client
+                    .control_stream_id
+                    .ok_or("local control stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
@@ -4555,20 +4526,10 @@ mod tests {
 
         assert_eq!(
             s.send_body_client(
-                s.client.local_qpack_streams.decoder_stream_id.unwrap(),
-                true
-            ),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
-            s.send_body_client(s.client.peer_control_stream_id.unwrap(), true),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
-            s.send_body_client(
-                s.client.peer_qpack_streams.encoder_stream_id.unwrap(),
+                s.client
+                    .local_qpack_streams
+                    .encoder_stream_id
+                    .ok_or("local QPACK encoder stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
@@ -4576,30 +4537,63 @@ mod tests {
 
         assert_eq!(
             s.send_body_client(
-                s.client.peer_qpack_streams.decoder_stream_id.unwrap(),
+                s.client
+                    .local_qpack_streams
+                    .decoder_stream_id
+                    .ok_or("local QPACK decoder stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
         );
+
+        assert_eq!(
+            s.send_body_client(
+                s.client
+                    .peer_control_stream_id
+                    .ok_or("peer control stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+
+        assert_eq!(
+            s.send_body_client(
+                s.client
+                    .peer_qpack_streams
+                    .encoder_stream_id
+                    .ok_or("peer QPACK encoder stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+
+        assert_eq!(
+            s.send_body_client(
+                s.client
+                    .peer_qpack_streams
+                    .decoder_stream_id
+                    .ok_or("peer QPACK decoder stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+        Ok(())
     }
 
     #[test]
     /// Try to send DATA frames on wrong streams, ensure the API returns an
     /// error before anything hits the transport layer.
-    fn send_body_invalid_server_stream() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn send_body_invalid_server_stream() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         assert_eq!(s.send_body_server(0, true), Err(Error::FrameUnexpected));
 
         assert_eq!(
-            s.send_body_server(s.server.control_stream_id.unwrap(), true),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
             s.send_body_server(
-                s.server.local_qpack_streams.encoder_stream_id.unwrap(),
+                s.server
+                    .control_stream_id
+                    .ok_or("local control stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
@@ -4607,20 +4601,10 @@ mod tests {
 
         assert_eq!(
             s.send_body_server(
-                s.server.local_qpack_streams.decoder_stream_id.unwrap(),
-                true
-            ),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
-            s.send_body_server(s.server.peer_control_stream_id.unwrap(), true),
-            Err(Error::FrameUnexpected)
-        );
-
-        assert_eq!(
-            s.send_body_server(
-                s.server.peer_qpack_streams.encoder_stream_id.unwrap(),
+                s.server
+                    .local_qpack_streams
+                    .encoder_stream_id
+                    .ok_or("local QPACK encoder stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
@@ -4628,38 +4612,72 @@ mod tests {
 
         assert_eq!(
             s.send_body_server(
-                s.server.peer_qpack_streams.decoder_stream_id.unwrap(),
+                s.server
+                    .local_qpack_streams
+                    .decoder_stream_id
+                    .ok_or("local QPACK decoder stream was not opened")?,
                 true
             ),
             Err(Error::FrameUnexpected)
         );
+
+        assert_eq!(
+            s.send_body_server(
+                s.server
+                    .peer_control_stream_id
+                    .ok_or("peer control stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+
+        assert_eq!(
+            s.send_body_server(
+                s.server
+                    .peer_qpack_streams
+                    .encoder_stream_id
+                    .ok_or("peer QPACK encoder stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+
+        assert_eq!(
+            s.send_body_server(
+                s.server
+                    .peer_qpack_streams
+                    .decoder_stream_id
+                    .ok_or("peer QPACK decoder stream was not opened")?,
+                true
+            ),
+            Err(Error::FrameUnexpected)
+        );
+        Ok(())
     }
 
     #[test]
     /// Client sends request with body and trailers.
-    fn trailers() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn trailers() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let body = s.send_body_client(stream, false).unwrap();
+        let body = s.send_body_client(stream, false)?;
 
         let mut recv_buf = vec![0; body.len()];
 
         let req_trailers = vec![Header::new(b"foo", b"bar")];
 
-        s.client
-            .send_additional_headers(
-                &mut s.pipe.client,
-                stream,
-                &req_trailers,
-                true,
-                true,
-            )
-            .unwrap();
+        s.client.send_additional_headers(
+            &mut s.pipe.client,
+            stream,
+            &req_trailers,
+            true,
+            true,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -4678,15 +4696,16 @@ mod tests {
 
         assert_eq!(s.poll_server(), Ok((stream, ev_trailers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
+        Ok(())
     }
 
     #[test]
     /// Server responds with a 103, then a 200 with no body.
-    fn informational_response() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn informational_response() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         assert_eq!(stream, 0);
 
@@ -4715,8 +4734,7 @@ mod tests {
         );
 
         s.server
-            .send_response(&mut s.pipe.server, stream, &info_resp, false)
-            .unwrap();
+            .send_response(&mut s.pipe.server, stream, &info_resp, false)?;
 
         assert_eq!(
             s.server
@@ -4744,17 +4762,15 @@ mod tests {
             Err(Error::FrameUnexpected)
         );
 
-        s.server
-            .send_additional_headers(
-                &mut s.pipe.server,
-                stream,
-                &resp,
-                false,
-                true,
-            )
-            .unwrap();
+        s.server.send_additional_headers(
+            &mut s.pipe.server,
+            stream,
+            &resp,
+            false,
+            true,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_info_headers = Event::Headers {
             list: info_resp,
@@ -4770,16 +4786,17 @@ mod tests {
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Server responds with a 103, then attempts to send a 200 using
-    /// send_response again, which should fail.
-    fn no_multiple_response() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// `send_response` again, which should fail.
+    fn no_multiple_response() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         assert_eq!(stream, 0);
 
@@ -4802,8 +4819,7 @@ mod tests {
         ];
 
         s.server
-            .send_response(&mut s.pipe.server, stream, &info_resp, false)
-            .unwrap();
+            .send_response(&mut s.pipe.server, stream, &info_resp, false)?;
 
         assert_eq!(
             Err(Error::FrameUnexpected),
@@ -4811,7 +4827,7 @@ mod tests {
                 .send_response(&mut s.pipe.server, stream, &resp, true)
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_info_headers = Event::Headers {
             list: info_resp,
@@ -4820,15 +4836,17 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, ev_info_headers)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Server attempts to use send_additional_headers before initial response.
-    fn no_send_additional_before_initial_response() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Server attempts to use `send_additional_headers` before initial
+    /// response.
+    fn no_send_additional_before_initial_response() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         assert_eq!(stream, 0);
 
@@ -4856,18 +4874,19 @@ mod tests {
             )
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Client sends multiple HEADERS before data.
-    fn additional_headers_before_data_client() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn additional_headers_before_data_client() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let req_trailer = vec![Header::new(b"goodbye", b"world")];
 
@@ -4882,7 +4901,7 @@ mod tests {
             Ok(())
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_initial_headers = Event::Headers {
             list: req,
@@ -4897,20 +4916,21 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_initial_headers)));
         assert_eq!(s.poll_server(), Ok((stream, ev_trailing_headers)));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[rstest::rstest]
     #[case(false)]
     #[case(true)]
     /// Client sends multiple HEADERS before data.
-    fn data_after_trailers_client(#[case] with_body: bool) {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn data_after_trailers_client(#[case] with_body: bool) -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let body = if with_body {
-            s.send_body_client(stream, false).unwrap()
+            s.send_body_client(stream, false)?
         } else {
             Vec::new()
         };
@@ -4918,17 +4938,15 @@ mod tests {
 
         let req_trailers = vec![Header::new(b"foo", b"bar")];
 
-        s.client
-            .send_additional_headers(
-                &mut s.pipe.client,
-                stream,
-                &req_trailers,
-                true,
-                false,
-            )
-            .unwrap();
+        s.client.send_additional_headers(
+            &mut s.pipe.client,
+            stream,
+            &req_trailers,
+            true,
+            false,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         s.send_frame_client(
             &frame::Frame::Data {
@@ -4936,8 +4954,7 @@ mod tests {
             },
             stream,
             true,
-        )
-        .unwrap();
+        )?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -4956,27 +4973,36 @@ mod tests {
         }
         assert_eq!(s.poll_server(), Ok((stream, ev_trailers)));
         assert_eq!(s.poll_server(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[rstest::rstest]
     #[case::max_push_id(frame::Frame::MaxPushId { push_id: 1 })]
     #[case::cancel_push(frame::Frame::CancelPush { push_id: 1 })]
-    fn client_push_control_frame_on_control_stream(#[case] frame: frame::Frame) {
-        let mut session = Session::new().unwrap();
-        session.handshake().unwrap();
-        let control = session.client.control_stream_id.unwrap();
-        session.send_frame_client(&frame, control, false).unwrap();
+    fn client_push_control_frame_on_control_stream(
+        #[case] frame: frame::Frame,
+    ) -> TestResult {
+        let mut session = Session::new()?;
+        session.handshake()?;
+        let control = session
+            .client
+            .control_stream_id
+            .ok_or("local control stream was not opened")?;
+        session.send_frame_client(&frame, control, false)?;
         assert_eq!(session.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[rstest::rstest]
     #[case::max_push_id(frame::Frame::MaxPushId { push_id: 2 })]
     #[case::cancel_push(frame::Frame::CancelPush { push_id: 2 })]
-    fn client_push_control_frame_on_request_stream(#[case] frame: frame::Frame) {
-        let mut session = Session::new().unwrap();
-        session.handshake().unwrap();
-        let (stream_id, request) = session.send_request(false).unwrap();
-        session.send_frame_client(&frame, stream_id, false).unwrap();
+    fn client_push_control_frame_on_request_stream(
+        #[case] frame: frame::Frame,
+    ) -> TestResult {
+        let mut session = Session::new()?;
+        session.handshake()?;
+        let (stream_id, request) = session.send_request(false)?;
+        session.send_frame_client(&frame, stream_id, false)?;
         assert_eq!(
             session.poll_server(),
             Ok((stream_id, Event::Headers {
@@ -4985,57 +5011,63 @@ mod tests {
             }))
         );
         assert_eq!(session.poll_server(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
-    /// Send a sequence of MAX_PUSH_ID frames from the client that attempt to
+    /// Send a sequence of `MAX_PUSH_ID` frames from the client that attempt to
     /// reduce the limit.
-    fn max_push_id_from_client_limit_reduction() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn max_push_id_from_client_limit_reduction() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_client(
             &frame::Frame::MaxPushId { push_id: 2 },
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         s.send_frame_client(
             &frame::Frame::MaxPushId { push_id: 1 },
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_server(), Err(Error::InvalidId));
+        Ok(())
     }
 
     #[test]
-    /// Send a MAX_PUSH_ID frame from the server, which is forbidden.
-    fn max_push_id_from_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `MAX_PUSH_ID` frame from the server, which is forbidden.
+    fn max_push_id_from_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::MaxPushId { push_id: 1 },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
-    /// Send a PUSH_PROMISE frame from the client, which is forbidden.
-    fn push_promise_from_client() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PUSH_PROMISE` frame from the client, which is forbidden.
+    fn push_promise_from_client() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let header_block = qpack::encode(&req).unwrap();
+        let header_block = qpack::encode(&req)?;
 
         s.send_frame_client(
             &frame::Frame::PushPromise {
@@ -5044,8 +5076,7 @@ mod tests {
             },
             stream,
             false,
-        )
-        .unwrap();
+        )?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -5054,119 +5085,124 @@ mod tests {
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
     /// Server push streams from client are not allowed by the protocol.
-    fn push_stream_from_client() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn push_stream_from_client() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .open_uni_stream(
-                &mut s.pipe.client,
-                stream::HTTP3_PUSH_STREAM_TYPE_ID,
-                &[],
-                false,
-            )
-            .unwrap();
+        s.client.open_uni_stream(
+            &mut s.pipe.client,
+            stream::HTTP3_PUSH_STREAM_TYPE_ID,
+            &[],
+            false,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Err(Error::StreamCreation));
+        Ok(())
     }
 
     #[test]
     /// Server push streams from server are not allowed since the client does
     /// not advertise server push support by default.
-    fn push_stream_from_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn push_stream_from_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.server
-            .open_uni_stream(
-                &mut s.pipe.server,
-                stream::HTTP3_PUSH_STREAM_TYPE_ID,
-                &[],
-                false,
-            )
-            .unwrap();
+        s.server.open_uni_stream(
+            &mut s.pipe.server,
+            stream::HTTP3_PUSH_STREAM_TYPE_ID,
+            &[],
+            false,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Err(Error::StreamCreation));
+        Ok(())
     }
 
     #[test]
-    /// Send a CANCEL_PUSH frame from the client.
-    fn cancel_push_from_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `CANCEL_PUSH` frame from the client.
+    fn cancel_push_from_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::CancelPush { push_id: 1 },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a GOAWAY frame from the client.
-    fn goaway_from_client_good() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn goaway_from_client_good() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client.send_goaway(&mut s.pipe.client, 100).unwrap();
+        s.client.send_goaway(&mut s.pipe.client, 100)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         // TODO: server push
         assert_eq!(s.poll_server(), Ok((0, Event::GoAway)));
+        Ok(())
     }
 
     #[test]
     /// Send a GOAWAY frame from the server.
-    fn goaway_from_server_good() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn goaway_from_server_good() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.server.send_goaway(&mut s.pipe.server, 4000).unwrap();
+        s.server.send_goaway(&mut s.pipe.server, 4000)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Ok((4000, Event::GoAway)));
+        Ok(())
     }
 
     #[test]
     /// A client MUST NOT send a request after it receives GOAWAY.
-    fn client_request_after_goaway() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn client_request_after_goaway() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.server.send_goaway(&mut s.pipe.server, 4000).unwrap();
+        s.server.send_goaway(&mut s.pipe.server, 4000)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_client(), Ok((4000, Event::GoAway)));
 
         assert_eq!(s.send_request(true), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
     /// Send a GOAWAY frame from the server, using an invalid goaway ID.
-    fn goaway_from_server_invalid_id() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn goaway_from_server_invalid_id() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::GoAway { id: 1 },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::InvalidId));
         assert_eq!(
@@ -5175,49 +5211,55 @@ mod tests {
             "invalid GOAWAY stream ID must close with H3_ID_ERROR"
         );
         assert_eq!(s.client.peer_goaway_id, None);
+        Ok(())
     }
 
     #[test]
     /// Send a GOAWAY frame from the server with extra bytes after the ID.
-    fn goaway_from_server_trailing_bytes() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn goaway_from_server_trailing_bytes() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // GOAWAY (type 0x7) with a 3-byte payload: ID 0, then 2 extra bytes.
         s.send_arbitrary_stream_data_server(
             &[0x07, 0x03, 0x00, 0xaa, 0xbb],
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::MalformedFrame));
+        Ok(())
     }
 
     #[test]
     /// Send multiple GOAWAY frames from the server, that increase the goaway
     /// ID.
-    fn goaway_from_server_increase_id() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn goaway_from_server_increase_id() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::GoAway { id: 0 },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         s.send_frame_server(
             &frame::Frame::GoAway { id: 4 },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Ok((0, Event::GoAway)));
 
         assert_eq!(s.poll_client(), Err(Error::InvalidId));
+        Ok(())
     }
 
     #[test]
@@ -5307,27 +5349,30 @@ mod tests {
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the client.
-    fn priority_update_request() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for request stream from the client.
+    fn priority_update_request() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    fn priority_update_with_fragmented_frame_header_and_payload() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn priority_update_with_fragmented_frame_header_and_payload() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Force a four-byte frame type and a two-byte payload length.
         // Deliver each wire byte separately to exercise every resume point,
@@ -5338,11 +5383,15 @@ mod tests {
             priority_field_value: field.clone(),
         };
         let mut wire = [0; 128];
-        let written = frame
-            .to_bytes(&mut octets::OctetsMut::with_slice(&mut wire))
-            .unwrap();
-        let (last, prefix) = wire[..written].split_last().unwrap();
-        let control = s.client.control_stream_id.unwrap();
+        let written =
+            frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut wire))?;
+        let (last, prefix) = wire[..written]
+            .split_last()
+            .ok_or("encoded frame was empty")?;
+        let control = s
+            .client
+            .control_stream_id
+            .ok_or("local control stream was not opened")?;
 
         for byte in prefix {
             assert_eq!(
@@ -5353,7 +5402,7 @@ mod tests {
                 ),
                 Ok(1)
             );
-            s.advance().unwrap();
+            s.advance()?;
             assert_eq!(s.poll_server(), Err(Error::Done));
             assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
         }
@@ -5364,24 +5413,21 @@ mod tests {
                 .stream_send(control, std::slice::from_ref(last), false),
             Ok(1)
         );
-        s.advance().unwrap();
+        s.advance()?;
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.server.take_last_priority_update(0), Ok(field));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the client that is too
+    /// Send a `PRIORITY_UPDATE` for request stream from the client that is too
     /// large.
-    fn priority_update_request_max_size_limit_default() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn priority_update_request_max_size_limit_default() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(1500);
         config.set_initial_max_stream_data_bidi_remote(1500);
@@ -5392,9 +5438,9 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         let mut d = vec![42; 600];
         let mut b = octets::OctetsMut::with_slice(&mut d);
@@ -5404,44 +5450,54 @@ mod tests {
             priority_field_value: vec![0; 512],
         };
 
-        pu.to_bytes(&mut b).unwrap();
+        pu.to_bytes(&mut b)?;
 
-        s.pipe.client.stream_send(2, &d, true).unwrap();
+        s.pipe.client.stream_send(2, &d, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Err(Error::ExcessiveLoad));
 
         assert_eq!(
-            s.pipe.server.local_error.as_ref().unwrap().error_code,
+            s.pipe
+                .server
+                .local_error
+                .as_ref()
+                .ok_or("expected a local connection error")?
+                .error_code,
             Error::to_wire(Error::ExcessiveLoad)
         );
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the client.
-    fn priority_update_single_stream_rearm() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for request stream from the client.
+    fn priority_update_single_stream_rearm() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 5,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
 
@@ -5450,57 +5506,67 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(0), Ok(b"u=5".to_vec()));
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 7,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         assert_eq!(s.server.take_last_priority_update(0), Ok(b"u=7".to_vec()));
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Send multiple PRIORITY_UPDATE frames for different streams from the
+    /// Send multiple `PRIORITY_UPDATE` frames for different streams from the
     /// client across multiple flights of exchange.
-    fn priority_update_request_multiple_stream_arm_multiple_flights() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn priority_update_request_multiple_stream_arm_multiple_flights() -> TestResult
+    {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 4, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            4,
+            Priority {
                 urgency: 1,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((4, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 8, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            8,
+            Priority {
                 urgency: 2,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((8, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -5509,16 +5575,17 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(4), Ok(b"u=1".to_vec()));
         assert_eq!(s.server.take_last_priority_update(8), Ok(b"u=2".to_vec()));
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Send multiple PRIORITY_UPDATE frames for different streams from the
+    /// Send multiple `PRIORITY_UPDATE` frames for different streams from the
     /// client across a single flight.
-    fn priority_update_request_multiple_stream_arm_single_flight() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn priority_update_request_multiple_stream_arm_single_flight() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let mut d = [42; 65535];
+        let mut d = vec![42; 65_535];
 
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
@@ -5537,17 +5604,20 @@ mod tests {
             priority_field_value: b"u=3".to_vec(),
         };
 
-        p1.to_bytes(&mut b).unwrap();
-        p2.to_bytes(&mut b).unwrap();
-        p3.to_bytes(&mut b).unwrap();
+        p1.to_bytes(&mut b)?;
+        p2.to_bytes(&mut b)?;
+        p3.to_bytes(&mut b)?;
 
         let off = b.off();
-        s.pipe
-            .client
-            .stream_send(s.client.control_stream_id.unwrap(), &d[..off], false)
-            .unwrap();
+        s.pipe.client.stream_send(
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
+            &d[..off],
+            false,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::PriorityUpdate)));
         assert_eq!(s.poll_server(), Ok((4, Event::PriorityUpdate)));
@@ -5559,24 +5629,27 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(8), Ok(b"u=3".to_vec()));
 
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for a request stream, before and after the stream
-    /// has been completed.
-    fn priority_update_request_collected_completed() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for a request stream, before and after the
+    /// stream has been completed.
+    fn priority_update_request_collected_completed() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
         let ev_headers = Event::Headers {
             list: req,
             more_frames: false,
@@ -5591,7 +5664,7 @@ mod tests {
         assert_eq!(s.server.take_last_priority_update(0), Ok(b"u=3".to_vec()));
         assert_eq!(s.server.take_last_priority_update(0), Err(Error::Done));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -5603,28 +5676,31 @@ mod tests {
         assert_eq!(s.poll_client(), Err(Error::Done));
 
         // Now send a PRIORITY_UPDATE for the completed request stream.
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         // No event generated at server
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for a request stream after H3 has collected it,
+    /// Send a `PRIORITY_UPDATE` for a request stream after H3 has collected it,
     /// but before the transport stream has been collected.
-    fn priority_update_request_after_h3_collection() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn priority_update_request_after_h3_collection() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let init_streams_server = s.server.streams.len();
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
         let ev_headers = Event::Headers {
             list: req,
             more_frames: false,
@@ -5640,8 +5716,7 @@ mod tests {
         ];
 
         s.server
-            .send_response(&mut s.pipe.server, stream, &resp, true)
-            .unwrap();
+            .send_response(&mut s.pipe.server, stream, &resp, true)?;
 
         // H3 no longer needs its stream state once it has sent the response
         // FIN and consumed the request FIN. The QUIC stream remains until the
@@ -5650,45 +5725,51 @@ mod tests {
         assert!(s.pipe.server.stream_finished(stream));
         assert!(s.pipe.server.stream_closed(stream));
 
-        let stream_state = s.pipe.server.streams.get(stream).unwrap();
+        let stream_state = s
+            .pipe
+            .server
+            .streams
+            .get(stream)
+            .ok_or("expected stream is absent")?;
         assert!(stream_state.recv.is_fin());
         assert!(stream_state.send.is_fin());
         assert!(!s.pipe.server.streams.is_collected(stream));
 
-        s.client
-            .send_priority_update_for_request(
-                &mut s.pipe.client,
-                stream,
-                Priority {
-                    urgency: 3,
-                    incremental: false,
-                },
-            )
-            .unwrap();
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            stream,
+            Priority {
+                urgency: 3,
+                incremental: false,
+            },
+        )?;
 
-        let flight = crate::test_utils::emit_flight(&mut s.pipe.client).unwrap();
-        crate::test_utils::process_flight(&mut s.pipe.server, flight).unwrap();
+        let flight = crate::test_utils::emit_flight(&mut s.pipe.client)?;
+        crate::test_utils::process_flight(&mut s.pipe.server, flight)?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.server.streams.len(), init_streams_server);
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for a request stream, before and after the stream
-    /// has been stopped.
-    fn priority_update_request_collected_stopped() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for a request stream, before and after the
+    /// stream has been stopped.
+    fn priority_update_request_collected_stopped() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
         let ev_headers = Event::Headers {
             list: req,
             more_frames: true,
@@ -5704,26 +5785,26 @@ mod tests {
 
         s.pipe
             .client
-            .stream_shutdown(stream, crate::Shutdown::Write, 0x100)
-            .unwrap();
+            .stream_shutdown(stream, crate::Shutdown::Write, 0x100)?;
         s.pipe
             .client
-            .stream_shutdown(stream, crate::Shutdown::Read, 0x100)
-            .unwrap();
+            .stream_shutdown(stream, crate::Shutdown::Read, 0x100)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((0, Event::Reset(0x100))));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Now send a PRIORITY_UPDATE for the closed request stream.
-        s.client
-            .send_priority_update_for_request(&mut s.pipe.client, 0, Priority {
+        s.client.send_priority_update_for_request(
+            &mut s.pipe.client,
+            0,
+            Priority {
                 urgency: 3,
                 incremental: false,
-            })
-            .unwrap();
-        s.advance().ok();
+            },
+        )?;
+        s.advance()?;
 
         // No event generated at server
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -5736,9 +5817,10 @@ mod tests {
         );
         assert!(s.pipe.server.streams.is_collected(0));
         assert!(s.pipe.client.streams.is_collected(0));
+        Ok(())
     }
 
-    /// RFC 9218 requires H3_ID_ERROR for a non-request stream ID in a
+    /// RFC 9218 requires `H3_ID_ERROR` for a non-request stream ID in a
     /// request priority update or an unpromised push ID in a push update.
     /// Push IDs are not QUIC stream IDs, so they have no stream-type bits.
     #[rstest::rstest]
@@ -5754,10 +5836,13 @@ mod tests {
     #[case::unpromised_push_within_limit(1, true, true)]
     fn priority_update_rejects_invalid_id(
         #[case] id: u64, #[case] push: bool, #[case] raise_push_limit: bool,
-    ) {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
-        let control = s.client.control_stream_id.unwrap();
+    ) -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
+        let control = s
+            .client
+            .control_stream_id
+            .ok_or("local control stream was not opened")?;
         if raise_push_limit {
             // MAX_PUSH_ID is only permission to promise pushes: no push was
             // actually promised by the server, so id=1 is still invalid.
@@ -5765,8 +5850,7 @@ mod tests {
                 &frame::Frame::MaxPushId { push_id: 10 },
                 control,
                 false,
-            )
-            .unwrap();
+            )?;
             assert_eq!(s.poll_server(), Err(Error::Done));
         }
 
@@ -5782,50 +5866,55 @@ mod tests {
                 priority_field_value,
             }
         };
-        s.send_frame_client(&frame, control, false).unwrap();
+        s.send_frame_client(&frame, control, false)?;
         assert_eq!(s.poll_server(), Err(Error::InvalidId));
         assert_eq!(
             s.pipe.server.local_error().map(|err| err.error_code),
             Some(WireErrorCode::IdError as u64)
         );
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the server.
-    fn priority_update_request_from_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for request stream from the server.
+    fn priority_update_request_from_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::PriorityUpdateRequest {
                 prioritized_element_id: 0,
                 priority_field_value: b"u=3".to_vec(),
             },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
-    /// Send a PRIORITY_UPDATE for request stream from the server.
-    fn priority_update_push_from_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Send a `PRIORITY_UPDATE` for request stream from the server.
+    fn priority_update_push_from_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_server(
             &frame::Frame::PriorityUpdatePush {
                 prioritized_element_id: 0,
                 priority_field_value: b"u=3".to_vec(),
             },
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
+        Ok(())
     }
 
     #[test]
@@ -5841,15 +5930,16 @@ mod tests {
     }
 
     #[test]
-    fn uni_stream_preface_and_fin_are_atomic_at_every_varint_width() {
+    fn uni_stream_preface_and_fin_are_atomic_at_every_varint_width() -> TestResult
+    {
         for ty in [33, 64, 1 << 14, 1 << 30] {
-            let prefix = octets::EncodedVarint::new(ty).unwrap();
+            let prefix = octets::EncodedVarint::new(ty)?;
             let credit = prefix.as_ref().len() + 3;
-            let (mut config, h3_config) = Session::default_configs().unwrap();
+            let (mut config, h3_config) = Session::default_configs()?;
             config.grease(false);
             config.set_initial_max_stream_data_uni(credit as u64);
-            let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-            s.pipe.handshake().unwrap();
+            let mut s = Session::with_configs(&mut config, &h3_config)?;
+            s.pipe.handshake()?;
 
             let id = s.client.next_uni_stream_id;
             assert_eq!(
@@ -5866,15 +5956,16 @@ mod tests {
                 Ok(id),
             );
             assert_eq!(s.client.next_uni_stream_id, id + 4);
-            s.pipe.advance().unwrap();
+            s.pipe.advance()?;
 
             let mut out = [0; 11];
-            let (len, fin) = s.pipe.server.stream_recv(id, &mut out).unwrap();
+            let (len, fin) = s.pipe.server.stream_recv(id, &mut out)?;
             assert_eq!(len, credit);
             assert!(fin);
             assert_eq!(&out[..prefix.as_ref().len()], prefix.as_ref());
             assert_eq!(&out[prefix.as_ref().len()..len], b"abc");
         }
+        Ok(())
     }
 
     #[rstest::rstest]
@@ -5882,9 +5973,9 @@ mod tests {
     #[case(stream::QPACK_ENCODER_STREAM_TYPE_ID)]
     #[case(stream::QPACK_DECODER_STREAM_TYPE_ID)]
     /// Client duplicates a critical stream, which is forbidden.
-    fn open_multiple_critical_streams(#[case] ty: u64) {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn open_multiple_critical_streams(#[case] ty: u64) -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let stream_id = s.client.next_uni_stream_id;
 
@@ -5893,224 +5984,250 @@ mod tests {
 
         s.pipe
             .client
-            .stream_send(stream_id, b.put_varint(ty).unwrap(), false)
-            .unwrap();
+            .stream_send(stream_id, b.put_varint(ty)?, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Err(Error::StreamCreation));
+        Ok(())
     }
 
     #[test]
     /// Client closes the control stream, which is forbidden.
-    fn close_control_stream_after_type() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn close_control_stream_after_type() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.pipe
-            .client
-            .stream_send(s.client.control_stream_id.unwrap(), &[], true)
-            .unwrap();
+        s.pipe.client.stream_send(
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
+            &[],
+            true,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client closes the control stream after a frame is sent, which is
     /// forbidden.
-    fn close_control_stream_after_frame() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn close_control_stream_after_frame() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_client(
             &frame::Frame::MaxPushId { push_id: 1 },
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             true,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client resets the control stream, which is forbidden.
-    fn reset_control_stream_after_type() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_control_stream_after_type() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.pipe
-            .client
-            .stream_shutdown(
-                s.client.control_stream_id.unwrap(),
-                crate::Shutdown::Write,
-                0,
-            )
-            .unwrap();
+        s.pipe.client.stream_shutdown(
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
+            crate::Shutdown::Write,
+            0,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client resets the control stream after a frame is sent, which is
     /// forbidden.
-    fn reset_control_stream_after_frame() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_control_stream_after_frame() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         s.send_frame_client(
             &frame::Frame::MaxPushId { push_id: 1 },
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
 
-        s.pipe
-            .client
-            .stream_shutdown(
-                s.client.control_stream_id.unwrap(),
-                crate::Shutdown::Write,
-                0,
-            )
-            .unwrap();
+        s.pipe.client.stream_shutdown(
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
+            crate::Shutdown::Write,
+            0,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client closes QPACK stream, which is forbidden.
-    fn close_qpack_stream_after_type() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn close_qpack_stream_after_type() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.pipe
-            .client
-            .stream_send(
-                s.client.local_qpack_streams.encoder_stream_id.unwrap(),
-                &[],
-                true,
-            )
-            .unwrap();
+        s.pipe.client.stream_send(
+            s.client
+                .local_qpack_streams
+                .encoder_stream_id
+                .ok_or("local QPACK encoder stream was not opened")?,
+            &[],
+            true,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client closes QPACK stream after sending some stuff, which is forbidden.
-    fn close_qpack_stream_after_data() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn close_qpack_stream_after_data() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let stream_id = s.client.local_qpack_streams.encoder_stream_id.unwrap();
+        let stream_id = s
+            .client
+            .local_qpack_streams
+            .encoder_stream_id
+            .ok_or("local QPACK encoder stream was not opened")?;
         let d = [0; 1];
 
-        s.pipe.client.stream_send(stream_id, &d, false).unwrap();
-        s.pipe.client.stream_send(stream_id, &d, true).unwrap();
+        s.pipe.client.stream_send(stream_id, &d, false)?;
+        s.pipe.client.stream_send(stream_id, &d, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client resets QPACK stream, which is forbidden.
-    fn reset_qpack_stream_after_type() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_qpack_stream_after_type() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        s.pipe
-            .client
-            .stream_shutdown(
-                s.client.local_qpack_streams.encoder_stream_id.unwrap(),
-                crate::Shutdown::Write,
-                0,
-            )
-            .unwrap();
+        s.pipe.client.stream_shutdown(
+            s.client
+                .local_qpack_streams
+                .encoder_stream_id
+                .ok_or("local QPACK encoder stream was not opened")?,
+            crate::Shutdown::Write,
+            0,
+        )?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Client resets QPACK stream after sending some stuff, which is forbidden.
-    fn reset_qpack_stream_after_data() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_qpack_stream_after_data() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let stream_id = s.client.local_qpack_streams.encoder_stream_id.unwrap();
+        let stream_id = s
+            .client
+            .local_qpack_streams
+            .encoder_stream_id
+            .ok_or("local QPACK encoder stream was not opened")?;
         let d = [0; 1];
 
-        s.pipe.client.stream_send(stream_id, &d, false).unwrap();
-        s.pipe.client.stream_send(stream_id, &d, false).unwrap();
+        s.pipe.client.stream_send(stream_id, &d, false)?;
+        s.pipe.client.stream_send(stream_id, &d, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
 
         s.pipe
             .client
-            .stream_shutdown(stream_id, crate::Shutdown::Write, 0)
-            .unwrap();
+            .stream_shutdown(stream_id, crate::Shutdown::Write, 0)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             Err(Error::ClosedCriticalStream),
             s.server.poll(&mut s.pipe.server)
         );
         assert_eq!(Err(Error::Done), s.server.poll(&mut s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// QPACK bytes are accounted for even when discarded across QUIC packets.
-    fn qpack_data() {
+    fn qpack_data() -> TestResult {
         // Dynamic table instructions are currently ignored.
-        let (mut config, h3_config) = Session::default_configs().unwrap();
+        let (mut config, h3_config) = Session::default_configs()?;
         config.set_initial_max_data(100_000);
         config.set_initial_max_stream_data_uni(40_000);
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
-        let encoder = s.client.local_qpack_streams.encoder_stream_id.unwrap();
-        let decoder = s.client.local_qpack_streams.decoder_stream_id.unwrap();
+        let encoder = s
+            .client
+            .local_qpack_streams
+            .encoder_stream_id
+            .ok_or("local QPACK encoder stream was not opened")?;
+        let decoder = s
+            .client
+            .local_qpack_streams
+            .decoder_stream_id
+            .ok_or("local QPACK decoder stream was not opened")?;
 
         // Larger than the former discard scratch buffer.
         let data = vec![0; 8192];
@@ -6120,7 +6237,7 @@ mod tests {
                     s.pipe.client.stream_send(stream_id, &data, false),
                     Ok(data.len()),
                 );
-                s.advance().unwrap();
+                s.advance()?;
                 assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
             }
         }
@@ -6128,13 +6245,14 @@ mod tests {
         let stats = s.server.stats();
         assert_eq!(stats.qpack_encoder_stream_recv_bytes, 16384);
         assert_eq!(stats.qpack_decoder_stream_recv_bytes, 16384);
+        Ok(())
     }
 
     #[test]
     /// Tests limits for the stream state buffer maximum size.
-    fn max_state_buf_size() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn max_state_buf_size() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6149,7 +6267,7 @@ mod tests {
             Ok(0)
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -6162,36 +6280,37 @@ mod tests {
         let mut d = [42; 128];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        let frame_type = b.put_varint(frame::DATA_FRAME_TYPE_ID).unwrap();
-        s.pipe.client.stream_send(0, frame_type, false).unwrap();
+        let frame_type = b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
+        s.pipe.client.stream_send(0, frame_type, false)?;
 
-        let frame_len = b.put_varint(1 << 24).unwrap();
-        s.pipe.client.stream_send(0, frame_len, false).unwrap();
+        let frame_len = b.put_varint(1 << 24)?;
+        s.pipe.client.stream_send(0, frame_len, false)?;
 
-        s.pipe.client.stream_send(0, &d, false).unwrap();
+        s.pipe.client.stream_send(0, &d, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Ok((0, Event::Data)));
 
         // GREASE frames consume the state buffer, so need to be limited.
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let mut d = [42; 128];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        let frame_type = b.put_varint(148_764_065_110_560_899).unwrap();
-        s.pipe.client.stream_send(0, frame_type, false).unwrap();
+        let frame_type = b.put_varint(148_764_065_110_560_899)?;
+        s.pipe.client.stream_send(0, frame_type, false)?;
 
-        let frame_len = b.put_varint(1 << 24).unwrap();
-        s.pipe.client.stream_send(0, frame_len, false).unwrap();
+        let frame_len = b.put_varint(1 << 24)?;
+        s.pipe.client.stream_send(0, frame_len, false)?;
 
-        s.pipe.client.stream_send(0, &d, false).unwrap();
+        s.pipe.client.stream_send(0, &d, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::ExcessiveLoad));
+        Ok(())
     }
 
     /// A single client-originated blocked notice is reflected at both ends
@@ -6214,13 +6333,13 @@ mod tests {
     #[test]
     /// Tests that DATA frames are properly truncated depending on the request
     /// stream's outgoing flow control capacity.
-    fn stream_backpressure() {
+    fn stream_backpressure() -> TestResult {
         let bytes = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let total_data_frames = 6;
 
@@ -6231,7 +6350,7 @@ mod tests {
                 Ok(bytes.len())
             );
 
-            s.advance().ok();
+            s.advance()?;
         }
 
         assert_eq!(
@@ -6239,7 +6358,7 @@ mod tests {
             Ok(bytes.len() - 2)
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         let mut recv_buf = vec![0; bytes.len()];
 
@@ -6269,24 +6388,21 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         assert_client_blocked(&s, false);
+        Ok(())
     }
 
     #[test]
     /// Tests that the max header list size setting allows larger headers than
     /// default.
-    fn request_max_header_size_limit_accepts_large_headers() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
-        config.set_initial_max_data(150000000);
-        config.set_initial_max_stream_data_bidi_local(150000000);
-        config.set_initial_max_stream_data_bidi_remote(150000000);
-        config.set_initial_max_stream_data_uni(150000000);
+    fn request_max_header_size_limit_accepts_large_headers() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
+        config.set_initial_max_data(150_000_000);
+        config.set_initial_max_stream_data_bidi_local(150_000_000);
+        config.set_initial_max_stream_data_bidi_remote(150_000_000);
+        config.set_initial_max_stream_data_uni(150_000_000);
         config.set_initial_max_streams_bidi(5);
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
@@ -6295,9 +6411,9 @@ mod tests {
         let mut h3_config = Config::new();
         h3_config.set_max_field_section_size(256 * 1024);
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         let mut req = vec![
             Header::new(b":method", b"GET"),
@@ -6315,31 +6431,25 @@ mod tests {
             more_frames: false,
         };
 
-        let stream = s
-            .client
-            .send_request(&mut s.pipe.client, &req, true)
-            .unwrap();
+        let stream = s.client.send_request(&mut s.pipe.client, &req, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(stream, 0);
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Tests that the max header list size setting is enforced after decoding.
-    fn request_max_header_size_limit_decoded_field_section() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn request_max_header_size_limit_decoded_field_section() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -6351,9 +6461,9 @@ mod tests {
         let mut h3_config = Config::new();
         h3_config.set_max_field_section_size(65);
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6363,88 +6473,94 @@ mod tests {
             Header::new(b"aaaaaaa", b"aaaaaaaa"),
         ];
 
-        let stream = s
-            .client
-            .send_request(&mut s.pipe.client, &req, true)
-            .unwrap();
+        let stream = s.client.send_request(&mut s.pipe.client, &req, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(stream, 0);
 
         assert_eq!(s.poll_server(), Err(Error::ExcessiveLoad));
 
         assert_eq!(
-            s.pipe.server.local_error.as_ref().unwrap().error_code,
+            s.pipe
+                .server
+                .local_error
+                .as_ref()
+                .ok_or("expected a local connection error")?
+                .error_code,
             Error::to_wire(Error::ExcessiveLoad)
         );
+        Ok(())
     }
 
     #[test]
     /// Tests that the max header list size setting is enforced when observing
     /// frame size before decode.
-    fn request_max_header_size_limit_default_abort_before_decode() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
-        config.set_initial_max_data(150000);
-        config.set_initial_max_stream_data_bidi_local(150000);
-        config.set_initial_max_stream_data_bidi_remote(150000);
-        config.set_initial_max_stream_data_uni(150000);
+    fn request_max_header_size_limit_default_abort_before_decode() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
+        config.set_initial_max_data(150_000);
+        config.set_initial_max_stream_data_bidi_local(150_000);
+        config.set_initial_max_stream_data_bidi_remote(150_000);
+        config.set_initial_max_stream_data_uni(150_000);
         config.set_initial_max_streams_bidi(5);
         config.set_initial_max_streams_uni(5);
         config.verify_peer(false);
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
-        let mut d = vec![42; 200000];
+        let mut d = vec![42; 200_000];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
         let hdrs = frame::Frame::Headers {
             header_block: vec![0; 65536],
         };
 
-        hdrs.to_bytes(&mut b).unwrap();
+        hdrs.to_bytes(&mut b)?;
 
-        s.pipe.client.stream_send(0, &d, true).unwrap();
+        s.pipe.client.stream_send(0, &d, true)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Err(Error::ExcessiveLoad));
 
         assert_eq!(
-            s.pipe.server.local_error.as_ref().unwrap().error_code,
+            s.pipe
+                .server
+                .local_error
+                .as_ref()
+                .ok_or("expected a local connection error")?
+                .error_code,
             Error::to_wire(Error::ExcessiveLoad)
         );
+        Ok(())
     }
 
     #[test]
-    fn wrapped_transport_error_exposes_its_source() {
+    fn wrapped_transport_error_exposes_its_source() -> TestResult {
         use std::error::Error as _;
 
         let transport = crate::Error::StreamLimit;
         let wrapped = Error::Transport(transport);
-        let source = wrapped.source().expect("transport error cause");
+        let source = wrapped.source().ok_or("transport error cause")?;
         assert_eq!(source.downcast_ref::<crate::Error>(), Some(&transport));
         assert!(Error::Done.source().is_none());
         assert!(Error::MalformedFrame.source().is_none());
         assert!(Error::from(crate::Error::Done).source().is_none());
+        Ok(())
     }
 
     #[test]
-    /// Tests that Error::Transport contains a transport error.
-    fn transport_error() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Tests that `Error::Transport` contains a transport error.
+    fn transport_error() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6474,67 +6590,66 @@ mod tests {
             s.client.send_request(&mut s.pipe.client, &req, true),
             Err(Error::Transport(crate::Error::StreamLimit))
         );
+        Ok(())
     }
 
     #[test]
     /// Tests that sending DATA before HEADERS causes an error.
-    fn data_before_headers() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn data_before_headers() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let mut d = [42; 128];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        let frame_type = b.put_varint(frame::DATA_FRAME_TYPE_ID).unwrap();
-        s.pipe.client.stream_send(0, frame_type, false).unwrap();
+        let frame_type = b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
+        s.pipe.client.stream_send(0, frame_type, false)?;
 
-        let frame_len = b.put_varint(5).unwrap();
-        s.pipe.client.stream_send(0, frame_len, false).unwrap();
+        let frame_len = b.put_varint(5)?;
+        s.pipe.client.stream_send(0, frame_len, false)?;
 
-        s.pipe.client.stream_send(0, b"hello", false).unwrap();
+        s.pipe.client.stream_send(0, b"hello", false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(
             s.server.poll(&mut s.pipe.server),
             Err(Error::FrameUnexpected)
         );
+        Ok(())
     }
 
     #[test]
-    /// Tests that calling poll() after an error occurred does nothing.
-    fn poll_after_error() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    /// Tests that calling `poll()` after an error occurred does nothing.
+    fn poll_after_error() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let mut d = [42; 128];
         let mut b = octets::OctetsMut::with_slice(&mut d);
 
-        let frame_type = b.put_varint(148_764_065_110_560_899).unwrap();
-        s.pipe.client.stream_send(0, frame_type, false).unwrap();
+        let frame_type = b.put_varint(148_764_065_110_560_899)?;
+        s.pipe.client.stream_send(0, frame_type, false)?;
 
-        let frame_len = b.put_varint(1 << 24).unwrap();
-        s.pipe.client.stream_send(0, frame_len, false).unwrap();
+        let frame_len = b.put_varint(1 << 24)?;
+        s.pipe.client.stream_send(0, frame_len, false)?;
 
-        s.pipe.client.stream_send(0, &d, false).unwrap();
+        s.pipe.client.stream_send(0, &d, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::ExcessiveLoad));
 
         // Try to call poll() again after an error occurred.
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
+        Ok(())
     }
 
-    fn headers_blocked_session() -> Session {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn headers_blocked_session() -> TestResult<Session> {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(75);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -6545,16 +6660,16 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
-        s
+        s.handshake()?;
+        Ok(s)
     }
 
     #[test]
     /// Tests that we limit sending HEADERS based on the stream capacity.
-    fn headers_blocked() {
-        let mut s = headers_blocked_session();
+    fn headers_blocked() -> TestResult {
+        let mut s = headers_blocked_session()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6576,7 +6691,7 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(10));
         assert_eq!(s.pipe.client.stream_writable_next(), None);
 
-        s.advance().ok();
+        s.advance()?;
 
         // Once the server gives flow control credits back, we can send the
         // request.
@@ -6584,12 +6699,13 @@ mod tests {
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(4));
 
         assert_client_blocked(&s, true);
+        Ok(())
     }
 
     #[test]
-    /// Ensure StreamBlocked when connection flow control prevents headers.
-    fn headers_blocked_on_conn() {
-        let mut s = headers_blocked_session();
+    /// Ensure `StreamBlocked` when connection flow control prevents headers.
+    fn headers_blocked_on_conn() -> TestResult {
+        let mut s = headers_blocked_session()?;
 
         // After the HTTP handshake, some bytes of connection flow control have
         // been consumed. Fill the connection with more grease data on the
@@ -6614,9 +6730,9 @@ mod tests {
 
         // Emit the control stream data and drain it at the server via poll() to
         // consumes it via poll() and gives back flow control.
-        s.advance().ok();
+        s.advance()?;
         assert_eq!(s.poll_server(), Err(Error::Done));
-        s.advance().ok();
+        s.advance()?;
 
         // Now we can send the request.
         assert_eq!(s.pipe.client.stream_writable_next(), Some(2));
@@ -6624,22 +6740,19 @@ mod tests {
         assert_eq!(s.client.send_request(&mut s.pipe.client, &req, true), Ok(0));
 
         assert_client_blocked(&s, true);
+        Ok(())
     }
 
     #[test]
     /// Ensure that the connection does not consume a stream ID when
-    /// send_request fails with StreamBlocked due to hitting the
-    /// MAX_DATA flow control limit when attempting to send headers.
-    /// The headers are sent successfully after a MAX_DATA update.
-    fn headers_blocked_by_max_data_success_on_retry() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    /// `send_request` fails with `StreamBlocked` due to hitting the
+    /// `MAX_DATA` flow control limit when attempting to send headers.
+    /// The headers are sent successfully after a `MAX_DATA` update.
+    fn headers_blocked_by_max_data_success_on_retry() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(70);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -6650,9 +6763,9 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -6676,9 +6789,9 @@ mod tests {
 
         // Emit the control stream data and drain it at the server to give back
         // flow control.
-        s.advance().ok();
+        s.advance()?;
         assert_eq!(s.poll_server(), Err(Error::Done));
-        s.advance().ok();
+        s.advance()?;
 
         // Now we can send the request. The stream ID should be 0 (not 4),
         // confirming that the blocked attempt did not consume the stream ID.
@@ -6693,7 +6806,8 @@ mod tests {
         assert!(s.client.streams.contains_key(&0));
         assert!(s.client.streams.contains_key(&4));
 
-        s.advance().ok();
+        s.advance()?;
+        Ok(())
     }
 
     /// Inject client frames and verify the server acknowledges their packet.
@@ -6702,14 +6816,13 @@ mod tests {
     fn assert_client_packet_acknowledged(
         pipe: &mut crate::test_utils::Pipe, frames: &[crate::frame::Frame],
         buf: &mut [u8],
-    ) {
+    ) -> TestResult {
         let packet_number = pipe.client.next_pkt_num;
-        let len = pipe
-            .send_pkt_to_server(crate::packet::Type::Short, frames, buf)
-            .unwrap();
+        let len =
+            pipe.send_pkt_to_server(crate::packet::Type::Short, frames, buf)?;
         assert!(len > 0, "server did not emit an ACK response");
         let response =
-            crate::test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
+            crate::test_utils::decode_pkt(&pipe.client, &mut buf[..len])?;
         assert!(
             response.iter().any(|frame| matches!(frame,
                 crate::frame::Frame::Ack { ranges, .. } if ranges.contains(packet_number)
@@ -6724,22 +6837,19 @@ mod tests {
             )),
             "unexpected non-ACK response: {response:?}"
         );
+        Ok(())
     }
 
     #[test]
-    /// Ensure STREAM_DATA_BLOCKED is not emitted multiple times with the same
+    /// Ensure `STREAM_DATA_BLOCKED` is not emitted multiple times with the same
     /// offset when trying to send large bodies.
-    fn send_body_truncation_stream_blocked() {
+    fn send_body_truncation_stream_blocked() -> TestResult {
         use crate::test_utils::decode_pkt;
 
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         // Use generous connection-level flow control.
         config.set_initial_max_data(10000);
         config.set_initial_max_stream_data_bidi_local(80);
@@ -6751,11 +6861,11 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -6765,7 +6875,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let _ = s.send_response(stream, false).unwrap();
+        let _ = s.send_response(stream, false)?;
 
         assert_eq!(s.pipe.server.streams.blocked().len(), 0);
 
@@ -6773,10 +6883,7 @@ mod tests {
         let d = [42; 500];
         let mut off = 0;
 
-        let sent = s
-            .server
-            .send_body(&mut s.pipe.server, stream, &d, true)
-            .unwrap();
+        let sent = s.server.send_body(&mut s.pipe.server, stream, &d, true)?;
         assert_eq!(sent, 26);
         off += sent;
 
@@ -6790,10 +6897,10 @@ mod tests {
         assert_eq!(s.pipe.server.streams.blocked().len(), 1);
 
         // Now read raw frames to see what the QUIC layer did
-        let mut buf = [0; 65535];
-        let (len, _) = s.pipe.server.send(&mut buf).unwrap();
+        let mut buf = vec![0; 65_535];
+        let (len, _) = s.pipe.server.send(&mut buf)?;
 
-        let frames = decode_pkt(&s.pipe.client, &mut buf[..len]).unwrap();
+        let frames = decode_pkt(&s.pipe.client, &mut buf[..len])?;
 
         let mut iter = frames.iter();
 
@@ -6828,12 +6935,11 @@ mod tests {
             max: 100,
         }];
 
-        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf)?;
 
-        let sent = s
-            .server
-            .send_body(&mut s.pipe.server, stream, &d[off..], true)
-            .unwrap();
+        let sent =
+            s.server
+                .send_body(&mut s.pipe.server, stream, &d[off..], true)?;
         assert_eq!(sent, 18);
 
         // Same thing here...
@@ -6845,9 +6951,9 @@ mod tests {
         );
         assert_eq!(s.pipe.server.streams.blocked().len(), 1);
 
-        let (len, _) = s.pipe.server.send(&mut buf).unwrap();
+        let (len, _) = s.pipe.server.send(&mut buf)?;
 
-        let frames = decode_pkt(&s.pipe.client, &mut buf[..len]).unwrap();
+        let frames = decode_pkt(&s.pipe.client, &mut buf[..len])?;
 
         let mut iter = frames.iter();
 
@@ -6858,22 +6964,19 @@ mod tests {
                 limit: 100,
             })
         );
+        Ok(())
     }
 
     #[test]
     /// Ensure stream doesn't hang due to small cwnd.
-    fn send_body_stream_blocked_by_small_cwnd() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn send_body_stream_blocked_by_small_cwnd() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         // Use generous connection-level flow control.
-        config.set_initial_max_data(100000);
-        config.set_initial_max_stream_data_bidi_local(100000);
+        config.set_initial_max_data(100_000);
+        config.set_initial_max_stream_data_bidi_local(100_000);
         config.set_initial_max_stream_data_bidi_remote(50000);
         config.set_initial_max_stream_data_uni(150);
         config.set_initial_max_streams_bidi(100);
@@ -6882,11 +6985,11 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -6896,7 +6999,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let _ = s.send_response(stream, false).unwrap();
+        let _ = s.send_response(stream, false)?;
 
         // Clear the writable stream queue.
         assert_eq!(s.pipe.server.stream_writable_next(), Some(3));
@@ -6906,47 +7009,43 @@ mod tests {
         assert_eq!(s.pipe.server.stream_writable_next(), None);
 
         // The body must be larger than the cwnd would allow.
-        let send_buf = [42; 80000];
+        let send_buf = vec![42; 80_000];
 
-        let sent = s
-            .server
-            .send_body(&mut s.pipe.server, stream, &send_buf, true)
-            .unwrap();
+        let sent =
+            s.server
+                .send_body(&mut s.pipe.server, stream, &send_buf, true)?;
 
         // send_body wrote as much as it could (sent < size of buff).
         assert_eq!(sent, 11997);
 
-        s.advance().ok();
+        s.advance()?;
 
         // Client reads received headers and body.
-        let mut recv_buf = [42; 80000];
+        let mut recv_buf = vec![42; 80_000];
         assert!(s.poll_client().is_ok());
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
         assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11997));
 
-        s.advance().ok();
+        s.advance()?;
 
         // Server send cap is smaller than remaining body buffer.
         assert!(s.pipe.server.tx_cap < send_buf.len() - sent);
 
         // Once the server cwnd opens up, we can send more body.
         assert_eq!(s.pipe.server.stream_writable_next(), Some(0));
+        Ok(())
     }
 
     #[test]
     /// Ensure stream doesn't hang due to small cwnd.
-    fn send_body_stream_blocked_zero_length() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn send_body_stream_blocked_zero_length() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         // Use generous connection-level flow control.
-        config.set_initial_max_data(100000);
-        config.set_initial_max_stream_data_bidi_local(100000);
+        config.set_initial_max_data(100_000);
+        config.set_initial_max_stream_data_bidi_local(100_000);
         config.set_initial_max_stream_data_bidi_remote(50000);
         config.set_initial_max_stream_data_uni(150);
         config.set_initial_max_streams_bidi(100);
@@ -6955,11 +7054,11 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -6969,7 +7068,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
 
-        let _ = s.send_response(stream, false).unwrap();
+        let _ = s.send_response(stream, false)?;
 
         // Clear the writable stream queue.
         assert_eq!(s.pipe.server.stream_writable_next(), Some(3));
@@ -6982,40 +7081,40 @@ mod tests {
         // frame with a one-byte length field.
         let send_buf = [42; 11994];
 
-        let sent = s
-            .server
-            .send_body(&mut s.pipe.server, stream, &send_buf, false)
-            .unwrap();
+        let sent =
+            s.server
+                .send_body(&mut s.pipe.server, stream, &send_buf, false)?;
 
         assert_eq!(sent, 11994);
 
         // The input size must not force a two-byte length field for a
         // one-byte partial write.
-        assert_eq!(s.pipe.server.stream_capacity(stream).unwrap(), 3);
+        assert_eq!(s.pipe.server.stream_capacity(stream)?, 3);
         assert_eq!(
             s.server
                 .send_body(&mut s.pipe.server, stream, &send_buf, false),
             Ok(1)
         );
-        assert_eq!(s.pipe.server.stream_capacity(stream).unwrap(), 0);
+        assert_eq!(s.pipe.server.stream_capacity(stream)?, 0);
         assert_eq!(
             s.server
                 .send_body(&mut s.pipe.server, stream, &send_buf, false),
             Err(Error::Done)
         );
 
-        s.advance().ok();
+        s.advance()?;
 
         // Client reads received headers and body.
-        let mut recv_buf = [42; 80000];
+        let mut recv_buf = vec![42; 80_000];
         assert!(s.poll_client().is_ok());
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
         assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(11995));
 
-        s.advance().ok();
+        s.advance()?;
 
         // Once the server cwnd opens up, we can send more body.
         assert_eq!(s.pipe.server.stream_writable_next(), Some(0));
+        Ok(())
     }
 
     #[test]
@@ -7052,14 +7151,16 @@ mod tests {
     }
 
     #[rstest::rstest]
-    fn finish_after_trailers_without_data(#[values(false, true)] response: bool) {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
-        let (stream, _) = s.send_request(response).unwrap();
+    fn finish_after_trailers_without_data(
+        #[values(false, true)] response: bool,
+    ) -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
+        let (stream, _) = s.send_request(response)?;
         assert!(matches!(s.poll_server(), Ok((_, Event::Headers { .. }))));
         if response {
             assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
-            s.send_response(stream, false).unwrap();
+            s.send_response(stream, false)?;
             assert!(matches!(s.poll_client(), Ok((_, Event::Headers { .. }))));
         }
         let trailers = [Header::new(b"foo", b"bar")];
@@ -7069,8 +7170,7 @@ mod tests {
             (&mut s.client, &mut s.pipe.client)
         };
         sender
-            .send_additional_headers(transport, stream, &trailers, true, false)
-            .unwrap();
+            .send_additional_headers(transport, stream, &trailers, true, false)?;
         assert_eq!(
             sender.send_body(transport, stream, b"x", true),
             Err(Error::FrameUnexpected)
@@ -7079,17 +7179,27 @@ mod tests {
             sender.send_body(transport, stream, b"", false),
             Err(Error::FrameUnexpected)
         );
-        let offset = transport.streams.get(stream).unwrap().send.off_back();
+        let offset = transport
+            .streams
+            .get(stream)
+            .ok_or("expected stream is absent")?
+            .send
+            .off_back();
         assert_eq!(sender.send_body(transport, stream, b"", true), Ok(0));
         assert_eq!(
-            transport.streams.get(stream).unwrap().send.off_back(),
+            transport
+                .streams
+                .get(stream)
+                .ok_or("expected stream is absent")?
+                .send
+                .off_back(),
             offset
         );
         assert_eq!(
             sender.send_body(transport, stream, b"", true),
             Err(Error::FrameUnexpected)
         );
-        s.advance().unwrap();
+        s.advance()?;
         let event = if response {
             s.poll_client()
         } else {
@@ -7108,15 +7218,16 @@ mod tests {
             s.poll_server()
         };
         assert_eq!(event, Ok((stream, Event::Finished)));
+        Ok(())
     }
 
     #[test]
     /// Test handling of 0-length DATA writes with and without fin.
-    fn zero_length_data() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn zero_length_data() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         assert_eq!(
             s.client.send_body(&mut s.pipe.client, 0, b"", false),
@@ -7124,7 +7235,7 @@ mod tests {
         );
         assert_eq!(s.client.send_body(&mut s.pipe.client, 0, b"", true), Ok(0));
 
-        s.advance().ok();
+        s.advance()?;
 
         let mut recv_buf = vec![0; 100];
 
@@ -7141,7 +7252,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         assert_eq!(
             s.server.send_body(&mut s.pipe.server, 0, b"", false),
@@ -7149,7 +7260,7 @@ mod tests {
         );
         assert_eq!(s.server.send_body(&mut s.pipe.server, 0, b"", true), Ok(0));
 
-        s.advance().ok();
+        s.advance()?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -7163,19 +7274,16 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Tests that blocked 0-length DATA writes are reported correctly.
-    fn zero_length_data_blocked() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn zero_length_data_blocked() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(74);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7186,9 +7294,9 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         let req = vec![
             Header::new(b":method", b"GET"),
@@ -7213,24 +7321,21 @@ mod tests {
         assert_eq!(s.pipe.client.stream_writable_next(), Some(10));
         assert_eq!(s.pipe.client.stream_writable_next(), None);
 
-        s.advance().ok();
+        s.advance()?;
 
         // Flow-control credit from the server allows the body to be sent.
         assert_eq!(s.pipe.client.stream_writable_next(), Some(0));
         assert_eq!(s.client.send_body(&mut s.pipe.client, 0, b"", true), Ok(0));
+        Ok(())
     }
 
     #[test]
     /// Tests that receiving an empty SETTINGS frame is handled and reported.
-    fn empty_settings() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn empty_settings() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7242,25 +7347,22 @@ mod tests {
         config.grease(false);
 
         let h3_config = Config::new();
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
 
-        s.handshake().unwrap();
+        s.handshake()?;
 
         assert!(s.client.peer_settings_raw().is_some());
         assert!(s.server.peer_settings_raw().is_some());
+        Ok(())
     }
 
     #[test]
-    /// Tests that receiving a H3_DATAGRAM setting is ok.
-    fn dgram_setting() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    /// Tests that receiving a `H3_DATAGRAM` setting is ok.
+    fn dgram_setting() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(70);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7272,10 +7374,10 @@ mod tests {
 
         let h3_config = Config::new();
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
         assert_eq!(s.pipe.handshake(), Ok(()));
 
-        s.client.send_settings(&mut s.pipe.client).unwrap();
+        s.client.send_settings(&mut s.pipe.client)?;
         assert_eq!(s.pipe.advance(), Ok(()));
 
         // Before processing SETTINGS (via poll), HTTP/3 DATAGRAMS are not
@@ -7287,34 +7389,31 @@ mod tests {
         assert!(s.server.dgram_enabled_by_peer(&s.pipe.server));
 
         // Now detect things on the client
-        s.server.send_settings(&mut s.pipe.server).unwrap();
+        s.server.send_settings(&mut s.pipe.server)?;
         assert_eq!(s.pipe.advance(), Ok(()));
         assert!(!s.client.dgram_enabled_by_peer(&s.pipe.client));
         assert_eq!(s.client.poll(&mut s.pipe.client), Err(Error::Done));
         assert!(s.client.dgram_enabled_by_peer(&s.pipe.client));
+        Ok(())
     }
 
     #[test]
-    /// Tests that receiving a H3_DATAGRAM setting when no TP is set generates
+    /// Tests that receiving a `H3_DATAGRAM` setting when no TP is set generates
     /// an error.
-    fn dgram_setting_no_tp() {
-        let (mut config, h3_config) = Session::default_configs().unwrap();
+    fn dgram_setting_no_tp() -> TestResult {
+        let (mut config, h3_config) = Session::default_configs()?;
         config.set_initial_max_data(70);
         config.enable_dgram(false, 0, 0);
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
         assert_eq!(s.pipe.handshake(), Ok(()));
 
-        s.client.control_stream_id = Some(
-            s.client
-                .open_uni_stream(
-                    &mut s.pipe.client,
-                    stream::HTTP3_CONTROL_STREAM_TYPE_ID,
-                    &[],
-                    false,
-                )
-                .unwrap(),
-        );
+        s.client.control_stream_id = Some(s.client.open_uni_stream(
+            &mut s.pipe.client,
+            stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+            &[],
+            false,
+        )?);
 
         let settings = frame::Frame::Settings {
             max_field_section_size: None,
@@ -7323,16 +7422,17 @@ mod tests {
             connect_protocol_enabled: None,
             h3_datagram: Some(1),
             grease: None,
-            additional_settings: Default::default(),
-            raw: Default::default(),
+            additional_settings: None,
+            raw: None,
         };
 
         s.send_frame_client(
             &settings,
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -7351,61 +7451,56 @@ mod tests {
         );
         assert_eq!(s.server.peer_settings.h3_datagram, None);
         assert!(!s.server.dgram_enabled_by_peer(&s.pipe.server));
+        Ok(())
     }
 
     #[test]
     /// Tests that receiving SETTINGS with prohibited values generates an error.
-    fn settings_h2_prohibited() {
-        let (mut config, h3_config) = Session::default_configs().unwrap();
+    fn settings_h2_prohibited() -> TestResult {
+        let (mut config, h3_config) = Session::default_configs()?;
         config.set_initial_max_data(70);
         config.enable_dgram(false, 0, 0);
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
         assert_eq!(s.pipe.handshake(), Ok(()));
 
-        s.client.control_stream_id = Some(
-            s.client
-                .open_uni_stream(
-                    &mut s.pipe.client,
-                    stream::HTTP3_CONTROL_STREAM_TYPE_ID,
-                    &[],
-                    false,
-                )
-                .unwrap(),
-        );
+        s.client.control_stream_id = Some(s.client.open_uni_stream(
+            &mut s.pipe.client,
+            stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+            &[],
+            false,
+        )?);
 
-        s.server.control_stream_id = Some(
-            s.server
-                .open_uni_stream(
-                    &mut s.pipe.server,
-                    stream::HTTP3_CONTROL_STREAM_TYPE_ID,
-                    &[],
-                    false,
-                )
-                .unwrap(),
-        );
+        s.server.control_stream_id = Some(s.server.open_uni_stream(
+            &mut s.pipe.server,
+            stream::HTTP3_CONTROL_STREAM_TYPE_ID,
+            &[],
+            false,
+        )?);
 
         let frame_payload_len = 2u64;
         let settings = [
-            frame::SETTINGS_FRAME_TYPE_ID as u8,
-            frame_payload_len as u8,
+            u8::try_from(frame::SETTINGS_FRAME_TYPE_ID)?,
+            u8::try_from(frame_payload_len)?,
             0x2, // 0x2 is a reserved setting type
             1,
         ];
 
         s.send_arbitrary_stream_data_client(
             &settings,
-            s.client.control_stream_id.unwrap(),
+            s.client
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         s.send_arbitrary_stream_data_server(
             &settings,
-            s.server.control_stream_id.unwrap(),
+            s.server
+                .control_stream_id
+                .ok_or("local control stream was not opened")?,
             false,
-        )
-        .unwrap();
+        )?;
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -7418,6 +7513,7 @@ mod tests {
             s.client.poll(&mut s.pipe.client),
             Err(Error::InvalidSettings)
         );
+        Ok(())
     }
 
     #[test]
@@ -7462,11 +7558,11 @@ mod tests {
     #[test]
     /// Tests that a client rejects a SETTINGS frame received on a request
     /// stream.
-    fn settings_on_request_stream_client() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn settings_on_request_stream_client() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, _req) = s.send_request(true).unwrap();
+        let (stream, _req) = s.send_request(true)?;
 
         let settings = frame::Frame::Settings {
             max_field_section_size: None,
@@ -7475,11 +7571,11 @@ mod tests {
             connect_protocol_enabled: None,
             h3_datagram: None,
             grease: None,
-            additional_settings: Default::default(),
-            raw: Default::default(),
+            additional_settings: None,
+            raw: None,
         };
 
-        s.send_frame_server(&settings, stream, false).unwrap();
+        s.send_frame_server(&settings, stream, false)?;
 
         // The client MUST treat this as H3_FRAME_UNEXPECTED.
         assert_eq!(s.poll_client(), Err(Error::FrameUnexpected));
@@ -7495,6 +7591,7 @@ mod tests {
                 .into_bytes(),
             })
         );
+        Ok(())
     }
 
     /// Server-to-client control frames are forbidden on request streams.
@@ -7505,12 +7602,12 @@ mod tests {
     #[case::max_push_id(frame::Frame::MaxPushId { push_id: 0 }, frame::MAX_PUSH_FRAME_TYPE_ID)]
     fn client_rejects_control_frame_on_request_stream(
         #[case] frame: frame::Frame, #[case] frame_type: u64,
-    ) {
-        let mut session = Session::new().unwrap();
-        session.handshake().unwrap();
+    ) -> TestResult {
+        let mut session = Session::new()?;
+        session.handshake()?;
 
-        let (stream_id, _) = session.send_request(true).unwrap();
-        session.send_frame_server(&frame, stream_id, false).unwrap();
+        let (stream_id, _) = session.send_request(true)?;
+        session.send_frame_server(&frame, stream_id, false)?;
 
         assert_eq!(session.poll_client(), Err(Error::FrameUnexpected));
         assert_eq!(
@@ -7522,10 +7619,11 @@ mod tests {
                     .into_bytes(),
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn settings_send_full_budget_or_fail_without_partial_frame() {
+    fn settings_send_full_budget_or_fail_without_partial_frame() -> TestResult {
         let mut additional: Vec<_> =
             (0..15).map(|n| ((1_u64 << 30) + n, 1_u64 << 30)).collect();
         additional.extend([((1_u64 << 30) + 15, 1 << 14), (9, 0)]);
@@ -7537,23 +7635,21 @@ mod tests {
         for (grease, credit) in
             [(false, 260), (true, 260), (false, 259), (true, 259)]
         {
-            let (mut config, mut h3_config) = Session::default_configs().unwrap();
+            let (mut config, mut h3_config) = Session::default_configs()?;
             config.enable_dgram(false, 0, 0);
             config.grease(grease);
             config.set_initial_max_stream_data_uni(credit);
             h3_config.set_max_field_section_size(0);
-            h3_config
-                .set_additional_settings(additional.clone())
-                .unwrap();
-            let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-            s.pipe.handshake().unwrap();
+            h3_config.set_additional_settings(additional.clone())?;
+            let mut s = Session::with_configs(&mut config, &h3_config)?;
+            s.pipe.handshake()?;
             let stream_id = s.client.next_uni_stream_id;
             let sent = s.client.send_settings(&mut s.pipe.client);
             if credit == 260 {
                 assert_eq!(sent, Ok(()));
                 assert_eq!(s.client.control_stream_id, Some(stream_id));
                 assert_eq!(s.client.next_uni_stream_id, stream_id + 4);
-                s.pipe.advance().unwrap();
+                s.pipe.advance()?;
                 assert_eq!(s.poll_server(), Err(Error::Done));
                 assert_eq!(
                     s.server.peer_settings_raw(),
@@ -7566,13 +7662,14 @@ mod tests {
                 assert_eq!(s.pipe.client.stream_capacity(stream_id), Ok(259));
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn invalid_additional_settings_do_not_replace_configuration() {
+    fn invalid_additional_settings_do_not_replace_configuration() -> TestResult {
         let mut config = Config::new();
         let original = vec![(9, 42)];
-        config.set_additional_settings(original.clone()).unwrap();
+        config.set_additional_settings(original.clone())?;
         for invalid in [
             vec![(0, 1)],
             vec![(5, 1)],
@@ -7587,19 +7684,16 @@ mod tests {
             );
             assert_eq!(config.additional_settings.as_ref(), Some(&original));
         }
+        Ok(())
     }
 
     #[test]
     /// Tests additional settings are actually exchanged by the peers.
-    fn set_additional_settings() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn set_additional_settings() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(70);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7610,20 +7704,18 @@ mod tests {
         config.grease(false);
 
         let mut h3_config = Config::new();
-        h3_config
-            .set_additional_settings(vec![(42, 43), (44, 45)])
-            .unwrap();
+        h3_config.set_additional_settings(vec![(42, 43), (44, 45)])?;
 
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
         assert_eq!(s.pipe.handshake(), Ok(()));
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
-        s.client.send_settings(&mut s.pipe.client).unwrap();
+        s.client.send_settings(&mut s.pipe.client)?;
         assert_eq!(s.pipe.advance(), Ok(()));
         assert_eq!(s.server.poll(&mut s.pipe.server), Err(Error::Done));
 
-        s.server.send_settings(&mut s.pipe.server).unwrap();
+        s.server.send_settings(&mut s.pipe.server)?;
         assert_eq!(s.pipe.advance(), Ok(()));
         assert_eq!(s.client.poll(&mut s.pipe.client), Err(Error::Done));
 
@@ -7635,41 +7727,43 @@ mod tests {
             s.client.peer_settings_raw(),
             Some(&[(6, 32_768), (42, 43), (44, 45)][..])
         );
+        Ok(())
     }
 
     #[test]
     /// Send a single DATAGRAM.
-    fn single_dgram() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn single_dgram() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // We'll send default data of 10 bytes on flow ID 0.
         let result = (11, 0, 1);
 
-        s.send_dgram_client(0).unwrap();
+        s.send_dgram_client(0)?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.recv_dgram_server(&mut buf), Ok(result));
 
-        s.send_dgram_server(0).unwrap();
+        s.send_dgram_server(0)?;
         assert_eq!(s.poll_client(), Err(Error::Done));
         assert_eq!(s.recv_dgram_client(&mut buf), Ok(result));
+        Ok(())
     }
 
     #[test]
     /// Send multiple DATAGRAMs.
-    fn multiple_dgram() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn multiple_dgram() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // We'll send default data of 10 bytes on flow ID 0.
         let result = (11, 0, 1);
 
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.recv_dgram_server(&mut buf), Ok(result));
@@ -7677,33 +7771,34 @@ mod tests {
         assert_eq!(s.recv_dgram_server(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_server(&mut buf), Err(Error::Done));
 
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
+        s.send_dgram_server(0)?;
+        s.send_dgram_server(0)?;
+        s.send_dgram_server(0)?;
 
         assert_eq!(s.poll_client(), Err(Error::Done));
         assert_eq!(s.recv_dgram_client(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_client(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_client(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_client(&mut buf), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send more DATAGRAMs than the send queue allows.
-    fn multiple_dgram_overflow() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn multiple_dgram_overflow() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // We'll send default data of 10 bytes on flow ID 0.
         let result = (11, 0, 1);
 
         // Five DATAGRAMs
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
 
         // Only 3 independent DATAGRAMs to read events will fire.
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -7711,19 +7806,16 @@ mod tests {
         assert_eq!(s.recv_dgram_server(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_server(&mut buf), Ok(result));
         assert_eq!(s.recv_dgram_server(&mut buf), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a single DATAGRAM and request.
-    fn poll_datagram_cycling_no_read() {
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+    fn poll_datagram_cycling_no_read() -> TestResult {
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7734,40 +7826,37 @@ mod tests {
         config.enable_dgram(true, 100, 100);
 
         let h3_config = Config::new();
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
         // Send request followed by DATAGRAM on client side.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        s.send_body_client(stream, true).unwrap();
+        s.send_body_client(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: req,
             more_frames: true,
         };
 
-        s.send_dgram_client(0).unwrap();
+        s.send_dgram_client(0)?;
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
 
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send a single DATAGRAM and request.
-    fn poll_datagram_single_read() {
-        let mut buf = [0; 65535];
+    fn poll_datagram_single_read() -> TestResult {
+        let mut buf = vec![0; 65_535];
 
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7778,16 +7867,16 @@ mod tests {
         config.enable_dgram(true, 100, 100);
 
         let h3_config = Config::new();
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
         // We'll send default data of 10 bytes on flow ID 0.
         let result = (11, 0, 1);
 
         // Send request followed by DATAGRAM on client side.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -7796,7 +7885,7 @@ mod tests {
             more_frames: true,
         };
 
-        s.send_dgram_client(0).unwrap();
+        s.send_dgram_client(0)?;
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
@@ -7812,9 +7901,9 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Send response followed by DATAGRAM on server side
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
-        let body = s.send_body_server(stream, true).unwrap();
+        let body = s.send_body_server(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -7823,7 +7912,7 @@ mod tests {
             more_frames: true,
         };
 
-        s.send_dgram_server(0).unwrap();
+        s.send_dgram_server(0)?;
 
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
@@ -7838,21 +7927,18 @@ mod tests {
 
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Send multiple DATAGRAMs and requests.
-    fn poll_datagram_multi_read() {
-        let mut buf = [0; 65535];
+    fn poll_datagram_multi_read() -> TestResult {
+        let mut buf = vec![0; 65_535];
 
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -7863,17 +7949,13 @@ mod tests {
         config.enable_dgram(true, 100, 100);
 
         let h3_config = Config::new();
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
-
-        // 10 bytes on flow ID 0 and 2.
-        let flow_0_result = (11, 0, 1);
-        let flow_2_result = (11, 2, 1);
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
         // Send requests followed by DATAGRAMs on client side.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -7882,16 +7964,11 @@ mod tests {
             more_frames: true,
         };
 
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(2).unwrap();
-        s.send_dgram_client(2).unwrap();
-        s.send_dgram_client(2).unwrap();
-        s.send_dgram_client(2).unwrap();
-        s.send_dgram_client(2).unwrap();
+        for flow_id in [0, 2] {
+            for _ in 0..5 {
+                s.send_dgram_client(flow_id)?;
+            }
+        }
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
@@ -7899,12 +7976,10 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Second cycle, start to read
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
+        for flow_id in [0; 3] {
+            assert_eq!(s.recv_dgram_server(&mut buf), Ok((11, flow_id, 1)));
+            assert_eq!(s.poll_server(), Err(Error::Done));
+        }
 
         assert_eq!(s.recv_body_server(stream, &mut recv_buf), Ok(body.len()));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
@@ -7912,25 +7987,15 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Third cycle.
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_server(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_server(), Err(Error::Done));
+        for flow_id in [0, 0, 2, 2, 2, 2, 2] {
+            assert_eq!(s.recv_dgram_server(&mut buf), Ok((11, flow_id, 1)));
+            assert_eq!(s.poll_server(), Err(Error::Done));
+        }
 
         // Send response followed by DATAGRAM on server side
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
-        let body = s.send_body_server(stream, true).unwrap();
+        let body = s.send_body_server(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -7939,16 +8004,11 @@ mod tests {
             more_frames: true,
         };
 
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(0).unwrap();
-        s.send_dgram_server(2).unwrap();
-        s.send_dgram_server(2).unwrap();
-        s.send_dgram_server(2).unwrap();
-        s.send_dgram_server(2).unwrap();
-        s.send_dgram_server(2).unwrap();
+        for flow_id in [0, 2] {
+            for _ in 0..5 {
+                s.send_dgram_server(flow_id)?;
+            }
+        }
 
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
@@ -7956,12 +8016,10 @@ mod tests {
         assert_eq!(s.poll_client(), Err(Error::Done));
 
         // Second cycle, start to read
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        for flow_id in [0; 3] {
+            assert_eq!(s.recv_dgram_client(&mut buf), Ok((11, flow_id, 1)));
+            assert_eq!(s.poll_client(), Err(Error::Done));
+        }
 
         assert_eq!(s.recv_body_client(stream, &mut recv_buf), Ok(body.len()));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
@@ -7969,28 +8027,19 @@ mod tests {
         assert_eq!(s.poll_client(), Err(Error::Done));
 
         // Third cycle.
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_0_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
-        assert_eq!(s.recv_dgram_client(&mut buf), Ok(flow_2_result));
-        assert_eq!(s.poll_client(), Err(Error::Done));
+        for flow_id in [0, 0, 2, 2, 2, 2, 2] {
+            assert_eq!(s.recv_dgram_client(&mut buf), Ok((11, flow_id, 1)));
+            assert_eq!(s.poll_client(), Err(Error::Done));
+        }
+        Ok(())
     }
 
     #[test]
     /// Tests that the Finished event is not issued for streams of unknown type
     /// (e.g. GREASE).
-    fn finished_is_for_requests() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn finished_is_for_requests() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         assert_eq!(s.poll_client(), Err(Error::Done));
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -8000,114 +8049,57 @@ mod tests {
 
         assert_eq!(s.poll_client(), Err(Error::Done));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
-    #[test]
-    fn unknown_uni_stream_leaks_past_max_streams_uni() {
-        let (mut config, h3_config) = Session::default_configs().unwrap();
+    #[rstest]
+    #[case::unknown_type(&[0x21])]
+    #[case::empty(&[])]
+    fn unrecognized_uni_streams_return_stream_credit(
+        #[case] payload: &[u8],
+    ) -> TestResult {
+        let (mut config, h3_config) = Session::default_configs()?;
         config.set_initial_max_data(100_000);
         config.set_initial_max_stream_data_uni(100_000);
         config.set_initial_max_streams_uni(5);
         config.grease(false);
-
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
         let baseline = s.server.streams.len();
-        let mut leaked_streams = Vec::new();
-        let mut id = 14;
-
-        let n = 500;
-        for i in 0..n {
-            s.pipe
-                .client
-                .stream_send(id, &[0x21], true)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "stream credit was not re-issued after {} streams: {:?}",
-                        i, e
-                    )
-                });
-
-            s.pipe.advance().unwrap();
+        let count = 500;
+        let ids = (0..count).map(|ordinal| 14 + ordinal * 4);
+        for id in ids.clone() {
+            let written = s.pipe.client.stream_send(id, payload, true);
+            assert_eq!(
+                written,
+                Ok(payload.len()),
+                "stream credit not reissued for stream {id}"
+            );
+            s.pipe.advance()?;
             assert_eq!(s.poll_server(), Err(Error::Done));
             assert!(s.pipe.server.streams.is_collected(id));
-            s.pipe.advance().unwrap();
-
-            leaked_streams.push(id);
-            id += 4;
+            s.pipe.advance()?;
         }
-
-        for id in leaked_streams {
+        for id in ids {
             assert!(s.pipe.server.streams.is_collected(id));
         }
-
         assert_eq!(
             s.server.streams.len(),
             baseline,
-            "expected {} allocated streams in stream map after {} streams with unknown type",
-            baseline,
-            n,
+            "unrecognized streams leaked after {count} requests"
         );
-    }
-
-    #[test]
-    fn empty_uni_stream_leaks_past_max_streams_uni() {
-        let (mut config, h3_config) = Session::default_configs().unwrap();
-        config.set_initial_max_data(100_000);
-        config.set_initial_max_stream_data_uni(100_000);
-        config.set_initial_max_streams_uni(5);
-        config.grease(false);
-
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
-
-        let baseline = s.server.streams.len();
-        let mut leaked_streams = Vec::new();
-        let mut id = 14;
-
-        let n = 500;
-        for i in 0..n {
-            s.pipe
-                .client
-                .stream_send(id, &[], true)
-                .unwrap_or_else(|e| {
-                    panic!(
-                        "stream credit was not re-issued after {} streams: {:?}",
-                        i, e
-                    )
-                });
-
-            s.pipe.advance().unwrap();
-            assert_eq!(s.poll_server(), Err(Error::Done));
-            assert!(s.pipe.server.streams.is_collected(id));
-            s.pipe.advance().unwrap();
-
-            leaked_streams.push(id);
-            id += 4;
-        }
-
-        for id in leaked_streams {
-            assert!(s.pipe.server.streams.is_collected(id));
-        }
-
-        assert_eq!(
-            s.server.streams.len(),
-            baseline,
-            "expected {} allocated streams in stream map after {} streams without stream type",
-            baseline,
-            n,
-        );
+        Ok(())
     }
 
     #[test]
     /// Tests that streams are marked as finished only once.
-    fn finished_once() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn finished_once() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (stream, req) = s.send_request(false).unwrap();
-        let body = s.send_body_client(stream, true).unwrap();
+        let (stream, req) = s.send_request(false)?;
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -8124,17 +8116,18 @@ mod tests {
 
         assert_eq!(s.recv_body_server(stream, &mut recv_buf), Err(Error::Done));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
     /// Tests that the Data event is properly re-armed.
-    fn data_event_rearm() {
+    fn data_event_rearm() -> TestResult {
         let bytes = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
 
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::new()?;
+        s.handshake()?;
 
-        let (r1_id, r1_hdrs) = s.send_request(false).unwrap();
+        let (r1_id, r1_hdrs) = s.send_request(false)?;
 
         let mut recv_buf = vec![0; bytes.len()];
 
@@ -8149,17 +8142,17 @@ mod tests {
             let mut d = [42; 10];
             let mut b = octets::OctetsMut::with_slice(&mut d);
 
-            b.put_varint(frame::DATA_FRAME_TYPE_ID).unwrap();
-            b.put_varint(bytes.len() as u64).unwrap();
+            b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
+            b.put_varint(bytes.len() as u64)?;
             let off = b.off();
-            s.pipe.client.stream_send(r1_id, &d[..off], false).unwrap();
+            s.pipe.client.stream_send(r1_id, &d[..off], false)?;
 
             assert_eq!(
                 s.pipe.client.stream_send(r1_id, &bytes[..5], false),
                 Ok(5)
             );
 
-            s.advance().ok();
+            s.advance()?;
         }
 
         assert_eq!(s.poll_server(), Ok((r1_id, r1_ev_headers)));
@@ -8171,7 +8164,7 @@ mod tests {
 
         // Send the remaining DATA payload.
         assert_eq!(s.pipe.client.stream_send(r1_id, &bytes[5..], false), Ok(5));
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r1_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -8181,7 +8174,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Send more data.
-        let r1_body = s.send_body_client(r1_id, false).unwrap();
+        let r1_body = s.send_body_client(r1_id, false)?;
 
         assert_eq!(s.poll_server(), Ok((r1_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -8189,14 +8182,14 @@ mod tests {
         assert_eq!(s.recv_body_server(r1_id, &mut recv_buf), Ok(r1_body.len()));
 
         // Send a new request to test cross-stream event rearming.
-        let (r2_id, r2_hdrs) = s.send_request(false).unwrap();
+        let (r2_id, r2_hdrs) = s.send_request(false)?;
         let r2_ev_headers = Event::Headers {
             list: r2_hdrs,
             more_frames: true,
         };
-        let r2_body = s.send_body_client(r2_id, false).unwrap();
+        let r2_body = s.send_body_client(r2_id, false)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r2_id, r2_ev_headers)));
         assert_eq!(s.poll_server(), Ok((r2_id, Event::Data)));
@@ -8204,26 +8197,24 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Send more data on request 1, then trailing HEADERS.
-        let r1_body = s.send_body_client(r1_id, false).unwrap();
+        let r1_body = s.send_body_client(r1_id, false)?;
 
         let trailers = vec![Header::new(b"hello", b"world")];
 
-        s.client
-            .send_additional_headers(
-                &mut s.pipe.client,
-                r1_id,
-                &trailers,
-                true,
-                true,
-            )
-            .unwrap();
+        s.client.send_additional_headers(
+            &mut s.pipe.client,
+            r1_id,
+            &trailers,
+            true,
+            true,
+        )?;
 
         let r1_ev_trailers = Event::Headers {
             list: trailers.clone(),
             more_frames: false,
         };
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r1_id, Event::Data)));
         assert_eq!(s.recv_body_server(r1_id, &mut recv_buf), Ok(r1_body.len()));
@@ -8233,31 +8224,36 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Send more data on request 2, then trailing HEADERS.
-        let r2_body = s.send_body_client(r2_id, false).unwrap();
+        let r2_body = s.send_body_client(r2_id, false)?;
 
-        s.client
-            .send_additional_headers(
-                &mut s.pipe.client,
-                r2_id,
-                &trailers,
-                true,
-                false,
-            )
-            .unwrap();
+        s.client.send_additional_headers(
+            &mut s.pipe.client,
+            r2_id,
+            &trailers,
+            true,
+            false,
+        )?;
 
         let r2_ev_trailers = Event::Headers {
             list: trailers,
             more_frames: true,
         };
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r2_id, Event::Data)));
         assert_eq!(s.recv_body_server(r2_id, &mut recv_buf), Ok(r2_body.len()));
         assert_eq!(s.poll_server(), Ok((r2_id, r2_ev_trailers)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        let (r3_id, r3_hdrs) = s.send_request(false).unwrap();
+        assert_header_only_data_rearm(&mut s, &bytes, &mut recv_buf)?;
+        Ok(())
+    }
+
+    fn assert_header_only_data_rearm(
+        s: &mut Session, bytes: &[u8], recv_buf: &mut [u8],
+    ) -> TestResult {
+        let (r3_id, r3_hdrs) = s.send_request(false)?;
 
         let r3_ev_headers = Event::Headers {
             list: r3_hdrs,
@@ -8269,41 +8265,41 @@ mod tests {
             let mut d = [42; 10];
             let mut b = octets::OctetsMut::with_slice(&mut d);
 
-            b.put_varint(frame::DATA_FRAME_TYPE_ID).unwrap();
-            b.put_varint(bytes.len() as u64).unwrap();
+            b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
+            b.put_varint(bytes.len() as u64)?;
             let off = b.off();
-            s.pipe.client.stream_send(r3_id, &d[..off], false).unwrap();
+            s.pipe.client.stream_send(r3_id, &d[..off], false)?;
 
-            s.advance().ok();
+            s.advance()?;
         }
 
         assert_eq!(s.poll_server(), Ok((r3_id, r3_ev_headers)));
         assert_eq!(s.poll_server(), Ok((r3_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        assert_eq!(s.recv_body_server(r3_id, &mut recv_buf), Err(Error::Done));
+        assert_eq!(s.recv_body_server(r3_id, recv_buf), Err(Error::Done));
 
         assert_eq!(s.pipe.client.stream_send(r3_id, &bytes[..5], false), Ok(5));
 
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r3_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        assert_eq!(s.recv_body_server(r3_id, &mut recv_buf), Ok(5));
+        assert_eq!(s.recv_body_server(r3_id, recv_buf), Ok(5));
 
         assert_eq!(s.pipe.client.stream_send(r3_id, &bytes[5..], false), Ok(5));
-        s.advance().ok();
+        s.advance()?;
 
         assert_eq!(s.poll_server(), Ok((r3_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        assert_eq!(s.recv_body_server(r3_id, &mut recv_buf), Ok(5));
+        assert_eq!(s.recv_body_server(r3_id, recv_buf), Ok(5));
 
         // Buffer multiple data frames.
-        let body = s.send_body_client(r3_id, false).unwrap();
-        s.send_body_client(r3_id, false).unwrap();
-        s.send_body_client(r3_id, false).unwrap();
+        let body = s.send_body_client(r3_id, false)?;
+        s.send_body_client(r3_id, false)?;
+        s.send_body_client(r3_id, false)?;
 
         assert_eq!(s.poll_server(), Ok((r3_id, Event::Data)));
         assert_eq!(s.poll_server(), Err(Error::Done));
@@ -8312,32 +8308,32 @@ mod tests {
             let mut d = [42; 10];
             let mut b = octets::OctetsMut::with_slice(&mut d);
 
-            b.put_varint(frame::DATA_FRAME_TYPE_ID).unwrap();
-            b.put_varint(0).unwrap();
+            b.put_varint(frame::DATA_FRAME_TYPE_ID)?;
+            b.put_varint(0)?;
             let off = b.off();
-            s.pipe.client.stream_send(r3_id, &d[..off], true).unwrap();
+            s.pipe.client.stream_send(r3_id, &d[..off], true)?;
 
-            s.advance().ok();
+            s.advance()?;
         }
 
-        let mut recv_buf = vec![0; bytes.len() * 3];
+        let mut aggregate = vec![0; bytes.len() * 3];
 
-        assert_eq!(s.recv_body_server(r3_id, &mut recv_buf), Ok(body.len() * 3));
+        assert_eq!(
+            s.recv_body_server(r3_id, &mut aggregate),
+            Ok(body.len() * 3)
+        );
+        Ok(())
     }
 
     #[test]
     /// Tests that the Datagram event is properly re-armed.
-    fn dgram_event_rearm() {
-        let mut buf = [0; 65535];
+    fn dgram_event_rearm() -> TestResult {
+        let mut buf = vec![0; 65_535];
 
-        let mut config = crate::Config::new(crate::PROTOCOL_VERSION).unwrap();
-        config
-            .load_cert_chain_from_pem_file("examples/cert.crt")
-            .unwrap();
-        config
-            .load_priv_key_from_pem_file("examples/cert.key")
-            .unwrap();
-        config.set_application_protos(&[b"h3"]).unwrap();
+        let mut config = crate::Config::new(crate::PROTOCOL_VERSION)?;
+        config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+        config.load_priv_key_from_pem_file("examples/cert.key")?;
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1500);
         config.set_initial_max_stream_data_bidi_local(150);
         config.set_initial_max_stream_data_bidi_remote(150);
@@ -8348,17 +8344,17 @@ mod tests {
         config.enable_dgram(true, 100, 100);
 
         let h3_config = Config::new();
-        let mut s = Session::with_configs(&mut config, &h3_config).unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::with_configs(&mut config, &h3_config)?;
+        s.handshake()?;
 
         // 10 bytes on flow ID 0 and 2.
         let flow_0_result = (11, 0, 1);
         let flow_2_result = (11, 2, 1);
 
         // Send requests followed by DATAGRAMs on client side.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -8367,10 +8363,10 @@ mod tests {
             more_frames: true,
         };
 
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(2).unwrap();
-        s.send_dgram_client(2).unwrap();
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(2)?;
+        s.send_dgram_client(2)?;
 
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Data)));
@@ -8389,8 +8385,8 @@ mod tests {
 
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        s.send_dgram_client(0).unwrap();
-        s.send_dgram_client(2).unwrap();
+        s.send_dgram_client(0)?;
+        s.send_dgram_client(2)?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
 
@@ -8409,23 +8405,24 @@ mod tests {
         assert_eq!(s.pipe.server.stats().dgram_sent, 0);
         assert_eq!(s.pipe.server.stats().dgram_recv, 6);
 
-        let server_path = s.pipe.server.paths.get_active().expect("no active");
-        let client_path = s.pipe.client.paths.get_active().expect("no active");
+        let server_path = s.pipe.server.paths.get_active()?;
+        let client_path = s.pipe.client.paths.get_active()?;
         assert_eq!(client_path.dgram_sent_count, 6);
         assert_eq!(client_path.dgram_recv_count, 0);
         assert_eq!(server_path.dgram_sent_count, 0);
         assert_eq!(server_path.dgram_recv_count, 6);
+        Ok(())
     }
 
     #[test]
-    fn reset_stream() {
-        let mut buf = [0; 65535];
+    fn reset_stream() -> TestResult {
+        let mut buf = vec![0; 65_535];
 
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends request.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8436,7 +8433,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -8454,28 +8451,29 @@ mod tests {
             final_size: 68,
         }];
 
-        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf)?;
 
         // Server issues Reset event for the stream.
         assert_eq!(s.poll_server(), Ok((stream, Event::Reset(42))));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Sending RESET_STREAM again shouldn't trigger another Reset event.
-        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf)?;
 
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     /// The client shuts down the stream's write direction, the server
     /// shuts down its side with fin
     #[test]
-    fn client_shutdown_write_server_fin() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn client_shutdown_write_server_fin() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends request.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8486,7 +8484,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -8516,7 +8514,7 @@ mod tests {
 
         // Client sends another request, server sends response without fin
         //
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8528,7 +8526,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Server sends reponse without closing the stream.
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -8552,7 +8550,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Server sends body and closes the stream.
-        s.send_body_server(stream, true).unwrap();
+        s.send_body_server(stream, true)?;
 
         // Stream has been collected on server by quiche
         assert!(s.pipe.server.streams.is_collected(stream));
@@ -8560,20 +8558,21 @@ mod tests {
         // read the fin from the stream first.
         assert!(!s.pipe.client.streams.is_collected(stream));
         assert_eq!(s.poll_client(), Ok((stream, Event::Data)));
-        s.recv_body_client(stream, &mut buf).unwrap();
+        s.recv_body_client(stream, &mut buf)?;
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
         assert!(s.pipe.client.streams.is_collected(stream));
+        Ok(())
     }
 
     #[test]
-    fn client_shutdown_read() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn client_shutdown_read() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends request and leaves stream open.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8584,7 +8583,7 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Err(Error::Done));
 
-        let resp = s.send_response(stream, false).unwrap();
+        let resp = s.send_response(stream, false)?;
 
         let ev_headers = Event::Headers {
             list: resp,
@@ -8604,8 +8603,7 @@ mod tests {
 
         // Stream is writable on server side, but returns StreamStopped
         assert_eq!(s.poll_server(), Err(Error::Done));
-        let writables: Vec<u64> = s.pipe.server.writable().collect();
-        assert!(writables.contains(&stream));
+        assert!(s.pipe.server.writable().any(|id| id == stream));
         assert_eq!(
             s.send_body_server(stream, false),
             Err(Error::Transport(crate::Error::StreamStopped(42)))
@@ -8628,15 +8626,16 @@ mod tests {
         // on both client and server
         assert!(s.pipe.client.streams.is_collected(stream));
         assert!(s.pipe.server.streams.is_collected(stream));
+        Ok(())
     }
 
     #[test]
-    fn reset_finished_at_server() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_finished_at_server() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends HEADERS and doesn't fin
-        let (stream, _req) = s.send_request(false).unwrap();
+        let (stream, _req) = s.send_request(false)?;
 
         // ..then Client sends RESET_STREAM
         assert_eq!(
@@ -8651,7 +8650,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Client sends HEADERS and fin
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         // ..then Client sends RESET_STREAM
         assert_eq!(
@@ -8668,15 +8667,16 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_server(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_server(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    fn reset_finished_at_server_with_data_pending() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_finished_at_server_with_data_pending() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends HEADERS and doesn't fin.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         assert!(s.send_body_client(stream, false).is_ok());
 
@@ -8707,17 +8707,18 @@ mod tests {
         assert_eq!(s.poll_server(), Ok((stream, Event::Reset(0))));
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.pipe.server.readable().len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn reset_finished_at_server_with_data_pending_2() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_finished_at_server_with_data_pending_2() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let init_streams_server = s.server.streams.len();
 
         // Client sends HEADERS and doesn't fin.
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         assert!(s.send_body_client(stream, false).is_ok());
 
@@ -8734,7 +8735,7 @@ mod tests {
 
         // Finish the local H3 send side first. Once the peer resets its
         // receive side, the QUIC stream can be collected immediately.
-        s.send_response(stream, true).unwrap();
+        s.send_response(stream, true)?;
 
         // ..then Client sends RESET_STREAM.
         assert_eq!(
@@ -8757,16 +8758,17 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
         assert_eq!(s.pipe.server.readable().len(), 0);
         assert_eq!(s.server.streams.len(), init_streams_server);
+        Ok(())
     }
 
     #[test]
-    fn reset_while_data_payload_pending_frees_h3_state() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_while_data_payload_pending_frees_h3_state() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let init_streams_server = s.server.streams.len();
 
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
         assert_eq!(
             s.poll_server(),
             Ok((stream, Event::Headers {
@@ -8786,7 +8788,7 @@ mod tests {
 
         // Finish the local H3 send side while the DATA payload is still
         // pending, so consuming the peer reset makes QUIC collect the stream.
-        s.send_response(stream, true).unwrap();
+        s.send_response(stream, true)?;
 
         assert_eq!(
             s.pipe
@@ -8801,16 +8803,17 @@ mod tests {
             Err(Error::Transport(crate::Error::StreamReset(0)))
         );
         assert_eq!(s.server.streams.len(), init_streams_server);
+        Ok(())
     }
 
     #[test]
-    fn reset_finished_at_client() {
-        let mut buf = [0; 65535];
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn reset_finished_at_client() -> TestResult {
+        let mut buf = vec![0; 65_535];
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         // Client sends HEADERS and doesn't fin
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8822,7 +8825,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Server sends response and doesn't fin
-        s.send_response(stream, false).unwrap();
+        s.send_response(stream, false)?;
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -8841,7 +8844,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Client sends headers and fin.
-        let (stream, req) = s.send_request(true).unwrap();
+        let (stream, req) = s.send_request(true)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8854,7 +8857,7 @@ mod tests {
         assert_eq!(s.poll_server(), Err(Error::Done));
 
         // Server sends response and fin
-        let resp = s.send_response(stream, true).unwrap();
+        let resp = s.send_response(stream, true)?;
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -8865,7 +8868,7 @@ mod tests {
             final_size: 68,
         }];
 
-        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf);
+        assert_client_packet_acknowledged(&mut s.pipe, &frames, &mut buf)?;
 
         assert_eq!(s.pipe.advance(), Ok(()));
 
@@ -8878,18 +8881,19 @@ mod tests {
         assert_eq!(s.poll_client(), Ok((stream, ev_headers)));
         assert_eq!(s.poll_client(), Ok((stream, Event::Finished)));
         assert_eq!(s.poll_client(), Err(Error::Done));
+        Ok(())
     }
 
     #[test]
-    fn collect_completed_streams() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn collect_completed_streams() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let init_streams_client = s.client.streams.len();
         let init_streams_server = s.server.streams.len();
 
         // Client sends HEADERS and doesn't fin
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8904,7 +8908,7 @@ mod tests {
         assert_eq!(s.server.streams.len(), init_streams_server + 1);
 
         // Client sends body and fin
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -8917,8 +8921,8 @@ mod tests {
         assert_eq!(s.server.streams.len(), init_streams_server + 1);
 
         // Server sends response and finishes the stream
-        let resp_headers = s.send_response(stream, false).unwrap();
-        s.send_body_server(stream, true).unwrap();
+        let resp_headers = s.send_response(stream, false)?;
+        s.send_body_server(stream, true)?;
 
         let ev_headers = Event::Headers {
             list: resp_headers,
@@ -8938,18 +8942,19 @@ mod tests {
         assert_eq!(s.poll_client(), Err(Error::Done));
 
         assert_eq!(s.client.streams.len(), init_streams_client);
+        Ok(())
     }
 
     #[test]
-    fn collect_reset_streams() {
-        let mut s = Session::new().unwrap();
-        s.handshake().unwrap();
+    fn collect_reset_streams() -> TestResult {
+        let mut s = Session::new()?;
+        s.handshake()?;
 
         let init_streams_client = s.client.streams.len();
         let init_streams_server = s.server.streams.len();
 
         // Client sends HEADERS and doesn't fin
-        let (stream, req) = s.send_request(false).unwrap();
+        let (stream, req) = s.send_request(false)?;
 
         let ev_headers = Event::Headers {
             list: req,
@@ -8964,7 +8969,7 @@ mod tests {
         assert_eq!(s.server.streams.len(), init_streams_server + 1);
 
         // Client sends body and fin
-        let body = s.send_body_client(stream, true).unwrap();
+        let body = s.send_body_client(stream, true)?;
 
         let mut recv_buf = vec![0; body.len()];
 
@@ -8977,13 +8982,12 @@ mod tests {
         assert_eq!(s.server.streams.len(), init_streams_server + 1);
 
         // Server sends response and resets the stream.
-        s.send_response(stream, false).unwrap();
+        s.send_response(stream, false)?;
         s.pipe
             .server
-            .stream_shutdown(stream, crate::Shutdown::Write, 0)
-            .unwrap();
+            .stream_shutdown(stream, crate::Shutdown::Write, 0)?;
 
-        s.advance().ok();
+        s.advance()?;
 
         // TODO: need to notify resets better.
         //
@@ -9003,6 +9007,7 @@ mod tests {
         // The server stream should be gone now
         assert_eq!(s.client.streams.len(), init_streams_client);
         assert_eq!(s.server.streams.len(), init_streams_server);
+        Ok(())
     }
 }
 
