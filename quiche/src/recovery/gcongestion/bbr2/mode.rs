@@ -141,9 +141,8 @@ impl Mode {
     /// Process one phase. Return whether the event entered a different
     /// mode, so the caller can reprocess it under the new mode's rules.
     pub(super) fn do_on_congestion_event(
-        &mut self, event: &mut BBRv2CongestionEvent,
-        target_bytes_inflight: usize, params: &Params,
-        recovery_stats: &mut RecoveryStats,
+        &mut self, event: &BBRv2CongestionEvent, target_bytes_inflight: usize,
+        params: &Params, recovery_stats: &mut RecoveryStats,
     ) -> bool {
         let now = event.event_time;
         let next =
@@ -308,13 +307,9 @@ mod tests {
         let mut stats = RecoveryStats::default();
 
         assert!(mode.is_probing_for_bandwidth());
-        assert!(
-            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
-        );
+        assert!(mode.do_on_congestion_event(&event, 13_000, params, &mut stats));
         assert!(matches!(mode.phase, Phase::Drain));
-        assert!(
-            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
-        );
+        assert!(mode.do_on_congestion_event(&event, 13_000, params, &mut stats));
         let Phase::ProbeBw(cycle) = &mut mode.phase else {
             panic!("DRAIN must enter PROBE_BW");
         };
@@ -323,9 +318,7 @@ mod tests {
 
         event.event_time += params.probe_rtt_period + Duration::from_millis(1);
         event.sample_min_rtt = Some(Duration::from_millis(80));
-        assert!(
-            mode.do_on_congestion_event(&mut event, 13_000, params, &mut stats)
-        );
+        assert!(mode.do_on_congestion_event(&event, 13_000, params, &mut stats));
         assert!(matches!(mode.phase, Phase::ProbeRtt(_)));
         assert_eq!(mode.model.pacing_gain(), 0.8);
         assert_eq!(mode.model.cwnd_gain(), 0.5);
@@ -333,12 +326,14 @@ mod tests {
         if resume_from_quiescence {
             mode.do_on_exit_quiescence(event.event_time, now);
         } else {
-            assert!(!mode
-                .do_on_congestion_event(&mut event, 13_000, params, &mut stats));
+            assert!(
+                !mode.do_on_congestion_event(&event, 13_000, params, &mut stats)
+            );
             event.event_time +=
                 params.probe_rtt_duration + Duration::from_millis(1);
-            assert!(mode
-                .do_on_congestion_event(&mut event, 13_000, params, &mut stats));
+            assert!(
+                mode.do_on_congestion_event(&event, 13_000, params, &mut stats)
+            );
         }
 
         let Phase::ProbeBw(cycle) = &mode.phase else {
