@@ -7299,6 +7299,27 @@ fn assert_next_packet_frame(
     Ok(frames.len())
 }
 
+// Packet headers can change size as stream offsets cross varint boundaries.
+// Check actual contiguous payload ranges, rather than assuming that one
+// application write corresponds to exactly one STREAM frame.
+fn assert_priority_stream_chunk(
+    pipe: &mut test_utils::Pipe, buf: &mut [u8], id: u64, offset: &mut u64,
+) -> TestResult<usize> {
+    let (len, _) = pipe.server.send(buf)?;
+    let frames = test_utils::decode_pkt(&pipe.client, &mut buf[..len])?;
+    let Some(frame::Frame::Stream { stream_id, data }) = frames.first() else {
+        return Err(format!("expected STREAM {id}, got {frames:?}").into());
+    };
+    assert_eq!(*stream_id, id);
+    assert_eq!(data.off(), *offset);
+    assert!(!data.is_empty());
+    assert!(!data.fin());
+    assert!(data.iter().all(|&byte| byte == b'b'));
+    *offset = data.max_off();
+    assert!(*offset <= 1500);
+    Ok(frames.len())
+}
+
 fn open_streams_for_priority(
     pipe: &mut test_utils::Pipe, ids: &[u64],
 ) -> TestResult {
@@ -7363,19 +7384,18 @@ fn stream_priority(
     // Non-incremental streams drain completely; equal-priority
     // incremental streams alternate at each payload offset.
     for ids in [&[8][..], &[16], &[20], &[12, 4], &[0]] {
-        for offset in [0, 500, 1_000] {
-            for &id in ids {
-                assert_next_packet_frame(
-                    &mut pipe.server,
-                    &pipe.client,
+        let mut offsets = vec![0; ids.len()];
+        for _ in 0..3 {
+            for (&id, offset) in ids.iter().zip(&mut offsets) {
+                assert_priority_stream_chunk(
+                    &mut pipe,
                     &mut buf[..MAX_TEST_PACKET_SIZE],
-                    &frame::Frame::Stream {
-                        stream_id: id,
-                        data: RangeBuf::from(&out, offset, false),
-                    },
+                    id,
+                    offset,
                 )?;
             }
         }
+        assert!(offsets.iter().all(|&offset| offset == 1500));
     }
     assert_eq!(pipe.server.send(&mut buf), Err(Error::Done));
     Ok(())
@@ -7487,8 +7507,9 @@ fn stream_datagram_priority(
         assert_eq!(pipe.server.dgram_send(&out), Ok(()));
     }
 
-    for offset in [0, 500, 1_000] {
-        for id in [0, 4] {
+    let mut offsets = [0; 2];
+    for _ in 0..3 {
+        for (id, offset) in [0, 4].into_iter().zip(&mut offsets) {
             assert_eq!(
                 assert_next_packet_frame(
                     &mut pipe.server,
@@ -7499,14 +7520,11 @@ fn stream_datagram_priority(
                 1
             );
             assert_eq!(
-                assert_next_packet_frame(
-                    &mut pipe.server,
-                    &pipe.client,
+                assert_priority_stream_chunk(
+                    &mut pipe,
                     &mut buf[..MAX_TEST_PACKET_SIZE],
-                    &frame::Frame::Stream {
-                        stream_id: id,
-                        data: RangeBuf::from(&out, offset, false)
-                    },
+                    id,
+                    offset
                 )?,
                 1
             );
