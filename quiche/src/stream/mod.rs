@@ -167,7 +167,7 @@ impl StreamDirection {
 /// Stream-count credit and its signaling, for one direction. A stream's
 /// ordinal implicitly opens all lower ordinals of the same initiator.
 #[derive(Default)]
-pub(super) struct StreamQuota {
+pub struct StreamQuota {
     peer_limit: u64,
     peer_opened: u64,
     local_limit: u64,
@@ -424,7 +424,7 @@ impl<F: BufFactory> StreamMap<F> {
                     return Err(Error::InvalidStreamState(id));
                 }
 
-                let (max_rx_data, max_tx_data) = match (local, is_bidi(id)) {
+                let (receive_limit, send_limit) = match (local, is_bidi(id)) {
                     // Locally-initiated bidirectional stream.
                     (true, true) => (
                         local_params.initial_max_stream_data_bidi_local,
@@ -455,15 +455,15 @@ impl<F: BufFactory> StreamMap<F> {
                 self.quotas[StreamDirection::from_id(id).index()]
                     .open(local, stream_sequence + 1)?;
 
-                let initial_window = max_rx_data;
+                let initial_window = receive_limit;
                 let s = Stream::new(
                     StreamPriorityKey {
                         id,
                         owner: Some(Arc::clone(&self.owner)),
                         ..Default::default()
                     },
-                    max_rx_data,
-                    max_tx_data,
+                    receive_limit,
+                    send_limit,
                     local,
                     initial_window,
                     self.max_stream_window,
@@ -724,6 +724,25 @@ impl<F: BufFactory> StreamMap<F> {
     /// If the stream was already in the list, this does nothing.
     pub fn insert_stopped(&mut self, stream_id: u64, error_code: u64) {
         self.stopped.insert(stream_id, error_code);
+    }
+
+    /// Reissue STOP_SENDING only while the receive side lacks a final size.
+    pub(crate) fn requeue_stop_sending(
+        &mut self, stream_id: u64, error_code: u64,
+    ) {
+        if self
+            .get(stream_id)
+            .is_some_and(|stream| !stream.recv.is_fin())
+        {
+            self.insert_stopped(stream_id, error_code);
+        }
+    }
+
+    /// Lost MAX_STREAM_DATA matters only while the stream still exists.
+    pub(crate) fn requeue_receive_credit(&mut self, stream_id: u64) {
+        if self.get(stream_id).is_some() {
+            self.insert_almost_full(stream_id);
+        }
     }
 
     /// Removes the stream ID from the stopped streams set.
@@ -1010,15 +1029,19 @@ pub struct Stream<F: BufFactory = DefaultBufFactory> {
 impl<F: BufFactory> Stream<F> {
     /// Creates a new stream with the given flow control limits.
     pub fn new(
-        priority: StreamPriorityKey, max_rx_data: u64, max_tx_data: u64,
+        priority: StreamPriorityKey, receive_limit: u64, send_limit: u64,
         local: bool, initial_window: u64, max_window: u64,
     ) -> Self {
         let id = priority.id;
         let priority_key = Arc::new(priority);
 
         Self {
-            recv: recv_buf::RecvBuf::new(max_rx_data, initial_window, max_window),
-            send: send_buf::SendBuf::new(max_tx_data),
+            recv: recv_buf::RecvBuf::new(
+                receive_limit,
+                initial_window,
+                max_window,
+            ),
+            send: send_buf::SendBuf::new(send_limit),
             send_lowat: 1,
             bidi: is_bidi(id),
             local,

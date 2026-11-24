@@ -27,7 +27,7 @@ pub const MAX_PROBES_DEFAULT: u8 = 3;
 const MIN_PLPMTU: usize = crate::MIN_CLIENT_INITIAL_LEN;
 
 /// PMTU discovery settings retained even when discovery is disabled.
-pub(super) struct Config {
+pub struct Config {
     pub(crate) enabled: bool,
     pub(crate) max_probes: u8,
 }

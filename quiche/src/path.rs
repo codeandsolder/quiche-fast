@@ -509,6 +509,47 @@ impl Path {
             .then_some(size)
     }
 
+    /// Bound the next datagram by negotiated limits, validated MTU and
+    /// anti-amplification credit. A probe may reserve extra output capacity,
+    /// but must not increase recovery's confirmed MSS before acknowledgement.
+    pub(crate) fn datagram_send_limit(
+        &mut self, peer_limit: usize, progress: crate::HandshakeProgress,
+        is_server: bool,
+    ) -> usize {
+        let handshake_ready = progress == crate::HandshakeProgress::Confirmed;
+        let mut limit = if progress.completed() {
+            self.recovery.max_datagram_size().min(peer_limit)
+        } else {
+            crate::MIN_CLIENT_INITIAL_LEN
+        };
+
+        if let Some(pmtud) = self.pmtud.as_mut() {
+            if handshake_ready {
+                pmtud.limit_maximum(peer_limit);
+            }
+            limit = pmtud.get_current_mtu().min(peer_limit);
+            if self.recovery.max_datagram_size() != limit {
+                self.recovery.pmtud_update_max_datagram_size(limit);
+            }
+            if handshake_ready && pmtud.should_probe() {
+                limit = limit.max(pmtud.get_probe_size().min(peer_limit));
+            }
+        }
+        if is_server && !self.verified_peer_address {
+            limit = limit.min(self.max_send_bytes);
+        }
+        limit
+    }
+
+    /// PING itself is not retransmitted; a lost probe updates PMTU state.
+    pub(crate) fn on_lost_ping(
+        &mut self, mtu_probe: Option<usize>,
+    ) -> Option<PathEvent> {
+        let size = mtu_probe?;
+        trace!("pmtud probe dropped: {size}");
+        self.on_pmtu_probe_lost(size)
+    }
+
     /// A failed MTU probe can invalidate previously confirmed MTU evidence.
     /// Keep recovery's datagram limit synchronized and publish the change.
     pub(crate) fn on_pmtu_probe_lost(

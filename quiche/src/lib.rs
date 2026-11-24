@@ -531,7 +531,7 @@ pub struct SendInfo {
 ///
 /// [`stream_shutdown()`]: struct.Connection.html#method.stream_shutdown
 #[repr(C)]
-#[derive(PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Shutdown {
     /// Stop receiving stream data.
     Read  = 0,
@@ -1343,6 +1343,25 @@ enum ConnectionLifecycle {
     Closed(CloseCause),
 }
 
+/// Progress of the initial CID/key exchange, distinct from TLS completion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum InitialExchange {
+    #[default]
+    AwaitingKeys,
+    AwaitingPeerId,
+    PeerIdentified,
+}
+
+impl InitialExchange {
+    const fn keys_derived(self) -> bool {
+        !matches!(self, Self::AwaitingKeys)
+    }
+
+    const fn peer_identified(self) -> bool {
+        matches!(self, Self::PeerIdentified)
+    }
+}
+
 /// TLS completion and peer confirmation can arrive in either order.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum HandshakeProgress {
@@ -1495,6 +1514,83 @@ struct RxFrameEffects {
     probing: bool,
 }
 
+/// Cumulative connection accounting survives path retirement. Derived
+/// snapshot fields (current path count, queue consistency and flight duration)
+/// are deliberately computed from their owning subsystems instead.
+#[derive(Default)]
+struct ConnectionCounters {
+    /// Total number of received packets.
+    recv_count: usize,
+
+    /// Total number of sent packets.
+    sent_count: usize,
+
+    /// Total number of lost packets.
+    lost_count: usize,
+
+    /// Total number of lost packets that were later acked.
+    spurious_lost_count: usize,
+
+    /// Total number of packets sent with data retransmitted.
+    retrans_count: usize,
+
+    /// Total number of sent DATAGRAM frames.
+    dgram_sent_count: usize,
+
+    /// Total number of received DATAGRAM frames.
+    dgram_recv_count: usize,
+
+    /// Total number of bytes sent over the connection.
+    sent_bytes: u64,
+
+    /// Total number of bytes received over the connection.
+    recv_bytes: u64,
+
+    /// Total number of bytes sent acked over the connection.
+    acked_bytes: u64,
+
+    /// Total number of bytes sent lost over the connection.
+    lost_bytes: u64,
+
+    /// Total number of bytes retransmitted over the connection.
+    /// This counts only STREAM and CRYPTO data.
+    stream_retrans_bytes: u64,
+
+    /// Total number of received `PATH_CHALLENGE` frames.
+    path_challenge_rx_count: u64,
+
+    /// The number of times `send()` was blocked because the anti-amplification
+    /// budget (bytes received × `max_amplification_factor`) was exhausted.
+    amplification_limited_count: u64,
+
+    /// The number of streams reset by local.
+    reset_stream_local_count: u64,
+
+    /// The number of streams stopped by local.
+    stopped_stream_local_count: u64,
+
+    /// The number of streams reset by remote.
+    reset_stream_remote_count: u64,
+
+    /// The number of streams stopped by remote.
+    stopped_stream_remote_count: u64,
+
+    /// The number of `DATA_BLOCKED` frames sent due to hitting the connection
+    /// flow control limit.
+    data_blocked_sent_count: u64,
+
+    /// The number of `STREAM_DATA_BLOCKED` frames sent due to a stream hitting
+    /// the stream flow control limit.
+    stream_data_blocked_sent_count: u64,
+
+    /// The number of `DATA_BLOCKED` frames received from the remote endpoint.
+    data_blocked_recv_count: u64,
+
+    /// The number of `STREAM_DATA_BLOCKED` frames received from the remote
+    /// endpoint.
+    stream_data_blocked_recv_count: u64,
+}
+
 /// A QUIC connection.
 pub struct Connection<F = DefaultBufFactory>
 where
@@ -1547,38 +1643,17 @@ where
     /// The configuration for recovery.
     recovery_config: recovery::RecoveryConfig,
 
+    /// Cumulative connection-level accounting.
+    counters: ConnectionCounters,
+
     /// The path manager.
     paths: path::PathMap,
 
     /// `PATH_CHALLENGE` receive queue max length.
     path_challenge_recv_max_queue_len: usize,
 
-    /// Total number of received `PATH_CHALLENGE` frames.
-    path_challenge_rx_count: u64,
-
     /// List of supported application protocols.
     application_protos: Vec<Vec<u8>>,
-
-    /// Total number of received packets.
-    recv_count: usize,
-
-    /// Total number of sent packets.
-    sent_count: usize,
-
-    /// Total number of lost packets.
-    lost_count: usize,
-
-    /// Total number of lost packets that were later acked.
-    spurious_lost_count: usize,
-
-    /// Total number of packets sent with data retransmitted.
-    retrans_count: usize,
-
-    /// Total number of sent DATAGRAM frames.
-    dgram_sent_count: usize,
-
-    /// Total number of received DATAGRAM frames.
-    dgram_recv_count: usize,
 
     /// Total number of bytes received from the peer.
     rx_data: u64,
@@ -1603,22 +1678,6 @@ where
 
     /// Last `tx_data` before running a full `send()` loop.
     last_tx_data: u64,
-
-    /// Total number of bytes retransmitted over the connection.
-    /// This counts only STREAM and CRYPTO data.
-    stream_retrans_bytes: u64,
-
-    /// Total number of bytes sent over the connection.
-    sent_bytes: u64,
-
-    /// Total number of bytes received over the connection.
-    recv_bytes: u64,
-
-    /// Total number of bytes sent acked over the connection.
-    acked_bytes: u64,
-
-    /// Total number of bytes sent lost over the connection.
-    lost_bytes: u64,
 
     /// Streams map, indexed by stream ID.
     pub(crate) streams: stream::StreamMap<F>,
@@ -1660,8 +1719,8 @@ where
     /// Whether this is a server-side connection.
     is_server: bool,
 
-    /// Whether the initial secrets have been derived.
-    derived_initial_secrets: bool,
+    /// Initial protection and authenticated peer CID progress.
+    initial_exchange: InitialExchange,
 
     /// Whether a version negotiation packet has already been received. Only
     /// relevant for client connections.
@@ -1669,9 +1728,6 @@ where
 
     /// Whether stateless retry has been performed.
     did_retry: bool,
-
-    /// Whether the peer already updated its connection ID.
-    got_peer_conn_id: bool,
 
     /// Whether the peer verified our initial address.
     peer_verified_initial_address: bool,
@@ -1715,37 +1771,6 @@ where
     /// Whether the connection should prevent from reusing destination
     /// Connection IDs when the peer migrates.
     disable_dcid_reuse: bool,
-
-    /// The number of streams reset by local.
-    reset_stream_local_count: u64,
-
-    /// The number of streams stopped by local.
-    stopped_stream_local_count: u64,
-
-    /// The number of streams reset by remote.
-    reset_stream_remote_count: u64,
-
-    /// The number of streams stopped by remote.
-    stopped_stream_remote_count: u64,
-
-    /// The number of `DATA_BLOCKED` frames sent due to hitting the connection
-    /// flow control limit.
-    data_blocked_sent_count: u64,
-
-    /// The number of `STREAM_DATA_BLOCKED` frames sent due to a stream hitting
-    /// the stream flow control limit.
-    stream_data_blocked_sent_count: u64,
-
-    /// The number of `DATA_BLOCKED` frames received from the remote endpoint.
-    data_blocked_recv_count: u64,
-
-    /// The number of `STREAM_DATA_BLOCKED` frames received from the remote
-    /// endpoint.
-    stream_data_blocked_recv_count: u64,
-
-    /// The number of times `send()` was blocked because the anti-amplification
-    /// budget (bytes received × `max_amplification_factor`) was exhausted.
-    amplification_limited_count: u64,
 
     /// The anti-amplification limit factor.
     max_amplification_factor: usize,
@@ -1814,6 +1839,7 @@ pub fn accept_with_buf_factory<F: BufFactory>(
 }
 
 /// A wrapper for connection IDs used in [`accept_with_retry`].
+#[derive(Clone, Copy)]
 pub struct RetryConnectionIds<'a> {
     /// The DCID of the first Initial packet received by the server, which
     /// triggered the Retry packet.
@@ -1825,6 +1851,7 @@ pub struct RetryConnectionIds<'a> {
 
 /// Role-specific inputs to connection creation. A client chooses an initial
 /// destination CID; only a server can restore a validated Retry exchange.
+#[derive(Clone, Copy)]
 enum ConnectionStart<'a> {
     Client {
         dcid: Option<&'a ConnectionId<'a>>,
@@ -1999,8 +2026,8 @@ pub fn connect_with_buffer_factory<F: BufFactory>(
     Ok(conn)
 }
 
-/// Creates a new client-side connection, with a custom buffer generation
-/// method using the given dcid initially.
+/// Creates a new client-side connection with custom buffers and initial DCID.
+///
 /// Be aware the RFC places requirements for unpredictability and length
 /// on the client DCID field.
 ///
@@ -2282,41 +2309,9 @@ impl<F: BufFactory> Connection<F> {
 
         let trace_id = format!("{scid:?}");
 
-        let reset_token = if is_server {
-            config.local_transport_params.stateless_reset_token
-        } else {
-            None
-        };
-
+        let (paths, ids, active_path_id) =
+            Self::initial_path_and_ids(scid, local, peer, config, &start)?;
         let recovery_config = config.recovery;
-
-        let mut path = path::Path::new(
-            local,
-            peer,
-            &recovery_config,
-            config.path_challenge_recv_max_queue_len,
-            true,
-            Some(config),
-        );
-
-        // If we sent a Retry assume the peer's address is verified.
-        path.verified_peer_address = did_retry;
-
-        // Do not allocate more than the number of active CIDs. A wire limit
-        // above the addressable collection size cannot constrain it further.
-        let active_conn_id_limit =
-            usize::try_from(config.local_transport_params.active_conn_id_limit)
-                .unwrap_or(usize::MAX);
-        let paths = path::PathMap::new(path, active_conn_id_limit, is_server);
-
-        let active_path_id = paths.get_active_path_id()?;
-
-        let ids = cid::ConnectionIdentifiers::new(
-            active_conn_id_limit,
-            scid,
-            active_path_id,
-            reset_token,
-        );
 
         let initial_flow_control_window = max_rx_data;
         let mut conn = Self {
@@ -2358,23 +2353,10 @@ impl<F: BufFactory> Connection<F> {
             recovery_config,
 
             paths,
+            counters: ConnectionCounters::default(),
             path_challenge_recv_max_queue_len: config
                 .path_challenge_recv_max_queue_len,
-            path_challenge_rx_count: 0,
-
             application_protos: config.application_protos.clone(),
-
-            recv_count: 0,
-            sent_count: 0,
-            lost_count: 0,
-            spurious_lost_count: 0,
-            retrans_count: 0,
-            dgram_sent_count: 0,
-            dgram_recv_count: 0,
-            sent_bytes: 0,
-            recv_bytes: 0,
-            acked_bytes: 0,
-            lost_bytes: 0,
 
             rx_data: 0,
             flow_control: flowcontrol::FlowControl::new(
@@ -2390,8 +2372,6 @@ impl<F: BufFactory> Connection<F> {
             tx_data: 0,
             max_tx_data: 0,
             last_tx_data: 0,
-
-            stream_retrans_bytes: 0,
 
             streams: stream::StreamMap::new(
                 config.local_transport_params.initial_max_streams_bidi,
@@ -2421,13 +2401,11 @@ impl<F: BufFactory> Connection<F> {
 
             is_server,
 
-            derived_initial_secrets: false,
+            initial_exchange: InitialExchange::default(),
 
             did_version_negotiation: false,
 
             did_retry,
-
-            got_peer_conn_id: false,
 
             // Assume clients validate the server's address implicitly.
             peer_verified_initial_address: is_server,
@@ -2463,31 +2441,63 @@ impl<F: BufFactory> Connection<F> {
 
             disable_dcid_reuse: config.disable_dcid_reuse,
 
-            reset_stream_local_count: 0,
-            stopped_stream_local_count: 0,
-            reset_stream_remote_count: 0,
-            stopped_stream_remote_count: 0,
-
-            data_blocked_sent_count: 0,
-            stream_data_blocked_sent_count: 0,
-            data_blocked_recv_count: 0,
-            stream_data_blocked_recv_count: 0,
-
-            amplification_limited_count: 0,
-
             max_amplification_factor: config.max_amplification_factor,
         };
-        conn.initialize_handshake(start, active_path_id)?;
+        conn.initialize_handshake(&start, active_path_id)?;
         Ok(conn)
+    }
+
+    /// Build the first path and its corresponding source CID entry together.
+    fn initial_path_and_ids(
+        scid: &ConnectionId, local: SocketAddr, peer: SocketAddr,
+        config: &Config, start: &ConnectionStart<'_>,
+    ) -> Result<(path::PathMap, cid::ConnectionIdentifiers, usize)> {
+        let is_server = start.is_server();
+        let reset_token = if is_server {
+            config.local_transport_params.stateless_reset_token
+        } else {
+            None
+        };
+
+        let mut path = path::Path::new(
+            local,
+            peer,
+            &config.recovery,
+            config.path_challenge_recv_max_queue_len,
+            true,
+            Some(config),
+        );
+
+        // If we sent a Retry assume the peer's address is verified.
+        path.verified_peer_address =
+            matches!(start, ConnectionStart::Server { retry: Some(_) });
+
+        // Do not allocate more than the number of active CIDs. A wire limit
+        // above the addressable collection size cannot constrain it further.
+        let active_conn_id_limit =
+            usize::try_from(config.local_transport_params.active_conn_id_limit)
+                .unwrap_or(usize::MAX);
+        let paths = path::PathMap::new(path, active_conn_id_limit, is_server);
+
+        let active_path_id = paths.get_active_path_id()?;
+
+        let ids = cid::ConnectionIdentifiers::new(
+            active_conn_id_limit,
+            scid,
+            active_path_id,
+            reset_token,
+        );
+
+        Ok((paths, ids, active_path_id))
     }
 
     /// Apply the role-specific transport parameters and install initial keys.
     fn initialize_handshake(
-        &mut self, start: ConnectionStart<'_>, active_path_id: usize,
+        &mut self, start: &ConnectionStart<'_>, active_path_id: usize,
     ) -> Result<()> {
         if let ConnectionStart::Server {
             retry: Some(retry_cids),
-        } = &start
+        } = start
         {
             self.local_transport_params
                 .original_destination_connection_id =
@@ -2535,7 +2545,7 @@ impl<F: BufFactory> Connection<F> {
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
-            self.derived_initial_secrets = true;
+            self.initial_exchange = InitialExchange::AwaitingPeerId;
         }
 
         Ok(())
@@ -3354,7 +3364,9 @@ impl<F: BufFactory> Connection<F> {
         };
 
         // Only authenticated, nonduplicate packets can select or create paths.
-        let recv_pid = if hdr.ty == Type::Short && self.got_peer_conn_id {
+        let recv_pid = if hdr.ty == Type::Short &&
+            self.initial_exchange.peer_identified()
+        {
             let pkt_dcid = ConnectionId::from_ref(&hdr.dcid);
             self.get_or_create_recv_path_id(recv_pid, &pkt_dcid, buf_len, info)?
         } else {
@@ -3409,7 +3421,7 @@ impl<F: BufFactory> Connection<F> {
 
         // Ignore version negotiation if any other packet has already been
         // successfully processed.
-        if self.recv_count > 0 {
+        if self.counters.recv_count > 0 {
             return Err(Error::Done);
         }
 
@@ -3535,7 +3547,7 @@ impl<F: BufFactory> Connection<F> {
     ) -> Result<()> {
         // Reset connection state to force sending another Initial packet.
         self.drop_epoch_state(packet::Epoch::Initial, now);
-        self.got_peer_conn_id = false;
+        self.initial_exchange = InitialExchange::AwaitingPeerId;
         self.handshake.clear()?;
 
         self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
@@ -3589,7 +3601,7 @@ impl<F: BufFactory> Connection<F> {
         };
 
         // Derive initial secrets on the server.
-        if !self.derived_initial_secrets {
+        if !self.initial_exchange.keys_derived() {
             let (aead_open, aead_seal) = crypto::derive_initial_key_material(
                 &hdr.dcid,
                 self.is_server,
@@ -3599,7 +3611,7 @@ impl<F: BufFactory> Connection<F> {
             self.crypto_ctx[packet::Epoch::Initial].crypto_open = Some(aead_open);
             self.crypto_ctx[packet::Epoch::Initial].crypto_seal = Some(aead_seal);
 
-            self.derived_initial_secrets = true;
+            self.initial_exchange = InitialExchange::AwaitingPeerId;
         }
 
         Ok(payload_len)
@@ -3629,7 +3641,7 @@ impl<F: BufFactory> Connection<F> {
         // On the server, if no other packet has been successfully processed,
         // abort the connection to avoid keeping the connection open when only
         // junk is received.
-        if self.is_server && self.recv_count == 0 {
+        if self.is_server && self.counters.recv_count == 0 {
             return e;
         }
 
@@ -3842,7 +3854,7 @@ impl<F: BufFactory> Connection<F> {
     fn install_rx_peer_connection_id(
         &mut self, hdr: &Header<'static>, recv_pid: usize,
     ) -> Result<()> {
-        if self.got_peer_conn_id {
+        if self.initial_exchange.peer_identified() {
             return Ok(());
         }
 
@@ -3870,7 +3882,7 @@ impl<F: BufFactory> Connection<F> {
             )?;
         }
 
-        self.got_peer_conn_id = true;
+        self.initial_exchange = InitialExchange::PeerIdentified;
         Ok(())
     }
 
@@ -4294,10 +4306,10 @@ impl<F: BufFactory> Connection<F> {
         // Update send capacity.
         self.update_tx_cap();
 
-        self.recv_count += 1;
+        self.counters.recv_count += 1;
         self.paths.get_mut(recv_pid)?.recv_count += 1;
 
-        self.recv_bytes += read as u64;
+        self.counters.recv_bytes += read as u64;
         self.paths.get_mut(recv_pid)?.recv_bytes += read as u64;
 
         // An Handshake packet has been received from the client and has been
@@ -4517,7 +4529,7 @@ impl<F: BufFactory> Connection<F> {
 
         // There's no point in trying to send a packet if the Initial secrets
         // have not been derived yet, so return early.
-        if !self.derived_initial_secrets {
+        if !self.initial_exchange.keys_derived() {
             return Err(Error::Done);
         }
 
@@ -4534,42 +4546,17 @@ impl<F: BufFactory> Connection<F> {
             _ => self.get_send_path_id(from, to)?,
         };
 
-        let send_path = self.paths.get_mut(send_pid)?;
-
         let peer_limit =
             usize::try_from(self.peer_transport_params.max_udp_payload_size)
                 .unwrap_or(usize::MAX)
                 .min(MAX_SEND_UDP_PAYLOAD_SIZE);
-        let handshake_ready =
-            self.handshake_progress == HandshakeProgress::Confirmed;
-        let mut limit = if self.handshake_progress.completed() {
-            send_path.recovery.max_datagram_size().min(peer_limit)
-        } else {
-            MIN_CLIENT_INITIAL_LEN
-        };
-
-        // Reserve output space for a probe without raising the congestion
-        // controller's confirmed datagram size before an ACK.
-        if let Some(pmtud) = send_path.pmtud.as_mut() {
-            if handshake_ready {
-                pmtud.limit_maximum(peer_limit);
-            }
-            limit = pmtud.get_current_mtu().min(peer_limit);
-            if send_path.recovery.max_datagram_size() != limit {
-                send_path.recovery.pmtud_update_max_datagram_size(limit);
-            }
-            if handshake_ready && pmtud.should_probe() {
-                limit = limit.max(pmtud.get_probe_size().min(peer_limit));
-            }
-        }
-
-        let mut left = out.cap().min(limit);
-
-        // Limit data sent by the server based on the amount of data received
-        // from the client before its address is validated.
-        if !send_path.verified_peer_address && self.is_server {
-            left = cmp::min(left, send_path.max_send_bytes);
-        }
+        let mut left =
+            out.cap()
+                .min(self.paths.get_mut(send_pid)?.datagram_send_limit(
+                    peer_limit,
+                    self.handshake_progress,
+                    self.is_server,
+                ));
 
         // Generate coalesced packets.
         while left > 0 {
@@ -4766,17 +4753,7 @@ impl<F: BufFactory> Connection<F> {
                     frame::Frame::StopSending {
                         stream_id,
                         error_code,
-                    } =>
-                    // We only need to retransmit the STOP_SENDING frame if
-                    // the stream is still active and not FIN'd. Even if the
-                    // packet was lost, if the application has the final
-                    // size at this point there is no need to retransmit.
-                        if let Some(stream) = self.streams.get(stream_id) {
-                            if !stream.recv.is_fin() {
-                                self.streams
-                                    .insert_stopped(stream_id, error_code);
-                            }
-                        },
+                    } => self.streams.requeue_stop_sending(stream_id, error_code),
 
                     // Retransmit HANDSHAKE_DONE only if it hasn't been acked at
                     // least once already.
@@ -4785,11 +4762,8 @@ impl<F: BufFactory> Connection<F> {
                             self.handshake_done = HandshakeDoneState::Pending;
                         },
 
-                    frame::Frame::MaxStreamData { stream_id, .. } => {
-                        if self.streams.get(stream_id).is_some() {
-                            self.streams.insert_almost_full(stream_id);
-                        }
-                    },
+                    frame::Frame::MaxStreamData { stream_id, .. } =>
+                        self.streams.requeue_receive_credit(stream_id),
 
                     frame::Frame::MaxData { .. } => {
                         self.should_send_max_data = true;
@@ -4815,51 +4789,19 @@ impl<F: BufFactory> Connection<F> {
                         self.ids.mark_retire_dcid_seq(seq_num, true)?;
                     },
 
-                    frame::Frame::Ping { mtu_probe } => {
-                        // Ping frames are not retransmitted.
-                        if let Some(failed_probe) = mtu_probe {
-                            trace!("pmtud probe dropped: {failed_probe}");
+                    frame::Frame::Ping { mtu_probe } =>
+                        if let Some(event) = p.on_lost_ping(mtu_probe) {
+                            path_events.push_back(event);
+                        },
 
-                            if let Some(event) =
-                                p.on_pmtu_probe_lost(failed_probe)
-                            {
-                                path_events.push_back(event);
-                            }
-                        }
-                    },
-
-                    // Sent as StreamHeader frames. Stream frames are never
-                    // generated by quiche.
-                    frame::Frame::Stream { .. } => {
-                        debug_assert!(
-                            false,
-                            "Unexpected frame lost: Stream. quiche should \
-                             have tracked retransmittable stream data as \
-                             StreamHeader frames."
-                        );
-                    },
-
-                    // Sent as CryptoHeader frames. Crypto frames are never
-                    // generated by quiche.
-                    frame::Frame::Crypto { .. } => {
-                        debug_assert!(
-                            false,
-                            "Unexpected frame lost: Crypto. quiche should \
-                             have tracked retransmittable crypto data as \
-                             CryptoHeader frames."
-                        );
-                    },
-
-                    // NewToken frames are never sent by quiche; they are not
-                    // implemented.
-                    frame::Frame::NewToken { .. } => {
-                        debug_assert!(
-                            false,
-                            "Unexpected frame lost: NewToken. quiche used to \
-                             not implement NewToken frames, retransmission of \
-                             these frames is not implemented."
-                        );
-                    },
+                    // STREAM and CRYPTO are tracked by range metadata;
+                    // NEW_TOKEN is not implemented by the sender.
+                    unexpected @ (frame::Frame::Stream { .. } |
+                    frame::Frame::Crypto { .. } |
+                    frame::Frame::NewToken { .. }) => debug_assert!(
+                        false,
+                        "Unexpected lost frame: {unexpected:?}"
+                    ),
 
                     // Advisory blocked frames are not retransmitted.
                     // Path challenges and responses have their own retry logic
@@ -5657,9 +5599,11 @@ impl<F: BufFactory> Connection<F> {
         // carried the repeated payload or FIN, not the lost frame's path.
         let retransmitted_bytes = assembly.data.retransmitted_bytes();
         if retransmitted_bytes != 0 || assembly.data.stream.retransmitted_fin {
-            self.retrans_count = self.retrans_count.saturating_add(1);
+            self.counters.retrans_count =
+                self.counters.retrans_count.saturating_add(1);
             path.retrans_count = path.retrans_count.saturating_add(1);
-            self.stream_retrans_bytes = self
+            self.counters.stream_retrans_bytes = self
+                .counters
                 .stream_retrans_bytes
                 .saturating_add(retransmitted_bytes);
             path.stream_retrans_bytes = path
@@ -5667,8 +5611,8 @@ impl<F: BufFactory> Connection<F> {
                 .saturating_add(retransmitted_bytes);
         }
 
-        self.sent_count += 1;
-        self.sent_bytes += written as u64;
+        self.counters.sent_count += 1;
+        self.counters.sent_bytes += written as u64;
         path.sent_count += 1;
         path.sent_bytes += written as u64;
 
@@ -5683,8 +5627,8 @@ impl<F: BufFactory> Connection<F> {
             had_send_budget &&
             path.max_send_bytes == 0
         {
-            self.amplification_limited_count =
-                self.amplification_limited_count.saturating_add(1);
+            self.counters.amplification_limited_count =
+                self.counters.amplification_limited_count.saturating_add(1);
         }
 
         // On the client, drop initial state after sending an Handshake packet.
@@ -5830,8 +5774,8 @@ impl<F: BufFactory> Connection<F> {
                     *left -= hdr_len + len;
                     frames.push(frame::Frame::DatagramHeader { length: len });
                     emitted = true;
-                    self.dgram_sent_count =
-                        self.dgram_sent_count.saturating_add(1);
+                    self.counters.dgram_sent_count =
+                        self.counters.dgram_sent_count.saturating_add(1);
                     path.dgram_sent_count =
                         path.dgram_sent_count.saturating_add(1);
                 }
@@ -6041,8 +5985,8 @@ impl<F: BufFactory> Connection<F> {
 
             if push_frame_to_pkt(b, frames, frame, left)? {
                 self.blocked_limit = None;
-                self.data_blocked_sent_count =
-                    self.data_blocked_sent_count.saturating_add(1);
+                self.counters.data_blocked_sent_count =
+                    self.counters.data_blocked_sent_count.saturating_add(1);
             }
         }
 
@@ -6179,8 +6123,10 @@ impl<F: BufFactory> Connection<F> {
 
             if push_frame_to_pkt(b, frames, frame, left)? {
                 self.streams.remove_blocked(stream_id);
-                self.stream_data_blocked_sent_count =
-                    self.stream_data_blocked_sent_count.saturating_add(1);
+                self.counters.stream_data_blocked_sent_count = self
+                    .counters
+                    .stream_data_blocked_sent_count
+                    .saturating_add(1);
             }
         }
 
@@ -6954,8 +6900,8 @@ impl<F: BufFactory> Connection<F> {
                 // Once shutdown, the stream is guaranteed to be non-readable.
                 self.streams.remove_readable(&priority_key);
 
-                self.stopped_stream_local_count =
-                    self.stopped_stream_local_count.saturating_add(1);
+                self.counters.stopped_stream_local_count =
+                    self.counters.stopped_stream_local_count.saturating_add(1);
 
                 if collectable {
                     self.streams.collect(stream_id);
@@ -7006,8 +6952,8 @@ impl<F: BufFactory> Connection<F> {
                 // Once shutdown, the stream is guaranteed to be non-writable.
                 self.streams.remove_writable(&priority_key);
 
-                self.reset_stream_local_count =
-                    self.reset_stream_local_count.saturating_add(1);
+                self.counters.reset_stream_local_count =
+                    self.counters.reset_stream_local_count.saturating_add(1);
             },
         }
 
@@ -7857,8 +7803,8 @@ impl<F: BufFactory> Connection<F> {
                         &self.trace_id,
                     );
 
-                    self.lost_count += lost_packets;
-                    self.lost_bytes += lost_bytes as u64;
+                    self.counters.lost_count += lost_packets;
+                    self.counters.lost_bytes += lost_bytes as u64;
 
                     qlog_with_type!(QLOG_METRICS, self.qlog, q, {
                         p.recovery.maybe_qlog(q, now);
@@ -8347,7 +8293,7 @@ impl<F: BufFactory> Connection<F> {
         }
 
         // Close immediately if no packet was processed successfully.
-        if self.recv_count == 0 {
+        if self.counters.recv_count == 0 {
             self.mark_closed(CloseCause::Explicit(CloseOrigin::Local));
         }
 
@@ -8650,27 +8596,33 @@ impl<F: BufFactory> Connection<F> {
     #[must_use = "the returned snapshot contains connection statistics"]
     pub fn stats(&self) -> Stats {
         Stats {
-            recv: self.recv_count,
-            sent: self.sent_count,
-            lost: self.lost_count,
-            spurious_lost: self.spurious_lost_count,
-            retrans: self.retrans_count,
-            sent_bytes: self.sent_bytes,
-            recv_bytes: self.recv_bytes,
-            acked_bytes: self.acked_bytes,
-            lost_bytes: self.lost_bytes,
-            stream_retrans_bytes: self.stream_retrans_bytes,
-            dgram_recv: self.dgram_recv_count,
-            dgram_sent: self.dgram_sent_count,
+            recv: self.counters.recv_count,
+            sent: self.counters.sent_count,
+            lost: self.counters.lost_count,
+            spurious_lost: self.counters.spurious_lost_count,
+            retrans: self.counters.retrans_count,
+            sent_bytes: self.counters.sent_bytes,
+            recv_bytes: self.counters.recv_bytes,
+            acked_bytes: self.counters.acked_bytes,
+            lost_bytes: self.counters.lost_bytes,
+            stream_retrans_bytes: self.counters.stream_retrans_bytes,
+            dgram_recv: self.counters.dgram_recv_count,
+            dgram_sent: self.counters.dgram_sent_count,
             paths_count: self.paths.len(),
-            reset_stream_count_local: self.reset_stream_local_count,
-            stopped_stream_count_local: self.stopped_stream_local_count,
-            reset_stream_count_remote: self.reset_stream_remote_count,
-            stopped_stream_count_remote: self.stopped_stream_remote_count,
-            data_blocked_sent_count: self.data_blocked_sent_count,
-            stream_data_blocked_sent_count: self.stream_data_blocked_sent_count,
-            data_blocked_recv_count: self.data_blocked_recv_count,
-            stream_data_blocked_recv_count: self.stream_data_blocked_recv_count,
+            reset_stream_count_local: self.counters.reset_stream_local_count,
+            stopped_stream_count_local: self.counters.stopped_stream_local_count,
+            reset_stream_count_remote: self.counters.reset_stream_remote_count,
+            stopped_stream_count_remote: self
+                .counters
+                .stopped_stream_remote_count,
+            data_blocked_sent_count: self.counters.data_blocked_sent_count,
+            stream_data_blocked_sent_count: self
+                .counters
+                .stream_data_blocked_sent_count,
+            data_blocked_recv_count: self.counters.data_blocked_recv_count,
+            stream_data_blocked_recv_count: self
+                .counters
+                .stream_data_blocked_recv_count,
             streams_blocked_bidi_recv_count: self
                 .streams
                 .quota(stream::StreamDirection::Bidirectional)
@@ -8679,8 +8631,10 @@ impl<F: BufFactory> Connection<F> {
                 .streams
                 .quota(stream::StreamDirection::Unidirectional)
                 .blocked_received,
-            path_challenge_rx_count: self.path_challenge_rx_count,
-            amplification_limited_count: self.amplification_limited_count,
+            path_challenge_rx_count: self.counters.path_challenge_rx_count,
+            amplification_limited_count: self
+                .counters
+                .amplification_limited_count,
             bytes_in_flight_duration: self.bytes_in_flight_duration(),
             tx_buffered_state: if self.streams.tx_buffered_is_consistent() {
                 TxBufferTrackingState::Ok
@@ -8764,17 +8718,11 @@ impl<F: BufFactory> Connection<F> {
         // Validate original_destination_connection_id.
         if let Some(odcid) = &self.odcid {
             match &peer_params.original_destination_connection_id {
-                Some(v) if v != odcid =>
-                    return Err(Error::InvalidTransportParam),
-
-                Some(_) => (),
-
-                // original_destination_connection_id must be
-                // sent by the server.
-                None if !self.is_server =>
-                    return Err(Error::InvalidTransportParam),
-
-                None => (),
+                Some(v) if v == odcid => (),
+                None if self.is_server => (),
+                // The server must supply the original destination CID;
+                // if supplied, either endpoint's value must match.
+                _ => return Err(Error::InvalidTransportParam),
             }
         }
 
@@ -9202,7 +9150,8 @@ impl<F: BufFactory> Connection<F> {
     }
 
     fn record_received_datagram(&mut self, recv_path_id: usize) -> Result<()> {
-        self.dgram_recv_count = self.dgram_recv_count.saturating_add(1);
+        self.counters.dgram_recv_count =
+            self.counters.dgram_recv_count.saturating_add(1);
         let path = self.paths.get_mut(recv_path_id)?;
         path.dgram_recv_count = path.dgram_recv_count.saturating_add(1);
         Ok(())
@@ -9265,8 +9214,8 @@ impl<F: BufFactory> Connection<F> {
             },
 
             frame::Frame::DataBlocked { .. } => {
-                self.data_blocked_recv_count =
-                    self.data_blocked_recv_count.saturating_add(1);
+                self.counters.data_blocked_recv_count =
+                    self.counters.data_blocked_recv_count.saturating_add(1);
             },
 
             frame::Frame::StreamDataBlocked { stream_id, .. } => {
@@ -9279,8 +9228,10 @@ impl<F: BufFactory> Connection<F> {
                     )?
                     .is_some()
                 {
-                    self.stream_data_blocked_recv_count =
-                        self.stream_data_blocked_recv_count.saturating_add(1);
+                    self.counters.stream_data_blocked_recv_count = self
+                        .counters
+                        .stream_data_blocked_recv_count
+                        .saturating_add(1);
                 }
             },
 
@@ -9397,10 +9348,10 @@ impl<F: BufFactory> Connection<F> {
                 &self.trace_id,
             )?;
 
-            self.lost_count += lost_packets;
-            self.lost_bytes += lost_bytes as u64;
-            self.acked_bytes += acked_bytes as u64;
-            self.spurious_lost_count += spurious_losses;
+            self.counters.lost_count += lost_packets;
+            self.counters.lost_bytes += lost_bytes as u64;
+            self.counters.acked_bytes += acked_bytes as u64;
+            self.counters.spurious_lost_count += spurious_losses;
         }
 
         let space = &mut self.pkt_num_spaces[epoch];
@@ -9454,8 +9405,8 @@ impl<F: BufFactory> Connection<F> {
         // flow-control
         self.flow_control.add_consumed(consumed_flowcontrol);
 
-        self.reset_stream_remote_count =
-            self.reset_stream_remote_count.saturating_add(1);
+        self.counters.reset_stream_remote_count =
+            self.counters.reset_stream_remote_count.saturating_add(1);
 
         if collectable {
             self.streams.collect(stream_id);
@@ -9526,10 +9477,10 @@ impl<F: BufFactory> Connection<F> {
             self.streams
                 .enqueue(&priority_key, stream::PriorityQueue::StoppedWritable);
 
-            self.stopped_stream_remote_count =
-                self.stopped_stream_remote_count.saturating_add(1);
-            self.reset_stream_local_count =
-                self.reset_stream_local_count.saturating_add(1);
+            self.counters.stopped_stream_remote_count =
+                self.counters.stopped_stream_remote_count.saturating_add(1);
+            self.counters.reset_stream_local_count =
+                self.counters.reset_stream_local_count.saturating_add(1);
         }
 
         Ok(())
@@ -9733,7 +9684,7 @@ impl<F: BufFactory> Connection<F> {
     fn process_path_challenge(
         &mut self, data: [u8; 8], recv_path_id: usize,
     ) -> Result<()> {
-        self.path_challenge_rx_count += 1;
+        self.counters.path_challenge_rx_count += 1;
         self.paths
             .get_mut(recv_path_id)?
             .on_challenge_received(data);
@@ -10109,8 +10060,8 @@ impl<F: BufFactory> Connection<F> {
                     .recovery
                     .on_path_change(e, now, &self.trace_id);
 
-                self.lost_count += lost_packets;
-                self.lost_bytes += lost_bytes as u64;
+                self.counters.lost_count += lost_packets;
+                self.counters.lost_bytes += lost_bytes as u64;
             }
         }
 

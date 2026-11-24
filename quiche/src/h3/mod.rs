@@ -6731,8 +6731,7 @@ mod tests {
             .unwrap();
         assert!(len > 0, "server did not emit an ACK response");
         let response =
-            crate::test_utils::decode_pkt(&mut pipe.client, &mut buf[..len])
-                .unwrap();
+            crate::test_utils::decode_pkt(&pipe.client, &mut buf[..len]).unwrap();
         assert!(
             response.iter().any(|frame| matches!(frame,
                 crate::frame::Frame::Ack { ranges, .. } if ranges.contains(packet_number)
@@ -6816,7 +6815,7 @@ mod tests {
         let mut buf = [0; 65535];
         let (len, _) = s.pipe.server.send(&mut buf).unwrap();
 
-        let frames = decode_pkt(&mut s.pipe.client, &mut buf[..len]).unwrap();
+        let frames = decode_pkt(&s.pipe.client, &mut buf[..len]).unwrap();
 
         let mut iter = frames.iter();
 
@@ -6870,7 +6869,7 @@ mod tests {
 
         let (len, _) = s.pipe.server.send(&mut buf).unwrap();
 
-        let frames = decode_pkt(&mut s.pipe.client, &mut buf[..len]).unwrap();
+        let frames = decode_pkt(&s.pipe.client, &mut buf[..len]).unwrap();
 
         let mut iter = frames.iter();
 

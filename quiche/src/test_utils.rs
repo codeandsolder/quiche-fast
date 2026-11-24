@@ -154,10 +154,12 @@ impl Pipe {
         Ok(ctx)
     }
 
+    #[must_use]
     pub fn client_addr() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 1234))
     }
 
+    #[must_use]
     pub fn server_addr() -> SocketAddr {
         SocketAddr::from(([127, 0, 0, 1], 4321))
     }
@@ -499,11 +501,11 @@ pub fn encode_raw_pkt<F: BufFactory>(
     let pn_len = 4;
 
     let send_path = conn.paths.get_active()?;
-    let active_dcid_seq = send_path
+    let destination_sequence = send_path
         .active_dcid_seq
         .as_ref()
         .ok_or(Error::InvalidState)?;
-    let active_scid_seq = send_path
+    let source_sequence = send_path
         .active_scid_seq
         .as_ref()
         .ok_or(Error::InvalidState)?;
@@ -512,10 +514,10 @@ pub fn encode_raw_pkt<F: BufFactory>(
         ty: pkt_type,
         version: conn.version,
         dcid: ConnectionId::from_ref(
-            conn.ids.get_dcid(*active_dcid_seq)?.cid.as_ref(),
+            conn.ids.get_dcid(*destination_sequence)?.cid.as_ref(),
         ),
         scid: ConnectionId::from_ref(
-            conn.ids.get_scid(*active_scid_seq)?.cid.as_ref(),
+            conn.ids.get_scid(*source_sequence)?.cid.as_ref(),
         ),
         pkt_num: pn,
         pkt_num_len: pn_len,
@@ -563,7 +565,7 @@ pub fn encode_raw_pkt<F: BufFactory>(
 }
 
 pub fn decode_pkt<F: BufFactory>(
-    conn: &mut Connection<F>, buf: &mut [u8],
+    conn: &Connection<F>, buf: &mut [u8],
 ) -> Result<Vec<frame::Frame>> {
     let mut b = octets::OctetsMut::with_slice(buf);
 
@@ -599,6 +601,7 @@ pub fn decode_pkt<F: BufFactory>(
     Ok(frames)
 }
 
+#[must_use]
 pub fn create_cid_and_reset_token(
     cid_len: usize,
 ) -> (ConnectionId<'static>, u128) {
@@ -613,6 +616,7 @@ pub fn create_cid_and_reset_token(
     (cid, reset_token)
 }
 
+#[must_use]
 pub fn helper_packet_sent(pkt_num: u64, now: Instant, size: usize) -> Sent {
     Sent {
         pkt_num,
@@ -702,7 +706,7 @@ mod fixture_tests {
         ));
         let mut pipe = Pipe::new("cubic").unwrap();
         assert_eq!(pipe.client_update_key(), Err(Error::InvalidState));
-        assert!(decode_pkt(&mut pipe.client, &mut []).is_err());
+        assert!(decode_pkt(&pipe.client, &mut []).is_err());
         assert_eq!(
             recv_send(&mut pipe.client, &mut [], 1),
             Err(Error::BufferTooShort)
