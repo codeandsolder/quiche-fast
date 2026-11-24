@@ -131,7 +131,7 @@ impl<T: PartialOrd + Copy> Minmax<T> {
             self.estimate[2] = val;
             self.estimate[1] = val;
         } else if val.value >= self.estimate[2].value {
-            self.estimate[2] = val
+            self.estimate[2] = val;
         }
 
         self.subwin_update(win, time, meas)

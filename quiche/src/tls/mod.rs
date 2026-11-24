@@ -765,6 +765,7 @@ impl Handshake {
 
     #[cfg(test)]
     pub fn set_options(&mut self, opts: u32) {
+        // SAFETY: the live SSL is exclusively borrowed; this sets options.
         unsafe {
             SSL_set_options(self.ptr.as_ptr(), opts);
         }
@@ -1448,10 +1449,12 @@ mod tests {
     use super::select_offered_alpn;
 
     #[test]
-    fn offered_alpn_selection_preserves_peer_order_and_validates_entire_list() {
+    fn offered_alpn_selection_preserves_peer_order_and_validates_entire_list(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let supported = vec![b"h3".to_vec(), b"hq".to_vec()];
         let offered = b"\x02hq\x02h3";
-        let selected = select_offered_alpn(offered, &supported).unwrap();
+        let selected = select_offered_alpn(offered, &supported)
+            .ok_or("expected matching ALPN")?;
         assert_eq!(selected, b"hq");
         assert_eq!(selected.as_ptr(), offered[1..].as_ptr());
         for malformed in [
@@ -1464,5 +1467,6 @@ mod tests {
         ] {
             assert_eq!(select_offered_alpn(malformed, &supported), None);
         }
+        Ok(())
     }
 }

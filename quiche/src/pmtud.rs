@@ -308,7 +308,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn configuration_retains_probe_policy_and_bounds_by_both_limits() {
+    fn configuration_retains_probe_policy_and_bounds_by_both_limits(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut config = Config::default();
         assert!(config.create(1500, 1450).is_none());
         config.max_probes = 7;
@@ -316,7 +317,8 @@ mod tests {
 
         for (send, recv, expected) in [(1500, 1450, 1450), (1400, u64::MAX, 1400)]
         {
-            let pmtud = config.create(send, recv).unwrap();
+            let pmtud =
+                config.create(send, recv).ok_or("expected enabled PMTUD")?;
             assert_eq!(pmtud.get_probe_size(), expected);
             assert_eq!(pmtud.max_probes, 7);
         }
@@ -324,7 +326,14 @@ mod tests {
         config.enabled = false;
         assert!(config.create(1500, 1450).is_none());
         config.enabled = true;
-        assert_eq!(config.create(1500, 1450).unwrap().max_probes, 7);
+        assert_eq!(
+            config
+                .create(1500, 1450)
+                .ok_or("expected enabled PMTUD")?
+                .max_probes,
+            7
+        );
+        Ok(())
     }
 
     #[test]
@@ -589,8 +598,8 @@ mod tests {
     ///
     /// Simulates a scenario where the first probe at each size fails but the
     /// second succeeds (random loss, not MTU limitation). Verifies that:
-    /// 1. probe_failure_count resets to 0 on success
-    /// 2. probe_failure_count resets to 0 when probe size changes
+    /// 1. `probe_failure_count` resets to 0 on success
+    /// 2. `probe_failure_count` resets to 0 when probe size changes
     /// 3. Algorithm converges to the correct MTU of 1337
     #[test]
     fn pmtud_convergence_with_intermittent_loss() {

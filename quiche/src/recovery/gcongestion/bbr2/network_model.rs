@@ -704,21 +704,21 @@ impl BBRv2NetworkModel {
     /// The start time of the most recently confirmed persistent RTT jump
     /// episode, if any.
     #[cfg(test)]
-    pub(super) fn last_persistent_jump_time(&self) -> Option<Instant> {
+    pub(super) const fn last_persistent_jump_time(&self) -> Option<Instant> {
         self.rtt_jump_detector.last_persistent_jump_time()
     }
 
     /// Whether an RTT jump episode is currently active (elevated but not yet
     /// resolved), regardless of whether it has been confirmed persistent.
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         self.rtt_jump_detector.is_rtt_jump_active()
     }
 
     /// Whether the current RTT jump episode has been confirmed as a persistent
     /// network condition.
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         self.rtt_jump_detector.is_rtt_jump_persistent()
     }
 

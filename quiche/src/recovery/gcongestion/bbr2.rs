@@ -888,15 +888,14 @@ mod tests {
         const MAX_WINDOW_PACKETS: usize = 10000;
         const INIT_CWND: usize = INIT_WINDOW_PACKETS * INIT_PACKET_SIZE;
         const MAX_CWND: usize = MAX_WINDOW_PACKETS * INIT_PACKET_SIZE;
+        const NEW_PACKET_SIZE: usize = 1450;
+        const NEW_CWND: usize = INIT_WINDOW_PACKETS * NEW_PACKET_SIZE;
+        const NEW_MAX_CWND: usize = MAX_WINDOW_PACKETS * NEW_PACKET_SIZE;
         let initial_rtt = Duration::from_millis(333);
         let bbr_params = &BbrParams {
             scale_pacing_rate_by_mss: Some(scale_pacing_rate_by_mss),
             ..Default::default()
         };
-
-        const NEW_PACKET_SIZE: usize = 1450;
-        const NEW_CWND: usize = INIT_WINDOW_PACKETS * NEW_PACKET_SIZE;
-        const NEW_MAX_CWND: usize = MAX_WINDOW_PACKETS * NEW_PACKET_SIZE;
 
         let mut bbr2 = BBRv2::new(
             INIT_WINDOW_PACKETS,
@@ -911,7 +910,7 @@ mod tests {
         assert_eq!(bbr2.cwnd, INIT_CWND);
         assert_eq!(
             bbr2.pacing_rate.to_bytes_per_period(initial_rtt),
-            (2.88499 * INIT_CWND as f64) as u64
+            INIT_CWND as u64 * 288_499 / 100_000
         );
 
         bbr2.update_mss(NEW_PACKET_SIZE);
@@ -926,7 +925,7 @@ mod tests {
         };
         assert_eq!(
             bbr2.pacing_rate.to_bytes_per_period(initial_rtt),
-            (2.88499 * pacing_cwnd as f64) as u64
+            pacing_cwnd as u64 * 288_499 / 100_000
         );
     }
 

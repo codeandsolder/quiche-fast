@@ -865,7 +865,8 @@ mod tests {
     use crate::test_utils::create_cid_and_reset_token;
 
     #[test]
-    fn matches_initial_and_rotated_stateless_reset_tokens_until_retirement() {
+    fn matches_initial_and_rotated_stateless_reset_tokens_until_retirement(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut ids = ConnectionIdentifiers::new(
             4,
             &ConnectionId::from_ref(b"source"),
@@ -877,10 +878,8 @@ mod tests {
         let third_token = u128::from_be_bytes([0x33; 16]);
         ids.set_initial_dcid(vec![1].into(), Some(initial_token), Some(0));
         let mut retired_path_ids = SmallVec::new();
-        ids.new_dcid(vec![2].into(), 1, rotated_token, 0, &mut retired_path_ids)
-            .unwrap();
-        ids.new_dcid(vec![3].into(), 2, third_token, 0, &mut retired_path_ids)
-            .unwrap();
+        ids.new_dcid(vec![2].into(), 1, rotated_token, 0, &mut retired_path_ids)?;
+        ids.new_dcid(vec![3].into(), 2, third_token, 0, &mut retired_path_ids)?;
         assert!(retired_path_ids.is_empty());
         for token in [initial_token, rotated_token, third_token] {
             assert!(ids.matches_reset_token(&token.to_be_bytes(), None));
@@ -893,6 +892,7 @@ mod tests {
         assert!(!ids.matches_reset_token(&rotated_token.to_be_bytes(), None));
         assert!(ids.matches_reset_token(&initial_token.to_be_bytes(), None));
         assert!(ids.matches_reset_token(&third_token.to_be_bytes(), None));
+        Ok(())
     }
 
     #[test]
@@ -910,7 +910,8 @@ mod tests {
     }
 
     #[test]
-    fn late_transport_parameter_token_only_matches_live_initial_dcid() {
+    fn late_transport_parameter_token_only_matches_live_initial_dcid(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut ids = ConnectionIdentifiers::new(
             3,
             &ConnectionId::from_ref(b"source"),
@@ -923,30 +924,30 @@ mod tests {
         assert!(ids.matches_reset_token(&token.to_be_bytes(), Some(token)));
 
         let mut retired_path_ids = SmallVec::new();
-        ids.new_dcid(vec![2].into(), 1, 0xaa, 0, &mut retired_path_ids)
-            .unwrap();
+        ids.new_dcid(vec![2].into(), 1, 0xaa, 0, &mut retired_path_ids)?;
         assert_eq!(ids.retire_dcid(0), Ok(Some(0)));
         assert!(!ids.matches_reset_token(&token.to_be_bytes(), Some(token)));
         assert!(ids.matches_reset_token(&0xaa_u128.to_be_bytes(), Some(token)));
+        Ok(())
     }
 
     #[test]
-    fn repeated_destination_id_advances_retirement_without_replacing_path() {
+    fn repeated_destination_id_advances_retirement_without_replacing_path(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut ids =
             ConnectionIdentifiers::new(3, &ConnectionId::from_ref(b"s"), 0, None);
         ids.set_initial_dcid(vec![10].into(), None, Some(0));
         let mut retired = SmallVec::new();
         for seq in 1..=2 {
             ids.new_dcid(
-                vec![10 + seq as u8].into(),
+                vec![10 + u8::try_from(seq)?].into(),
                 seq,
                 u128::from(seq),
                 0,
                 &mut retired,
-            )
-            .unwrap();
+            )?;
         }
-        ids.link_dcid_to_path_id(2, 7).unwrap();
+        ids.link_dcid_to_path_id(2, 7)?;
         assert_eq!(
             ids.new_dcid(vec![12].into(), 2, 2, 3, &mut retired),
             Err(Error::InvalidFrame)
@@ -954,13 +955,13 @@ mod tests {
         assert_eq!(ids.dcids.len(), 3);
         assert!(retired.is_empty());
 
-        ids.new_dcid(vec![12].into(), 2, 2, 2, &mut retired)
-            .unwrap();
+        ids.new_dcid(vec![12].into(), 2, 2, 2, &mut retired)?;
         assert_eq!(ids.dcids.len(), 1);
         assert_eq!(ids.dcids.get_oldest().seq, 2);
-        assert_eq!(ids.get_dcid(2).unwrap().path_id, Some(7));
+        assert_eq!(ids.get_dcid(2)?.path_id, Some(7));
         assert_eq!(retired.as_slice(), &[(0, 0)]);
         assert_eq!(ids.retire_dcid_seqs(), HashSet::from([0, 1]));
+        Ok(())
     }
 
     #[test]
@@ -1011,22 +1012,23 @@ mod tests {
     }
 
     #[test]
-    fn full_retirement_queue_is_idempotent_and_preserves_unretired_id() {
+    fn full_retirement_queue_is_idempotent_and_preserves_unretired_id(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut ids =
             ConnectionIdentifiers::new(2, &ConnectionId::from_ref(b"s"), 0, None);
         ids.set_initial_dcid(vec![10].into(), None, Some(0));
         let mut retired = SmallVec::new();
-        ids.new_dcid(vec![11].into(), 1, 1, 0, &mut retired)
-            .unwrap();
+        ids.new_dcid(vec![11].into(), 1, 1, 0, &mut retired)?;
         ids.retire_dcid_seqs.capacity = 1;
         assert_eq!(ids.mark_retire_dcid_seq(99, true), Ok(()));
         assert_eq!(ids.mark_retire_dcid_seq(99, true), Ok(()));
         assert_eq!(ids.retire_dcid(0), Err(Error::IdLimit));
-        assert_eq!(ids.get_dcid(0).unwrap().path_id, Some(0));
+        assert_eq!(ids.get_dcid(0)?.path_id, Some(0));
         assert_eq!(ids.dcids.len(), 2);
-        ids.mark_retire_dcid_seq(99, false).unwrap();
+        ids.mark_retire_dcid_seq(99, false)?;
         assert_eq!(ids.retire_dcid(0), Ok(Some(0)));
         assert_eq!(ids.dcids.get_oldest().seq, 1);
+        Ok(())
     }
 
     #[test]
@@ -1110,7 +1112,7 @@ mod tests {
     }
 
     #[test]
-    fn new_dcid_event() {
+    fn new_dcid_event() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let (scid, _) = create_cid_and_reset_token(16);
         let (dcid, _) = create_cid_and_reset_token(16);
 
@@ -1143,7 +1145,7 @@ mod tests {
         );
         assert_eq!(retired_path_ids, SmallVec::from_buf([(0, 0)]));
         // The CID module does not handle path replacing. Fake it now.
-        ids.link_dcid_to_path_id(1, 0).unwrap();
+        ids.link_dcid_to_path_id(1, 0)?;
         assert_eq!(ids.available_dcids(), 1);
         assert_eq!(ids.dcids.len(), 2);
         assert!(ids.has_retire_dcids());
@@ -1164,7 +1166,7 @@ mod tests {
         // Now it removes DCID with sequence 1.
         assert_eq!(ids.retire_dcid(1), Ok(Some(0)));
         // The CID module does not handle path replacing. Fake it now.
-        ids.link_dcid_to_path_id(2, 0).unwrap();
+        ids.link_dcid_to_path_id(2, 0)?;
         assert_eq!(ids.available_dcids(), 0);
         assert!(ids.has_retire_dcids());
         assert_eq!(ids.retire_dcid_seqs().iter().next(), Some(&1));
@@ -1182,6 +1184,7 @@ mod tests {
         assert_eq!(ids.available_dcids(), 0);
         assert!(!ids.has_retire_dcids());
         assert_eq!(ids.dcids.len(), 1);
+        Ok(())
     }
 
     #[test]

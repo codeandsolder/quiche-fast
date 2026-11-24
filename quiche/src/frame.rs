@@ -1202,20 +1202,20 @@ fn parse_datagram_frame(ty: u64, b: &mut octets::Octets) -> Result<Frame> {
 mod tests {
     use super::*;
 
-    fn encode_checked(frame: &Frame, out: &mut [u8]) -> usize {
-        let expected = frame.wire_len().unwrap();
+    fn encode_checked(frame: &Frame, out: &mut [u8]) -> Result<usize> {
+        let expected = frame.wire_len()?;
         let mut b = octets::OctetsMut::with_slice(out);
-        let written = frame.to_bytes(&mut b).unwrap();
+        let written = frame.to_bytes(&mut b)?;
         assert_eq!(written, expected);
         assert_eq!(written, b.off());
-        written
+        Ok(written)
     }
 
     fn assert_roundtrip(
         frame: &Frame, out: &mut [u8], expected_len: usize,
         other_allowed: &[packet::Type],
-    ) {
-        assert_eq!(encode_checked(frame, out), expected_len);
+    ) -> Result<()> {
+        assert_eq!(encode_checked(frame, out)?, expected_len);
         for ty in [
             packet::Type::Short,
             packet::Type::Initial,
@@ -1230,6 +1230,7 @@ mod tests {
                 assert!(decoded.is_err(), "{ty:?}");
             }
         }
+        Ok(())
     }
 
     #[cfg(feature = "qlog")]
@@ -1307,7 +1308,8 @@ mod tests {
 
     #[cfg(feature = "qlog")]
     #[test]
-    fn qlog_ack_delay_uses_wire_exponent_and_milliseconds() {
+    fn qlog_ack_delay_uses_wire_exponent_and_milliseconds(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut ranges = ranges::RangeSet::default();
         ranges.insert(1..2);
 
@@ -1324,9 +1326,9 @@ mod tests {
                 ecn_counts: None,
             };
             let QuicFrame::Ack { ack_delay, .. } = frame.to_qlog(exponent) else {
-                panic!("expected ACK");
+                return Err("expected ACK".into());
             };
-            let delay = ack_delay.unwrap();
+            let delay = ack_delay.ok_or("expected representable ACK delay")?;
             assert!((delay - expected).abs() <= expected * f32::EPSILON);
         }
 
@@ -1339,6 +1341,7 @@ mod tests {
             ack_delay: None,
             ..
         }));
+        Ok(())
     }
 
     #[test]
@@ -1384,12 +1387,13 @@ mod tests {
     }
 
     #[test]
-    fn only_frame_type_requires_minimal_varint_encoding() {
+    fn only_frame_type_requires_minimal_varint_encoding(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for ty in [0_u64, 1, 0x08, 0x1c, 0x30, 0x31] {
             for width in [2, 4, 8] {
                 let mut wire = [0; 16];
                 let mut writer = octets::OctetsMut::with_slice(&mut wire);
-                writer.put_varint_with_len(ty, width).unwrap();
+                writer.put_varint_with_len(ty, width)?;
                 let mut reader = octets::Octets::with_slice(&wire[..width]);
                 assert_eq!(
                     Frame::from_bytes(&mut reader, packet::Type::Short),
@@ -1403,6 +1407,7 @@ mod tests {
             Frame::from_bytes(&mut reader, packet::Type::Short),
             Ok(Frame::MaxData { max: 1 })
         );
+        Ok(())
     }
 
     #[test]
@@ -1462,7 +1467,7 @@ mod tests {
             ),
             (Frame::DatagramHeader { length: 4 }, Error::InvalidState),
         ];
-        let mut out = [0; 17_000];
+        let mut out = vec![0; 17_000];
         for (frame, error) in cases {
             assert_eq!(frame.wire_len(), Err(error));
             let mut b = octets::OctetsMut::with_slice(&mut out);
@@ -1494,7 +1499,8 @@ mod tests {
     }
 
     #[test]
-    fn large_data_frames_roundtrip() {
+    fn large_data_frames_roundtrip(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for length in [16_383, 16_384, 65_000] {
             let data = vec![0x5a; length];
             let width = payload_length_width(length as u64);
@@ -1516,7 +1522,7 @@ mod tests {
             ];
             for (frame, fixed) in frames {
                 let mut output = vec![0; fixed + width + length];
-                assert_eq!(encode_checked(&frame, &mut output), output.len());
+                assert_eq!(encode_checked(&frame, &mut output)?, output.len());
                 let mut reader = octets::Octets::with_slice(&output);
                 assert_eq!(
                     Frame::from_bytes(&mut reader, packet::Type::Short),
@@ -1525,10 +1531,11 @@ mod tests {
                 assert_eq!(reader.cap(), 0);
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn padding() {
+    fn padding() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::Padding { len: 128 };
@@ -1537,16 +1544,17 @@ mod tests {
             packet::Type::Initial,
             packet::Type::ZeroRTT,
             packet::Type::Handshake,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn ping() {
+    fn ping() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::Ping { mtu_probe: None };
 
-        let wire_len = encode_checked(&frame, &mut d);
+        let wire_len = encode_checked(&frame, &mut d)?;
 
         assert_eq!(wire_len, 1);
         assert_eq!(&d[..wire_len], [0x01_u8]);
@@ -1562,10 +1570,11 @@ mod tests {
 
         let mut b = octets::Octets::with_slice(&d);
         assert!(Frame::from_bytes(&mut b, packet::Type::Handshake).is_ok());
+        Ok(())
     }
 
     #[test]
-    fn ack() {
+    fn ack() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let mut ranges = ranges::RangeSet::default();
@@ -1583,11 +1592,12 @@ mod tests {
         assert_roundtrip(&frame, &mut d, 17, &[
             packet::Type::Initial,
             packet::Type::Handshake,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn ack_ecn() {
+    fn ack_ecn() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let mut ranges = ranges::RangeSet::default();
@@ -1611,11 +1621,12 @@ mod tests {
         assert_roundtrip(&frame, &mut d, 23, &[
             packet::Type::Initial,
             packet::Type::Handshake,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn reset_stream() {
+    fn reset_stream() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::ResetStream {
@@ -1624,11 +1635,12 @@ mod tests {
             final_size: 21_123_767,
         };
 
-        assert_roundtrip(&frame, &mut d, 13, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 13, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[test]
-    fn stop_sending() {
+    fn stop_sending() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::StopSending {
@@ -1636,63 +1648,68 @@ mod tests {
             error_code: 15_352,
         };
 
-        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[test]
-    fn crypto() {
+    fn crypto() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
         let frame = Frame::Crypto {
-            data: <RangeBuf>::from(&data, 1230976, false),
+            data: <RangeBuf>::from(&data, 1_230_976, false),
         };
 
         assert_roundtrip(&frame, &mut d, 19, &[
             packet::Type::Initial,
             packet::Type::Handshake,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn new_token() {
+    fn new_token() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::NewToken {
             token: Vec::from("this is a token"),
         };
 
-        assert_roundtrip(&frame, &mut d, 17, &[]);
+        assert_roundtrip(&frame, &mut d, 17, &[])?;
+        Ok(())
     }
 
     #[test]
-    fn stream() {
+    fn stream() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
         let frame = Frame::Stream {
             stream_id: 32,
-            data: <RangeBuf>::from(&data, 1230976, true),
+            data: <RangeBuf>::from(&data, 1_230_976, true),
         };
 
-        assert_roundtrip(&frame, &mut d, 20, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 20, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[test]
-    fn oversized_wire_frame_lengths_cannot_wrap_to_empty_payloads() {
+    fn oversized_wire_frame_lengths_cannot_wrap_to_empty_payloads(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         // A 2^32 length is valid QUIC varint syntax, but far larger than
         // this packet. On 32-bit systems the old `as usize` yielded zero.
         const OVERSIZED_LENGTH: u64 = 1_u64 << 32;
         for frame_type in [0x07_u64, 0x0a, 0x31] {
             let mut wire = [0_u8; 32];
             let mut writer = octets::OctetsMut::with_slice(&mut wire);
-            writer.put_varint(frame_type).unwrap();
+            writer.put_varint(frame_type)?;
             if frame_type == 0x0a {
-                writer.put_varint(0).unwrap(); // STREAM ID
+                writer.put_varint(0)?; // STREAM ID
             }
-            writer.put_varint(OVERSIZED_LENGTH).unwrap();
+            writer.put_varint(OVERSIZED_LENGTH)?;
             let used = 32 - writer.cap();
             let mut reader = octets::Octets::with_slice(&wire[..used]);
             assert_eq!(
@@ -1701,10 +1718,11 @@ mod tests {
                 "frame {frame_type:#x} accepted a truncated oversized payload",
             );
         }
+        Ok(())
     }
 
     #[test]
-    fn stream_too_big() {
+    fn stream_too_big() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let data = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
@@ -1714,7 +1732,7 @@ mod tests {
             data: <RangeBuf>::from(&data, MAX_STREAM_SIZE - 11, true),
         };
 
-        let wire_len = encode_checked(&frame, &mut d);
+        let wire_len = encode_checked(&frame, &mut d)?;
 
         assert_eq!(wire_len, 24);
 
@@ -1723,31 +1741,48 @@ mod tests {
             Frame::from_bytes(&mut b, packet::Type::Short),
             Err(Error::InvalidFrame)
         );
+        Ok(())
     }
 
-    #[test]
-    fn max_data() {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxData { max: 128_318_273 };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn max_stream_data() {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreamData {
+    #[rstest::rstest]
+    #[case::max_data(Frame::MaxData { max: 128_318_273 }, 5)]
+    #[case::max_stream_data(Frame::MaxStreamData {
             stream_id: 12_321,
             max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
+        }, 7)]
+    #[case::max_streams_bidi(Frame::MaxStreams {
+            direction: StreamDirection::Bidirectional,
+            max: 128_318_273,
+        }, 5)]
+    #[case::max_streams_uni(Frame::MaxStreams {
+            direction: StreamDirection::Unidirectional,
+            max: 128_318_273,
+        }, 5)]
+    #[case::data_blocked(Frame::DataBlocked { limit: 128_318_273 }, 5)]
+    #[case::stream_data_blocked(Frame::StreamDataBlocked {
+            stream_id: 12_321,
+            limit: 128_318_273,
+        }, 7)]
+    #[case::streams_blocked_bidi(Frame::StreamsBlocked {
+            direction: StreamDirection::Bidirectional,
+            limit: 128_318_273,
+        }, 5)]
+    #[case::streams_blocked_uni(Frame::StreamsBlocked {
+            direction: StreamDirection::Unidirectional,
+            limit: 128_318_273,
+        }, 5)]
+    fn flow_control_frame_roundtrips(
+        #[case] frame: Frame, #[case] expected_len: usize,
+    ) -> Result<()> {
+        let mut wire = [42; 128];
+        assert_roundtrip(&frame, &mut wire, expected_len, &[
+            packet::Type::ZeroRTT,
+        ])
     }
 
     #[test]
-    fn stream_count_direction_keeps_exact_wire_types() {
+    fn stream_count_direction_keeps_exact_wire_types(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for (direction, max_ty, blocked_ty) in [
             (StreamDirection::Bidirectional, 0x12, 0x16),
             (StreamDirection::Unidirectional, 0x13, 0x17),
@@ -1763,7 +1798,7 @@ mod tests {
                 ),
             ] {
                 let mut bytes = [0; 2];
-                assert_eq!(encode_checked(&frame, &mut bytes), 2);
+                assert_eq!(encode_checked(&frame, &mut bytes)?, 2);
                 assert_eq!(bytes, [ty, 17]);
                 let mut reader = octets::Octets::with_slice(&bytes);
                 assert_eq!(
@@ -1772,79 +1807,12 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn max_streams_bidi() {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreams {
-            direction: StreamDirection::Bidirectional,
-            max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn max_streams_uni() {
-        let mut d = [42; 128];
-
-        let frame = Frame::MaxStreams {
-            direction: StreamDirection::Unidirectional,
-            max: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn data_blocked() {
-        let mut d = [42; 128];
-
-        let frame = Frame::DataBlocked { limit: 128_318_273 };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn stream_data_blocked() {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamDataBlocked {
-            stream_id: 12_321,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 7, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn streams_blocked_bidi() {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamsBlocked {
-            direction: StreamDirection::Bidirectional,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn streams_blocked_uni() {
-        let mut d = [42; 128];
-
-        let frame = Frame::StreamsBlocked {
-            direction: StreamDirection::Unidirectional,
-            limit: 128_318_273,
-        };
-
-        assert_roundtrip(&frame, &mut d, 5, &[packet::Type::ZeroRTT]);
-    }
-
-    #[test]
-    fn new_connection_id() {
+    fn new_connection_id() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let mut d = [42; 128];
 
         let frame = Frame::NewConnectionId {
@@ -1856,7 +1824,8 @@ mod tests {
             reset_token: [0x42; 16],
         };
 
-        assert_roundtrip(&frame, &mut d, 41, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 41, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[cfg(feature = "qlog")]
@@ -1880,38 +1849,42 @@ mod tests {
     }
 
     #[test]
-    fn retire_connection_id() {
+    fn retire_connection_id(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::RetireConnectionId { seq_num: 123_213 };
 
-        assert_roundtrip(&frame, &mut d, 5, &[]);
+        assert_roundtrip(&frame, &mut d, 5, &[])?;
+        Ok(())
     }
 
     #[test]
-    fn path_challenge() {
+    fn path_challenge() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::PathChallenge {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        assert_roundtrip(&frame, &mut d, 9, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 9, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[test]
-    fn path_response() {
+    fn path_response() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::PathResponse {
             data: [1, 2, 3, 4, 5, 6, 7, 8],
         };
 
-        assert_roundtrip(&frame, &mut d, 9, &[]);
+        assert_roundtrip(&frame, &mut d, 9, &[])?;
+        Ok(())
     }
 
     #[test]
-    fn connection_close() {
+    fn connection_close() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::ConnectionClose {
@@ -1924,11 +1897,13 @@ mod tests {
             packet::Type::Initial,
             packet::Type::Handshake,
             packet::Type::ZeroRTT,
-        ]);
+        ])?;
+        Ok(())
     }
 
     #[test]
-    fn application_close() {
+    fn application_close() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
         let mut d = [42; 128];
 
         let frame = Frame::ApplicationClose {
@@ -1936,27 +1911,29 @@ mod tests {
             reason: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
         };
 
-        assert_roundtrip(&frame, &mut d, 18, &[packet::Type::ZeroRTT]);
+        assert_roundtrip(&frame, &mut d, 18, &[packet::Type::ZeroRTT])?;
+        Ok(())
     }
 
     #[test]
-    fn handshake_done() {
+    fn handshake_done() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let frame = Frame::HandshakeDone;
 
-        assert_roundtrip(&frame, &mut d, 1, &[]);
+        assert_roundtrip(&frame, &mut d, 1, &[])?;
+        Ok(())
     }
 
     #[test]
-    fn datagram() {
+    fn datagram() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut d = [42; 128];
 
         let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
         let frame = Frame::Datagram { data: data.clone() };
 
-        let wire_len = encode_checked(&frame, &mut d);
+        let wire_len = encode_checked(&frame, &mut d)?;
 
         assert_eq!(wire_len, 15);
 
@@ -1982,5 +1959,6 @@ mod tests {
         };
 
         assert_eq!(frame_data, data);
+        Ok(())
     }
 }

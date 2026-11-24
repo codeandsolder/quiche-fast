@@ -119,7 +119,8 @@ mod tests {
     /// timestamps. The duration metric must never move backwards. Earlier
     /// timestamps must not erase elapsed time already observed.
     #[test]
-    fn in_flight_duration_is_monotonic_under_out_of_order_timestamps() {
+    fn in_flight_duration_is_monotonic_under_out_of_order_timestamps(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let mut in_flight = BytesInFlight::default();
         in_flight.add(3, start);
@@ -140,30 +141,48 @@ mod tests {
         // previously closed interval, even with a backdated observation.
         let second_start = start + Duration::from_secs(20);
         in_flight.add(1, second_start);
-        in_flight.saturating_subtract(1, second_start - Duration::from_secs(2));
+        in_flight.saturating_subtract(
+            1,
+            second_start
+                .checked_sub(Duration::from_secs(2))
+                .ok_or("fixture timestamp underflow")?,
+        );
         assert!(in_flight.is_zero());
         assert_eq!(in_flight.get_duration(), Duration::from_secs(10));
+        Ok(())
     }
 
     #[test]
-    fn in_flight_duration_handles_updates_before_interval_start() {
+    fn in_flight_duration_handles_updates_before_interval_start(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now() + Duration::from_secs(5);
         let mut in_flight = BytesInFlight::default();
         in_flight.add(2, start);
-        in_flight.add(1, start - Duration::from_secs(3));
+        in_flight.add(
+            1,
+            start
+                .checked_sub(Duration::from_secs(3))
+                .ok_or("fixture timestamp underflow")?,
+        );
         assert_eq!(in_flight.get_duration(), Duration::ZERO);
 
-        in_flight.saturating_subtract(1, start - Duration::from_secs(1));
+        in_flight.saturating_subtract(
+            1,
+            start
+                .checked_sub(Duration::from_secs(1))
+                .ok_or("fixture timestamp underflow")?,
+        );
         assert_eq!(in_flight.get_duration(), Duration::ZERO);
         in_flight.saturating_subtract(2, start + Duration::from_secs(7));
         assert_eq!(in_flight.get_duration(), Duration::from_secs(7));
+        Ok(())
     }
 
     #[test]
     fn bytes_in_flight_basic() {
         let start = Instant::now();
 
-        let mut bytes_in_flight: BytesInFlight = Default::default();
+        let mut bytes_in_flight: BytesInFlight = BytesInFlight::default();
         assert_eq!(bytes_in_flight.get(), 0);
         assert_eq!(bytes_in_flight.get_duration(), Duration::ZERO);
 
@@ -211,7 +230,7 @@ mod tests {
     fn bytes_in_flight_saturating_sub() {
         let start = Instant::now();
 
-        let mut bytes_in_flight: BytesInFlight = Default::default();
+        let mut bytes_in_flight: BytesInFlight = BytesInFlight::default();
         bytes_in_flight.add(10, start);
         assert_eq!(bytes_in_flight.get(), 10);
 

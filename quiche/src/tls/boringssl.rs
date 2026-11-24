@@ -278,10 +278,11 @@ impl Handshake {
                 complete: Some(failing_complete),
             };
 
+        // SAFETY: SSL is live and the callback table has static lifetime.
         unsafe {
             SSL_set_private_key_method(
                 self.ptr.as_ptr(),
-                &QUICHE_PRIVATE_KEY_METHOD,
+                &raw const QUICHE_PRIVATE_KEY_METHOD,
             );
         }
     }

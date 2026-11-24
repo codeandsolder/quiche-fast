@@ -223,7 +223,8 @@ mod tests {
     }
 
     #[test]
-    fn rational_scaling_preserves_integer_loss_and_rounding() {
+    fn rational_scaling_preserves_integer_loss_and_rounding(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for value in [0, 1, 7, 10, 11, (1 << 53) + 1, u64::MAX] {
             let product = u128::from(value) * 7;
             for (rounding, expected) in [
@@ -233,7 +234,7 @@ mod tests {
             ] {
                 assert_eq!(
                     scale_ratio_u64(value, 7, 10, rounding),
-                    u64::try_from(expected).unwrap()
+                    u64::try_from(expected)?
                 );
             }
             assert_eq!(
@@ -248,8 +249,9 @@ mod tests {
         );
         assert_eq!(
             scale_ratio_usize(usize::MAX, 7, 10, Rounding::Down),
-            usize::try_from((usize::MAX as u128) * 7 / 10).unwrap()
+            usize::try_from((usize::MAX as u128) * 7 / 10)?
         );
+        Ok(())
     }
 
     #[test]
@@ -290,7 +292,8 @@ mod tests {
     }
 
     #[test]
-    fn dyadic_gains_match_wide_integer_reference() {
+    fn dyadic_gains_match_wide_integer_reference(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Independently evaluate a set of dyadic factors as rational numbers,
         // including full-width inputs and values whose f64 conversion loses
         // bits. No floating-point intermediate is used by the oracle.
@@ -299,7 +302,7 @@ mod tests {
                 for exponent in [0_u32, 1, 4, 16, 31] {
                     let denominator = 1_u64 << exponent;
                     let gain = f64::from(numerator) /
-                        2.0_f64.powi(i32::try_from(exponent).unwrap());
+                        2.0_f64.powi(i32::try_from(exponent)?);
                     let product = u128::from(value) * u128::from(numerator);
                     let denominator = u128::from(denominator);
                     for (rounding, expected) in [
@@ -318,5 +321,6 @@ mod tests {
                 }
             }
         }
+        Ok(())
     }
 }

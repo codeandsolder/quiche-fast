@@ -288,7 +288,7 @@ mod tests {
     #[rstest::rstest]
     fn phase_transitions_keep_model_and_probe_history(
         #[values(false, true)] resume_from_quiescence: bool,
-    ) {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let custom_bbr_settings = BbrParams {
             probe_rtt_pacing_gain: Some(0.8),
             probe_rtt_cwnd_gain: Some(0.5),
@@ -311,7 +311,7 @@ mod tests {
         assert!(matches!(mode.phase, Phase::Drain));
         assert!(mode.do_on_congestion_event(&event, 13_000, params, &mut stats));
         let Phase::ProbeBw(cycle) = &mut mode.phase else {
-            panic!("DRAIN must enter PROBE_BW");
+            return Err("DRAIN must enter PROBE_BW".into());
         };
         assert_eq!(cycle.phase, CyclePhase::Down);
         cycle.outcome = ProbeOutcome::TooHigh;
@@ -337,7 +337,7 @@ mod tests {
         }
 
         let Phase::ProbeBw(cycle) = &mode.phase else {
-            panic!("PROBE_RTT must resume PROBE_BW");
+            return Err("PROBE_RTT must resume PROBE_BW".into());
         };
         assert_eq!(cycle.phase, CyclePhase::Refill);
         assert_eq!(cycle.outcome, ProbeOutcome::TooHigh);
@@ -345,6 +345,7 @@ mod tests {
         assert_eq!(std::ptr::from_ref(mode.network_model()), model_address);
         assert_eq!(mode.model.inflight_hi(), 46_000);
         assert_eq!(mode.model.min_rtt(), Duration::from_millis(80));
+        Ok(())
     }
 
     #[test]

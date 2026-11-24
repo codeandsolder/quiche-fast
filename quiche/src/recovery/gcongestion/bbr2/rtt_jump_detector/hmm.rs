@@ -27,6 +27,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use super::record_minimum_baseline;
 use super::RttJumpUpdate;
 
 // 3-state discrete-emission Hidden Markov Model (HMM) RTT jump detector
@@ -288,7 +289,7 @@ impl HmmDetector {
                 self.dispersion +=
                     (rel - self.dispersion) / f32::from(self.warmup_contrib);
             }
-            self.update_baseline(rtt_sample);
+            record_minimum_baseline(&mut self.baseline, rtt_sample);
             return RttJumpUpdate::None;
         }
 
@@ -367,7 +368,7 @@ impl HmmDetector {
         if committed_to_normal {
             self.baseline = Some(rtt_sample);
         } else {
-            self.update_baseline(rtt_sample);
+            record_minimum_baseline(&mut self.baseline, rtt_sample);
         }
 
         let rel = relative_elevation(rtt_sample, self.baseline);
@@ -380,18 +381,13 @@ impl HmmDetector {
         }
     }
 
-    fn update_baseline(&mut self, rtt_sample: Duration) {
-        self.baseline =
-            Some(self.baseline.map_or(rtt_sample, |min| min.min(rtt_sample)));
-    }
-
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         !matches!(self.episode, HmmEpisode::Idle)
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         matches!(self.episode, HmmEpisode::Persistent)
     }
 }

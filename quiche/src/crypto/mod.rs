@@ -412,7 +412,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn crypto_ffi_checks_lengths_before_access() {
+    fn crypto_ffi_checks_lengths_before_access(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for alg in [
             Algorithm::AES128_GCM,
             Algorithm::AES256_GCM,
@@ -424,11 +425,11 @@ mod tests {
             assert!(PacketKey::new(alg, &key[..key.len() - 1], &nonce).is_err());
             assert!(PacketKey::new(alg, key, &nonce[..nonce.len() - 1]).is_err());
             assert!(HeaderProtectionKey::new(alg, &key[..key.len() - 1]).is_err());
-            let hp = HeaderProtectionKey::new(alg, key).unwrap();
+            let hp = HeaderProtectionKey::new(alg, key)?;
             assert_eq!(hp.new_mask(&[0; 15]), Err(Error::CryptoFail));
             assert!(hp.new_mask(&[0; 16]).is_ok());
 
-            let mut pkt = PacketKey::new(alg, key, &nonce).unwrap();
+            let mut pkt = PacketKey::new(alg, key, &nonce)?;
             let mut buf = [0; 32];
             assert_eq!(
                 pkt.seal_with_u64_counter(0, b"", &mut buf, usize::MAX, None),
@@ -447,8 +448,7 @@ mod tests {
                 alg,
                 &[0; 32],
                 CounterInitialization::FirstPacket,
-            )
-            .unwrap();
+            )?;
             assert_eq!(
                 seal.seal_with_u64_counter(0, b"", &mut buf, usize::MAX, None),
                 Err(Error::CryptoFail)
@@ -483,10 +483,12 @@ mod tests {
             ),
             Err(Error::CryptoFail)
         );
+        Ok(())
     }
 
     #[test]
-    fn key_derivation_preserves_counter_initialization() {
+    fn key_derivation_preserves_counter_initialization(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for alg in [
             Algorithm::AES128_GCM,
             Algorithm::AES256_GCM,
@@ -498,9 +500,8 @@ mod tests {
             ] {
                 let secret = [0xa5; 48];
                 let mut seal =
-                    PacketKey::from_secret(alg, &secret, initialization).unwrap();
-                let open =
-                    PacketKey::from_secret(alg, &secret, initialization).unwrap();
+                    PacketKey::from_secret(alg, &secret, initialization)?;
+                let open = PacketKey::from_secret(alg, &secret, initialization)?;
                 let mut buf = [0; 7 + TAG_LEN];
                 buf[..7].copy_from_slice(b"payload");
                 assert_eq!(
@@ -516,23 +517,26 @@ mod tests {
                 assert_eq!(&buf[..7], b"payload");
             }
         }
+        Ok(())
     }
 
     #[test]
-    fn hkdf_label_encoding_matches_reference_at_width_boundaries() {
+    fn hkdf_label_encoding_matches_reference_at_width_boundaries(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let alg = Algorithm::AES128_GCM;
         for len in [0, 1, 6, 32, 248, 249] {
             let label = vec![0x93; len];
             let mut actual = [0; 32];
             let mut expected = [0; 32];
-            let mut info = vec![0, 32, u8::try_from(6 + len).unwrap()];
+            let mut info = vec![0, 32, u8::try_from(6 + len)?];
             info.extend_from_slice(b"tls13 ");
             info.extend_from_slice(&label);
             info.push(0);
-            hkdf_expand(alg, &mut expected, b"secret", &info).unwrap();
-            hkdf_expand_label(alg, b"secret", &label, &mut actual).unwrap();
+            hkdf_expand(alg, &mut expected, b"secret", &info)?;
+            hkdf_expand_label(alg, b"secret", &label, &mut actual)?;
             assert_eq!(actual, expected);
         }
+        Ok(())
     }
 
     #[test]
@@ -619,7 +623,8 @@ mod tests {
     }
 
     #[test]
-    fn derive_chacha20_secrets() {
+    fn derive_chacha20_secrets(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let secret = [
             0x9a, 0xc3, 0x12, 0xa7, 0xf8, 0x77, 0x46, 0x8e, 0xbe, 0x69, 0x42,
             0x27, 0x48, 0xad, 0x00, 0xa1, 0x54, 0x43, 0xf1, 0x82, 0x03, 0xa0,
@@ -655,13 +660,14 @@ mod tests {
         ];
         assert_eq!(&hdr_key, &expected_hdr_key);
 
-        let next_secret = derive_next_secret(aead, &secret).unwrap();
+        let next_secret = derive_next_secret(aead, &secret)?;
         let expected_secret = [
             0x12, 0x23, 0x50, 0x47, 0x55, 0x03, 0x6d, 0x55, 0x63, 0x42, 0xee,
             0x93, 0x61, 0xd2, 0x53, 0x42, 0x1a, 0x82, 0x6c, 0x9e, 0xcd, 0xf3,
             0xc7, 0x14, 0x86, 0x84, 0xb3, 0x6b, 0x71, 0x48, 0x81, 0xf9,
         ];
         assert_eq!(&next_secret, &expected_secret);
+        Ok(())
     }
 }
 

@@ -220,7 +220,7 @@ mod tests {
     use super::RangeBuf;
 
     #[test]
-    fn rangebuf_split_off() {
+    fn rangebuf_split_off() -> Result<(), Box<dyn std::error::Error>> {
         let mut buf = <RangeBuf>::from(b"helloworld", 5, true);
         assert_eq!(buf.start, 0);
         assert_eq!(buf.pos, 0);
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(&buf[..], b"world");
 
         // Split buffer before position.
-        let mut new_buf = buf.split_off(8).unwrap();
+        let mut new_buf = buf.split_off(8).ok_or("expected in-range split")?;
 
         assert_eq!(buf.start, 0);
         assert_eq!(buf.pos, 3);
@@ -292,7 +292,8 @@ mod tests {
         assert_eq!(&new_buf[..], b"rld");
 
         // Split buffer after position.
-        let mut new_new_buf = new_buf.split_off(13).unwrap();
+        let mut new_new_buf =
+            new_buf.split_off(13).ok_or("expected in-range split")?;
 
         assert_eq!(new_buf.start, 3);
         assert_eq!(new_buf.pos, 7);
@@ -332,6 +333,7 @@ mod tests {
         assert!(new_new_buf.fin());
 
         assert_eq!(&new_new_buf[..], b"");
+        Ok(())
     }
 
     #[test]

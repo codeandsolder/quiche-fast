@@ -27,6 +27,7 @@
 use std::time::Duration;
 use std::time::Instant;
 
+use super::record_minimum_baseline;
 use super::RttJumpUpdate;
 
 // An RTT jump is a sustained RTT increase above the connection-lifetime minimum
@@ -100,12 +101,12 @@ impl GlobalMinDetector {
         full_bandwidth_reached: bool,
     ) -> RttJumpUpdate {
         if !full_bandwidth_reached {
-            self.update_baseline(rtt_sample);
+            record_minimum_baseline(&mut self.baseline, rtt_sample);
             return RttJumpUpdate::None;
         }
 
         let Some(baseline) = self.baseline else {
-            self.update_baseline(rtt_sample);
+            record_minimum_baseline(&mut self.baseline, rtt_sample);
             return RttJumpUpdate::None;
         };
 
@@ -156,22 +157,17 @@ impl GlobalMinDetector {
                 },
         }
 
-        self.update_baseline(rtt_sample);
+        record_minimum_baseline(&mut self.baseline, rtt_sample);
         update
     }
 
-    fn update_baseline(&mut self, rtt_sample: Duration) {
-        self.baseline =
-            Some(self.baseline.map_or(rtt_sample, |min| min.min(rtt_sample)));
-    }
-
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_active(&self) -> bool {
+    pub(super) const fn is_rtt_jump_active(&self) -> bool {
         !matches!(self.episode, GlobalMinEpisode::Idle)
     }
 
     #[cfg(test)]
-    pub(super) fn is_rtt_jump_persistent(&self) -> bool {
+    pub(super) const fn is_rtt_jump_persistent(&self) -> bool {
         matches!(self.episode, GlobalMinEpisode::Persistent)
     }
 }

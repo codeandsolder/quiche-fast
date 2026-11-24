@@ -583,15 +583,16 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_parameter_ids_across_width_classes() {
+    fn duplicate_parameter_ids_across_width_classes(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         for id in [17, 27, 58, 63, 64, 1 << 14, octets::MAX_VAR_INT] {
             let mut wire = [0; 32];
             let mut writer = octets::OctetsMut::with_slice(&mut wire);
-            writer.put_varint(id).unwrap();
-            writer.put_varint(0).unwrap();
+            writer.put_varint(id)?;
+            writer.put_varint(0)?;
             let first = writer.off();
-            writer.put_varint_with_len(id, 8).unwrap();
-            writer.put_varint(0).unwrap();
+            writer.put_varint_with_len(id, 8)?;
+            writer.put_varint(0)?;
             let end = writer.off();
             for tracking in [None, Some(0), Some(16)] {
                 assert!(TransportParams::decode(&wire[..first], false, tracking)
@@ -602,6 +603,7 @@ mod tests {
                 );
             }
         }
+        Ok(())
     }
 
     #[test]
@@ -620,7 +622,8 @@ mod tests {
     }
 
     #[test]
-    fn stateless_reset_token_requires_exact_length() {
+    fn stateless_reset_token_requires_exact_length(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
         let mut underlong = vec![0x02, 0x0f];
         underlong.extend_from_slice(&[0xba; 15]);
 
@@ -640,10 +643,11 @@ mod tests {
         let mut exact = vec![0x02, 0x10];
         exact.extend_from_slice(&[0xba; 16]);
 
-        let decoded = TransportParams::decode(&exact, false, None).unwrap();
+        let decoded = TransportParams::decode(&exact, false, None)?;
         assert_eq!(
             decoded.stateless_reset_token,
             Some(u128::from_be_bytes([0xba; 16]))
         );
+        Ok(())
     }
 }
