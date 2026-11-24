@@ -170,7 +170,7 @@ struct Router<P> {
 
 impl<P: Protocol> Router<P> {
     fn route(
-        &mut self, header: &quiche::Header, peer: SocketAddr,
+        &mut self, header: &quiche::Header<'static>, peer: SocketAddr,
         output: &mut DatagramOutput, socket: &mio::net::UdpSocket,
     ) -> Result<Option<&mut Session<P>>> {
         if self.sessions.contains_key(&header.dcid) {
