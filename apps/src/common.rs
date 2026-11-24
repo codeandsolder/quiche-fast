@@ -36,8 +36,6 @@ use std::collections::HashMap;
 #[cfg(feature = "sfv")]
 use std::convert::TryFrom;
 
-use std::fmt::Write as _;
-
 use std::rc::Rc;
 
 use std::cell::RefCell;
@@ -160,81 +158,68 @@ pub fn make_qlog_writer(
     }
 }
 
+#[derive(serde::Serialize)]
+struct JsonHeader<'a> {
+    name: std::borrow::Cow<'a, str>,
+    value: std::borrow::Cow<'a, str>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonRequest<'a> {
+    headers: Vec<JsonHeader<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonResponse<'a> {
+    headers: Vec<JsonHeader<'a>>,
+    body: &'a [u8],
+}
+
+#[derive(serde::Serialize)]
+struct JsonEntry<'a> {
+    request: JsonRequest<'a>,
+    response: JsonResponse<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct JsonReport<'a> {
+    entries: Vec<JsonEntry<'a>>,
+}
+
+fn json_headers(headers: &[quiche::h3::Header]) -> Vec<JsonHeader<'_>> {
+    headers
+        .iter()
+        .map(|header| JsonHeader {
+            name: String::from_utf8_lossy(header.name()),
+            value: String::from_utf8_lossy(header.value()),
+        })
+        .collect()
+}
+
+fn response_json(reqs: &[Http3Request]) -> serde_json::Result<String> {
+    let entries = reqs
+        .iter()
+        .map(|req| JsonEntry {
+            request: JsonRequest {
+                headers: json_headers(&req.hdrs),
+            },
+            response: JsonResponse {
+                headers: json_headers(&req.response_hdrs),
+                body: &req.response_body,
+            },
+        })
+        .collect();
+    serde_json::to_string_pretty(&JsonReport { entries })
+}
+
 fn dump_json(reqs: &[Http3Request], output_sink: &mut dyn FnMut(String)) {
-    let mut out = String::new();
-
-    writeln!(out, "{{").unwrap();
-    writeln!(out, "  \"entries\": [").unwrap();
-    let mut reqs = reqs.iter().peekable();
-
-    while let Some(req) = reqs.next() {
-        writeln!(out, "  {{").unwrap();
-        writeln!(out, "    \"request\":{{").unwrap();
-        writeln!(out, "      \"headers\":[").unwrap();
-
-        let mut req_hdrs = req.hdrs.iter().peekable();
-        while let Some(h) = req_hdrs.next() {
-            writeln!(out, "        {{").unwrap();
-            writeln!(
-                out,
-                "          \"name\": \"{}\",",
-                std::str::from_utf8(h.name()).unwrap()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "          \"value\": \"{}\"",
-                std::str::from_utf8(h.value()).unwrap().replace('"', "\\\"")
-            )
-            .unwrap();
-
-            if req_hdrs.peek().is_some() {
-                writeln!(out, "        }},").unwrap();
-            } else {
-                writeln!(out, "        }}").unwrap();
-            }
-        }
-        writeln!(out, "      ]}},").unwrap();
-
-        writeln!(out, "    \"response\":{{").unwrap();
-        writeln!(out, "      \"headers\":[").unwrap();
-
-        let mut response_hdrs = req.response_hdrs.iter().peekable();
-        while let Some(h) = response_hdrs.next() {
-            writeln!(out, "        {{").unwrap();
-            writeln!(
-                out,
-                "          \"name\": \"{}\",",
-                std::str::from_utf8(h.name()).unwrap()
-            )
-            .unwrap();
-            writeln!(
-                out,
-                "          \"value\": \"{}\"",
-                std::str::from_utf8(h.value()).unwrap().replace('"', "\\\"")
-            )
-            .unwrap();
-
-            if response_hdrs.peek().is_some() {
-                writeln!(out, "        }},").unwrap();
-            } else {
-                writeln!(out, "        }}").unwrap();
-            }
-        }
-        writeln!(out, "      ],").unwrap();
-        writeln!(out, "      \"body\": {:?}", req.response_body).unwrap();
-        writeln!(out, "    }}").unwrap();
-
-        if reqs.peek().is_some() {
-            writeln!(out, "}},").unwrap();
-        } else {
-            writeln!(out, "}}").unwrap();
-        }
+    match response_json(reqs) {
+        Ok(mut json) => {
+            json.push('\n');
+            output_sink(json);
+        },
+        Err(error) => error!("cannot serialize HTTP response report: {error}"),
     }
-    writeln!(out, "]").unwrap();
-    writeln!(out, "}}").unwrap();
-
-    output_sink(out);
 }
 
 pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
@@ -261,52 +246,61 @@ pub fn generate_cid_and_reset_token<T: SecureRandom>(
     (scid, reset_token)
 }
 
-/// Construct a priority field value from quiche apps custom query string.
-pub fn priority_field_value_from_query_string(url: &url::Url) -> Option<String> {
-    let mut priority = "".to_string();
-    for param in url.query_pairs() {
-        if param.0 == "u" {
-            write!(priority, "{}={},", param.0, param.1).ok();
-        }
+/// Validated RFC 9218 query overrides. Missing or invalid parameters do not
+/// replace a valid header, and the same parsed values drive both directions.
+#[derive(Default)]
+struct PriorityQuery {
+    urgency: Option<u8>,
+    incremental: bool,
+}
 
-        if param.0 == "i" && param.1 == "1" {
-            priority.push_str("i,");
+impl PriorityQuery {
+    fn parse(url: &url::Url) -> Self {
+        let mut query = Self::default();
+        for (name, value) in url.query_pairs() {
+            match name.as_ref() {
+                "u" => {
+                    if let Some(urgency) =
+                        value.parse::<u8>().ok().filter(|urgency| *urgency <= 7)
+                    {
+                        query.urgency = Some(urgency);
+                    }
+                },
+                "i" if value == "1" => query.incremental = true,
+                _ => (),
+            }
+        }
+        query
+    }
+
+    fn field_value(&self) -> Option<String> {
+        match (self.urgency, self.incremental) {
+            (Some(urgency), true) => Some(format!("u={urgency},i")),
+            (Some(urgency), false) => Some(format!("u={urgency}")),
+            (None, true) => Some("i".to_owned()),
+            (None, false) => None,
         }
     }
 
-    if !priority.is_empty() {
-        // remove trailing comma
-        priority.pop();
-
-        Some(priority)
-    } else {
-        None
+    fn priority(&self) -> Option<Priority> {
+        if self.urgency.is_some() || self.incremental {
+            Some(Priority::new(self.urgency.unwrap_or(3), self.incremental))
+        } else {
+            None
+        }
     }
 }
 
-/// Construct a Priority from quiche apps custom query string.
+/// Construct a priority field from validated query overrides.
+#[must_use]
+pub fn priority_field_value_from_query_string(url: &url::Url) -> Option<String> {
+    PriorityQuery::parse(url).field_value()
+}
+
+/// Construct a priority from validated query overrides.
+#[must_use]
 pub fn priority_from_query_string(url: &url::Url) -> Option<Priority> {
-    let mut urgency = None;
-    let mut incremental = None;
-    for param in url.query_pairs() {
-        if param.0 == "u" {
-            urgency = Some(param.1.parse::<u8>().unwrap());
-        }
-
-        if param.0 == "i" && param.1 == "1" {
-            incremental = Some(true);
-        }
-    }
-
-    match (urgency, incremental) {
-        (Some(u), Some(i)) => Some(Priority::new(u, i)),
-
-        (Some(u), None) => Some(Priority::new(u, false)),
-
-        (None, Some(i)) => Some(Priority::new(3, i)),
-
-        (None, None) => None,
-    }
+    PriorityQuery::parse(url).priority()
 }
 
 fn send_h3_dgram(
@@ -326,6 +320,24 @@ fn send_h3_dgram(
         .map_err(|_| quiche::Error::BufferTooShort)?;
 
     conn.dgram_send(&d)
+}
+
+fn h3_datagram(bytes: &[u8]) -> octets::Result<(u64, &[u8])> {
+    let mut reader = octets::Octets::with_slice(bytes);
+    let flow_id = reader.get_varint()?;
+    Ok((flow_id, &bytes[reader.off()..]))
+}
+
+fn receive_h3_datagrams(conn: &mut quiche::Connection, buf: &mut [u8]) {
+    while let Ok(len) = conn.dgram_recv(buf) {
+        match h3_datagram(&buf[..len]) {
+            Ok((flow_id, data)) => info!(
+                "Received DATAGRAM flow_id={flow_id} len={len} data={data:?}"
+            ),
+            Err(error) =>
+                debug!("Discarding malformed HTTP/3 DATAGRAM: {error:?}"),
+        }
+    }
 }
 
 pub trait HttpConn {
@@ -754,6 +766,52 @@ fn make_h3_config(
     config
 }
 
+type MessageError = (u64, String);
+
+fn message_error(message: impl Into<String>) -> MessageError {
+    (H3_MESSAGE_ERROR, message.into())
+}
+
+#[derive(Default)]
+struct RequestFields<'a> {
+    scheme: Option<&'a str>,
+    authority: Option<&'a str>,
+    host: Option<&'a str>,
+    path: Option<&'a str>,
+    method: Option<&'a str>,
+    priority: Vec<u8>,
+}
+
+impl<'a> RequestFields<'a> {
+    fn parse(headers: &'a [quiche::h3::Header]) -> Result<Self, MessageError> {
+        let mut fields = Self::default();
+        for header in headers {
+            let (slot, name) = match header.name() {
+                b":scheme" => (&mut fields.scheme, ":scheme"),
+                b":authority" => (&mut fields.authority, ":authority"),
+                b":path" => (&mut fields.path, ":path"),
+                b":method" => (&mut fields.method, ":method"),
+                b"host" => (&mut fields.host, "host"),
+                b":protocol" =>
+                    return Err(message_error(":protocol not supported")),
+                b"priority" => {
+                    fields.priority = header.value().to_vec();
+                    continue;
+                },
+                _ => continue,
+            };
+            let value = std::str::from_utf8(header.value())
+                .map_err(|error| message_error(format!("{name}: {error}")))?;
+            if slot.replace(value).is_some() {
+                return Err(message_error(format!(
+                    "{name} cannot be duplicated"
+                )));
+            }
+        }
+        Ok(fields)
+    }
+}
+
 pub struct Http3Conn {
     h3_conn: quiche::h3::Connection,
     reqs_hdrs_sent: usize,
@@ -903,74 +961,14 @@ impl Http3Conn {
         root: &str, index: &str, request: &[quiche::h3::Header],
     ) -> Http3ResponseBuilderResult {
         let mut file_path = path::PathBuf::from(root);
-        let mut scheme = None;
-        let mut authority = None;
-        let mut host = None;
-        let mut path = None;
-        let mut method = None;
-        let mut priority = vec![];
-
-        // Parse some of the request headers.
-        for hdr in request {
-            match hdr.name() {
-                b":scheme" => {
-                    if scheme.is_some() {
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":scheme cannot be duplicated".to_string(),
-                        ));
-                    }
-
-                    scheme = Some(std::str::from_utf8(hdr.value()).unwrap());
-                },
-
-                b":authority" => {
-                    if authority.is_some() {
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":authority cannot be duplicated".to_string(),
-                        ));
-                    }
-
-                    authority = Some(std::str::from_utf8(hdr.value()).unwrap());
-                },
-
-                b":path" => {
-                    if path.is_some() {
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":path cannot be duplicated".to_string(),
-                        ));
-                    }
-
-                    path = Some(std::str::from_utf8(hdr.value()).unwrap())
-                },
-
-                b":method" => {
-                    if method.is_some() {
-                        return Err((
-                            H3_MESSAGE_ERROR,
-                            ":method cannot be duplicated".to_string(),
-                        ));
-                    }
-
-                    method = Some(std::str::from_utf8(hdr.value()).unwrap())
-                },
-
-                b":protocol" => {
-                    return Err((
-                        H3_MESSAGE_ERROR,
-                        ":protocol not supported".to_string(),
-                    ));
-                },
-
-                b"priority" => priority = hdr.value().to_vec(),
-
-                b"host" => host = Some(std::str::from_utf8(hdr.value()).unwrap()),
-
-                _ => (),
-            }
-        }
+        let RequestFields {
+            scheme,
+            authority,
+            host,
+            path,
+            method,
+            mut priority,
+        } = RequestFields::parse(request)?;
 
         let decided_method = match method {
             Some(method) => {
@@ -1033,34 +1031,12 @@ impl Http3Conn {
                 )),
         };
 
-        let decided_host = match (authority, host) {
-            (None, Some("")) =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    "host value cannot be empty".to_string(),
-                )),
-
-            (Some(""), None) =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":authority value cannot be empty".to_string(),
-                )),
-
-            (Some(""), Some("")) =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":authority and host value cannot be empty".to_string(),
-                )),
-
-            (None, None) =>
-                return Err((
-                    H3_MESSAGE_ERROR,
-                    ":authority and host missing".to_string(),
-                )),
-
-            // Any other combo, prefer :authority
-            (..) => authority.unwrap(),
-        };
+        let decided_host = authority
+            .filter(|value| !value.is_empty())
+            .or_else(|| host.filter(|value| !value.is_empty()))
+            .ok_or_else(|| {
+                message_error("missing or empty :authority and host")
+            })?;
 
         let decided_path = match path {
             Some("") =>
@@ -1078,8 +1054,13 @@ impl Http3Conn {
             Some(path) => path,
         };
 
+        if !decided_path.starts_with('/') {
+            return Err(message_error(":path must be an absolute path"));
+        }
         let url = format!("{decided_scheme}://{decided_host}{decided_path}");
-        let url = url::Url::parse(&url).unwrap();
+        let url = url::Url::parse(&url).map_err(|error| {
+            message_error(format!("invalid request URL: {error}"))
+        })?;
 
         let pathbuf = path::PathBuf::from(url.path());
         let pathbuf = autoindex(pathbuf, index);
@@ -1369,18 +1350,7 @@ impl HttpConn for Http3Conn {
             }
         }
 
-        // Process datagram-related events.
-        while let Ok(len) = conn.dgram_recv(buf) {
-            let mut b = octets::Octets::with_slice(buf);
-            if let Ok(flow_id) = b.get_varint() {
-                info!(
-                    "Received DATAGRAM flow_id={} len={} data={:?}",
-                    flow_id,
-                    len,
-                    buf[b.off()..len].to_vec()
-                );
-            }
-        }
+        receive_h3_datagrams(conn, buf);
     }
 
     fn report_incomplete(&self, start: &std::time::Instant) -> bool {
@@ -1571,18 +1541,7 @@ impl HttpConn for Http3Conn {
             self.handle_writable(conn, partial_responses, stream_id);
         }
 
-        // Process datagram-related events.
-        while let Ok(len) = conn.dgram_recv(buf) {
-            let mut b = octets::Octets::with_slice(buf);
-            if let Ok(flow_id) = b.get_varint() {
-                info!(
-                    "Received DATAGRAM flow_id={} len={} data={:?}",
-                    flow_id,
-                    len,
-                    buf[b.off()..len].to_vec()
-                );
-            }
-        }
+        receive_h3_datagrams(conn, buf);
 
         if let Some(ds) = self.dgram_sender.as_mut() {
             let mut dgrams_done = 0;
@@ -1666,5 +1625,122 @@ impl HttpConn for Http3Conn {
         if resp.written == resp.body.len() {
             partial_responses.remove(&stream_id);
         }
+    }
+}
+
+#[cfg(test)]
+mod input_output_tests {
+    use super::h3_datagram;
+    use super::priority_field_value_from_query_string;
+    use super::priority_from_query_string;
+    use super::response_json;
+    use super::Http3Conn;
+    use super::Http3Request;
+    use super::H3_MESSAGE_ERROR;
+    use quiche::h3::Header;
+    use quiche::h3::NameValue;
+    use quiche::h3::Priority;
+
+    #[test]
+    fn json_report_escapes_all_strings_and_preserves_payload(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let req = Http3Request {
+            url: url::Url::parse("https://example.org/")?,
+            cardinal: 1,
+            stream_id: None,
+            hdrs: vec![Header::new(b"x-request", b"quote\"\\\t\n")],
+            priority: None,
+            response_hdrs: vec![Header::new(b"x-response", b"\xff\r\n")],
+            response_body: vec![0, 128, 255],
+            response_body_max: 3,
+            response_writer: None,
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&response_json(&[req])?)?;
+        assert_eq!(
+            json["entries"][0]["request"]["headers"][0]["value"],
+            "quote\"\\\t\n"
+        );
+        assert_eq!(
+            json["entries"][0]["response"]["headers"][0]["value"],
+            "\u{fffd}\r\n"
+        );
+        assert_eq!(
+            json["entries"][0]["response"]["body"],
+            serde_json::json!([0, 128, 255])
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&response_json(&[])?)?,
+            serde_json::json!({"entries": []})
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn query_priority_is_validated_consistently() -> Result<(), url::ParseError> {
+        for (query, field, priority) in [
+            ("u=7&i=1", Some("u=7,i"), Some(Priority::new(7, true))),
+            ("i=1", Some("i"), Some(Priority::new(3, true))),
+            ("u=0", Some("u=0"), Some(Priority::new(0, false))),
+            ("u=bad&i=0", None, None),
+            ("u=255", None, None),
+            ("u=1%2Ci", None, None),
+            ("u=2&u=3", Some("u=3"), Some(Priority::new(3, false))),
+        ] {
+            let url = url::Url::parse(&format!("https://example.org/?{query}"))?;
+            assert_eq!(
+                priority_field_value_from_query_string(&url).as_deref(),
+                field
+            );
+            assert_eq!(priority_from_query_string(&url), priority);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn request_header_errors_are_returned_and_host_fallback_works(
+    ) -> Result<(), String> {
+        let valid = vec![
+            Header::new(b":method", b"GET"),
+            Header::new(b":scheme", b"https"),
+            Header::new(b"host", b"example.org"),
+            Header::new(b":path", b"/stream-bytes/3"),
+        ];
+        let (headers, body, _) =
+            Http3Conn::build_h3_response(".", "index.html", &valid)
+                .map_err(|(_, message)| message)?;
+        assert!(headers.iter().any(
+            |header| header.name() == b":status" && header.value() == b"200"
+        ));
+        assert_eq!(body, [0x57; 3]);
+        for invalid in [
+            Header::new(b":path", b"/duplicate"),
+            Header::new(b":authority", b"\xff"),
+            Header::new(b":authority", b"[invalid"),
+        ] {
+            let mut request = valid.clone();
+            request.push(invalid);
+            assert!(matches!(
+                Http3Conn::build_h3_response(".", "index.html", &request),
+                Err((H3_MESSAGE_ERROR, _))
+            ));
+        }
+        let mut request = valid;
+        request[3] = Header::new(b":path", b"not-an-absolute-path");
+        assert!(matches!(
+            Http3Conn::build_h3_response(".", "index.html", &request),
+            Err((H3_MESSAGE_ERROR, _))
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn truncated_datagrams_cannot_read_stale_buffer_bytes() -> octets::Result<()>
+    {
+        assert!(h3_datagram(&[]).is_err());
+        assert!(h3_datagram(&[0x40]).is_err());
+        assert_eq!(h3_datagram(&[0x40, 0x40, 7, 8])?, (64, &[7, 8][..]));
+        assert_eq!(h3_datagram(&[0])?, (0, &[][..]));
+        Ok(())
     }
 }
