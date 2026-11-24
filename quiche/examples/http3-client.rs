@@ -24,6 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[path = "support/http3.rs"]
+mod http3;
+#[path = "support/transport.rs"]
+mod transport;
+
 #[path = "support/client.rs"]
 mod client;
 #[path = "support/input.rs"]
@@ -49,14 +54,13 @@ struct Request {
 }
 
 impl Request {
-    fn new(url: &Url) -> client::Result<Self> {
+    fn new(url: &Url) -> transport::Result<Self> {
         let host = url.host_str().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "URL lacks a host")
         })?;
-        let authority = match url.port() {
-            Some(port) => format!("{host}:{port}"),
-            None => host.to_owned(),
-        };
+        let authority = url
+            .port()
+            .map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
         let target = client::request_target(url);
         Ok(Self {
             headers: vec![
@@ -76,17 +80,11 @@ impl Request {
     fn process(
         &mut self, conn: &mut quiche::Connection, buffer: &mut [u8],
         writer: &mut impl Write,
-    ) -> client::Result<()> {
+    ) -> transport::Result<()> {
         if self.finished || !conn.is_established() {
             return Ok(());
         }
-        if self.connection.is_none() {
-            self.connection =
-                Some(h3::Connection::with_transport(conn, &h3::Config::new())?);
-        }
-        let Some(http3) = &mut self.connection else {
-            return Ok(());
-        };
+        let http3 = http3::connection(&mut self.connection, conn)?;
 
         if self.stream_id.is_none() {
             match http3.send_request(conn, &self.headers, true) {
@@ -145,7 +143,7 @@ impl Request {
 fn read_body(
     http3: &mut h3::Connection, conn: &mut quiche::Connection, stream_id: u64,
     buffer: &mut [u8], writer: &mut impl Write,
-) -> client::Result<()> {
+) -> transport::Result<()> {
     loop {
         match http3.recv_body(conn, stream_id, buffer) {
             Ok(read) => writer.write_all(&buffer[..read])?,
@@ -155,7 +153,7 @@ fn read_body(
     }
 }
 
-fn main() -> client::Result<()> {
+fn main() -> transport::Result<()> {
     let url = client::request_url(input::one_argument("URL")?)?;
     let mut transport =
         client::ClientTransport::connect(&url, h3::APPLICATION_PROTOCOL)?;

@@ -24,6 +24,9 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[path = "support/transport.rs"]
+mod transport;
+
 #[path = "support/client.rs"]
 mod client;
 #[path = "support/input.rs"]
@@ -39,7 +42,7 @@ const HTTP_REQ_STREAM_ID: u64 = 4;
 const HTTP09_PROTOCOLS: &[&[u8]] =
     &[b"hq-interop", b"hq-29", b"hq-28", b"hq-27", b"http/0.9"];
 
-fn main() -> client::Result<()> {
+fn main() -> transport::Result<()> {
     let url = client::request_url(input::one_argument("URL")?)?;
     let mut transport = client::ClientTransport::connect(&url, HTTP09_PROTOCOLS)?;
     let request = format!("GET {}\r\n", client::request_target(&url));

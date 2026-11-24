@@ -24,6 +24,9 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[path = "support/transport.rs"]
+mod transport;
+
 #[path = "support/response.rs"]
 mod response;
 #[path = "support/server.rs"]
@@ -93,7 +96,7 @@ impl Http09 {
 impl server::Protocol for Http09 {
     fn process(
         &mut self, conn: &mut quiche::Connection, buffer: &mut [u8], root: &Path,
-    ) -> server::Result<()> {
+    ) -> transport::Result<()> {
         for id in conn.readable() {
             self.receive(conn, id, buffer, root)?;
         }
@@ -127,6 +130,6 @@ fn request_body(root: &Path, request: &[u8]) -> Vec<u8> {
         .unwrap_or_else(|_| b"Not Found!\r\n".to_vec())
 }
 
-fn main() -> server::Result<()> {
+fn main() -> transport::Result<()> {
     server::run::<Http09>(HTTP09_PROTOCOLS)
 }

@@ -25,7 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::collections::HashMap;
-use std::error::Error;
 use std::io;
 use std::net::IpAddr;
 use std::net::Ipv4Addr;
@@ -36,8 +35,11 @@ use std::path::PathBuf;
 use ring::hmac;
 use ring::rand::SystemRandom;
 
-pub type Result<T> = std::result::Result<T, Box<dyn Error>>;
-const MAX_DATAGRAM_SIZE: usize = 1350;
+use crate::transport::DatagramOutput;
+use crate::transport::Result;
+use crate::transport::{
+    self,
+};
 
 pub trait Protocol: Default {
     fn process(
@@ -108,59 +110,6 @@ impl RetryTokens {
     }
 }
 
-/// Retain a generated datagram until the socket has accepted it. While it
-/// is pending, the server does not generate another packet into the buffer.
-struct DatagramOutput {
-    bytes: [u8; MAX_DATAGRAM_SIZE],
-    pending: Option<(usize, SocketAddr)>,
-}
-
-impl Default for DatagramOutput {
-    fn default() -> Self {
-        Self {
-            bytes: [0; MAX_DATAGRAM_SIZE],
-            pending: None,
-        }
-    }
-}
-
-impl DatagramOutput {
-    fn flush(&mut self, socket: &mio::net::UdpSocket) -> io::Result<()> {
-        let Some((length, peer)) = self.pending else {
-            return Ok(());
-        };
-        loop {
-            match socket.send_to(&self.bytes[..length], peer) {
-                Ok(written) if written == length => {
-                    self.pending = None;
-                    return Ok(());
-                },
-                Ok(_) =>
-                    return Err(io::Error::new(
-                        io::ErrorKind::WriteZero,
-                        "partial UDP datagram",
-                    )),
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock =>
-                    return Ok(()),
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => (),
-                Err(error) => return Err(error),
-            }
-        }
-    }
-
-    fn send(
-        &mut self, socket: &mio::net::UdpSocket, length: usize, peer: SocketAddr,
-    ) -> io::Result<()> {
-        debug_assert!(self.pending.is_none());
-        self.pending = Some((length, peer));
-        self.flush(socket)
-    }
-
-    const fn blocked(&self) -> bool {
-        self.pending.is_some()
-    }
-}
-
 struct Router<P> {
     config: quiche::Config,
     tokens: RetryTokens,
@@ -183,7 +132,7 @@ impl<P: Protocol> Router<P> {
             let length = quiche::negotiate_version(
                 &header.scid,
                 &header.dcid,
-                &mut output.bytes,
+                output.buffer(),
             )?;
             output.send(socket, length, peer)?;
             return Ok(None);
@@ -203,7 +152,7 @@ impl<P: Protocol> Router<P> {
                 &scid,
                 &token,
                 header.version,
-                &mut output.bytes,
+                output.buffer(),
             )?;
             output.send(socket, length, peer)?;
             return Ok(None);
@@ -252,20 +201,9 @@ impl<P: Protocol> Server<P> {
         )?;
         let local = socket.local_addr()?;
 
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+        let mut config = transport::demo_config(protocols)?;
         config.load_cert_chain_from_pem_file("examples/cert.crt")?;
         config.load_priv_key_from_pem_file("examples/cert.key")?;
-        config.set_application_protos(protocols)?;
-        config.set_max_idle_timeout(5000);
-        config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-        config.set_initial_max_data(10_000_000);
-        config.set_initial_max_stream_data_bidi_local(1_000_000);
-        config.set_initial_max_stream_data_bidi_remote(1_000_000);
-        config.set_initial_max_stream_data_uni(1_000_000);
-        config.set_initial_max_streams_bidi(100);
-        config.set_initial_max_streams_uni(100);
-        config.set_disable_active_migration(true);
         config.enable_early_data();
 
         Ok(Self {
@@ -278,7 +216,7 @@ impl<P: Protocol> Server<P> {
             poll,
             events: mio::Events::with_capacity(1024),
             socket,
-            input: vec![0; 65535],
+            input: vec![0; transport::MAX_UDP_PAYLOAD],
             output: DatagramOutput::default(),
             root,
         })
@@ -325,12 +263,10 @@ impl<P: Protocol> Server<P> {
 
     fn receive_available(&mut self) -> Result<()> {
         while !self.output.blocked() {
-            let (length, peer) = match self.socket.recv_from(&mut self.input) {
-                Ok(received) => received,
-                Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted =>
-                    continue,
-                Err(error) => return Err(error.into()),
+            let Some((length, peer)) =
+                transport::receive_datagram(&self.socket, &mut self.input)?
+            else {
+                break;
             };
             let packet = &mut self.input[..length];
             let header =
@@ -394,7 +330,7 @@ impl<P: Protocol> Server<P> {
     fn flush_connections(&mut self) -> io::Result<()> {
         for session in self.router.sessions.values_mut() {
             while !self.output.blocked() {
-                match session.connection.send(&mut self.output.bytes) {
+                match session.connection.send(self.output.buffer()) {
                     Ok((length, info)) =>
                         self.output.send(&self.socket, length, info.to)?,
                     Err(quiche::Error::Done) => break,

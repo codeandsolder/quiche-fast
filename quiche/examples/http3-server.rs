@@ -24,6 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[path = "support/http3.rs"]
+mod http3;
+#[path = "support/transport.rs"]
+mod transport;
+
 #[path = "support/response.rs"]
 mod response;
 #[path = "support/server.rs"]
@@ -47,11 +52,11 @@ impl Response {
         let target = request.iter().find(|header| header.name() == b":path");
         let (status, body) =
             match (method.map(NameValue::value), target.map(NameValue::value)) {
-                (Some(b"GET"), Some(target)) =>
-                    match response::file_body(root, target) {
-                        Ok(bytes) => (200, bytes),
-                        Err(_) => (404, b"Not Found!".to_vec()),
-                    },
+                (Some(b"GET"), Some(target)) => response::file_body(root, target)
+                    .map_or_else(
+                        |_| (404, b"Not Found!".to_vec()),
+                        |bytes| (200, bytes),
+                    ),
                 (Some(b"GET"), None) | (None, _) => (400, Vec::new()),
                 _ => (405, Vec::new()),
             };
@@ -97,14 +102,8 @@ struct Http3 {
 impl server::Protocol for Http3 {
     fn process(
         &mut self, conn: &mut quiche::Connection, buffer: &mut [u8], root: &Path,
-    ) -> server::Result<()> {
-        if self.connection.is_none() {
-            self.connection =
-                Some(h3::Connection::with_transport(conn, &h3::Config::new())?);
-        }
-        let Some(http3) = &mut self.connection else {
-            return Ok(());
-        };
+    ) -> transport::Result<()> {
+        let http3 = http3::connection(&mut self.connection, conn)?;
         loop {
             match http3.poll(conn) {
                 Ok((id, h3::Event::Headers { list, .. })) => {
@@ -151,6 +150,6 @@ impl server::Protocol for Http3 {
     }
 }
 
-fn main() -> server::Result<()> {
+fn main() -> transport::Result<()> {
     server::run::<Http3>(h3::APPLICATION_PROTOCOL)
 }

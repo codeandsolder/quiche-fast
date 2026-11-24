@@ -52,8 +52,8 @@ pub fn file_body(root: &Path, target: &[u8]) -> io::Result<Vec<u8>> {
 }
 
 /// A response is complete only after the transport accepts the final write,
-/// including an empty body. WouldBlock must not be confused with zero bytes
-/// successfully written with FIN.
+/// including an empty body. `WouldBlock` must not be confused with zero bytes
+/// successfully written with `FIN`.
 pub struct Body {
     bytes: Vec<u8>,
     offset: usize,
