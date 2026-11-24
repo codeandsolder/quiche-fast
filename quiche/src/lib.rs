@@ -3333,7 +3333,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Handle an unauthenticated version negotiation packet.
     fn recv_version_negotiation(
-        &mut self, hdr: Header<'_>, now: Instant,
+        &mut self, hdr: Header<'static>, now: Instant,
     ) -> Result<()> {
         // Version negotiation packets can only be sent by the server.
         if self.is_server {
@@ -3420,7 +3420,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Authenticate Retry integrity and restart the Initial exchange.
     fn recv_retry(
-        &mut self, hdr: Header<'_>, b: &octets::OctetsMut<'_>, now: Instant,
+        &mut self, hdr: Header<'static>, b: &octets::OctetsMut<'_>, now: Instant,
     ) -> Result<()> {
         // Retry packets can only be sent by the server.
         if self.is_server {
@@ -3543,6 +3543,26 @@ impl<F: BufFactory> Connection<F> {
         Ok(payload_len)
     }
 
+    /// Maps an `Error` to `Error::Done`, or itself.
+    ///
+    /// When a received packet that hasn't yet been authenticated triggers a
+    /// failure it should, in most cases, be ignored, instead of raising a
+    /// connection error, to avoid potential man-in-the-middle and
+    /// man-on-the-side attacks.
+    ///
+    /// However, if no other packet was previously received, the connection
+    /// should indeed be closed as the received packet might just be network
+    /// background noise, and it shouldn't keep resources occupied indefinitely.
+    ///
+    /// This function maps an error to `Error::Done` to ignore a packet failure
+    /// without aborting the connection, except when no other packet was
+    /// previously received, in which case the error itself is returned, but
+    /// only on the server-side as the client will already have armed the idle
+    /// timer.
+    ///
+    /// This must only be used for errors preceding packet authentication.
+    /// Failures happening after a packet has been authenticated should still
+    /// cause the connection to be aborted.
     fn unauthenticated_rx_error(&self, e: Error) -> Error {
         // On the server, if no other packet has been successfully processed,
         // abort the connection to avoid keeping the connection open when only
@@ -3758,7 +3778,7 @@ impl<F: BufFactory> Connection<F> {
 
     /// Install the peer's initial connection ID and transport parameters.
     fn install_rx_peer_connection_id(
-        &mut self, hdr: &Header<'_>, recv_pid: usize,
+        &mut self, hdr: &Header<'static>, recv_pid: usize,
     ) -> Result<()> {
         if self.got_peer_conn_id {
             return Ok(());
@@ -10185,25 +10205,6 @@ impl<F: BufFactory> AsMut<btls::ssl::SslRef> for Connection<F> {
         self.handshake.ssl_mut()
     }
 }
-
-/// Maps an `Error` to `Error::Done`, or itself.
-///
-/// When a received packet that hasn't yet been authenticated triggers a failure
-/// it should, in most cases, be ignored, instead of raising a connection error,
-/// to avoid potential man-in-the-middle and man-on-the-side attacks.
-///
-/// However, if no other packet was previously received, the connection should
-/// indeed be closed as the received packet might just be network background
-/// noise, and it shouldn't keep resources occupied indefinitely.
-///
-/// This function maps an error to `Error::Done` to ignore a packet failure
-/// without aborting the connection, except when no other packet was previously
-/// received, in which case the error itself is returned, but only on the
-/// server-side as the client will already have armed the idle timer.
-///
-/// This must only be used for errors preceding packet authentication. Failures
-/// happening after a packet has been authenticated should still cause the
-/// connection to be aborted.
 
 // Transport parameter validation limits the exponent to 20. Scale before
 // narrowing the elapsed duration, and clamp to the largest wire integer.
