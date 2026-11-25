@@ -56,7 +56,6 @@ use netlog::h2;
 use netlog::h2::Http2Settings;
 use netlog::h3;
 use netlog::quic;
-use netlog::quic::TransportParameters;
 
 mod h2_flow;
 pub use h2_flow::H2SendWindows;
@@ -344,8 +343,6 @@ pub struct Datastore {
     pub h2_client_settings: Http2Settings,
     pub h2_server_settings: Http2Settings,
 
-    pub client_quic_tps: TransportParameters,
-
     pub last_event_time: f64,
 
     // There are several packet spaces, so store a map of all packets sent
@@ -429,7 +426,6 @@ pub struct Datastore {
     pub h2_send_windows: H2SendWindows,
 
     pub quic_peer_window_blocked: BTreeMap<i64, Vec<f64>>,
-    pub netlog_quic_client_side_window_updates: BTreeMap<i64, Vec<(f64, u64)>>,
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
 
@@ -492,25 +488,25 @@ fn cumulative_total(
 ///
 /// For bidirectional streams bit zero
 /// selects the initiator; bit one identifies unidirectional streams.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InitialStreamLimits {
-    bidi_local: u64,
-    bidi_remote: u64,
-    uni: u64,
+    pub connection: Option<u64>,
+    pub bidi_local: Option<u64>,
+    pub bidi_remote: Option<u64>,
+    pub uni: Option<u64>,
 }
 
 impl InitialStreamLimits {
-    fn update(&mut self, tp: &qlog::events::quic::ParametersSet) {
-        self.bidi_local = tp
-            .initial_max_stream_data_bidi_local
-            .unwrap_or(self.bidi_local);
-        self.bidi_remote = tp
-            .initial_max_stream_data_bidi_remote
-            .unwrap_or(self.bidi_remote);
-        self.uni = tp.initial_max_stream_data_uni.unwrap_or(self.uni);
+    fn update(&mut self, observed: Self) {
+        self.connection = observed.connection.or(self.connection);
+        self.bidi_local = observed.bidi_local.or(self.bidi_local);
+        self.bidi_remote = observed.bidi_remote.or(self.bidi_remote);
+        self.uni = observed.uni.or(self.uni);
     }
 
-    const fn for_stream(&self, stream_id: u64, advertiser: VantagePoint) -> u64 {
+    const fn for_stream(
+        &self, stream_id: u64, advertiser: VantagePoint,
+    ) -> Option<u64> {
         if stream_id & 2 != 0 {
             return self.uni;
         }
@@ -556,14 +552,14 @@ enum NetlogH2Direction {
     Received,
 }
 
-/// Whether an HTTP/3 frame was written by this endpoint or read from its peer.
+/// Whether this endpoint sent or received a recorded event.
 #[derive(Clone, Copy)]
-enum HttpDataDirection {
+enum LocalDirection {
     Sent,
     Received,
 }
 
-impl HttpDataDirection {
+impl LocalDirection {
     const fn is_client_data(self, vantage: VantagePoint) -> bool {
         matches!(
             (self, vantage),
@@ -667,30 +663,23 @@ impl Datastore {
 
     fn record_netlog_quic_stream_frame(
         &mut self, params: &quic::QuicSessionStreamFrameParams, time: f64,
-        direction: HttpDataDirection,
+        direction: LocalDirection,
     ) -> Result<(), TrackerError> {
         let observation = QuicStreamObservation::Frame {
             offset: Some(params.offset),
             length: Some(params.length),
             fin: Some(params.fin),
         };
-        match direction {
-            HttpDataDirection::Sent => self.sent_quic_streams.observe(
-                params.stream_id,
-                observation,
-                time,
-            ),
-            HttpDataDirection::Received => self.record_received_quic_stream(
-                params.stream_id,
-                observation,
-                time,
-            ),
-        }
+        self.record_quic_stream(direction, params.stream_id, observation, time)
     }
 
-    fn record_received_quic_stream(
-        &mut self, stream_id: u64, observation: QuicStreamObservation, time: f64,
+    fn record_quic_stream(
+        &mut self, direction: LocalDirection, stream_id: u64,
+        observation: QuicStreamObservation, time: f64,
     ) -> Result<(), TrackerError> {
+        if matches!(direction, LocalDirection::Sent) {
+            return self.sent_quic_streams.observe(stream_id, observation, time);
+        }
         self.received_quic_streams
             .observe(stream_id, observation, time)?;
         if matches!(observation, QuicStreamObservation::Frame {
@@ -851,16 +840,16 @@ impl Datastore {
 
     fn record_netlog_quic_reset(
         &mut self, params: &quic::QuicSessionRstStreamFrameParams, time: f64,
-        direction: HttpDataDirection, constants: &netlog::constants::Constants,
+        direction: LocalDirection, constants: &netlog::constants::Constants,
     ) -> Result<(), TrackerError> {
         let (tracker, termination) = match direction {
-            HttpDataDirection::Sent => (
+            LocalDirection::Sent => (
                 &mut self.sent_quic_streams,
                 NetlogQuicTermination::ResetSent {
                     offset: params.offset,
                 },
             ),
-            HttpDataDirection::Received => (
+            LocalDirection::Received => (
                 &mut self.received_quic_streams,
                 NetlogQuicTermination::ResetReceived {
                     offset: params.offset,
@@ -883,6 +872,92 @@ impl Datastore {
         Ok(())
     }
 
+    fn record_quic_max_data(
+        &mut self, direction: LocalDirection, time: f64, maximum: u64,
+    ) {
+        match direction {
+            LocalDirection::Sent => &mut self.sent_max_data,
+            LocalDirection::Received => &mut self.received_max_data,
+        }
+        .push((time, maximum));
+    }
+
+    fn record_quic_max_stream_data(
+        &mut self, direction: LocalDirection, stream_id: u64, time: f64,
+        maximum: u64,
+    ) -> Result<(), TrackerError> {
+        let (limits, advertiser, tracker) = match direction {
+            LocalDirection::Sent => (
+                &self.local_initial_stream_limits,
+                self.vantage_point,
+                &mut self.sent_stream_max_data_tracker,
+            ),
+            LocalDirection::Received => (
+                &self.peer_initial_stream_limits,
+                self.vantage_point.peer(),
+                &mut self.received_stream_max_data_tracker,
+            ),
+        };
+        tracker.update(
+            stream_id,
+            maximum,
+            time,
+            limits.for_stream(stream_id, advertiser),
+        )?;
+        Ok(())
+    }
+
+    fn record_netlog_quic_window_update(
+        &mut self, direction: LocalDirection, time: f64,
+        params: &quic::QuicSessionWindowUpdateFrameParams,
+    ) -> Result<(), TrackerError> {
+        if params.stream_id == -1 {
+            self.record_quic_max_data(direction, time, params.byte_offset);
+        } else if let Ok(stream_id) = u64::try_from(params.stream_id) {
+            self.record_quic_max_stream_data(
+                direction,
+                stream_id,
+                time,
+                params.byte_offset,
+            )?;
+        } else {
+            log::warn!(
+                "ignoring negative stream id in netlog window update: {}",
+                params.stream_id
+            );
+        }
+        Ok(())
+    }
+
+    fn record_quic_initial_limits(
+        &mut self, direction: LocalDirection, time: f64,
+        observed: InitialStreamLimits,
+    ) {
+        if let Some(maximum) = observed.connection {
+            self.record_quic_max_data(direction, time, maximum);
+        }
+        match direction {
+            LocalDirection::Sent => &mut self.local_initial_stream_limits,
+            LocalDirection::Received => &mut self.peer_initial_stream_limits,
+        }
+        .update(observed);
+    }
+
+    fn record_netlog_quic_transport_parameters(
+        &mut self, direction: LocalDirection, time: f64,
+        params: &quic::QuicSessionTransportParametersParams,
+    ) {
+        let parsed = quic::TransportParameters::from(
+            params.quic_transport_parameters.as_str(),
+        );
+        self.record_quic_initial_limits(direction, time, InitialStreamLimits {
+            connection: parsed.initial_max_data,
+            bidi_local: parsed.initial_max_stream_data_bidi_local,
+            bidi_remote: parsed.initial_max_stream_data_bidi_remote,
+            uni: parsed.initial_max_stream_data_uni,
+        });
+    }
+
     fn consume_netlog_quic(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &quic::Event, constants: &netlog::constants::Constants,
@@ -895,13 +970,13 @@ impl Datastore {
                 .record_netlog_quic_stream_frame(
                     &e.params,
                     rel_event_time,
-                    HttpDataDirection::Received,
+                    LocalDirection::Received,
                 )?,
             quic::Event::QuicSessionStreamFrameSent(e) => self
                 .record_netlog_quic_stream_frame(
                     &e.params,
                     rel_event_time,
-                    HttpDataDirection::Sent,
+                    LocalDirection::Sent,
                 )?,
 
             quic::Event::QuicSessionUnauthenticatedPacketHeaderReceived(e) =>
@@ -934,7 +1009,7 @@ impl Datastore {
                 .record_netlog_quic_reset(
                     &e.params,
                     rel_event_time,
-                    HttpDataDirection::Received,
+                    LocalDirection::Received,
                     constants,
                 )?,
 
@@ -942,7 +1017,7 @@ impl Datastore {
                 .record_netlog_quic_reset(
                     &e.params,
                     rel_event_time,
-                    HttpDataDirection::Sent,
+                    LocalDirection::Sent,
                     constants,
                 )?,
 
@@ -962,29 +1037,33 @@ impl Datastore {
                 s.push(rel_event_time);
             },
 
-            quic::Event::QuicSessionWindowUpdateFrameSent(e) => {
-                if e.params.stream_id == -1 {
-                    self.sent_max_data
-                        .push((rel_event_time, e.params.byte_offset));
-                } else {
-                    self.netlog_quic_client_side_window_updates
-                        .entry(e.params.stream_id)
-                        .or_default()
-                        .push((rel_event_time, e.params.byte_offset));
-                }
-            },
+            quic::Event::QuicSessionWindowUpdateFrameSent(e) => self
+                .record_netlog_quic_window_update(
+                    LocalDirection::Sent,
+                    rel_event_time,
+                    &e.params,
+                )?,
+            quic::Event::QuicSessionWindowUpdateFrameReceived(e) => self
+                .record_netlog_quic_window_update(
+                    LocalDirection::Received,
+                    rel_event_time,
+                    &e.params,
+                )?,
 
-            quic::Event::QuicSessionTransportParametersSent(e) => {
-                self.client_quic_tps =
-                    e.params.quic_transport_parameters.clone().into();
-                if let Some(initial) = self.client_quic_tps.initial_max_data {
-                    self.sent_max_data.push((rel_event_time, initial));
-                }
-            },
+            quic::Event::QuicSessionTransportParametersSent(e) => self
+                .record_netlog_quic_transport_parameters(
+                    LocalDirection::Sent,
+                    rel_event_time,
+                    &e.params,
+                ),
+            quic::Event::QuicSessionTransportParametersReceived(e) => self
+                .record_netlog_quic_transport_parameters(
+                    LocalDirection::Received,
+                    rel_event_time,
+                    &e.params,
+                ),
 
-            // ignore the other events for now
-            quic::Event::QuicSession(_) |
-            quic::Event::QuicSessionTransportParametersReceived(_) => (),
+            quic::Event::QuicSession(_) => (),
         }
         Ok(())
     }
@@ -993,13 +1072,13 @@ impl Datastore {
     /// roles. Validate arithmetic before mutating frame history or request
     /// metadata.
     fn record_http_data(
-        &mut self, direction: HttpDataDirection, stream_id: u64,
+        &mut self, direction: LocalDirection, stream_id: u64,
         length: Option<u64>, time: f64,
     ) -> Result<(), DatastoreError> {
         let req = self.get_or_insert_http_req(stream_id);
         let (history, field) = match direction {
-            HttpDataDirection::Sent => (&mut req.sent_data, "sent_data_bytes"),
-            HttpDataDirection::Received =>
+            LocalDirection::Sent => (&mut req.sent_data, "sent_data_bytes"),
+            LocalDirection::Received =>
                 (&mut req.received_data, "received_data_bytes"),
         };
         history
@@ -1021,7 +1100,7 @@ impl Datastore {
             ApplicationProto::Http3 => None,
         };
         self.record_http_data(
-            HttpDataDirection::Received,
+            LocalDirection::Received,
             stream_id,
             Some(length),
             event_time,
@@ -1038,7 +1117,7 @@ impl Datastore {
         &mut self, stream_id: u32, size: u32, event_time: f64,
     ) -> Result<(), DatastoreError> {
         self.record_http_data(
-            HttpDataDirection::Sent,
+            LocalDirection::Sent,
             u64::from(stream_id),
             Some(u64::from(size)),
             event_time,
@@ -1094,7 +1173,7 @@ impl Datastore {
                 )?,
 
             h3::Event::Http3DataSent(e) => self.record_http_data(
-                HttpDataDirection::Sent,
+                LocalDirection::Sent,
                 e.params.stream_id,
                 Some(e.params.payload_length),
                 rel_event_time,
@@ -1357,7 +1436,7 @@ impl Datastore {
                     v.raw.as_ref().and_then(|raw| raw.payload_length)
                 }),
                 ev_time,
-                HttpDataDirection::Sent,
+                LocalDirection::Sent,
             )?,
 
             EventData::Http3FrameParsed(v) => self.consume_qlog_h3_frame(
@@ -1367,7 +1446,7 @@ impl Datastore {
                     v.raw.as_ref().and_then(|raw| raw.payload_length)
                 }),
                 ev_time,
-                HttpDataDirection::Received,
+                LocalDirection::Received,
             )?,
 
             _ => (), // trace!("skipping {:?}", event.data),
@@ -1440,24 +1519,20 @@ impl Datastore {
     fn consume_qlog_transport_parameters_set(
         &mut self, tp: &qlog::events::quic::ParametersSet,
     ) {
-        let (limits, connection) = match tp.initiator {
-            Some(TransportInitiator::Local) => (
-                &mut self.local_initial_stream_limits,
-                &mut self.sent_max_data,
-            ),
-            Some(TransportInitiator::Remote) => (
-                &mut self.peer_initial_stream_limits,
-                &mut self.received_max_data,
-            ),
+        let direction = match tp.initiator {
+            Some(TransportInitiator::Local) => LocalDirection::Sent,
+            Some(TransportInitiator::Remote) => LocalDirection::Received,
             None => {
                 trace!("ignoring transport parameters with no initiator");
                 return;
             },
         };
-        if let Some(max_data) = tp.initial_max_data {
-            connection.push((0.0, max_data));
-        }
-        limits.update(tp);
+        self.record_quic_initial_limits(direction, 0.0, InitialStreamLimits {
+            connection: tp.initial_max_data,
+            bidi_local: tp.initial_max_stream_data_bidi_local,
+            bidi_remote: tp.initial_max_stream_data_bidi_remote,
+            uni: tp.initial_max_stream_data_uni,
+        });
     }
 
     /// ACKs in a 1-RTT packet acknowledge the shared application-data
@@ -1491,6 +1566,66 @@ impl Datastore {
         }
     }
 
+    fn record_qlog_stream_frame(
+        &mut self, direction: LocalDirection, frame: &QuicFrame, time: f64,
+    ) -> Result<(), TrackerError> {
+        match frame {
+            QuicFrame::MaxData { maximum, .. } => {
+                self.record_quic_max_data(direction, time, *maximum);
+            },
+
+            QuicFrame::MaxStreamData {
+                stream_id, maximum, ..
+            } => self.record_quic_max_stream_data(
+                direction, *stream_id, time, *maximum,
+            )?,
+
+            QuicFrame::ResetStream {
+                stream_id,
+                final_size,
+                ..
+            } => {
+                let (tracker, resets) = match direction {
+                    LocalDirection::Sent =>
+                        (&mut self.sent_quic_streams, &mut self.sent_reset_stream),
+                    LocalDirection::Received => (
+                        &mut self.received_quic_streams,
+                        &mut self.received_reset_stream,
+                    ),
+                };
+                tracker.observe(
+                    *stream_id,
+                    QuicStreamObservation::Reset {
+                        final_size: *final_size,
+                    },
+                    time,
+                )?;
+                resets.entry(*stream_id).or_default().push(frame.clone());
+            },
+
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                fin,
+                raw,
+            } => {
+                self.record_quic_stream(
+                    direction,
+                    *stream_id,
+                    QuicStreamObservation::Frame {
+                        offset: *offset,
+                        length: raw.as_ref().and_then(|raw| raw.payload_length),
+                        fin: *fin,
+                    },
+                    time,
+                )?;
+            },
+
+            _ => (),
+        }
+        Ok(())
+    }
+
     fn consume_qlog_packet_received(
         &mut self, pr: &qlog::events::quic::PacketReceived, ev_time: f64,
         process_acks: bool,
@@ -1519,57 +1654,6 @@ impl Datastore {
                         ..
                     } if process_acks => self.mark_qlog_acks(packet_type, ranges),
 
-                    QuicFrame::MaxData { maximum, .. } => {
-                        self.received_max_data.push((ev_time, *maximum));
-                    },
-
-                    QuicFrame::MaxStreamData {
-                        stream_id, maximum, ..
-                    } => {
-                        let init_val = self
-                            .peer_initial_stream_limits
-                            .for_stream(*stream_id, self.vantage_point.peer());
-                        self.received_stream_max_data_tracker
-                            .update(*stream_id, *maximum, ev_time, init_val)?;
-                    },
-
-                    QuicFrame::ResetStream {
-                        stream_id,
-                        final_size,
-                        ..
-                    } => {
-                        self.received_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Reset {
-                                final_size: *final_size,
-                            },
-                            ev_time,
-                        )?;
-                        self.received_reset_stream
-                            .entry(*stream_id)
-                            .or_default()
-                            .push(frame.clone());
-                    },
-
-                    QuicFrame::Stream {
-                        stream_id,
-                        offset,
-                        fin,
-                        raw,
-                    } => {
-                        self.record_received_quic_stream(
-                            *stream_id,
-                            QuicStreamObservation::Frame {
-                                offset: *offset,
-                                length: raw
-                                    .as_ref()
-                                    .and_then(|raw| raw.payload_length),
-                                fin: *fin,
-                            },
-                            ev_time,
-                        )?;
-                    },
-
                     QuicFrame::DataBlocked { .. } => {
                         self.quic_peer_window_blocked
                             .entry(-1)
@@ -1577,7 +1661,11 @@ impl Datastore {
                             .push(ev_time);
                     },
 
-                    _ => (),
+                    _ => self.record_qlog_stream_frame(
+                        LocalDirection::Received,
+                        frame,
+                        ev_time,
+                    )?,
                 }
             }
         }
@@ -1617,57 +1705,6 @@ impl Datastore {
                         // TODO
                     },
 
-                    QuicFrame::MaxData { maximum, .. } => {
-                        self.sent_max_data.push((event_time, *maximum));
-                    },
-
-                    QuicFrame::MaxStreamData {
-                        stream_id, maximum, ..
-                    } => {
-                        let init_val = self
-                            .local_initial_stream_limits
-                            .for_stream(*stream_id, self.vantage_point);
-                        self.sent_stream_max_data_tracker
-                            .update(*stream_id, *maximum, event_time, init_val)?;
-                    },
-
-                    QuicFrame::ResetStream {
-                        stream_id,
-                        final_size,
-                        ..
-                    } => {
-                        self.sent_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Reset {
-                                final_size: *final_size,
-                            },
-                            event_time,
-                        )?;
-                        self.sent_reset_stream
-                            .entry(*stream_id)
-                            .or_default()
-                            .push(frame.clone());
-                    },
-
-                    QuicFrame::Stream {
-                        stream_id,
-                        offset,
-                        fin,
-                        raw,
-                    } => {
-                        self.sent_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Frame {
-                                offset: *offset,
-                                length: raw
-                                    .as_ref()
-                                    .and_then(|raw| raw.payload_length),
-                                fin: *fin,
-                            },
-                            event_time,
-                        )?;
-                    },
-
                     QuicFrame::DataBlocked { limit, .. } => {
                         trace!("todo DATA_BLOCKED t={event_time} limit={limit}");
                     },
@@ -1680,7 +1717,11 @@ impl Datastore {
                         );
                     },
 
-                    _ => (),
+                    _ => self.record_qlog_stream_frame(
+                        LocalDirection::Sent,
+                        frame,
+                        event_time,
+                    )?,
                 }
             }
         }
@@ -1809,17 +1850,17 @@ impl Datastore {
     /// requests and responses and which DATA lengths are client/server bytes.
     fn consume_qlog_h3_frame(
         &mut self, stream_id: u64, frame: &Http3Frame, length: Option<u64>,
-        ev_time: f64, direction: HttpDataDirection,
+        ev_time: f64, direction: LocalDirection,
     ) -> Result<(), DatastoreError> {
         match frame {
             Http3Frame::Headers { headers, .. } => {
                 let vantage = self.vantage_point;
                 let req = self.get_or_insert_http_req(stream_id);
                 match direction {
-                    HttpDataDirection::Sent => {
+                    LocalDirection::Sent => {
                         req.time_first_headers_tx.get_or_insert(ev_time);
                     },
-                    HttpDataDirection::Received => {
+                    LocalDirection::Received => {
                         req.time_first_headers_rx.get_or_insert(ev_time);
                     },
                 }
@@ -2242,8 +2283,8 @@ mod netlog_tests {
 
     fn h3_received(stream_id: u64, size: u64) -> netlog::Event {
         netlog::Event::H3(h3::Event::Http3DataFrameReceived(
-            h3::Http3DataFrameReceivedEvent {
-                params: h3::Http3DataFrameReceivedParams {
+            netlog::EventPayload {
+                params: h3::Http3DataParams {
                     stream_id,
                     payload_length: size,
                 },
@@ -2258,8 +2299,8 @@ mod netlog_tests {
         let mut datastore = Datastore::default();
         for (time, length) in [(101, 4), (105, 9), (108, 0)] {
             let event = netlog::Event::H3(h3::Event::Http3DataSent(
-                h3::Http3DataSentEvent {
-                    params: h3::Http3DataSentParams {
+                netlog::EventPayload {
+                    params: h3::Http3DataParams {
                         stream_id: 5,
                         payload_length: length,
                     },
@@ -2495,8 +2536,8 @@ mod netlog_tests {
         };
         let grant = |byte_offset| {
             netlog::Event::Quic(quic::Event::QuicSessionWindowUpdateFrameSent(
-                quic::QuicSessionWindowUpdateFrameSentEvent {
-                    params: quic::QuicSessionWindowUpdateFrameSentParams {
+                quic::QuicSessionWindowUpdateFrameEvent {
+                    params: quic::QuicSessionWindowUpdateFrameParams {
                         byte_offset,
                         stream_id: -1,
                     },
@@ -2532,6 +2573,81 @@ mod netlog_tests {
             Some(&(7.0, 260))
         );
         assert_eq!(series.received_stream_frames_series[&11], [(3.0, 20)]);
+        Ok(())
+    }
+
+    #[test]
+    fn netlog_both_credit_directions_use_shared_initial_and_update_histories(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut data = Datastore::default();
+        for (time, kind, payload) in [
+            (
+                101,
+                "QUIC_SESSION_TRANSPORT_PARAMETERS_SENT",
+                serde_json::json!({"quic_transport_parameters":"[Client initial_max_data 500 initial_max_stream_data_bidi_local 100]"}),
+            ),
+            (
+                102,
+                "QUIC_SESSION_TRANSPORT_PARAMETERS_RECEIVED",
+                serde_json::json!({"quic_transport_parameters":"[Server initial_max_data 600 initial_max_stream_data_bidi_remote 200]"}),
+            ),
+            (
+                103,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_SENT",
+                serde_json::json!({"stream_id":0,"byte_offset":150}),
+            ),
+            (
+                104,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":0,"byte_offset":180}),
+            ),
+            (
+                105,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":-1,"byte_offset":"9007199254740993"}),
+            ),
+            (
+                106,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":-1,"byte_offset":700}),
+            ),
+        ] {
+            let header = netlog::EventHeader {
+                ty_string: kind.into(),
+                time_num: time,
+                ..Default::default()
+            };
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"params":payload}))?;
+            let event = netlog::parse_event(&header, &bytes)
+                .ok_or("netlog credit event did not decode")?;
+            consume(&constants, &mut data, time, &event)?;
+        }
+        assert_eq!(data.sent_max_data, [(1.0, 500)]);
+        assert_eq!(data.received_max_data, [
+            (2.0, 600),
+            (5.0, 9_007_199_254_740_993),
+            (6.0, 700)
+        ]);
+        assert_eq!(
+            data.sent_stream_max_data_tracker.get_stream_max(0),
+            Some(150)
+        );
+        assert_eq!(
+            data.received_stream_max_data_tracker.get_stream_max(0),
+            Some(200)
+        );
+        let series = crate::seriesstore::SeriesStore::from_datastore(&data)?;
+        assert_eq!(
+            series.received_max_data.last(),
+            Some(&(6.0, 9_007_199_254_740_993))
+        );
+        assert_eq!(series.sent_stream_max_data[&0].last(), Some(&(3.0, 150)));
+        assert_eq!(
+            series.received_stream_max_data[&0].last(),
+            Some(&(4.0, 200))
+        );
         Ok(())
     }
 
@@ -2749,8 +2865,8 @@ mod netlog_tests {
 
     fn quic_ack_received(missing_packets: Vec<u64>) -> netlog::Event {
         netlog::Event::Quic(quic::Event::QuicSessionAckFrameReceived(
-            quic::QuicSessionAckFrameReceived {
-                params: quic::QuicSessionAckFrameReceivedParams {
+            quic::QuicSessionAckFrameEvent {
+                params: quic::QuicSessionAckFrameParams {
                     missing_packets,
                     ..Default::default()
                 },
@@ -2760,8 +2876,8 @@ mod netlog_tests {
 
     fn quic_ack_sent(missing_packets: Vec<u64>) -> netlog::Event {
         netlog::Event::Quic(quic::Event::QuicSessionAckFrameSent(
-            quic::QuicSessionAckFrameSent {
-                params: quic::QuicSessionAckFrameSentParams {
+            quic::QuicSessionAckFrameEvent {
+                params: quic::QuicSessionAckFrameParams {
                     missing_packets,
                     ..Default::default()
                 },
@@ -3042,8 +3158,8 @@ mod netlog_tests {
         let constants = constants()?;
         let mut datastore = Datastore::default();
         let sent = netlog::Event::Quic(quic::Event::QuicSessionAckFrameSent(
-            quic::QuicSessionAckFrameSent {
-                params: quic::QuicSessionAckFrameSentParams {
+            quic::QuicSessionAckFrameEvent {
+                params: quic::QuicSessionAckFrameParams {
                     missing_packets: vec![1, 2, 3, 4, 5, 6, 7],
                     ..Default::default()
                 },
@@ -3051,8 +3167,8 @@ mod netlog_tests {
         ));
         let received =
             netlog::Event::Quic(quic::Event::QuicSessionAckFrameReceived(
-                quic::QuicSessionAckFrameReceived {
-                    params: quic::QuicSessionAckFrameReceivedParams {
+                quic::QuicSessionAckFrameEvent {
+                    params: quic::QuicSessionAckFrameParams {
                         missing_packets: vec![3, 4],
                         ..Default::default()
                     },
