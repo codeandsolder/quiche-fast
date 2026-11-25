@@ -1185,6 +1185,22 @@ impl Datastore {
         Ok(())
     }
 
+    // Chrome logs a client endpoint. Server-initiated push streams do not
+    // have a client send side; the connection itself always has one.
+    const fn h2_has_local_send_side(&self, stream_id: u32) -> bool {
+        stream_id == 0 ||
+            stream_id & 1 != 0 ||
+            matches!(self.vantage_point, VantagePoint::Server)
+    }
+
+    /// A received frame on a stream with a local send side provides
+    /// evidence of that stream's existence in a partial capture.
+    fn observe_h2_received_stream(&mut self, stream_id: u32, time: f64) {
+        if stream_id != 0 && self.h2_has_local_send_side(stream_id) {
+            self.h2_send_windows.open(stream_id, time);
+        }
+    }
+
     /// `WINDOW_UPDATE` received from the peer increases our send credit;
     /// `WINDOW_UPDATE` we sent increases the peer's send credit instead.
     /// Neither invalid nor zero deltas are valid protocol increments.
@@ -1206,13 +1222,16 @@ impl Datastore {
         };
 
         match direction {
-            NetlogH2Direction::Received => {
+            NetlogH2Direction::Received
+                if self.h2_has_local_send_side(stream_id) =>
+            {
                 self.h2_send_windows.change(
                     stream_id,
                     event_time,
                     i64::from(delta),
                 );
             },
+            NetlogH2Direction::Received => (),
             NetlogH2Direction::Sent => {
                 self.h2_recv_window_updates
                     .entry(stream_id)
@@ -1226,9 +1245,9 @@ impl Datastore {
     /// The received `RESET_STREAM` event provides no description text.
     fn record_netlog_h2_stream_reset(
         &mut self, direction: NetlogH2Direction, stream_id: u32,
-        error_code: &str, description: Option<&str>,
+        error_code: &str, description: Option<&str>, time: f64,
     ) {
-        self.h2_send_windows.close(stream_id);
+        self.h2_send_windows.close(stream_id, time);
         let Some(req) = self.http_requests.get_mut(&u64::from(stream_id)) else {
             return;
         };
@@ -1247,9 +1266,9 @@ impl Datastore {
     /// available, a human-readable Chromium error name.
     fn record_netlog_h2_session_close(
         &mut self, params: &h2::Http2SessionCloseParams,
-        constants: &netlog::constants::Constants,
+        constants: &netlog::constants::Constants, time: f64,
     ) {
-        self.h2_send_windows.close_session();
+        self.h2_send_windows.close_session(time);
         self.h2_session_close = Some(H2SessionClose {
             session_id: self.session_id.unwrap_or(-1),
             sni: self
@@ -1282,6 +1301,25 @@ impl Datastore {
         self.h2_server_settings.set_from_wire(id, value);
     }
 
+    fn record_netlog_h2_sent_headers(
+        &mut self, params: &h2::Http2SessionSendHeadersParams, time: f64,
+        session_start_time: u64, stream_bind: &StreamBindingMap,
+    ) {
+        self.h2_send_windows.open(params.stream_id, time);
+        if params.fin {
+            self.h2_send_windows.close(params.stream_id, time);
+        }
+        let req = self.get_or_insert_http_req(u64::from(params.stream_id));
+        req.time_first_headers_tx.get_or_insert(time);
+        req.set_request_info_from_netlog(&params.headers);
+
+        if let Some(sb) = stream_bind.get(&params.source_dependency.id) {
+            // Discovery can precede the session's creation.
+            req.time_discovery =
+                Some(netlog_relative_time(*sb, session_start_time));
+        }
+    }
+
     fn consume_netlog_h2(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &h2::Event, constants: &netlog::constants::Constants,
@@ -1301,41 +1339,37 @@ impl Datastore {
             h2::Event::Http2SessionRecvSetting(e) => {
                 self.record_netlog_h2_peer_setting(&e.params, rel_event_time);
             },
-            h2::Event::Http2SessionSendHeaders(e) => {
-                self.h2_send_windows
-                    .open(e.params.stream_id, rel_event_time);
-                if e.params.fin {
-                    self.h2_send_windows.close(e.params.stream_id);
-                }
-                let req =
-                    self.get_or_insert_http_req(u64::from(e.params.stream_id));
-                req.time_first_headers_tx.get_or_insert(rel_event_time);
-                req.set_request_info_from_netlog(&e.params.headers);
-
-                if let Some(sb) = stream_bind.get(&e.params.source_dependency.id)
-                {
-                    // Discovery can precede the session's creation.
-                    req.time_discovery =
-                        Some(netlog_relative_time(*sb, session_start_time));
-                }
-            },
+            h2::Event::Http2SessionSendHeaders(e) => self
+                .record_netlog_h2_sent_headers(
+                    &e.params,
+                    rel_event_time,
+                    session_start_time,
+                    stream_bind,
+                ),
 
             h2::Event::Http2SessionRecvHeaders(e) => {
-                self.h2_send_windows
-                    .open(e.params.stream_id, rel_event_time);
+                self.observe_h2_received_stream(
+                    e.params.stream_id,
+                    rel_event_time,
+                );
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            h2::Event::Http2SessionRecvData(e) => self
-                .record_netlog_received_data(
+            h2::Event::Http2SessionRecvData(e) => {
+                self.record_netlog_received_data(
                     ApplicationProto::Http2,
                     u64::from(e.params.stream_id),
                     u64::from(e.params.size),
                     rel_event_time,
-                )?,
+                )?;
+                self.observe_h2_received_stream(
+                    e.params.stream_id,
+                    rel_event_time,
+                );
+            },
 
             h2::Event::Http2SessionSendData(e) => {
                 self.record_netlog_sent_h2_data(
@@ -1344,7 +1378,8 @@ impl Datastore {
                     rel_event_time,
                 )?;
                 if e.params.fin {
-                    self.h2_send_windows.close(e.params.stream_id);
+                    self.h2_send_windows
+                        .close(e.params.stream_id, rel_event_time);
                 }
             },
 
@@ -1364,8 +1399,12 @@ impl Datastore {
                     rel_event_time,
                 ),
 
-            h2::Event::Http2SessionClose(e) =>
-                self.record_netlog_h2_session_close(&e.params, constants),
+            h2::Event::Http2SessionClose(e) => self
+                .record_netlog_h2_session_close(
+                    &e.params,
+                    constants,
+                    rel_event_time,
+                ),
 
             h2::Event::Http2SessionSendRstStream(e) => self
                 .record_netlog_h2_stream_reset(
@@ -1373,6 +1412,7 @@ impl Datastore {
                     e.params.stream_id,
                     &e.params.error_code,
                     Some(&e.params.description),
+                    rel_event_time,
                 ),
 
             h2::Event::Http2SessionRecvRstStream(e) => self
@@ -1381,6 +1421,7 @@ impl Datastore {
                     e.params.stream_id,
                     &e.params.error_code,
                     None,
+                    rel_event_time,
                 ),
 
             // Recognized netlog events with no datastore series.
@@ -3301,6 +3342,28 @@ mod netlog_tests {
                 .error,
             "REFUSED_STREAM"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn h2_received_data_opens_only_observed_local_send_sides(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut data = Datastore::default();
+        for (time, event) in [
+            (103, h2_window_received(1, 50)),
+            (101, h2_received(1, 10)),
+            (102, h2_received(2, 20)),
+            (104, h2_window_received(2, 100)),
+            (105, h2_window_sent(2, 200)),
+        ] {
+            consume(&constants, &mut data, time, &event)?;
+        }
+        let histories = data.h2_send_windows.histories();
+        assert_eq!(histories.len(), 1);
+        assert_eq!(histories[&1].changes, [(3.0, 50)]);
+        assert_eq!(histories[&1].opened_at.to_bits(), 1.0_f64.to_bits());
+        assert_eq!(data.h2_recv_window_updates[&2], [(5.0, 200)]);
         Ok(())
     }
 

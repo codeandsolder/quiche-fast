@@ -655,7 +655,7 @@ impl SeriesStore {
         x_max: &mut f64,
     ) -> SeriesResult<BTreeMap<u32, Vec<(f64, i64)>>> {
         let mut output = BTreeMap::new();
-        for (&stream, history) in source.histories() {
+        for (stream, history) in source.histories() {
             let series = cumulative_series(
                 &history.changes,
                 i64::from(history.initial),
