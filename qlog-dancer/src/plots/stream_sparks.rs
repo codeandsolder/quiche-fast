@@ -144,7 +144,7 @@ impl<T> SparkOutputs<T> {
         })
     }
 
-    const fn as_ref(&self) -> SparkOutputs<&T> {
+    pub(crate) const fn as_ref(&self) -> SparkOutputs<&T> {
         SparkOutputs {
             download: SparkPair {
                 absolute: &self.download.absolute,

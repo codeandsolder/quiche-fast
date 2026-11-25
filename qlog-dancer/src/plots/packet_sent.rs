@@ -481,14 +481,15 @@ pub fn plot_packet_sent(
 ///
 /// # Errors
 /// Returns browser canvas/backend or invalid chart errors.
-pub fn plot_packet_sent_plot_canvas<'a>(
-    params: &PlotParameters, filename: &str, ss: &SeriesStore, canvas_id: &str,
+pub fn plot_packet_timeline_canvas<'a>(
+    is_sent: bool, params: &PlotParameters, filename: &str, ss: &SeriesStore,
+    canvas_id: &str,
 ) -> Result<
     ChartContext<'a, CanvasBackend, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     Box<dyn Error>,
 > {
     let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
-    draw_packet_sent_received_plot(true, filename, params, ss, &root)
+    draw_packet_sent_received_plot(is_sent, filename, params, ss, &root)
 }
 
 #[cfg(target_arch = "wasm32")]
