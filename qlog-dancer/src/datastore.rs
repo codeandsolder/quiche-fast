@@ -1115,18 +1115,47 @@ impl Datastore {
 
     /// HTTP/2 outbound DATA also consumes send-window credit.
     fn record_netlog_sent_h2_data(
-        &mut self, stream_id: u32, size: u32, event_time: f64,
+        &mut self, params: &h2::Http2SessionSendDataParams, event_time: f64,
     ) -> Result<(), DatastoreError> {
         self.record_http_data(
             LocalDirection::Sent,
-            u64::from(stream_id),
-            Some(u64::from(size)),
+            u64::from(params.stream_id),
+            Some(u64::from(params.size)),
             event_time,
         )?;
+        let delta = -i64::from(params.size);
         self.h2_send_windows
-            .change(stream_id, event_time, -i64::from(size));
-        if stream_id != 0 {
-            self.h2_send_windows.change(0, event_time, -i64::from(size));
+            .change(params.stream_id, event_time, delta);
+        if params.stream_id != 0 {
+            self.h2_send_windows.change(0, event_time, delta);
+        }
+        if params.fin {
+            self.h2_send_windows.close(params.stream_id, event_time);
+            self.record_h2_data_end(
+                params.stream_id,
+                LocalDirection::Sent,
+                event_time,
+            );
+        }
+        Ok(())
+    }
+
+    fn record_netlog_received_h2_data(
+        &mut self, params: &h2::Http2SessionRecvDataParams, time: f64,
+    ) -> Result<(), DatastoreError> {
+        self.record_netlog_received_data(
+            ApplicationProto::Http2,
+            u64::from(params.stream_id),
+            u64::from(params.size),
+            time,
+        )?;
+        self.observe_h2_received_stream(params.stream_id, time);
+        if params.fin {
+            self.record_h2_data_end(
+                params.stream_id,
+                LocalDirection::Received,
+                time,
+            );
         }
         Ok(())
     }
@@ -1413,42 +1442,11 @@ impl Datastore {
                 );
             },
 
-            h2::Event::Http2SessionRecvData(e) => {
-                self.record_netlog_received_data(
-                    ApplicationProto::Http2,
-                    u64::from(e.params.stream_id),
-                    u64::from(e.params.size),
-                    rel_event_time,
-                )?;
-                self.observe_h2_received_stream(
-                    e.params.stream_id,
-                    rel_event_time,
-                );
-                if e.params.fin {
-                    self.record_h2_data_end(
-                        e.params.stream_id,
-                        LocalDirection::Received,
-                        rel_event_time,
-                    );
-                }
-            },
+            h2::Event::Http2SessionRecvData(e) =>
+                self.record_netlog_received_h2_data(&e.params, rel_event_time)?,
 
-            h2::Event::Http2SessionSendData(e) => {
-                self.record_netlog_sent_h2_data(
-                    e.params.stream_id,
-                    e.params.size,
-                    rel_event_time,
-                )?;
-                if e.params.fin {
-                    self.h2_send_windows
-                        .close(e.params.stream_id, rel_event_time);
-                    self.record_h2_data_end(
-                        e.params.stream_id,
-                        LocalDirection::Sent,
-                        rel_event_time,
-                    );
-                }
-            },
+            h2::Event::Http2SessionSendData(e) =>
+                self.record_netlog_sent_h2_data(&e.params, rel_event_time)?,
 
             h2::Event::Http2SessionRecvWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
@@ -2491,9 +2489,10 @@ mod netlog_tests {
             (6.0, 12)
         ]);
         let h3_series = crate::seriesstore::SeriesStore::from_datastore(&h3)?;
-        assert!(h3_series
-            .netlog_h2_stream_received_connection_cumulative
-            .is_empty());
+        assert_eq!(
+            h3_series.netlog_h2_stream_received_connection_cumulative,
+            [] as [(f64, u64); 0]
+        );
         Ok(())
     }
 

@@ -199,32 +199,34 @@ fn occupancy_intervals(
     Ok(intervals)
 }
 
-/// Render pending and in-flight request occupancy with event-driven intervals.
-///
-/// # Errors
-/// Returns invalid times, impossible request counts, output and backend errors.
-pub fn plot_pending(
-    params: &PendingPlotParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
-    ty: &ChartOutputType,
-) -> Result<(), Box<dyn Error>> {
-    let mut start = 0.0_f64.min(ss.sent_x_min).min(ss.received_x_min);
-    let mut end = ds.last_event_time.max(ss.sent_x_max).max(ss.received_x_max);
-    if !end.is_finite() {
-        return Err(invalid_chart("trace duration must be finite").into());
-    }
-    for time in ds
-        .http_requests
-        .values()
-        .flat_map(request_times)
-        .chain(ds.time_session_close)
+struct PendingPlotData {
+    range: std::ops::Range<f64>,
+    intervals: Vec<PendingInterval>,
+    y_max: u64,
+}
+
+fn pending_plot_data(
+    clamp: &ClampParams, ss: &SeriesStore, ds: &Datastore,
+) -> io::Result<PendingPlotData> {
+    let (mut start, mut end) = (0.0_f64, 0.0_f64);
+    for time in [
+        ss.sent_x_min,
+        ss.received_x_min,
+        ss.sent_x_max,
+        ss.received_x_max,
+        ds.last_event_time,
+    ]
+    .into_iter()
+    .chain(ds.http_requests.values().flat_map(request_times))
+    .chain(ds.time_session_close)
     {
         validate_request_time(time)?;
         start = start.min(time);
         end = end.max(time);
     }
-    let range = checked_time_range(start, end, &params.clamp)?;
+    let range = checked_time_range(start, end, clamp)?;
     // Clip both ends before deriving the count axis.
-    let visible_end = params.clamp.end.map_or(end, |clamp| end.min(clamp));
+    let visible_end = clamp.end.map_or(end, |clamp| end.min(clamp));
     let intervals = occupancy_intervals(ds, visible_end)?
         .into_iter()
         .filter_map(|mut item| {
@@ -239,6 +241,26 @@ pub fn plot_pending(
             .ok_or_else(|| invalid_chart("request occupancy exceeds u64"))?;
         Ok::<_, io::Error>(maximum.max(count))
     })?;
+    Ok(PendingPlotData {
+        range,
+        intervals,
+        y_max,
+    })
+}
+
+/// Render pending and in-flight request occupancy with event-driven intervals.
+///
+/// # Errors
+/// Returns invalid times, impossible request counts, output and backend errors.
+pub fn plot_pending(
+    params: &PendingPlotParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
+    ty: &ChartOutputType,
+) -> Result<(), Box<dyn Error>> {
+    let PendingPlotData {
+        range,
+        intervals,
+        y_max,
+    } = pending_plot_data(&params.clamp, ss, ds)?;
     let config = ChartConfig::new("pending", filename, &params.clamp, ds, ty);
     #[cfg(not(target_arch = "wasm32"))]
     let path = match ty {
@@ -545,6 +567,40 @@ mod tests {
             pending: 1,
             in_flight: 0
         },]);
+        Ok(())
+    }
+
+    #[test]
+    fn occupancy_axis_uses_only_visible_intervals() -> Result<(), Box<dyn Error>>
+    {
+        let mut ds = Datastore {
+            last_event_time: 10.0,
+            ..Datastore::default()
+        };
+        for (id, end) in [(1, 3.0), (3, 4.0), (5, 9.0)] {
+            ds.http_requests.insert(id, HttpRequestStub {
+                time_first_headers_tx: Some(-2.0),
+                time_response_terminal: Some(end),
+                ..HttpRequestStub::default()
+            });
+        }
+        let plot = pending_plot_data(
+            &ClampParams {
+                start: Some(5.0),
+                end: Some(8.0),
+                ..Default::default()
+            },
+            &SeriesStore::default(),
+            &ds,
+        )?;
+        assert_eq!(plot.range, 5.0..8.0);
+        assert_eq!(plot.y_max, 1);
+        assert_eq!(plot.intervals, [PendingInterval {
+            start: 5.0,
+            end: 8.0,
+            pending: 0,
+            in_flight: 1
+        }]);
         Ok(())
     }
 
