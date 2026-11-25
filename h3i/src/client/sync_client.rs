@@ -425,7 +425,7 @@ pub fn connect_with_early_data(
 
         // Provides as many CIDs as possible.
         while conn.scids_left() > 0 {
-            let (scid, reset_token) = generate_cid_and_reset_token();
+            let (scid, reset_token) = generate_cid_and_reset_token()?;
 
             if conn.new_scid(&scid, reset_token, false).is_err() {
                 break;
@@ -555,7 +555,8 @@ fn check_duration_and_do_actions(
 }
 
 /// Generate a new pair of Source Connection ID and reset token.
-pub fn generate_cid_and_reset_token() -> (quiche::ConnectionId<'static>, u128) {
+pub fn generate_cid_and_reset_token(
+) -> Result<(quiche::ConnectionId<'static>, u128), ClientError> {
     let rng = SystemRandom::new();
 
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
@@ -564,10 +565,11 @@ pub fn generate_cid_and_reset_token() -> (quiche::ConnectionId<'static>, u128) {
     let scid = scid.to_vec().into();
 
     let mut reset_token = [0; 16];
-    rng.fill(&mut reset_token[..]).unwrap();
+    rng.fill(&mut reset_token)
+        .map_err(|error| ClientError::Other(error.to_string()))?;
 
     let reset_token = u128::from_be_bytes(reset_token);
-    (scid, reset_token)
+    Ok((scid, reset_token))
 }
 
 fn handle_actions<'a, I>(
