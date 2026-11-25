@@ -284,9 +284,21 @@ impl StreamMaxTracker {
     /// # Errors
     /// Returns an error if the sum of observed stream maxima overflows.
     pub fn update(
-        &mut self, stream_id: u64, new_value: u64, time: f64, initial: u64,
+        &mut self, stream_id: u64, new_value: u64, time: f64,
+        initial: Option<u64>,
     ) -> Result<Option<(u64, u64)>, TrackerError> {
-        self.record(stream_id, time, new_value, new_value, Some(initial))
+        let initial = if self.streams.contains_key(&stream_id) {
+            None
+        } else {
+            initial
+        };
+        self.record(
+            stream_id,
+            time,
+            new_value,
+            new_value.max(initial.unwrap_or_default()),
+            initial,
+        )
     }
 }
 
@@ -332,7 +344,7 @@ mod tests {
         assert!(buffers.streams().is_empty());
         let mut expected_history = Vec::new();
         for &(stream, value, time, change, total) in updates {
-            assert_eq!(maxima.update(stream, value, time, 0)?, change);
+            assert_eq!(maxima.update(stream, value, time, Some(0))?, change);
             // Use a nonzero offset to exercise endpoint rather than length.
             let offset = value / 2;
             assert_eq!(
@@ -496,7 +508,7 @@ mod tests {
     ) -> Result<(), TrackerError> {
         let mut maxima = StreamMaxTracker::default();
         let mut buffers = StreamBufferTracker::default();
-        assert_eq!(maxima.update(7, 0, 1.0, 0)?, None);
+        assert_eq!(maxima.update(7, 0, 1.0, Some(0))?, None);
         assert_eq!(
             buffers.update(
                 7,
@@ -520,13 +532,32 @@ mod tests {
     #[test]
     fn synthetic_initial_point_is_recorded_once() -> Result<(), TrackerError> {
         let mut tracker = StreamMaxTracker::default();
-        tracker.update(0, 1000, 10.0, 500)?;
-        tracker.update(0, 1500, 20.0, 700)?;
+        tracker.update(0, 1000, 10.0, Some(500))?;
+        tracker.update(0, 1500, 20.0, Some(700))?;
         assert_eq!(
             tracker.streams().get(&0).map(super::StreamHistory::points),
             Some([(0.0, 500), (10.0, 1000), (20.0, 1500)].as_slice())
         );
         assert_eq!(tracker.current_sum(), 1500);
+        Ok(())
+    }
+
+    #[test]
+    fn initial_stream_credit_is_known_or_absent_and_never_regresses(
+    ) -> Result<(), TrackerError> {
+        let mut tracker = StreamMaxTracker::default();
+        tracker.update(0, 20, 10.0, Some(100))?;
+        tracker.update(0, 30, 12.0, Some(200))?;
+        tracker.update(4, 40, 13.0, None)?;
+        assert_eq!(tracker.get_stream_max(0), Some(100));
+        assert_eq!(tracker.get_stream_max(4), Some(40));
+        assert_eq!(tracker.current_sum(), 140);
+        assert_eq!(tracker.streams()[&0].points(), [
+            (0.0, 100),
+            (10.0, 20),
+            (12.0, 30)
+        ]);
+        assert_eq!(tracker.streams()[&4].points(), [(13.0, 40)]);
         Ok(())
     }
 
@@ -571,7 +602,10 @@ mod tests {
     ) -> Result<(), TrackerError> {
         let mut maxima = StreamMaxTracker::default();
         let mut buffers = StreamBufferTracker::default();
-        assert_eq!(maxima.update(5, u64::MAX, 1.0, 12)?, Some((0, u64::MAX)));
+        assert_eq!(
+            maxima.update(5, u64::MAX, 1.0, Some(12))?,
+            Some((0, u64::MAX))
+        );
         assert_eq!(
             buffers.update(
                 5,
@@ -588,7 +622,7 @@ mod tests {
             total: u64::MAX,
             increment: 1,
         });
-        assert_eq!(maxima.update(6, 1, 2.0, 4), error);
+        assert_eq!(maxima.update(6, 1, 2.0, Some(0)), error);
         assert_eq!(
             buffers.update(
                 6,
@@ -606,7 +640,7 @@ mod tests {
         assert!(!buffers.streams().contains_key(&6));
         assert_eq!(maxima.sum_series(), [(1.0, u64::MAX)]);
         assert_eq!(buffers.sum_series(), [(1.0, u64::MAX)]);
-        assert_eq!(maxima.update(5, 3, 3.0, 0)?, None);
+        assert_eq!(maxima.update(5, 3, 3.0, Some(0))?, None);
         assert_eq!(
             buffers.update(
                 5,

@@ -55,6 +55,7 @@ pub enum PrioritizedElementType {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3PriorityUpdateSentParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub prioritized_element_id: u64,
     pub priority_field_value: String,
     #[serde(rename = "type")]
@@ -68,6 +69,7 @@ pub struct Http3PriorityUpdateSentEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3HeadersSentParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
     pub headers: Vec<String>,
 }
@@ -79,7 +81,9 @@ pub struct Http3HeadersSentEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3DataSentParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub payload_length: u64,
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
 }
 
@@ -90,7 +94,9 @@ pub struct Http3DataSentEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3HeadersReceivedParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub compressed_headers_length: u64,
 }
 
@@ -101,6 +107,7 @@ pub struct Http3HeadersReceivedEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3HeadersDecodedParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
     pub headers: Vec<String>,
 }
@@ -112,7 +119,9 @@ pub struct Http3HeadersDecodedEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct Http3DataFrameReceivedParams {
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub payload_length: u64,
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
 }
 

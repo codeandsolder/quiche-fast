@@ -339,6 +339,7 @@ pub mod h2;
 pub mod h3;
 pub mod http;
 pub mod quic;
+mod wire_number;
 
 #[cfg(test)]
 mod input_tests {

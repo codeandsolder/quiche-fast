@@ -340,30 +340,36 @@ pub fn print_flow_control(data: &[LogFileData]) {
             lf.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
         );
 
-        println!("  Initial Client connection window, Initial Client Bidi Local Stream Window");
-        println!(
-            "  {},{}",
-            lf.datastore.client_quic_tps.initial_max_data.unwrap_or(0),
-            lf.datastore
-                .client_quic_tps
-                .initial_max_stream_data_bidi_local
-                .unwrap_or(0)
-        );
-
-        println!("  Connection flow control updates");
-        println!("    Time, Value");
-        for (time, value) in &lf.datastore.sent_max_data {
-            println!("    {time},{value}");
-        }
-
-        for (stream_id, points) in
-            &lf.datastore.netlog_quic_client_side_window_updates
-        {
-            println!("  Stream {stream_id} flow control updates");
+        for (direction, limits, connection, streams) in [
+            (
+                "sent",
+                &lf.datastore.local_initial_stream_limits,
+                &lf.datastore.sent_max_data,
+                &lf.datastore.sent_stream_max_data_tracker,
+            ),
+            (
+                "received",
+                &lf.datastore.peer_initial_stream_limits,
+                &lf.datastore.received_max_data,
+                &lf.datastore.received_stream_max_data_tracker,
+            ),
+        ] {
+            println!("  Initial {direction} connection and stream limits: connection={}, bidi_local={}, bidi_remote={}, uni={}",
+                crate::request_stub::NaOption::new(limits.connection),
+                crate::request_stub::NaOption::new(limits.bidi_local),
+                crate::request_stub::NaOption::new(limits.bidi_remote),
+                crate::request_stub::NaOption::new(limits.uni));
+            println!("  {direction} connection flow control updates");
             println!("    Time, Value");
-
-            for (time, val) in points {
-                println!("    {time},{val}");
+            for (time, value) in connection {
+                println!("    {time},{value}");
+            }
+            for (stream_id, history) in streams.streams() {
+                println!("  {direction} stream {stream_id} flow control updates");
+                println!("    Time, Value");
+                for (time, value) in history.points() {
+                    println!("    {time},{value}");
+                }
             }
         }
     }
