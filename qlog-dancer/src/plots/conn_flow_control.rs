@@ -117,12 +117,13 @@ fn window_series(
 ) -> Option<&[(f64, u64)]> {
     match proto {
         ApplicationProto::Http2 =>
-            return Some(ss.h2_connection_receive_credit.as_slice())
+            Some(ss.h2_connection_receive_credit.as_slice())
                 .filter(|points| !points.is_empty()),
-        ApplicationProto::Http3 =>
-            ss.netlog_quic_client_side_window_updates.get(&-1),
+        ApplicationProto::Http3 => ss
+            .netlog_quic_client_side_window_updates
+            .get(&-1)
+            .map(Vec::as_slice),
     }
-    .map(Vec::as_slice)
 }
 
 fn blocked_connection_events(ds: &Datastore) -> Option<&[f64]> {

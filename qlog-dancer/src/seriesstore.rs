@@ -699,10 +699,8 @@ impl SeriesStore {
                 series: "h2_connection_receive_credit",
             },
         )?;
-        if let Some(&(time, credit)) = series.last() {
-            if time < end {
-                series.push((end, credit));
-            }
+        if let Some(&(_, credit)) = series.last().filter(|point| point.0 < end) {
+            series.push((end, credit));
         }
         Ok(series)
     }
