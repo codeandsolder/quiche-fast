@@ -31,12 +31,12 @@ use std::task::Context;
 use std::task::Poll;
 use std::time::Instant;
 
+use datagram_socket::DgramBuffer;
 use tokio::sync::mpsc;
 use tokio_util::sync::PollSender;
 
 use super::H3ConnectionError;
 use super::H3ConnectionResult;
-use super::InboundFrame;
 use super::InboundFrameSender;
 use super::InboundFrameStream;
 use super::OutboundFrame;
@@ -68,9 +68,6 @@ pub(super) struct StreamCtx {
     pub(super) read_state: ReadState,
     /// Indicates the stream sent fin or reset. No more data will be sent.
     pub(super) fin_or_reset_sent: bool,
-    /// The flow ID for proxying datagrams over this stream. If `None`,
-    /// the stream has no associated DATAGRAM flow.
-    pub(super) associated_dgram_flow_id: Option<u64>,
 }
 
 impl StreamCtx {
@@ -93,8 +90,6 @@ impl StreamCtx {
 
             read_state: ReadState::Open,
             fin_or_reset_sent: false,
-
-            associated_dgram_flow_id: None,
         };
 
         (ctx, PollSender::new(backward_sender), forward_receiver)
@@ -187,26 +182,26 @@ impl StreamCtx {
 }
 
 pub(super) struct FlowCtx {
-    /// Sends inbound datagrams to a local task.
-    send: mpsc::Sender<InboundFrame>,
-    // No `recv`: all outbound datagrams are sent on a shared channel in H3Driver
+    /// The receive side closes independently from the reliable stream body.
+    send: Option<mpsc::Sender<DgramBuffer>>,
 }
 
 impl FlowCtx {
-    /// Creates a new [FlowCtx]. This method returns the context itself
-    /// as well as the datagram receiver for this flow.
-    pub(super) fn new(capacity: usize) -> (Self, InboundFrameStream) {
-        let (forward_sender, forward_receiver) = mpsc::channel(capacity);
-        let ctx = Self {
-            send: forward_sender,
-        };
-        (ctx, forward_receiver)
+    /// Creates a request-bound datagram receiver.
+    pub(super) fn new(capacity: usize) -> (Self, mpsc::Receiver<DgramBuffer>) {
+        let (send, recv) = mpsc::channel(capacity);
+        (Self { send: Some(send) }, recv)
     }
 
-    /// Tries to send a datagram to the flow receiver, but drops it if the
-    /// channel is full.
-    pub(super) fn send_best_effort(&self, datagram: InboundFrame) {
-        let _ = self.send.try_send(datagram);
+    /// Drops a datagram if the receiving task is closed or backpressured.
+    pub(super) fn send_best_effort(&self, datagram: DgramBuffer) {
+        if let Some(send) = &self.send {
+            let _ = send.try_send(datagram);
+        }
+    }
+
+    pub(super) fn close_read(&mut self) {
+        self.send = None;
     }
 }
 

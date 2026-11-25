@@ -230,7 +230,7 @@ pub async fn handle_forwarded_headers_frame(
 
     while let Some(frame) = recv.recv().await {
         match frame {
-            InboundFrame::Body(_, fin) =>
+            InboundFrame { fin, .. } =>
                 if fin {
                     let res = format!(
                         "{stream_id},GET {}|",
@@ -244,7 +244,6 @@ pub async fn handle_forwarded_headers_frame(
                     .unwrap();
                     return;
                 },
-            InboundFrame::Datagram(_) => unreachable!(),
         }
     }
 }

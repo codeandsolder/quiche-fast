@@ -224,16 +224,8 @@ impl ClientHooks {
                 .set_sent_stream_fin(StreamClosureKind::Explicit);
         }
 
-        if let Some(quarter_stream_id) =
-            datagram::extract_quarter_stream_id(stream_id, &request.headers)
-        {
-            log::info!(
-                "creating new flow for MASQUE request";
-                "stream_id" => stream_id,
-                "quarter_stream_id" => quarter_stream_id,
-            );
-            let _ = driver.get_or_insert_flow(quarter_stream_id)?;
-            stream_ctx.associated_dgram_flow_id = Some(quarter_stream_id);
+        if datagram::is_extended_connect(&request.headers) {
+            driver.register_flow(stream_id)?;
         }
 
         if let Some(body_writer) = request.body_writer {

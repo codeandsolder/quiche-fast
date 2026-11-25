@@ -260,15 +260,12 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         let mut had_fin = false;
         loop {
             match recv.try_recv() {
-                Ok(InboundFrame::Body(pooled, fin)) => {
+                Ok(InboundFrame { body: pooled, fin }) => {
                     if had_fin {
                         panic!("Received data after fin");
                     }
                     buf.extend_from_slice(&pooled);
                     had_fin = fin;
-                },
-                Ok(InboundFrame::Datagram(..)) => {
-                    panic!("Unexepected InboundFrame::Datagram");
                 },
                 Err(err) => return (buf, had_fin, err),
             }

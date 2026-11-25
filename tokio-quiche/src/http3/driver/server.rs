@@ -189,19 +189,10 @@ impl ServerHooks {
         let (mut stream_ctx, send, recv) =
             StreamCtx::new(stream_id, STREAM_CAPACITY);
 
-        // When Extended CONNECT is enabled, extract the datagram flow ID
-        // from the request headers and register it in flow_map. This
-        // allows incoming DATAGRAMs to be routed to the correct stream.
-        // Note: flow_map entries are considered active work, so the
-        // connection will not be closed in cleanup_stream() while
-        // flows remain.
-        if driver.hooks.extended_connect_enabled() {
-            if let Some(flow_id) =
-                datagram::extract_quarter_stream_id(stream_id, &headers)
-            {
-                let _ = driver.get_or_insert_flow(flow_id)?;
-                stream_ctx.associated_dgram_flow_id = Some(flow_id);
-            }
+        if driver.hooks.extended_connect_enabled() &&
+            datagram::is_extended_connect(&headers)
+        {
+            driver.register_flow(stream_id)?;
         }
 
         let latest_priority_update: Option<RawPriorityValue> = driver
