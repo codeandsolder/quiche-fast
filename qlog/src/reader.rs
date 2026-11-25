@@ -312,7 +312,7 @@ impl<'a> QlogSeqReader<'a> {
         let encoding = file_encoding(name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("qlog file {name:?} does not match a known qlog extension ({SQLOG_EXT}, {SQLOG_GZ_EXT}, {SQLOG_ZST_EXT})"),
+                format!("qlog file {} does not match a known qlog extension ({SQLOG_EXT}, {SQLOG_GZ_EXT}, {SQLOG_ZST_EXT})", name.display()),
             )
         })?;
         match encoding {
@@ -327,7 +327,7 @@ impl<'a> QlogSeqReader<'a> {
                 #[cfg(not(feature = "gzip"))]
                 Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("qlog file {name:?} requires the `gzip` feature on the qlog crate to decode"),
+                    format!("qlog file {} requires the `gzip` feature on the qlog crate to decode", name.display()),
                 ))
             },
             FileEncoding::Zstd => {
@@ -339,7 +339,7 @@ impl<'a> QlogSeqReader<'a> {
                 #[cfg(not(feature = "zstd"))]
                 Err(io::Error::new(
                     io::ErrorKind::Unsupported,
-                    format!("qlog file {name:?} requires the `zstd` feature on the qlog crate to decode"),
+                    format!("qlog file {} requires the `zstd` feature on the qlog crate to decode", name.display()),
                 ))
             },
         }
