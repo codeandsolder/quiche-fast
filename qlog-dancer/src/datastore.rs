@@ -452,11 +452,8 @@ pub struct Datastore {
     pub largest_data_frame_rx_length_global: u64,
     pub largest_data_frame_tx_length_global: u64,
 
-    pub local_init_max_stream_data_bidi_local: u64,
-    pub local_init_max_stream_data_uni: u64,
-    pub peer_init_max_stream_data_bidi_local: u64,
-    pub peer_init_max_stream_data_bidi_remote: u64,
-    pub peer_init_max_stream_data_uni: u64,
+    local_initial_stream_limits: InitialStreamLimits,
+    peer_initial_stream_limits: InitialStreamLimits,
 
     pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, i32)>>,
 
@@ -527,8 +524,48 @@ fn cumulative_total(
     checked_netlog_sum(values.last().map_or(0, |value| value.1), length, field)
 }
 
-const fn is_bidi(stream_id: u64) -> bool {
-    (stream_id & 0x2) == 0
+/// Initial receive limits are relative to the endpoint advertising them,
+/// not the vantage point of the log. For bidirectional streams bit zero
+/// selects the initiator; bit one identifies unidirectional streams.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct InitialStreamLimits {
+    bidi_local: u64,
+    bidi_remote: u64,
+    uni: u64,
+}
+
+impl InitialStreamLimits {
+    fn update(&mut self, tp: &qlog::events::quic::ParametersSet) {
+        self.bidi_local = tp
+            .initial_max_stream_data_bidi_local
+            .unwrap_or(self.bidi_local);
+        self.bidi_remote = tp
+            .initial_max_stream_data_bidi_remote
+            .unwrap_or(self.bidi_remote);
+        self.uni = tp.initial_max_stream_data_uni.unwrap_or(self.uni);
+    }
+
+    const fn for_stream(&self, stream_id: u64, advertiser: VantagePoint) -> u64 {
+        if stream_id & 2 != 0 {
+            return self.uni;
+        }
+        let client_initiated = stream_id & 1 == 0;
+        let client_advertised = matches!(advertiser, VantagePoint::Client);
+        if client_initiated == client_advertised {
+            self.bidi_local
+        } else {
+            self.bidi_remote
+        }
+    }
+}
+
+impl VantagePoint {
+    const fn peer(self) -> Self {
+        match self {
+            Self::Client => Self::Server,
+            Self::Server => Self::Client,
+        }
+    }
 }
 
 /// Whether Chrome recorded an ACK frame we transmitted or received.
@@ -1421,48 +1458,54 @@ impl Datastore {
     fn consume_qlog_transport_parameters_set(
         &mut self, tp: &qlog::events::quic::ParametersSet,
     ) {
-        match tp.initiator {
-            Some(TransportInitiator::Local) => {
-                if let Some(max_data) = tp.initial_max_data {
-                    self.sent_max_data.push((0.0, max_data));
-                }
-
-                if let Some(max_stream_data) =
-                    tp.initial_max_stream_data_bidi_local
-                {
-                    self.local_init_max_stream_data_bidi_local = max_stream_data;
-                }
-
-                if let Some(max_stream_data) = tp.initial_max_stream_data_uni {
-                    self.local_init_max_stream_data_uni = max_stream_data;
-                }
+        let (limits, connection) = match tp.initiator {
+            Some(TransportInitiator::Local) => (
+                &mut self.local_initial_stream_limits,
+                &mut self.sent_max_data,
+            ),
+            Some(TransportInitiator::Remote) => (
+                &mut self.peer_initial_stream_limits,
+                &mut self.received_max_data,
+            ),
+            None => {
+                trace!("ignoring transport parameters with no initiator");
+                return;
             },
+        };
+        if let Some(max_data) = tp.initial_max_data {
+            connection.push((0.0, max_data));
+        }
+        limits.update(tp);
+    }
 
-            Some(TransportInitiator::Remote) => {
-                if let Some(max_data) = tp.initial_max_data {
-                    self.received_max_data.push((0.0, max_data));
+    /// ACKs in a 1-RTT packet acknowledge the shared application-data
+    /// packet-number space, including packets sent with 0-RTT keys.
+    fn mark_qlog_acks(
+        &mut self, packet_type: PacketType,
+        ranges: &[qlog::events::quic::AckRange],
+    ) {
+        let spaces = match packet_type {
+            PacketType::Initial => &[PacketType::Initial][..],
+            PacketType::Handshake => &[PacketType::Handshake][..],
+            PacketType::OneRtt => &[PacketType::ZeroRtt, PacketType::OneRtt][..],
+            _ => return,
+        };
+        for range in ranges {
+            // Deserialized external logs can contain reversed endpoints.
+            // Ignore that malformed range without losing valid sibling ranges.
+            if range.start > range.end {
+                log::warn!("ignoring reversed qlog ACK range {range}");
+                continue;
+            }
+            for space in spaces {
+                if let Some(packets) = self.packet_sent.get_mut(space) {
+                    for (_, packet) in
+                        packets.range_mut(range.as_range_inclusive())
+                    {
+                        packet.acked = Some(true);
+                    }
                 }
-
-                if let Some(max_stream_data) =
-                    tp.initial_max_stream_data_bidi_local
-                {
-                    self.peer_init_max_stream_data_bidi_local = max_stream_data;
-                }
-
-                if let Some(max_stream_data) =
-                    tp.initial_max_stream_data_bidi_remote
-                {
-                    self.peer_init_max_stream_data_bidi_remote = max_stream_data;
-                }
-
-                if let Some(max_stream_data) = tp.initial_max_stream_data_uni {
-                    self.peer_init_max_stream_data_uni = max_stream_data;
-                }
-            },
-
-            // This is optional in qlog. Without an initiator we cannot
-            // attribute limits to the local or peer transport parameters.
-            None => trace!("ignoring transport parameters with no initiator"),
+            }
         }
     }
 
@@ -1470,29 +1513,29 @@ impl Datastore {
         &mut self, pr: &qlog::events::quic::PacketReceived, ev_time: f64,
         process_acks: bool,
     ) -> Result<(), TrackerError> {
+        let packet_type =
+            PacketType::from_qlog_packet_type(&pr.header.packet_type);
+        if let Some(number) = pr.header.packet_number {
+            self.packet_received
+                .entry(packet_type)
+                .or_default()
+                .entry(number)
+                .or_insert_with(|| PacketInfoStub {
+                    acked: None,
+                    raw: pr.raw.clone(),
+                    created_time: ev_time,
+                    send_at_time: None,
+                    ty: packet_type,
+                    number,
+                });
+        }
         if let Some(frames) = &pr.frames {
             for frame in frames {
                 match frame {
-                    QuicFrame::Ack { acked_ranges, .. } => {
-                        if process_acks {
-                            if let Some(ack_ranges) = acked_ranges {
-                                let ty = PacketType::from_qlog_packet_type(
-                                    &pr.header.packet_type,
-                                );
-                                if let Some(pkt_space) =
-                                    self.packet_sent.get_mut(&ty)
-                                {
-                                    for range in ack_ranges {
-                                        // TODO: check ack ranges and rust
-                                        // Range mapping is correct
-                                        pkt_space
-                                            .range_mut(range.as_range_inclusive())
-                                            .for_each(|e| e.1.acked = Some(true));
-                                    }
-                                }
-                            }
-                        }
-                    },
+                    QuicFrame::Ack {
+                        acked_ranges: Some(ranges),
+                        ..
+                    } if process_acks => self.mark_qlog_acks(packet_type, ranges),
 
                     QuicFrame::MaxData { maximum, .. } => {
                         self.received_max_data.push((ev_time, *maximum));
@@ -1501,11 +1544,9 @@ impl Datastore {
                     QuicFrame::MaxStreamData {
                         stream_id, maximum, ..
                     } => {
-                        let init_val = if is_bidi(*stream_id) {
-                            self.peer_init_max_stream_data_bidi_remote
-                        } else {
-                            self.peer_init_max_stream_data_uni
-                        };
+                        let init_val = self
+                            .peer_initial_stream_limits
+                            .for_stream(*stream_id, self.vantage_point.peer());
                         self.received_stream_max_data_tracker
                             .update(*stream_id, *maximum, ev_time, init_val)?;
                     },
@@ -1525,9 +1566,8 @@ impl Datastore {
                         ..
                     } => {
                         let length = raw
-                            .clone()
-                            .unwrap_or_default()
-                            .payload_length
+                            .as_ref()
+                            .and_then(|raw| raw.payload_length)
                             .unwrap_or_default();
                         let s = self
                             .received_stream_frames
@@ -1563,25 +1603,24 @@ impl Datastore {
     fn consume_qlog_packet_sent(
         &mut self, ps: &qlog::events::quic::PacketSent, ev_time: f64,
     ) -> Result<(), TrackerError> {
-        // Packet number is optional for some packet types.
-        let Some(packet_number) = ps.header.packet_number else {
-            return Ok(());
-        };
-
-        let packet_type =
-            PacketType::from_qlog_packet_type(&ps.header.packet_type);
-        let packet_info = PacketInfoStub {
-            acked: None,
-            raw: ps.raw.clone(),
-            created_time: ev_time,
-            send_at_time: ps.send_at_time,
-            ty: packet_type,
-            number: packet_number,
-        };
-
-        let s = self.packet_sent.entry(packet_type).or_default();
-
-        s.insert(packet_number, packet_info);
+        // A missing packet number prevents indexing the packet, not
+        // processing other frame observations in the same record.
+        if let Some(number) = ps.header.packet_number {
+            let packet_type =
+                PacketType::from_qlog_packet_type(&ps.header.packet_type);
+            self.packet_sent
+                .entry(packet_type)
+                .or_default()
+                .entry(number)
+                .or_insert_with(|| PacketInfoStub {
+                    acked: None,
+                    raw: ps.raw.clone(),
+                    created_time: ev_time,
+                    send_at_time: ps.send_at_time,
+                    ty: packet_type,
+                    number,
+                });
+        }
 
         // Prefer to use the packet_sent send_at_time if it exists. Otherwise
         // fallback to the event time.
@@ -1601,13 +1640,11 @@ impl Datastore {
                     QuicFrame::MaxStreamData {
                         stream_id, maximum, ..
                     } => {
-                        let init_val = if is_bidi(*stream_id) {
-                            self.local_init_max_stream_data_bidi_local
-                        } else {
-                            self.local_init_max_stream_data_uni
-                        };
+                        let init_val = self
+                            .local_initial_stream_limits
+                            .for_stream(*stream_id, self.vantage_point);
                         self.sent_stream_max_data_tracker
-                            .update(*stream_id, *maximum, ev_time, init_val)?;
+                            .update(*stream_id, *maximum, event_time, init_val)?;
                     },
 
                     QuicFrame::ResetStream { stream_id, .. } => {
@@ -2375,8 +2412,14 @@ mod input_tests {
             .is_ok());
         assert!(datastore.sent_max_data.is_empty());
         assert!(datastore.received_max_data.is_empty());
-        assert_eq!(datastore.local_init_max_stream_data_bidi_local, 0);
-        assert_eq!(datastore.peer_init_max_stream_data_bidi_local, 0);
+        assert_eq!(
+            datastore.local_initial_stream_limits,
+            super::InitialStreamLimits::default()
+        );
+        assert_eq!(
+            datastore.peer_initial_stream_limits,
+            super::InitialStreamLimits::default()
+        );
 
         for (initiator, expected_local) in [
             (TransportInitiator::Local, true),
@@ -3589,5 +3632,257 @@ mod qlog_h3_direction_tests {
                 _ => unreachable!(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod qlog_packet_history_tests {
+    use super::Datastore;
+    use super::VantagePoint;
+    use crate::PacketType;
+    use qlog::events::quic::AckRange;
+    use qlog::events::quic::PacketHeader;
+    use qlog::events::quic::PacketReceived;
+    use qlog::events::quic::PacketSent;
+    use qlog::events::quic::PacketType as WirePacketType;
+    use qlog::events::quic::ParametersSet;
+    use qlog::events::quic::QuicFrame;
+    use qlog::events::quic::TransportInitiator;
+    use qlog::events::Event;
+    use qlog::events::EventData;
+    use qlog::events::RawInfo;
+
+    fn header(packet_type: WirePacketType, number: Option<u64>) -> PacketHeader {
+        PacketHeader {
+            packet_type,
+            packet_number: number,
+            ..PacketHeader::default()
+        }
+    }
+
+    fn sent(time: f64, packet_type: WirePacketType, number: u64) -> Event {
+        Event::with_time(
+            time,
+            EventData::QuicPacketSent(PacketSent {
+                header: header(packet_type, Some(number)),
+                raw: Some(RawInfo {
+                    length: Some(100),
+                    ..RawInfo::default()
+                }),
+                ..PacketSent::default()
+            }),
+        )
+    }
+
+    fn ack(ranges: Vec<AckRange>) -> QuicFrame {
+        QuicFrame::Ack {
+            ack_delay: None,
+            acked_ranges: Some(ranges),
+            ect1: None,
+            ect0: None,
+            ce: None,
+            raw: None,
+        }
+    }
+
+    fn received(
+        time: f64, packet_type: WirePacketType, number: Option<u64>,
+        frames: Vec<QuicFrame>,
+    ) -> Event {
+        Event::with_time(
+            time,
+            EventData::QuicPacketReceived(PacketReceived {
+                header: header(packet_type, number),
+                raw: Some(RawInfo {
+                    length: Some(200),
+                    ..RawInfo::default()
+                }),
+                frames: Some(frames),
+                ..PacketReceived::default()
+            }),
+        )
+    }
+
+    #[test]
+    fn received_packets_are_indexed_and_available_to_the_plot(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let events = [
+            received(1.0, WirePacketType::Initial, Some(5), vec![]),
+            received(2.0, WirePacketType::OneRtt, Some(5), vec![]),
+            received(3.0, WirePacketType::OneRtt, Some(8), vec![]),
+            received(4.0, WirePacketType::OneRtt, Some(5), vec![]),
+            received(5.0, WirePacketType::Retry, None, vec![]),
+        ];
+        let data = Datastore::with_qlog_events(
+            &events,
+            &qlog::VantagePointType::Client,
+            false,
+        )?;
+        assert_eq!(data.packet_received.len(), 2);
+        let packets = data
+            .packet_received
+            .get(&PacketType::OneRtt)
+            .ok_or("missing application packets")?;
+        assert_eq!(packets.keys().copied().collect::<Vec<_>>(), [5, 8]);
+        assert_eq!(packets.get(&5).map(|packet| packet.created_time), Some(2.0));
+        assert_eq!(
+            packets
+                .get(&8)
+                .and_then(|packet| packet.raw.as_ref())
+                .and_then(|raw| raw.length),
+            Some(200)
+        );
+        let series = crate::seriesstore::SeriesStore::from_datastore(&data)?;
+        assert_eq!(series.onertt_packet_received, [(2.0, 5), (3.0, 8)]);
+        assert_eq!(series.received_x_max, 3.0);
+        Ok(())
+    }
+
+    #[test]
+    fn ack_ranges_are_inclusive_and_respect_packet_number_spaces(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let events = [
+            sent(1.0, WirePacketType::Initial, 5),
+            sent(2.0, WirePacketType::Handshake, 5),
+            sent(3.0, WirePacketType::ZeroRtt, 4),
+            sent(4.0, WirePacketType::ZeroRtt, 5),
+            sent(5.0, WirePacketType::OneRtt, 6),
+            sent(6.0, WirePacketType::OneRtt, 7),
+            received(7.0, WirePacketType::OneRtt, Some(9), vec![ack(vec![
+                AckRange::new(7, 1),
+                AckRange::new(5, 6),
+            ])]),
+            // Repeated metadata must not discard the ACK state.
+            sent(8.0, WirePacketType::OneRtt, 6),
+        ];
+        for process_acks in [false, true] {
+            let data = Datastore::with_qlog_events(
+                &events,
+                &qlog::VantagePointType::Client,
+                process_acks,
+            )?;
+            for (packet_type, number, acknowledged) in [
+                (PacketType::Initial, 5, false),
+                (PacketType::Handshake, 5, false),
+                (PacketType::ZeroRtt, 4, false),
+                (PacketType::ZeroRtt, 5, true),
+                (PacketType::OneRtt, 6, true),
+                (PacketType::OneRtt, 7, false),
+            ] {
+                let packet = data
+                    .packet_sent
+                    .get(&packet_type)
+                    .and_then(|packets| packets.get(&number))
+                    .ok_or("missing sent packet")?;
+                assert_eq!(
+                    packet.acked,
+                    (process_acks && acknowledged).then_some(true)
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn missing_packet_number_does_not_discard_frame_observations(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut data = Datastore::default();
+        data.consume_qlog_event(
+            &Event::with_time(
+                1.0,
+                EventData::QuicPacketSent(PacketSent {
+                    header: header(WirePacketType::OneRtt, None),
+                    send_at_time: Some(2.0),
+                    frames: Some(vec![QuicFrame::MaxData {
+                        maximum: 100,
+                        raw: None,
+                    }]),
+                    ..PacketSent::default()
+                }),
+            ),
+            false,
+        )?;
+        assert!(data.packet_sent.is_empty());
+        assert_eq!(data.sent_max_data, [(2.0, 100)]);
+        Ok(())
+    }
+
+    #[test]
+    fn transport_limits_follow_advertiser_and_stream_initiator(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (vantage, local_bidi, remote_bidi) in [
+            (VantagePoint::Client, [10, 20], [50, 40]),
+            (VantagePoint::Server, [20, 10], [40, 50]),
+        ] {
+            let mut data = Datastore {
+                vantage_point: vantage,
+                ..Datastore::default()
+            };
+            for (initiator, bidi_local, bidi_remote, uni) in [
+                (TransportInitiator::Local, 10, 20, 30),
+                (TransportInitiator::Remote, 40, 50, 60),
+            ] {
+                data.consume_qlog_event(
+                    &Event::with_time(
+                        0.0,
+                        EventData::QuicParametersSet(Box::new(ParametersSet {
+                            initiator: Some(initiator),
+                            initial_max_stream_data_bidi_local: Some(bidi_local),
+                            initial_max_stream_data_bidi_remote: Some(
+                                bidi_remote,
+                            ),
+                            initial_max_stream_data_uni: Some(uni),
+                            ..ParametersSet::default()
+                        })),
+                    ),
+                    false,
+                )?;
+            }
+            let frames: Vec<_> = (0..4)
+                .map(|stream_id| QuicFrame::MaxStreamData {
+                    stream_id,
+                    maximum: 100,
+                    raw: None,
+                })
+                .collect();
+            data.consume_qlog_event(
+                &Event::with_time(
+                    1.0,
+                    EventData::QuicPacketSent(PacketSent {
+                        header: header(WirePacketType::OneRtt, Some(1)),
+                        send_at_time: Some(3.0),
+                        frames: Some(frames.clone()),
+                        ..PacketSent::default()
+                    }),
+                ),
+                false,
+            )?;
+            data.consume_qlog_event(
+                &received(2.0, WirePacketType::OneRtt, Some(2), frames),
+                false,
+            )?;
+            for (stream_id, local, peer) in [
+                (0, local_bidi[0], remote_bidi[0]),
+                (1, local_bidi[1], remote_bidi[1]),
+                (2, 30, 60),
+                (3, 30, 60),
+            ] {
+                assert_eq!(
+                    data.sent_stream_max_data_tracker
+                        .per_stream
+                        .get(&stream_id)
+                        .map(Vec::as_slice),
+                    Some([(0.0, local), (3.0, 100)].as_slice())
+                );
+                assert_eq!(
+                    data.received_stream_max_data_tracker
+                        .per_stream
+                        .get(&stream_id)
+                        .map(Vec::as_slice),
+                    Some([(0.0, peer), (2.0, 100)].as_slice())
+                );
+            }
+        }
+        Ok(())
     }
 }
