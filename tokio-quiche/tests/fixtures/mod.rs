@@ -140,7 +140,10 @@ pub async fn request(
         .map(|req| {
             let stream_id = req * 4;
             let body = stream_body(&summary, stream_id)?.ok_or_else(|| {
-                format!("missing response body on stream {stream_id}")
+                format!(
+                    "{url}: missing response body on stream {stream_id} (request {} of {count}); close={:?}; frames={:?}; stats={:?}",
+                    req + 1, summary.conn_close_details, summary.stream_map.stream(stream_id), summary.stats,
+                )
             })?;
             Ok((stream_id, body))
         })
@@ -184,9 +187,12 @@ pub async fn serve_connection_details(
 }
 
 pub async fn handle_connection(mut connection: ServerH3Connection) {
-    let _ =
+    if let Err(error) =
         serve_connection_details(&mut connection.h3_controller, Arc::default())
-            .await;
+            .await
+    {
+        eprintln!("HTTP/3 fixture connection failed: {error}");
+    }
 }
 
 pub async fn handle_forwarded_headers_frame(
