@@ -39,7 +39,6 @@ use super::parse_named_varint;
 use super::parse_varint;
 use super::suggest_named_varint;
 use super::validate_named_varint;
-use super::SuggestionResult;
 use super::AUTO_PICK;
 use super::EMPTY_PICKS;
 use super::ESC_TO_RET;
@@ -52,9 +51,9 @@ const STREAM_TYPES: &[(&str, u64)] = &[
     ("QPACK Decoder Stream", crate::QPACK_DECODER_STREAM_TYPE_ID),
 ];
 
-fn validate_stream_id(id: &str) -> SuggestionResult<Validation> {
+fn validate_stream_id(id: &str) -> Validation {
     if id.is_empty() {
-        return Ok(Validation::Valid);
+        return Validation::Valid;
     }
 
     h3::validate_varint(id)
@@ -66,7 +65,7 @@ pub(super) fn autopick_stream_id(
     let stream_id = Text::new(STREAM_ID_PROMPT)
         .with_placeholder(EMPTY_PICKS)
         .with_help_message(ESC_TO_RET)
-        .with_validator(validate_stream_id)
+        .with_validator(|input: &str| Ok(validate_stream_id(input)))
         .prompt()?;
 
     Ok(match stream_id.as_str() {
@@ -87,8 +86,12 @@ pub fn prompt_open_uni_stream(
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
     let stream_type = Text::new("stream type:")
-        .with_validator(validate_stream_type)
-        .with_autocomplete(&stream_type_suggestor)
+        .with_validator(|input: &str| {
+            Ok(validate_named_varint(input, STREAM_TYPES))
+        })
+        .with_autocomplete(&|input: &str| {
+            Ok(suggest_named_varint(input, STREAM_TYPES))
+        })
         .prompt()?;
 
     let ty = parse_named_varint(&stream_type, STREAM_TYPES)?;
@@ -101,14 +104,6 @@ pub fn prompt_open_uni_stream(
         stream_type: ty,
         expected_result: ExpectedStreamSendResult::default(),
     })
-}
-
-fn validate_stream_type(input: &str) -> SuggestionResult<Validation> {
-    validate_named_varint(input, STREAM_TYPES)
-}
-
-fn stream_type_suggestor(input: &str) -> SuggestionResult<Vec<String>> {
-    suggest_named_varint(input, STREAM_TYPES)
 }
 
 pub fn prompt_fin_stream() -> InquireResult<bool> {

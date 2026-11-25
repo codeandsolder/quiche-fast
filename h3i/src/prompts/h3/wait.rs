@@ -39,7 +39,6 @@ use crate::actions::h3::StreamEventType;
 use crate::actions::h3::WaitType;
 
 use super::prompt_stream_id;
-use super::SuggestionResult;
 
 #[derive(Clone, Copy)]
 enum WaitChoice {
@@ -70,7 +69,7 @@ pub(super) fn prompt_wait(idle_timeout: u64) -> InquireResult<Action> {
         WaitChoice::Duration => {
             let period = Text::new("wait period (ms):")
                 .with_validator(move |input: &str| {
-                    validate_wait_period(input, idle_timeout)
+                    Ok(validate_wait_period(input, idle_timeout))
                 })
                 .prompt()?;
             WaitType::WaitDuration(parse_wait_period(&period, idle_timeout)?)
@@ -96,14 +95,12 @@ fn parse_wait_period(input: &str, idle_timeout: u64) -> InquireResult<Duration> 
     Ok(Duration::from_millis(millis))
 }
 
-fn validate_wait_period(
-    input: &str, idle_timeout: u64,
-) -> SuggestionResult<Validation> {
-    Ok(match parse_wait_period(input, idle_timeout) {
+fn validate_wait_period(input: &str, idle_timeout: u64) -> Validation {
+    match parse_wait_period(input, idle_timeout) {
         Ok(_) => Validation::Valid,
         Err(error) =>
             Validation::Invalid(ErrorMessage::Custom(error.to_string())),
-    })
+    }
 }
 
 #[cfg(test)]

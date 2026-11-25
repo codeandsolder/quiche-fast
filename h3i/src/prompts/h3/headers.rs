@@ -35,10 +35,9 @@ use crate::encode_header_block;
 use crate::prompts::h3;
 use crate::StreamIdAllocator;
 
-use super::squish_suggester;
 use super::stream::autopick_stream_id;
 use super::stream::prompt_fin_stream;
-use super::SuggestionResult;
+use super::suggestions;
 use super::ESC_TO_RET;
 use super::PUSH_ID_PROMPT;
 use crate::actions::h3::Action;
@@ -96,7 +95,9 @@ pub fn prompt_push_promise() -> InquireResult<Action> {
 
 fn pseudo_headers(host_port: &str) -> InquireResult<Vec<quiche::h3::Header>> {
     let method = Text::new("method:")
-        .with_autocomplete(&method_suggester)
+        .with_autocomplete(&|input: &str| {
+            Ok(suggestions(["GET", "POST", "PUT", "DELETE"], input))
+        })
         .with_default("GET")
         .with_help_message(ESC_TO_RET)
         .prompt()?;
@@ -143,10 +144,4 @@ fn headers_read_loop() -> InquireResult<Vec<quiche::h3::Header>> {
     }
 
     Ok(headers)
-}
-
-fn method_suggester(val: &str) -> SuggestionResult<Vec<String>> {
-    let suggestions = ["GET", "POST", "PUT", "DELETE"];
-
-    squish_suggester(&suggestions, val)
 }

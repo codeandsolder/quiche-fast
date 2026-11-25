@@ -32,7 +32,6 @@ use super::parse_named_varint;
 use super::stream::prompt_fin_stream;
 use super::suggest_named_varint;
 use super::validate_named_varint;
-use super::SuggestionResult;
 use crate::actions::h3::Action;
 use crate::actions::h3::ExpectedStreamSendResult;
 use crate::prompts::h3;
@@ -78,8 +77,10 @@ fn settings_read_loop() -> InquireResult<RawSettings> {
     let mut settings = Vec::new();
     loop {
         let ty = Text::new("setting type:")
-            .with_validator(validate_setting_type)
-            .with_autocomplete(&settings_type_suggestor)
+            .with_validator(|input: &str| Ok(validate_setting_type(input)))
+            .with_autocomplete(&|input: &str| {
+                Ok(suggest_named_varint(input, SETTINGS))
+            })
             .with_help_message("type 'q!' to stop adding settings")
             .prompt()?;
         if ty == "q!" {
@@ -91,13 +92,9 @@ fn settings_read_loop() -> InquireResult<RawSettings> {
     }
 }
 
-fn validate_setting_type(id: &str) -> SuggestionResult<Validation> {
+fn validate_setting_type(id: &str) -> Validation {
     if id == "q!" {
-        return Ok(Validation::Valid);
+        return Validation::Valid;
     }
     validate_named_varint(id, SETTINGS)
-}
-
-fn settings_type_suggestor(input: &str) -> SuggestionResult<Vec<String>> {
-    suggest_named_varint(input, SETTINGS)
 }

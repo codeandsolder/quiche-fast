@@ -26,7 +26,6 @@
 
 //! A collection of interactive CLI prompts for HTTP/3 based on [inquire].
 
-use inquire::error::CustomUserError;
 use inquire::error::InquireResult;
 use inquire::validator::ErrorMessage;
 use inquire::validator::Validation;
@@ -47,36 +46,73 @@ use crate::quiche;
 use self::stream::prompt_fin_stream;
 use self::wait::prompt_wait;
 
-/// A specialized [`Result`] type for internal prompt suggestion.
-///
-/// [`Result`]: https://doc.rust-lang.org/std/result/enum.Result.html
-type SuggestionResult<T> = std::result::Result<T, CustomUserError>;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActionChoice {
+    Headers { raw: bool, literal: bool },
+    Data,
+    Settings,
+    PushPromise,
+    CancelPush,
+    Goaway,
+    MaxPushId,
+    PriorityUpdate,
+    UnknownFrame { grease: bool },
+    OpenUniStream,
+    ResetStream,
+    StopSending,
+    ConnectionClose,
+    StreamBytes,
+    Datagram { quarter_stream: bool },
+    FlushPackets,
+    Commit,
+    Wait,
+    Quit,
+}
 
-const HEADERS: &str = "headers";
-const HEADERS_NO_PSEUDO: &str = "headers_no_pseudo";
-const HEADERS_LITERAL: &str = "headers_literal";
-const HEADERS_NO_PSEUDO_LITERAL: &str = "headers_no_pseudo_literal";
-const DATA: &str = "data";
-const SETTINGS: &str = "settings";
-const PUSH_PROMISE: &str = "push_promise";
-const CANCEL_PUSH: &str = "cancel_push";
-const GOAWAY: &str = "goaway";
-const MAX_PUSH_ID: &str = "max_push_id";
-const PRIORITY_UPDATE: &str = "priority_update";
-const GREASE: &str = "grease";
-const EXTENSION: &str = "extension_frame";
-const OPEN_UNI_STREAM: &str = "open_uni_stream";
-const RESET_STREAM: &str = "reset_stream";
-const STOP_SENDING: &str = "stop_sending";
-const CONNECTION_CLOSE: &str = "connection_close";
-const STREAM_BYTES: &str = "stream_bytes";
-const DATAGRAM_QUARTER_STREAM_ID: &str = "datagram_quarter_stream_id";
-const DATAGRAM_RAW_PAYLOAD: &str = "datagram_raw_payload";
-
-const COMMIT: &str = "commit";
-const FLUSH_PACKETS: &str = "flush_packets";
-const WAIT: &str = "wait";
-const QUIT: &str = "quit";
+const ACTIONS: &[(&str, ActionChoice)] = &[
+    ("headers", ActionChoice::Headers {
+        raw: false,
+        literal: false,
+    }),
+    ("headers_no_pseudo", ActionChoice::Headers {
+        raw: true,
+        literal: false,
+    }),
+    ("headers_literal", ActionChoice::Headers {
+        raw: false,
+        literal: true,
+    }),
+    ("headers_no_pseudo_literal", ActionChoice::Headers {
+        raw: true,
+        literal: true,
+    }),
+    ("data", ActionChoice::Data),
+    ("settings", ActionChoice::Settings),
+    ("goaway", ActionChoice::Goaway),
+    ("priority_update", ActionChoice::PriorityUpdate),
+    ("push_promise", ActionChoice::PushPromise),
+    ("cancel_push", ActionChoice::CancelPush),
+    ("max_push_id", ActionChoice::MaxPushId),
+    ("grease", ActionChoice::UnknownFrame { grease: true }),
+    ("extension_frame", ActionChoice::UnknownFrame {
+        grease: false,
+    }),
+    ("open_uni_stream", ActionChoice::OpenUniStream),
+    ("reset_stream", ActionChoice::ResetStream),
+    ("stop_sending", ActionChoice::StopSending),
+    ("connection_close", ActionChoice::ConnectionClose),
+    ("stream_bytes", ActionChoice::StreamBytes),
+    ("datagram_quarter_stream_id", ActionChoice::Datagram {
+        quarter_stream: true,
+    }),
+    ("datagram_raw_payload", ActionChoice::Datagram {
+        quarter_stream: false,
+    }),
+    ("flush_packets", ActionChoice::FlushPackets),
+    ("commit", ActionChoice::Commit),
+    ("wait", ActionChoice::Wait),
+    ("quit", ActionChoice::Quit),
+];
 
 const YES: &str = "Yes";
 const NO: &str = "No";
@@ -89,7 +125,6 @@ const PUSH_ID_PROMPT: &str = "push ID:";
 
 enum PromptOutcome {
     Action(Action),
-    Repeat,
     Commit,
     Clear,
 }
@@ -114,57 +149,39 @@ impl Prompter {
         }
     }
 
-    fn handle_action(&mut self, action: &str) -> InquireResult<PromptOutcome> {
-        let res = match action {
-            HEADERS |
-            HEADERS_NO_PSEUDO |
-            HEADERS_LITERAL |
-            HEADERS_NO_PSEUDO_LITERAL => {
-                let literal = action == HEADERS_LITERAL ||
-                    action == HEADERS_NO_PSEUDO_LITERAL;
-                let raw = action == HEADERS_NO_PSEUDO ||
-                    action == HEADERS_NO_PSEUDO_LITERAL;
-                headers::prompt_headers(
-                    &self.bidi_sid_alloc,
-                    &self.host_port,
-                    raw,
-                    literal,
-                )
-            },
-
-            DATA => prompt_data(),
-            SETTINGS => settings::prompt_settings(),
-            OPEN_UNI_STREAM =>
-                stream::prompt_open_uni_stream(&self.uni_sid_alloc),
-            RESET_STREAM => stream::prompt_reset_stream(),
-            STOP_SENDING => stream::prompt_stop_sending(),
-            GREASE | EXTENSION => prompt_unknown_frame(action == GREASE),
-            GOAWAY => prompt_goaway(),
-            MAX_PUSH_ID => prompt_max_push_id(),
-            CANCEL_PUSH => prompt_cancel_push(),
-            PUSH_PROMISE => prompt_push_promise(),
-            PRIORITY_UPDATE => priority::prompt_priority(),
-            CONNECTION_CLOSE => prompt_connection_close(),
-            STREAM_BYTES => prompt_stream_bytes(),
-            DATAGRAM_QUARTER_STREAM_ID | DATAGRAM_RAW_PAYLOAD =>
-                prompt_send_datagram(action == DATAGRAM_QUARTER_STREAM_ID),
-            FLUSH_PACKETS =>
-                return Ok(PromptOutcome::Action(Action::FlushPackets)),
-            COMMIT => return Ok(PromptOutcome::Commit),
-            WAIT => prompt_wait(self.idle_timeout),
-            QUIT => return Ok(PromptOutcome::Clear),
-
-            _ => {
-                println!("error: unknown action {action}");
-                return Ok(PromptOutcome::Repeat);
-            },
+    fn handle_action(
+        &self, choice: ActionChoice,
+    ) -> InquireResult<PromptOutcome> {
+        let action = match choice {
+            ActionChoice::Headers { raw, literal } => headers::prompt_headers(
+                &self.bidi_sid_alloc,
+                &self.host_port,
+                raw,
+                literal,
+            )?,
+            ActionChoice::Data => prompt_data()?,
+            ActionChoice::Settings => settings::prompt_settings()?,
+            ActionChoice::OpenUniStream =>
+                stream::prompt_open_uni_stream(&self.uni_sid_alloc)?,
+            ActionChoice::ResetStream => stream::prompt_reset_stream()?,
+            ActionChoice::StopSending => stream::prompt_stop_sending()?,
+            ActionChoice::UnknownFrame { grease } =>
+                prompt_unknown_frame(grease)?,
+            ActionChoice::Goaway => prompt_goaway()?,
+            ActionChoice::MaxPushId => prompt_max_push_id()?,
+            ActionChoice::CancelPush => prompt_cancel_push()?,
+            ActionChoice::PushPromise => prompt_push_promise()?,
+            ActionChoice::PriorityUpdate => priority::prompt_priority()?,
+            ActionChoice::ConnectionClose => prompt_connection_close()?,
+            ActionChoice::StreamBytes => prompt_stream_bytes()?,
+            ActionChoice::Datagram { quarter_stream } =>
+                prompt_send_datagram(quarter_stream)?,
+            ActionChoice::FlushPackets => Action::FlushPackets,
+            ActionChoice::Commit => return Ok(PromptOutcome::Commit),
+            ActionChoice::Wait => prompt_wait(self.idle_timeout)?,
+            ActionChoice::Quit => return Ok(PromptOutcome::Clear),
         };
-
-        match res {
-            Ok(action) => Ok(PromptOutcome::Action(action)),
-            Err(InquireError::OperationCanceled) => Ok(PromptOutcome::Repeat),
-            Err(error) => Err(error),
-        }
+        Ok(PromptOutcome::Action(action))
     }
 
     fn observe_action(&mut self, action: &Action) {
@@ -191,78 +208,76 @@ impl Prompter {
     /// # Errors
     /// Returns terminal errors and interruptions.
     pub fn prompt(&mut self) -> InquireResult<Option<Vec<Action>>> {
+        self.collect_actions(prompt_action, Self::handle_action)
+    }
+
+    fn collect_actions(
+        &mut self, mut next_choice: impl FnMut() -> InquireResult<ActionChoice>,
+        mut handle: impl FnMut(&Self, ActionChoice) -> InquireResult<PromptOutcome>,
+    ) -> InquireResult<Option<Vec<Action>>> {
         self.bidi_sid_alloc = StreamIdAllocator { id: 0 };
         self.uni_sid_alloc = StreamIdAllocator { id: 2 };
         let mut actions = Vec::new();
         loop {
-            println!();
-            let action = match prompt_action() {
-                Ok(action) => action,
+            let choice = match next_choice() {
+                Ok(choice) => choice,
                 Err(InquireError::OperationCanceled) => return Ok(None),
                 Err(error) => return Err(error),
             };
-            match self.handle_action(&action)? {
-                PromptOutcome::Action(action) => {
+            match handle(self, choice) {
+                Ok(PromptOutcome::Action(action)) => {
                     self.observe_action(&action);
                     actions.push(action);
                 },
-                PromptOutcome::Repeat => (),
-                PromptOutcome::Commit => return Ok(Some(actions)),
-                PromptOutcome::Clear => return Ok(None),
+                Ok(PromptOutcome::Commit) => return Ok(Some(actions)),
+                Ok(PromptOutcome::Clear) => return Ok(None),
+                Err(InquireError::OperationCanceled) => (),
+                Err(error) => return Err(error),
             }
         }
     }
 }
 
-fn prompt_action() -> InquireResult<String> {
-    Text::new("Select an action to queue. `commit` sends queued actions.")
-        .with_autocomplete(&action_suggester)
-        .with_page_size(18)
-        .prompt()
-}
-
-fn action_suggester(val: &str) -> SuggestionResult<Vec<String>> {
-    // TODO: make this an enum to automatically pick up new actions
-    let suggestions = [
-        HEADERS,
-        HEADERS_NO_PSEUDO,
-        HEADERS_LITERAL,
-        HEADERS_NO_PSEUDO_LITERAL,
-        DATA,
-        SETTINGS,
-        GOAWAY,
-        PRIORITY_UPDATE,
-        PUSH_PROMISE,
-        CANCEL_PUSH,
-        MAX_PUSH_ID,
-        GREASE,
-        EXTENSION,
-        OPEN_UNI_STREAM,
-        RESET_STREAM,
-        STOP_SENDING,
-        CONNECTION_CLOSE,
-        STREAM_BYTES,
-        DATAGRAM_QUARTER_STREAM_ID,
-        DATAGRAM_RAW_PAYLOAD,
-        FLUSH_PACKETS,
-        COMMIT,
-        WAIT,
-        QUIT,
-    ];
-
-    squish_suggester(&suggestions, val)
-}
-
-fn squish_suggester(
-    suggestions: &[&str], val: &str,
-) -> SuggestionResult<Vec<String>> {
-    let val_lower = val.to_lowercase();
-
-    Ok(suggestions
+fn parse_action(input: &str) -> Option<ActionChoice> {
+    ACTIONS
         .iter()
-        .filter(|s| s.to_lowercase().contains(&val_lower))
-        .map(|s| String::from(*s))
-        .collect())
+        .find_map(|(label, choice)| (*label == input).then_some(*choice))
+}
+
+fn prompt_action() -> InquireResult<ActionChoice> {
+    println!();
+    let input =
+        Text::new("Select an action to queue. `commit` sends queued actions.")
+            .with_autocomplete(&|input: &str| {
+                Ok(suggestions(ACTIONS.iter().map(|(label, _)| *label), input))
+            })
+            .with_validator(|input: &str| {
+                Ok(validation(parse_action(input).is_some()))
+            })
+            .with_page_size(18)
+            .prompt()?;
+    parse_action(&input).ok_or_else(|| {
+        InquireError::Custom(format!("unknown action {input:?}").into())
+    })
+}
+
+fn suggestions<'a>(
+    labels: impl IntoIterator<Item = &'a str>, input: &str,
+) -> Vec<String> {
+    let input = input.to_lowercase();
+    labels
+        .into_iter()
+        .filter(|label| label.to_lowercase().contains(&input))
+        .map(str::to_owned)
+        .collect()
+}
+
+const fn validation(valid: bool) -> Validation {
+    if valid {
+        Validation::Valid
+    } else {
+        Validation::Invalid(ErrorMessage::Default)
+    }
 }
 
 fn parse_varint(input: &str) -> InquireResult<u64> {
@@ -275,12 +290,8 @@ fn parse_varint(input: &str) -> InquireResult<u64> {
         })
 }
 
-fn validate_varint(input: &str) -> SuggestionResult<Validation> {
-    Ok(if parse_varint(input).is_ok() {
-        Validation::Valid
-    } else {
-        Validation::Invalid(ErrorMessage::Default)
-    })
+fn validate_varint(input: &str) -> Validation {
+    validation(parse_varint(input).is_ok())
 }
 
 /// One definition supplies both the numeric parser and completion labels.
@@ -291,26 +302,12 @@ fn parse_named_varint(input: &str, names: &[(&str, u64)]) -> InquireResult<u64> 
         .map_or_else(|| parse_varint(input), |(_, value)| Ok(*value))
 }
 
-fn validate_named_varint(
-    input: &str, names: &[(&str, u64)],
-) -> SuggestionResult<Validation> {
-    Ok(if parse_named_varint(input, names).is_ok() {
-        Validation::Valid
-    } else {
-        Validation::Invalid(ErrorMessage::Default)
-    })
+fn validate_named_varint(input: &str, names: &[(&str, u64)]) -> Validation {
+    validation(parse_named_varint(input, names).is_ok())
 }
 
-fn suggest_named_varint(
-    input: &str, names: &[(&str, u64)],
-) -> SuggestionResult<Vec<String>> {
-    let input = input.to_lowercase();
-    Ok(names
-        .iter()
-        .map(|(name, _)| *name)
-        .filter(|name| name.to_lowercase().contains(&input))
-        .map(str::to_owned)
-        .collect())
+fn suggest_named_varint(input: &str, names: &[(&str, u64)]) -> Vec<String> {
+    suggestions(names.iter().map(|(label, _)| *label), input)
 }
 
 fn prompt_stream_id() -> InquireResult<u64> {
@@ -319,8 +316,8 @@ fn prompt_stream_id() -> InquireResult<u64> {
 
 fn prompt_control_stream_id() -> InquireResult<u64> {
     let id = Text::new(STREAM_ID_PROMPT)
-        .with_validator(validate_varint)
-        .with_autocomplete(&control_stream_suggestor)
+        .with_validator(|input: &str| Ok(validate_varint(input)))
+        .with_autocomplete(&|input: &str| Ok(suggestions(["2"], input)))
         .with_help_message(ESC_TO_RET)
         .prompt()?;
 
@@ -329,18 +326,12 @@ fn prompt_control_stream_id() -> InquireResult<u64> {
 
 fn prompt_varint(message: &str) -> InquireResult<u64> {
     let id = Text::new(message)
-        .with_validator(validate_varint)
+        .with_validator(|input: &str| Ok(validate_varint(input)))
         .with_placeholder("Integer <= 2^62 -1")
         .with_help_message(ESC_TO_RET)
         .prompt()?;
 
     parse_varint(&id)
-}
-
-fn control_stream_suggestor(val: &str) -> SuggestionResult<Vec<String>> {
-    let suggestions = ["2"];
-
-    squish_suggester(&suggestions, val)
 }
 
 fn send_frame(
@@ -474,11 +465,16 @@ mod wait;
 #[cfg(test)]
 mod tests {
     use super::encode_datagram;
+    use super::parse_action;
     use super::parse_varint;
+    use super::ActionChoice;
+    use super::PromptOutcome;
     use super::Prompter;
+    use super::ACTIONS;
     use crate::actions::h3::Action;
     use crate::actions::h3::ExpectedStreamSendResult;
     use crate::config::Config;
+    use inquire::InquireError;
 
     #[test]
     fn varint_bounds_and_datagram_wire_encoding(
@@ -536,6 +532,90 @@ mod tests {
         }
         prompter.uni_sid_alloc.observe(octets::MAX_VAR_INT - 1);
         assert_eq!(prompter.uni_sid_alloc.next_id(), None);
+        Ok(())
+    }
+    #[test]
+    fn menu_labels_and_dispatch_are_one_to_one() {
+        for &(name, choice) in ACTIONS {
+            assert_eq!(parse_action(name), Some(choice));
+        }
+        assert_eq!(parse_action("invalid"), None);
+    }
+
+    fn scripted_action(
+        prompter: &Prompter, choice: ActionChoice,
+    ) -> inquire::error::InquireResult<PromptOutcome> {
+        match choice {
+            ActionChoice::Commit => Ok(PromptOutcome::Commit),
+            ActionChoice::Quit => Ok(PromptOutcome::Clear),
+            ActionChoice::Data => Err(InquireError::OperationCanceled),
+            ActionChoice::Wait => Err(InquireError::OperationInterrupted),
+            ActionChoice::Headers { .. } =>
+                Ok(PromptOutcome::Action(Action::StreamBytes {
+                    stream_id: prompter.bidi_sid_alloc.next_id().ok_or_else(
+                        || InquireError::Custom("exhausted".into()),
+                    )?,
+                    fin_stream: false,
+                    bytes: vec![],
+                    expected_result: ExpectedStreamSendResult::default(),
+                })),
+            _ => Ok(PromptOutcome::Action(Action::FlushPackets)),
+        }
+    }
+
+    #[test]
+    fn only_explicit_commit_sends_and_nested_cancel_does_not_consume_ids(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let config = Config::new("example.org")?;
+        let mut prompter = Prompter::with_config(&config);
+        let headers = ActionChoice::Headers {
+            raw: false,
+            literal: false,
+        };
+        let choices =
+            [headers, ActionChoice::Data, headers, ActionChoice::Commit];
+        let mut choices = choices.into_iter();
+        let committed = prompter.collect_actions(
+            || choices.next().ok_or(InquireError::OperationInterrupted),
+            scripted_action,
+        )?;
+        assert!(matches!(
+            committed.as_deref(),
+            Some([
+                Action::StreamBytes { stream_id: 0, .. },
+                Action::StreamBytes { stream_id: 4, .. }
+            ])
+        ));
+        for terminal in
+            [Ok(ActionChoice::Quit), Err(InquireError::OperationCanceled)]
+        {
+            let mut choices = [Ok(headers), terminal].into_iter();
+            assert_eq!(
+                prompter.collect_actions(
+                    || choices
+                        .next()
+                        .ok_or(InquireError::OperationInterrupted)?,
+                    scripted_action
+                )?,
+                None
+            );
+        }
+        let mut choices = [headers, ActionChoice::Wait].into_iter();
+        assert!(matches!(
+            prompter.collect_actions(
+                || choices.next().ok_or(InquireError::OperationInterrupted),
+                scripted_action
+            ),
+            Err(InquireError::OperationInterrupted)
+        ));
+        let mut choices = [ActionChoice::Commit].into_iter();
+        assert_eq!(
+            prompter.collect_actions(
+                || choices.next().ok_or(InquireError::OperationInterrupted),
+                scripted_action
+            )?,
+            Some(Vec::new())
+        );
         Ok(())
     }
 }

@@ -174,7 +174,7 @@ impl StreamIdAllocator {
         }
     }
 
-    fn observe(&mut self, id: u64) {
+    const fn observe(&mut self, id: u64) {
         if id <= octets::MAX_VAR_INT && id >= self.id && id % 4 == self.id % 4 {
             self.id = id + 4;
         }

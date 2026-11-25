@@ -105,9 +105,11 @@ pub(super) fn prompt_transport_or_app_error() -> InquireResult<(ErrorSpace, u64)
         ErrorChoice::Transport => (ErrorSpace::Transport, TRANSPORT_CODES),
         ErrorChoice::Application => (ErrorSpace::Application, APPLICATION_CODES),
     };
-    let suggester = move |input: &str| suggest_named_varint(input, codes);
+    let suggester = move |input: &str| Ok(suggest_named_varint(input, codes));
     let code = Text::new("error code:")
-        .with_validator(move |input: &str| validate_named_varint(input, codes))
+        .with_validator(move |input: &str| {
+            Ok(validate_named_varint(input, codes))
+        })
         .with_autocomplete(&suggester)
         .with_page_size(codes.len())
         .prompt()?;
@@ -125,15 +127,15 @@ mod tests {
 
     #[test]
     fn all_named_codes_are_valid_and_suggested(
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    ) -> Result<(), inquire::InquireError> {
         for codes in [TRANSPORT_CODES, APPLICATION_CODES] {
             for &(name, code) in codes {
                 assert_eq!(parse_named_varint(name, codes)?, code);
                 assert!(matches!(
-                    validate_named_varint(name, codes)?,
+                    validate_named_varint(name, codes),
                     Validation::Valid
                 ));
-                assert!(suggest_named_varint(name, codes)?
+                assert!(suggest_named_varint(name, codes)
                     .iter()
                     .any(|label| label == name));
             }
