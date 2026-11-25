@@ -1092,9 +1092,11 @@ fn response_content(
         return (405, ResponseBody::bytes(b""));
     }
     path.strip_prefix("/stream-bytes/").map_or_else(
-        || match resource(root, path, index) {
-            Ok(body) => (200, body),
-            Err(_) => (404, ResponseBody::bytes(b"Not Found!")),
+        || {
+            resource(root, path, index).map_or_else(
+                |_| (404, ResponseBody::bytes(b"Not Found!")),
+                |body| (200, body),
+            )
         },
         generated_response,
     )

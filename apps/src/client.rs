@@ -239,7 +239,7 @@ impl ClientIo {
             match self.poll.poll(&mut self.events, conn.timeout()) {
                 Ok(()) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted =>
-                    continue,
+                    (),
                 Err(error) => return Err(failure("poll", error)),
             }
         }
