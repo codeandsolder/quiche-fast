@@ -71,6 +71,15 @@ struct TestContext {
 
 #[tokio::test]
 async fn handle_0_rtt_request() {
+    check_resumed_requests(false).await;
+}
+
+#[tokio::test]
+async fn handle_0_rtt_request_with_retry() {
+    check_resumed_requests(true).await;
+}
+
+async fn check_resumed_requests(retry: bool) {
     let context = Arc::new(Mutex::new(TestContext::default()));
     let early_stream_id = 0;
     let stream_id = 4;
@@ -78,6 +87,7 @@ async fn handle_0_rtt_request() {
     let context_clone = context.clone();
     let mut quic_settings = QuicSettings::default();
     quic_settings.enable_early_data = true;
+    quic_settings.disable_client_ip_validation = !retry;
     let (url, _) = start_server_with_settings(
         quic_settings,
         Http3Settings::default(),
@@ -134,14 +144,17 @@ async fn handle_0_rtt_request() {
 
         {
             let context = context.lock().unwrap();
-            // QUIC does not order requests across independent streams. Check
-            // the encryption phase of each request, not delivery order.
+            // QUIC does not order requests across independent streams.
             let mut requests = context.requests_seen.clone();
             requests.sort_unstable();
-            assert_eq!(requests, vec![
-                ("early.test.com".to_owned(), true),
-                ("test.com".to_owned(), false)
-            ]);
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].0, "early.test.com");
+            assert_eq!(requests[1], ("test.com".to_owned(), false));
+            // Retry can require recovery of early stream data after the
+            // handshake. Without Retry, prove actual early delivery.
+            if !retry {
+                assert!(requests[0].1);
+            }
             assert_eq!(context.requests_handled_count, 2);
         }
     }

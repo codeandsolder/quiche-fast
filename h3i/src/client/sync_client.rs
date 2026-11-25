@@ -34,7 +34,6 @@ use ring::rand::SystemRandom;
 use crate::actions::h3::Action;
 use crate::client::parse_streams;
 use crate::client::ClientError;
-use crate::client::ConnectionCloseDetails;
 use crate::client::MAX_DATAGRAM_SIZE;
 use crate::client::QUIC_VERSION;
 use crate::config::Config;
@@ -209,12 +208,7 @@ pub fn connect_with_early_data(
     if !conn.is_established() {
         return Err(ClientError::HandshakeFail);
     }
-    Ok(ConnectionSummary {
-        stream_map: client.streams,
-        stats: Some(conn.stats()),
-        path_stats: conn.path_stats().collect(),
-        conn_close_details: ConnectionCloseDetails::new(&conn),
-    })
+    Ok(ConnectionSummary::from_connection(&conn, client.streams))
 }
 
 fn active_queue<'a>(

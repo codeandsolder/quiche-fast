@@ -148,6 +148,9 @@ impl ActionQueue {
             }
             execute_action(action, conn, parsers)?;
             self.next += 1;
+            if matches!(action, Action::ConnectionClose { .. }) {
+                return Ok(());
+            }
         }
     }
 }

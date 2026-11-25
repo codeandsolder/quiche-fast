@@ -63,6 +63,19 @@ pub struct ConnectionSummary {
     pub conn_close_details: ConnectionCloseDetails,
 }
 
+impl ConnectionSummary {
+    pub(crate) fn from_connection<F: quiche::BufFactory>(
+        conn: &quiche::Connection<F>, stream_map: StreamMap,
+    ) -> Self {
+        Self {
+            stream_map,
+            stats: Some(conn.stats()),
+            path_stats: conn.path_stats().collect(),
+            conn_close_details: ConnectionCloseDetails::new(conn),
+        }
+    }
+}
+
 impl Serialize for ConnectionSummary {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
@@ -201,8 +214,8 @@ impl StreamMap {
             .map(|frames| &frames.close_with)
     }
 
-    pub(crate) fn close_due_to_trigger_frames(
-        &self, qconn: &mut quiche::Connection,
+    pub(crate) fn close_due_to_trigger_frames<F: quiche::BufFactory>(
+        &self, qconn: &mut quiche::Connection<F>,
     ) {
         if let Some(error) = self.triggered_close_error() {
             let _ = qconn.close(error.is_app, error.error_code, &error.reason);
