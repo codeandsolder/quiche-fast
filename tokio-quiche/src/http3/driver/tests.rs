@@ -1544,7 +1544,10 @@ mod server_side_driver {
         )?;
         let flight = quiche::test_utils::emit_flight(&mut helper.pipe.client)?;
         quiche::test_utils::process_flight(&mut helper.pipe.server, flight)?;
-        helper.driver.process_writes(&mut helper.pipe.server)?;
+        helper
+            .driver
+            .process_writes(&mut helper.pipe.server)
+            .map_err(anyhow::Error::from_boxed)?;
         assert!(helper.driver.stream_map.contains_key(&stream_id));
         assert!(to_client.is_closed());
         let code = h3::WireErrorCode::MessageError as u64;
