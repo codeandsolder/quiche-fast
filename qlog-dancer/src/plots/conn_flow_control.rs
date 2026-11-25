@@ -116,11 +116,14 @@ fn window_series(
     ss: &SeriesStore, proto: ApplicationProto,
 ) -> Option<&[(f64, u64)]> {
     match proto {
-        ApplicationProto::Http2 => ss.h2_send_window_series_absolute.get(&0),
-        ApplicationProto::Http3 =>
-            ss.netlog_quic_client_side_window_updates.get(&-1),
+        ApplicationProto::Http2 =>
+            Some(ss.h2_connection_receive_credit.as_slice())
+                .filter(|points| !points.is_empty()),
+        ApplicationProto::Http3 => ss
+            .netlog_quic_client_side_window_updates
+            .get(&-1)
+            .map(Vec::as_slice),
     }
-    .map(Vec::as_slice)
 }
 
 fn blocked_connection_events(ds: &Datastore) -> Option<&[f64]> {
@@ -207,7 +210,7 @@ fn window_updates<DB: DrawingBackend>(
     if let Some(points) = points {
         chart
             .draw_series(LineSeries::new(points.iter().copied(), BLUE))?
-            .label("sent window updates")
+            .label("cumulative receive credit granted")
             .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], BLUE));
         chart.draw_series(
             points.iter().map(|point| Circle::new(*point, 2, BLUE)),
@@ -339,9 +342,7 @@ mod tests {
             netlog_quic_stream_received_connection_cumulative: vec![(20.0, 20)],
             ..SeriesStore::default()
         };
-        series
-            .h2_send_window_series_absolute
-            .insert(0, vec![(85.0, 60)]);
+        series.h2_connection_receive_credit = vec![(85.0, 60)];
         series
             .netlog_quic_client_side_window_updates
             .insert(-1, vec![(60.0, 80)]);
@@ -441,18 +442,14 @@ mod tests {
             netlog_quic_stream_received_connection_cumulative: vec![(1.0, 400)],
             ..SeriesStore::default()
         };
-        series
-            .h2_send_window_series_absolute
-            .insert(0, vec![(0.0, 250), (1.0, 50)]);
+        series.h2_connection_receive_credit = vec![(0.0, 250), (1.0, 50)];
         series
             .netlog_quic_client_side_window_updates
             .insert(-1, vec![(0.0, 500), (2.0, 20)]);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 300);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
 
-        series
-            .h2_send_window_series_absolute
-            .insert(0, vec![(0.0, 1_000)]);
+        series.h2_connection_receive_credit = vec![(0.0, 1_000)];
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 1_200);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
     }
