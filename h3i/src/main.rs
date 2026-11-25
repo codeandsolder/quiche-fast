@@ -28,14 +28,14 @@ use std::env;
 use std::io::BufReader;
 use std::result::Result;
 use std::time;
-use std::time::Instant;
 
 use h3i::actions::h3::Action;
 use h3i::client::connection_summary::ConnectionSummary;
 use h3i::client::ClientError;
 use h3i::prompts::h3::Prompter;
+use h3i::recordreplay::qlog::actions_from_qlog;
+use h3i::recordreplay::qlog::H3Actions;
 use h3i::recordreplay::qlog::QlogEvent;
-use h3i::recordreplay::qlog::*;
 use qlog::events::HTTP3_URI;
 use qlog::events::QUIC_URI;
 use qlog::reader::QlogSeqReader;
@@ -68,7 +68,7 @@ fn main() -> Result<(), ClientError> {
 
     let actions = match &config.qlog_input {
         Some(v) => read_qlog(v, config.host_override.as_deref())?,
-        None => prompt_frames(&config),
+        None => prompt_frames(&config)?,
     };
 
     #[cfg(not(feature = "async"))]
@@ -316,12 +316,12 @@ fn read_qlog(
     for event in qlog_reader {
         match event {
             qlog::reader::Event::Qlog(ev) => {
-                let ac: H3Actions = actions_from_qlog(ev, host_override);
+                let ac: H3Actions = actions_from_qlog(ev, host_override)?;
                 actions.extend(ac.0);
             },
 
             qlog::reader::Event::Json(ev) => {
-                let ac: H3Actions = (ev).into();
+                let ac = H3Actions::try_from(ev)?;
                 actions.extend(ac.0);
             },
         }
@@ -330,62 +330,50 @@ fn read_qlog(
     Ok(actions)
 }
 
-fn prompt_frames(config: &Config) -> Vec<Action> {
+fn prompt_frames(config: &Config) -> Result<Vec<Action>, ClientError> {
     let mut prompter = Prompter::with_config(&config.library_config);
     let actions = prompter.prompt();
 
     if !actions.is_empty() && config.qlog_actions_output {
-        let writer = make_qlog_writer();
-        let mut streamer = make_streamer(std::boxed::Box::new(writer));
+        let writer = make_qlog_writer()?;
+        let mut streamer = make_streamer(Box::new(writer))?;
 
         for action in &actions {
-            let events: QlogEvents = action.into();
-            for event in events {
-                match event {
-                    QlogEvent::Event { data, ex_data } => {
-                        streamer.add_event_data_ex_now(*data, ex_data).ok();
-                    },
-
-                    QlogEvent::JsonEvent(mut ev) => {
-                        // need to rewrite the event time
-                        ev.time = Instant::now()
-                            .duration_since(streamer.start_time())
-                            .as_secs_f64() *
-                            1000.0;
-                        streamer.add_event(ev).ok();
-                    },
-                }
-            }
+            QlogEvent::try_from(action)?.write(&mut streamer).map_err(
+                |error| {
+                    ClientError::Other(format!("write qlog event: {error:?}"))
+                },
+            )?;
         }
+        streamer.finish_log().map_err(|error| {
+            ClientError::Other(format!("finish qlog: {error:?}"))
+        })?;
     }
 
-    actions
+    Ok(actions)
 }
 
-/// Makes a buffered writer for a qlog.
-pub fn make_qlog_writer() -> std::io::BufWriter<std::fs::File> {
-    let mut path = std::env::current_dir().unwrap();
-    let now = time::SystemTime::now();
-    let filename = format!(
-        "{}-qlog.sqlog",
-        now.duration_since(time::UNIX_EPOCH).unwrap().as_millis()
-    );
-    path.push(filename.clone());
-
-    log::info!("Session will be recorded to {filename}");
-
-    match std::fs::File::create(&path) {
-        Ok(f) => std::io::BufWriter::new(f),
-
-        Err(e) => {
-            panic!("Error creating qlog file attempted path was {path:?}: {e}")
-        },
-    }
+fn make_qlog_writer() -> Result<std::io::BufWriter<std::fs::File>, ClientError> {
+    let now = time::SystemTime::now()
+        .duration_since(time::UNIX_EPOCH)
+        .map_err(|error| {
+            ClientError::Other(format!("qlog timestamp: {error}"))
+        })?;
+    let path = std::env::current_dir()
+        .map_err(|error| {
+            ClientError::Other(format!("qlog working directory: {error}"))
+        })?
+        .join(format!("{}-qlog.sqlog", now.as_millis()));
+    let file = std::fs::File::create_new(&path).map_err(|error| {
+        ClientError::Other(format!("create {}: {error}", path.display()))
+    })?;
+    log::info!("Session will be recorded to {}", path.display());
+    Ok(std::io::BufWriter::new(file))
 }
 
-pub fn make_streamer(
+fn make_streamer(
     writer: Box<dyn std::io::Write + Send + Sync>,
-) -> qlog::streamer::QlogStreamer {
+) -> Result<qlog::streamer::QlogStreamer, ClientError> {
     let vp = qlog::VantagePointType::Client;
 
     let trace = qlog::TraceSeq::new(
@@ -410,9 +398,11 @@ pub fn make_streamer(
         writer,
     );
 
-    streamer.start_log().ok();
-
     streamer
+        .start_log()
+        .map_err(|error| ClientError::Other(format!("start qlog: {error:?}")))?;
+
+    Ok(streamer)
 }
 
 #[cfg(test)]

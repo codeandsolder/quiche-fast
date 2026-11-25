@@ -81,7 +81,11 @@ cargo run blog.cloudflare.com --qlog-input <timestamp>-qlog.sqlog
 Note that `:authority` or `host` headers may need to be re-written to match the target server, depending on the use case.
 
 The file uses a custom qlog schema that augments the [QUIC schema] and [HTTP/3
-schema].
+schema]. Explicit h3i action recordings retain binary frame and stream payloads,
+header bytes, connection-close reasons, wait conditions and packet flushes.
+SETTINGS replay preserves the recorded identifier/value order. Ordinary
+connection traces can omit payloads; when an action cannot be reconstructed,
+replay returns an error instead of sending an invented payload.
 
 # Library
 

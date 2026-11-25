@@ -54,7 +54,6 @@ use crate::frame_parser::FrameParseResult;
 use crate::frame_parser::FrameParser;
 use crate::frame_parser::InterruptCause;
 use crate::recordreplay::qlog::QlogEvent;
-use crate::recordreplay::qlog::*;
 use qlog::events::http3::Http3Frame;
 use qlog::events::EventData;
 use qlog::streamer::QlogStreamer;
@@ -142,19 +141,12 @@ fn record_frame_action<F: quiche::BufFactory>(
     action: &Action, conn: &mut quiche::Connection<F>,
 ) {
     if let Some(s) = conn.qlog_streamer() {
-        let events: QlogEvents = action.into();
-        for event in events {
-            match event {
-                QlogEvent::Event { data, ex_data } => {
-                    if !matches!(data.as_ref(), EventData::QuicPacketSent(..)) {
-                        let _ = s.add_event_data_ex_now(*data, ex_data);
-                    }
+        match QlogEvent::try_from(action) {
+            Ok(event) =>
+                if let Err(error) = event.write(s) {
+                    log::warn!("cannot write action: {error}");
                 },
-                QlogEvent::JsonEvent(mut ev) => {
-                    ev.time = s.start_time().elapsed().as_secs_f64() * 1000.0;
-                    let _ = s.add_event(ev);
-                },
-            }
+            Err(error) => log::warn!("cannot record action: {error}"),
         }
     }
 }

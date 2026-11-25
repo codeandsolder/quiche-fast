@@ -41,7 +41,8 @@ use serde::Serialize;
 use serde_with::serde_as;
 
 /// Expected result from a `stream_send` operation.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExpectedStreamSendResult {
     /// Expect success with any number of bytes written.
     #[default]

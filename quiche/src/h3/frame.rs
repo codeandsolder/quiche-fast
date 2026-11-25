@@ -415,49 +415,31 @@ impl Frame {
                 raw: None,
             },
 
-            Self::Settings {
-                max_field_section_size,
-                qpack_max_table_capacity,
-                qpack_blocked_streams,
-                connect_protocol_enabled,
-                h3_datagram,
-                grease,
-                additional_settings,
-                ..
-            } => {
+            Self::Settings { .. } => {
                 use qlog::events::http3::Setting;
 
-                let known = [
-                    ("MAX_FIELD_SECTION_SIZE", max_field_section_size),
-                    ("QPACK_MAX_TABLE_CAPACITY", qpack_max_table_capacity),
-                    ("QPACK_BLOCKED_STREAMS", qpack_blocked_streams),
-                    (
-                        "SETTINGS_ENABLE_CONNECT_PROTOCOL",
-                        connect_protocol_enabled,
-                    ),
-                    ("H3_DATAGRAM", h3_datagram),
-                ];
-                let mut settings: Vec<_> = known
-                    .into_iter()
-                    .filter_map(|(name, value)| {
-                        value.map(|value| Setting {
-                            name: Some(name.to_owned()),
+                let settings = self
+                    .settings_pairs()
+                    .map(|(id, value)| {
+                        let name = match id {
+                            SETTINGS_MAX_FIELD_SECTION_SIZE =>
+                                "MAX_FIELD_SECTION_SIZE".into(),
+                            SETTINGS_QPACK_MAX_TABLE_CAPACITY =>
+                                "QPACK_MAX_TABLE_CAPACITY".into(),
+                            SETTINGS_QPACK_BLOCKED_STREAMS =>
+                                "QPACK_BLOCKED_STREAMS".into(),
+                            SETTINGS_ENABLE_CONNECT_PROTOCOL =>
+                                "SETTINGS_ENABLE_CONNECT_PROTOCOL".into(),
+                            SETTINGS_H3_DATAGRAM => "H3_DATAGRAM".into(),
+                            _ => id.to_string(),
+                        };
+                        Setting {
+                            name: Some(name),
                             name_bytes: None,
                             value,
-                        })
+                        }
                     })
                     .collect();
-
-                settings.extend(
-                    grease
-                        .iter()
-                        .chain(additional_settings.iter().flatten())
-                        .map(|(k, v)| Setting {
-                            name: Some(k.to_string()),
-                            name_bytes: None,
-                            value: *v,
-                        }),
-                );
 
                 Http3Frame::Settings {
                     settings,

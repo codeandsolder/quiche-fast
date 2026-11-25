@@ -49,7 +49,7 @@ fuzzing = []
 ffi = ["dep:cdylib-link-lines", "dep:socket2"]
 
 # Exposes internal APIs that have no stability guarantees across versions.
-internal = []
+internal = ["dep:serde"]
 
 # Enable qlog support with serde_json for extension data
 qlog = ["dep:qlog", "dep:serde_json"]
@@ -77,6 +77,7 @@ libm = "0.2"
 log = { workspace = true, features = ["std"] }
 octets = { workspace = true, features = ["huffman_hpack"] }
 qlog = { workspace = true, optional = true }
+serde = { workspace = true, features = ["derive"], optional = true }
 serde_json = { version = "1.0", optional = true }
 sfv = { version = "0.16", optional = true }
 slab = "0.4"

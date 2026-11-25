@@ -2815,6 +2815,7 @@ dependencies = [
  "qlog",
  "ring",
  "rstest",
+ "serde",
  "serde_json",
  "sfv",
  "slab",
