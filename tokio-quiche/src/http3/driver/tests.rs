@@ -258,7 +258,15 @@ mod client_side_driver {
 
         for (stream_id, next_id) in [(0, 2), (4, 3)] {
             helper.advance_and_run_loop()?;
-            assert_matches!(helper.peer_server_poll()?, (id, h3::Event::Headers { .. }) if id == stream_id);
+            // The preceding bodyless request may still have its Finished
+            // event queued. Drain only those already-completed streams.
+            loop {
+                match helper.peer_server_poll()? {
+                    (id, h3::Event::Finished) if id < stream_id => (),
+                    (id, h3::Event::Headers { .. }) if id == stream_id => break,
+                    event => anyhow::bail!("unexpected peer event: {event:?}"),
+                }
+            }
             helper.peer_server_send_response(stream_id, true)?;
             helper.advance_and_run_loop()?;
             let mut allocated = Vec::new();
