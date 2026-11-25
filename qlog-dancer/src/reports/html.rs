@@ -415,8 +415,8 @@ impl RequestColumns {
             cell(row, column)
                 .is_some_and(|value| !value.is_empty() && value != "n/a")
         };
-        let status =
-            cell(row, self.status).and_then(|value| value.parse::<u16>().ok());
+        let status = cell(row, self.status)
+            .and_then(crate::request_stub::parse_http_status);
         if reset(self.reset_received) ||
             status.is_some_and(|code| (400..=599).contains(&code))
         {
@@ -697,6 +697,8 @@ mod report_event_html_tests {
             (["GET", "103", "n/a", "n/a", "n/a", "n/a"], None),
             (["GET", "n/a", "12", "12", "n/a", "n/a"], None),
             (["GET", "700", "12", "12", "n/a", "n/a"], None),
+            (["GET", "+200", "12", "12", "n/a", "n/a"], None),
+            (["GET", "0200", "12", "12", "n/a", "n/a"], None),
             (["n/a", "200", "120", "0", "n/a", "n/a"], None),
             (
                 ["HEAD", "404", "120", "0", "n/a", "n/a"],

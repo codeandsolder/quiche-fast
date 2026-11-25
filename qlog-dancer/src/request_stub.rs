@@ -213,15 +213,21 @@ enum ResponseStatusClass {
     Final,
 }
 
+pub(crate) fn parse_http_status(status: &str) -> Option<u16> {
+    if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    status
+        .parse::<u16>()
+        .ok()
+        .filter(|code| (100..=599).contains(code))
+}
+
 impl ResponseStatusClass {
     fn classify(status: &str) -> Self {
-        if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Self::Invalid;
-        }
-        match status.parse::<u16>() {
-            Ok(100..=199) => Self::Informational,
-            Ok(200..=599) => Self::Final,
+        match parse_http_status(status) {
+            Some(100..=199) => Self::Informational,
+            Some(200..=599) => Self::Final,
             _ => Self::Invalid,
         }
     }
@@ -476,7 +482,7 @@ impl tabled::Tabled for HttpRequestStub {
 }
 
 #[must_use = "returns the first matching header value"]
-pub fn find_header_value(hdrs: &[HttpHeader], name: &str) -> Option<String> {
+fn find_header_value(hdrs: &[HttpHeader], name: &str) -> Option<String> {
     hdrs.iter()
         .find(|&h| h.name.as_deref() == Some(name))
         .and_then(|h| h.value.clone())
