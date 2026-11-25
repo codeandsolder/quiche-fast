@@ -71,6 +71,34 @@ where
         .collect()
 }
 
+// Chromium's QUIC frame logger casts QuicStreamId (uint32_t) to int.
+// Recover the exact unsigned bit pattern rather than dropping negative IDs.
+fn chromium_stream_id(value: i64) -> Result<u64, std::num::TryFromIntError> {
+    u64::try_from(value).or_else(|_| {
+        i32::try_from(value)
+            .map(|signed| u64::from(u32::from_ne_bytes(signed.to_ne_bytes())))
+    })
+}
+
+pub fn deserialize_quic_stream_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    chromium_stream_id(deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+// In WINDOW_UPDATE and BLOCKED records the all-ones stream ID denotes
+// connection-level flow control, not a stream. Canonicalize that marker.
+pub fn deserialize_quic_flow_control_id<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<i64, D::Error> {
+    let value = deserialize_quic_stream_id(deserializer)?;
+    if value == u64::from(u32::MAX) {
+        Ok(-1)
+    } else {
+        i64::try_from(value).map_err(D::Error::custom)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde::Deserialize;

@@ -2713,6 +2713,72 @@ mod netlog_tests {
     }
 
     #[test]
+    fn signed_netlog_stream_ids_join_http_headers_data_and_credit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut ds = Datastore::default();
+        for (time, kind, payload) in [
+            (
+                101,
+                "HTTP3_HEADERS_SENT",
+                serde_json::json!({"stream_id":"2147483648","headers":[":method: GET"]}),
+            ),
+            (
+                102,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_SENT",
+                serde_json::json!({"stream_id":-2147483648,"byte_offset":100}),
+            ),
+            (
+                103,
+                "QUIC_SESSION_STREAM_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":-2147483648,"offset":0,"length":50,"fin":true}),
+            ),
+            (
+                104,
+                "HTTP3_DATA_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":"2147483648","payload_length":25}),
+            ),
+            (
+                105,
+                "QUIC_SESSION_BLOCKED_FRAME_RECEIVED",
+                serde_json::json!({"stream_id":-2147483648}),
+            ),
+            (
+                106,
+                "QUIC_SESSION_WINDOW_UPDATE_FRAME_SENT",
+                serde_json::json!({"stream_id":-1,"byte_offset":200}),
+            ),
+        ] {
+            let header = netlog::EventHeader {
+                ty_string: kind.into(),
+                time_num: time,
+                ..Default::default()
+            };
+            let bytes =
+                serde_json::to_vec(&serde_json::json!({"params":payload}))?;
+            let event = netlog::parse_event(&header, &bytes)
+                .ok_or("signed stream event did not decode")?;
+            consume(&constants, &mut ds, time, &event)?;
+        }
+        ds.hydrate_http_requests();
+        let id = 2_147_483_648;
+        assert_eq!(ds.http_requests.len(), 1);
+        assert_eq!(ds.http_requests[&id].time_response_terminal, Some(3.0));
+        assert_eq!(
+            ds.http_requests[&id].received_data.complete_bytes(),
+            Some(25)
+        );
+        assert_eq!(
+            ds.sent_stream_max_data_tracker.get_stream_max(id),
+            Some(100)
+        );
+        assert_eq!(ds.received_quic_streams.get_stream_max(id), Some(50));
+        assert_eq!(ds.quic_peer_window_blocked[&2_147_483_648], [5.0]);
+        assert_eq!(ds.sent_max_data, [(6.0, 200)]);
+        Ok(())
+    }
+
+    #[test]
     fn netlog_both_credit_directions_use_shared_initial_and_update_histories(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;

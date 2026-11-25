@@ -243,7 +243,7 @@ pub struct QuicSessionAckFrameEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QuicSessionStreamFrameParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
+    #[serde(deserialize_with = "crate::wire_number::deserialize_quic_stream_id")]
     pub stream_id: u64,
     pub fin: bool,
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
@@ -259,7 +259,7 @@ pub struct QuicSessionStreamFrameEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QuicSessionStopSendingFrameSentParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
+    #[serde(deserialize_with = "crate::wire_number::deserialize_quic_stream_id")]
     pub stream_id: u64,
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub quic_rst_stream_error: u64,
@@ -272,7 +272,7 @@ pub struct QuicSessionStopSendingFrameSentEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QuicSessionRstStreamFrameParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
+    #[serde(deserialize_with = "crate::wire_number::deserialize_quic_stream_id")]
     pub stream_id: u64,
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub quic_rst_stream_error: u64,
@@ -287,7 +287,9 @@ pub struct QuicSessionRstStreamFrameEvent {
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct QuicSessionBlockedFrameReceivedParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
+    #[serde(
+        deserialize_with = "crate::wire_number::deserialize_quic_flow_control_id"
+    )]
     pub stream_id: i64,
 }
 
@@ -300,7 +302,9 @@ pub struct QuicSessionBlockedFrameReceivedEvent {
 pub struct QuicSessionWindowUpdateFrameParams {
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub byte_offset: u64,
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
+    #[serde(
+        deserialize_with = "crate::wire_number::deserialize_quic_flow_control_id"
+    )]
     pub stream_id: i64,
 }
 
@@ -589,6 +593,62 @@ mod tests {
                 "{invalid}"
             );
         }
+    }
+
+    #[test]
+    fn signed_chromium_stream_ids_round_trip_to_unsigned_stream_identity(
+    ) -> Result<(), serde_json::Error> {
+        use super::QuicSessionBlockedFrameReceivedParams;
+        use super::QuicSessionRstStreamFrameParams;
+        use super::QuicSessionStopSendingFrameSentParams;
+        use super::QuicSessionStreamFrameParams;
+        use super::QuicSessionWindowUpdateFrameParams;
+        for (wire, id) in [
+            ("-2147483648", 2_147_483_648),
+            (r#""-2""#, 4_294_967_294),
+            ("4294967294", 4_294_967_294),
+        ] {
+            let stream: QuicSessionStreamFrameParams =
+                serde_json::from_str(&format!(
+                    r#"{{"stream_id":{wire},"fin":true,"offset":0,"length":1}}"#
+                ))?;
+            let reset: QuicSessionRstStreamFrameParams = serde_json::from_str(
+                &format!(
+                    r#"{{"stream_id":{wire},"quic_rst_stream_error":0,"offset":1}}"#
+                ),
+            )?;
+            let stop: QuicSessionStopSendingFrameSentParams =
+                serde_json::from_str(&format!(
+                    r#"{{"stream_id":{wire},"quic_rst_stream_error":0}}"#
+                ))?;
+            let window: QuicSessionWindowUpdateFrameParams =
+                serde_json::from_str(&format!(
+                    r#"{{"stream_id":{wire},"byte_offset":4}}"#
+                ))?;
+            let blocked: QuicSessionBlockedFrameReceivedParams =
+                serde_json::from_str(&format!(r#"{{"stream_id":{wire}}}"#))?;
+            assert_eq!(
+                (stream.stream_id, reset.stream_id, stop.stream_id),
+                (id, id, id)
+            );
+            assert_eq!(u64::try_from(window.stream_id).ok(), Some(id));
+            assert_eq!(u64::try_from(blocked.stream_id).ok(), Some(id));
+        }
+        for wire in ["-1", "4294967295", r#""-1""#] {
+            let window: QuicSessionWindowUpdateFrameParams =
+                serde_json::from_str(&format!(
+                    r#"{{"stream_id":{wire},"byte_offset":4}}"#
+                ))?;
+            let blocked: QuicSessionBlockedFrameReceivedParams =
+                serde_json::from_str(&format!(r#"{{"stream_id":{wire}}}"#))?;
+            assert_eq!(window.stream_id, -1);
+            assert_eq!(blocked.stream_id, -1);
+        }
+        assert!(serde_json::from_str::<QuicSessionWindowUpdateFrameParams>(
+            r#"{"stream_id":-2147483649,"byte_offset":4}"#
+        )
+        .is_err());
+        Ok(())
     }
 
     #[test]
