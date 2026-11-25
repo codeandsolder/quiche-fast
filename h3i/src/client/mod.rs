@@ -42,7 +42,6 @@ use quiche::ConnectionError;
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::time::Instant;
 
 use crate::actions::h3::Action;
 use crate::actions::h3::ExpectedStreamSendResult;
@@ -121,259 +120,189 @@ pub(crate) type StreamParserMap = HashMap<u64, FrameParser>;
 fn validate_stream_send_result(
     result: quiche::Result<usize>, expected: &ExpectedStreamSendResult,
     stream_id: u64,
+) -> std::result::Result<(), String> {
+    let matches = match (expected, &result) {
+        (ExpectedStreamSendResult::Ok, Ok(_)) => true,
+        (ExpectedStreamSendResult::OkExact(expected), Ok(actual)) =>
+            expected == actual,
+        (ExpectedStreamSendResult::Error(expected), Err(actual)) =>
+            expected == actual,
+        _ => false,
+    };
+    if matches {
+        Ok(())
+    } else {
+        Err(format!(
+            "stream {stream_id}: expected {expected:?}, got {result:?}"
+        ))
+    }
+}
+
+fn record_frame_action<F: quiche::BufFactory>(
+    action: &Action, conn: &mut quiche::Connection<F>,
 ) {
-    match expected {
-        ExpectedStreamSendResult::Ok => {
-            result.unwrap_or_else(|err| {
-                panic!(
-                    "Expected stream_send on stream {} to succeed, but got: {:?}",
-                    stream_id, err
-                )
-            });
-        },
-        ExpectedStreamSendResult::OkExact(expected_bytes) => {
-            match result {
-                Ok(actual_bytes) if actual_bytes == *expected_bytes => {},
-                Ok(actual_bytes) => panic!(
-                    "Expected stream_send on stream {} to write {} bytes, got {}",
-                    stream_id, expected_bytes, actual_bytes
-                ),
-                Err(err) => panic!(
-                    "Expected stream_send on stream {} to write {} bytes, got error: {:?}",
-                    stream_id, expected_bytes, err
-                ),
+    if let Some(s) = conn.qlog_streamer() {
+        let events: QlogEvents = action.into();
+        for event in events {
+            match event {
+                QlogEvent::Event { data, ex_data } => {
+                    if !matches!(data.as_ref(), EventData::QuicPacketSent(..)) {
+                        let _ = s.add_event_data_ex_now(*data, ex_data);
+                    }
+                },
+                QlogEvent::JsonEvent(mut ev) => {
+                    ev.time = s.start_time().elapsed().as_secs_f64() * 1000.0;
+                    let _ = s.add_event(ev);
+                },
             }
+        }
+    }
+}
+
+fn send_stream_action<F: quiche::BufFactory>(
+    conn: &mut quiche::Connection<F>, stream_parsers: &mut StreamParserMap,
+    stream_id: u64, fin_stream: bool, bytes: &[u8],
+    expected_result: &ExpectedStreamSendResult,
+) -> std::result::Result<(), String> {
+    let result = conn.stream_send(stream_id, bytes, fin_stream);
+    validate_stream_send_result(result, expected_result, stream_id)?;
+    if result.is_ok() {
+        stream_parsers
+            .entry(stream_id)
+            .or_insert_with(|| FrameParser::new(stream_id));
+    }
+    Ok(())
+}
+
+fn encode_frame_action(action: &Action) -> std::result::Result<Vec<u8>, String> {
+    match action {
+        Action::SendFrame { frame, .. } =>
+            frame.to_vec().map_err(|err| err.to_string()),
+        Action::SendHeadersFrame {
+            headers,
+            literal_headers,
+            ..
+        } => {
+            let header_block = if *literal_headers {
+                crate::encode_header_block_literal(headers)
+            } else {
+                crate::encode_header_block(headers)
+            }?;
+            QFrame::Headers { header_block }
+                .to_vec()
+                .map_err(|err| err.to_string())
         },
-        ExpectedStreamSendResult::Error(expected_err) => {
-            match result {
-                Ok(written) => panic!(
-                    "Expected stream_send on stream {} to fail with {:?}, but wrote {} bytes",
-                    stream_id, expected_err, written
-                ),
-                Err(actual_err) if &actual_err == expected_err => {},
-                Err(actual_err) => panic!(
-                    "Expected stream_send on stream {} to fail with {:?}, got {:?}",
-                    stream_id, expected_err, actual_err
-                ),
-            }
-        },
+        _ => Err("action does not contain an HTTP/3 frame".into()),
     }
 }
 
 pub(crate) fn execute_action<F: quiche::BufFactory>(
     action: &Action, conn: &mut quiche::Connection<F>,
     stream_parsers: &mut StreamParserMap,
-) {
+) -> std::result::Result<(), String> {
     match action {
         Action::SendFrame {
             stream_id,
             fin_stream,
-            frame,
             expected_result,
-        } => {
-            log::info!("frame tx id={stream_id} frame={frame:?}");
-
-            // TODO: make serialization smarter
-            let mut d = [42; 9999];
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-
-            if let Some(s) = conn.qlog_streamer() {
-                let events: QlogEvents = action.into();
-                for event in events {
-                    match event {
-                        QlogEvent::Event { data, ex_data } => {
-                            // skip dummy packet
-                            if matches!(
-                                data.as_ref(),
-                                EventData::QuicPacketSent(..)
-                            ) {
-                                continue;
-                            }
-
-                            s.add_event_data_ex_now(*data, ex_data).ok();
-                        },
-
-                        QlogEvent::JsonEvent(mut ev) => {
-                            // need to rewrite the event time
-                            ev.time = Instant::now()
-                                .duration_since(s.start_time())
-                                .as_secs_f64() *
-                                1000.0;
-                            s.add_event(ev).ok();
-                        },
-                    }
-                }
-            }
-            let len = frame.to_bytes(&mut b).unwrap();
-
-            // TODO - consider storying result in ConnectionSummary too.
-            let result = conn.stream_send(*stream_id, &d[..len], *fin_stream);
-            validate_stream_send_result(result, expected_result, *stream_id);
-
-            stream_parsers
-                .entry(*stream_id)
-                .or_insert_with(|| FrameParser::new(*stream_id));
-        },
-
+            ..
+        } |
         Action::SendHeadersFrame {
             stream_id,
             fin_stream,
-            headers,
-            frame,
             expected_result,
             ..
         } => {
-            log::info!("headers frame tx stream={stream_id} hdrs={headers:?}");
-
-            // TODO: make serialization smarter
-            let mut d = [42; 9999];
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-
-            if let Some(s) = conn.qlog_streamer() {
-                let events: QlogEvents = action.into();
-                for event in events {
-                    match event {
-                        QlogEvent::Event { data, ex_data } => {
-                            // skip dummy packet
-                            if matches!(
-                                data.as_ref(),
-                                EventData::QuicPacketSent(..)
-                            ) {
-                                continue;
-                            }
-
-                            s.add_event_data_ex_now(*data, ex_data).ok();
-                        },
-
-                        QlogEvent::JsonEvent(mut ev) => {
-                            // need to rewrite the event time
-                            ev.time = Instant::now()
-                                .duration_since(s.start_time())
-                                .as_secs_f64() *
-                                1000.0;
-                            s.add_event(ev).ok();
-                        },
-                    }
-                }
-            }
-            let len = frame.to_bytes(&mut b).unwrap();
-            let result = conn.stream_send(*stream_id, &d[..len], *fin_stream);
-            validate_stream_send_result(result, expected_result, *stream_id);
-
-            stream_parsers
-                .entry(*stream_id)
-                .or_insert_with(|| FrameParser::new(*stream_id));
+            let bytes = encode_frame_action(action)?;
+            record_frame_action(action, conn);
+            send_stream_action(
+                conn,
+                stream_parsers,
+                *stream_id,
+                *fin_stream,
+                &bytes,
+                expected_result,
+            )
         },
-
         Action::OpenUniStream {
             stream_id,
             fin_stream,
             stream_type,
             expected_result,
         } => {
-            log::info!(
-                "open uni stream_id={stream_id} ty={stream_type} fin={fin_stream}"
-            );
-
-            let mut d = [42; 8];
-            let mut b = octets::OctetsMut::with_slice(&mut d);
-            b.put_varint(*stream_type).unwrap();
-            let off = b.off();
-
-            let result = conn.stream_send(*stream_id, &d[..off], *fin_stream);
-            validate_stream_send_result(result, expected_result, *stream_id);
-
-            stream_parsers
-                .entry(*stream_id)
-                .or_insert_with(|| FrameParser::new(*stream_id));
+            let mut bytes = [0; 8];
+            let encoded = octets::OctetsMut::with_slice(&mut bytes)
+                .put_varint(*stream_type)
+                .map_err(|err| err.to_string())?
+                .len();
+            send_stream_action(
+                conn,
+                stream_parsers,
+                *stream_id,
+                *fin_stream,
+                &bytes[..encoded],
+                expected_result,
+            )
         },
-
         Action::StreamBytes {
             stream_id,
             bytes,
             fin_stream,
             expected_result,
-        } => {
-            log::info!(
-                "stream bytes tx id={} len={} fin={}",
-                stream_id,
-                bytes.len(),
-                fin_stream
-            );
-            let result = conn.stream_send(*stream_id, bytes, *fin_stream);
-            validate_stream_send_result(result, expected_result, *stream_id);
-
-            stream_parsers
-                .entry(*stream_id)
-                .or_insert_with(|| FrameParser::new(*stream_id));
-        },
-
-        Action::SendDatagram { payload } => {
-            log::info!("dgram tx len={}", payload.len(),);
-
-            conn.dgram_send(payload)
-                .expect("datagram extension not enabled by peer");
-        },
-
+        } => send_stream_action(
+            conn,
+            stream_parsers,
+            *stream_id,
+            *fin_stream,
+            bytes,
+            expected_result,
+        ),
+        Action::SendDatagram { payload } =>
+            conn.dgram_send(payload).map_err(|err| err.to_string()),
         Action::ResetStream {
             stream_id,
             error_code,
         } => {
-            log::info!(
-                "reset_stream stream_id={stream_id} error_code={error_code}"
-            );
-            if let Err(e) = conn.stream_shutdown(
+            if let Err(err) = conn.stream_shutdown(
                 *stream_id,
                 quiche::Shutdown::Write,
                 *error_code,
             ) {
-                log::error!("can't send reset_stream: {e}");
-                // Clients cannot reset streams they do not own. If attempted,
-                // `stream_shutdown()` fails and no parser should be created.
-                return;
+                log::error!("can't send reset_stream: {err}");
+                return Ok(());
             }
-
             stream_parsers
                 .entry(*stream_id)
                 .or_insert_with(|| FrameParser::new(*stream_id));
+            Ok(())
         },
-
         Action::StopSending {
             stream_id,
             error_code,
         } => {
-            log::info!(
-                "stop_sending stream id={stream_id} error_code={error_code}"
-            );
-
-            if let Err(e) = conn.stream_shutdown(
+            if let Err(err) = conn.stream_shutdown(
                 *stream_id,
                 quiche::Shutdown::Read,
                 *error_code,
             ) {
-                log::error!("can't send stop_sending: {e}");
+                log::error!("can't send stop_sending: {err}");
             }
-
-            // A `STOP_SENDING` should elicit a `RESET_STREAM` in response,
-            // which the frame parser can automatically handle.
             stream_parsers
                 .entry(*stream_id)
                 .or_insert_with(|| FrameParser::new(*stream_id));
+            Ok(())
         },
-
         Action::ConnectionClose { error } => {
             let ConnectionError {
                 is_app,
                 error_code,
                 reason,
             } = error;
-
-            log::info!("connection_close={error:?}");
             let _ = conn.close(*is_app, *error_code, reason);
+            Ok(())
         },
-
-        // Neither of these actions will manipulate the Quiche connection
-        Action::FlushPackets | Action::Wait { .. } => unreachable!(),
+        Action::FlushPackets | Action::Wait { .. } =>
+            Err("scheduler action passed to the stream executor".into()),
     }
 }
 
@@ -556,4 +485,76 @@ pub(crate) fn parse_args(
         bind_addr,
         connect_url: (!args.tls.omit_sni).then(|| args.endpoint.host()),
     })
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::encode_frame_action;
+    use super::validate_stream_send_result;
+    use crate::actions::h3::send_headers_frame_literal;
+    use crate::actions::h3::Action;
+    use crate::actions::h3::ExpectedStreamSendResult;
+    use crate::quiche;
+    use quiche::h3::frame::Frame;
+    use quiche::h3::Header;
+
+    #[test]
+    fn encodes_large_frames_without_fixed_buffer() -> Result<(), String> {
+        let frame = Frame::Data {
+            payload: vec![0x35; 65_536],
+        };
+        let action = Action::SendFrame {
+            stream_id: 0,
+            fin_stream: false,
+            frame: frame.clone(),
+            expected_result: ExpectedStreamSendResult::Ok,
+        };
+        assert_eq!(
+            encode_frame_action(&action)?,
+            frame.to_vec().map_err(|err| err.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn headers_encoded_from_authoritative_fields() -> Result<(), String> {
+        let headers = vec![Header::new(b"X-Test", b"value")];
+        let action = send_headers_frame_literal(0, false, headers.clone());
+        let block = quiche::h3::qpack::encode_literal(&headers)
+            .map_err(|err| err.to_string())?;
+        let frame = Frame::Headers {
+            header_block: block,
+        };
+        assert_eq!(
+            encode_frame_action(&action)?,
+            frame.to_vec().map_err(|err| err.to_string())?
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn mismatches_are_errors_not_panics() {
+        use ExpectedStreamSendResult::Error;
+        use ExpectedStreamSendResult::Ok as Any;
+        use ExpectedStreamSendResult::OkExact;
+        assert!(validate_stream_send_result(Ok(1), &Any, 0).is_ok());
+        assert!(validate_stream_send_result(Ok(1), &OkExact(1), 0).is_ok());
+        assert!(validate_stream_send_result(Ok(1), &OkExact(2), 0).is_err());
+        assert!(
+            validate_stream_send_result(Err(quiche::Error::Done), &Any, 0)
+                .is_err()
+        );
+        assert!(validate_stream_send_result(
+            Err(quiche::Error::Done),
+            &Error(quiche::Error::Done),
+            0
+        )
+        .is_ok());
+        assert!(validate_stream_send_result(
+            Ok(1),
+            &Error(quiche::Error::Done),
+            0
+        )
+        .is_err());
+    }
 }

@@ -33,7 +33,6 @@ use inquire::Text;
 use quiche::h3::frame::Frame;
 
 use crate::encode_header_block;
-use crate::encode_header_block_literal;
 use crate::prompts::h3;
 use crate::StreamIdAllocator;
 
@@ -76,12 +75,6 @@ pub fn prompt_headers(
 
     sid_alloc.take_next_id();
 
-    let header_block = if literal {
-        encode_header_block_literal(&headers).unwrap_or_default()
-    } else {
-        encode_header_block(&headers).unwrap_or_default()
-    };
-
     let fin_stream = prompt_fin_stream()?;
 
     let action = Action::SendHeadersFrame {
@@ -89,7 +82,6 @@ pub fn prompt_headers(
         fin_stream,
         headers,
         literal_headers: literal,
-        frame: Frame::Headers { header_block },
         expected_result: Default::default(),
     };
 
@@ -104,7 +96,8 @@ pub fn prompt_push_promise() -> InquireResult<Action> {
     let header_block = if headers.is_empty() {
         vec![]
     } else {
-        encode_header_block(&headers).unwrap()
+        encode_header_block(&headers)
+            .map_err(|err| inquire::InquireError::Custom(err.into()))?
     };
 
     let fin_stream = prompt_fin_stream()?;

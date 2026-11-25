@@ -181,6 +181,25 @@ impl FramePayload<'_> {
     }
 }
 
+struct FrameEncoding<'a> {
+    frame_type: u64,
+    payload: FramePayload<'a>,
+    wire_payload_len: u64,
+    total: usize,
+}
+
+impl FrameEncoding<'_> {
+    fn write(&self, b: &mut octets::OctetsMut) -> Result<usize> {
+        if b.cap() < self.total {
+            return Err(super::Error::BufferTooShort);
+        }
+        b.put_varint(self.frame_type)?;
+        b.put_varint(self.wire_payload_len)?;
+        self.payload.encode(b)?;
+        Ok(self.total)
+    }
+}
+
 impl Frame {
     pub fn from_bytes(
         frame_type: u64, payload_length: u64, bytes: &[u8],
@@ -330,9 +349,7 @@ impl Frame {
         .chain(additional_settings.iter().flatten().copied())
     }
 
-    /// Encodes an entire frame, leaving the caller's buffer and write cursor
-    /// untouched if its encoded size cannot fit or a varint is invalid.
-    pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
+    fn encoding_plan(&self) -> Result<FrameEncoding<'_>> {
         let (frame_type, payload) = self.encoding();
         if frame_type > octets::MAX_VAR_INT {
             return Err(super::Error::BufferTooShort);
@@ -343,19 +360,37 @@ impl Frame {
         if wire_payload_len > octets::MAX_VAR_INT {
             return Err(super::Error::BufferTooShort);
         }
-
         let total = octets::varint_len(frame_type)
             .checked_add(octets::varint_len(wire_payload_len))
             .and_then(|len| len.checked_add(payload_len))
             .ok_or(super::Error::BufferTooShort)?;
-        if b.cap() < total {
-            return Err(super::Error::BufferTooShort);
-        }
+        Ok(FrameEncoding {
+            frame_type,
+            payload,
+            wire_payload_len,
+            total,
+        })
+    }
 
-        b.put_varint(frame_type)?;
-        b.put_varint(wire_payload_len)?;
-        payload.encode(b)?;
-        Ok(total)
+    /// Encodes an entire frame, leaving the caller's buffer and write cursor
+    /// untouched if its encoded size cannot fit or a varint is invalid.
+    pub fn to_bytes(&self, b: &mut octets::OctetsMut) -> Result<usize> {
+        self.encoding_plan()?.write(b)
+    }
+
+    /// Encodes an entire frame into a dynamically sized owned buffer.
+    ///
+    /// # Errors
+    /// Returns an error for invalid wire values or failed allocation.
+    pub fn to_vec(&self) -> Result<Vec<u8>> {
+        let plan = self.encoding_plan()?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(plan.total)
+            .map_err(|_| super::Error::ExcessiveLoad)?;
+        bytes.resize(plan.total, 0);
+        plan.write(&mut octets::OctetsMut::with_slice(&mut bytes))?;
+        Ok(bytes)
     }
 
     #[cfg(feature = "qlog")]
@@ -802,6 +837,7 @@ mod tests {
             let mut full = [0xA5; 512];
             let total =
                 frame.to_bytes(&mut octets::OctetsMut::with_slice(&mut full))?;
+            assert_eq!(frame.to_vec()?, full[..total]);
             for capacity in 0..total {
                 let mut storage = [0xA5; 512];
                 let mut writer =
@@ -844,6 +880,7 @@ mod tests {
                 let mut full = vec![0xA5; len + 32];
                 let total = frame
                     .to_bytes(&mut octets::OctetsMut::with_slice(&mut full))?;
+                assert_eq!(frame.to_vec()?, full[..total]);
                 for available in [0, 1, total - 1] {
                     let mut storage = vec![0xA5; available];
                     let mut writer = octets::OctetsMut::with_slice(&mut storage);
@@ -881,6 +918,7 @@ mod tests {
                 frame.to_bytes(&mut writer),
                 Err(super::super::Error::BufferTooShort)
             );
+            assert_eq!(frame.to_vec(), Err(super::super::Error::BufferTooShort));
             assert_eq!(writer.off(), 0, "frame={frame:?}");
             assert!(storage.iter().all(|&byte| byte == 0xA5));
         }

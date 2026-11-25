@@ -47,8 +47,6 @@ use serde_json::json;
 
 use crate::actions::h3::Action;
 use crate::actions::h3::WaitType;
-use crate::encode_header_block;
-use crate::encode_header_block_literal;
 use crate::fake_packet_sent;
 use crate::HTTP3_CONTROL_STREAM_TYPE_ID;
 use crate::HTTP3_PUSH_STREAM_TYPE_ID;
@@ -561,18 +559,11 @@ impl From<H3FrameCreatedEx> for Action {
                     .as_bool()
                     .unwrap_or_default();
 
-                let header_block = if literal_headers {
-                    encode_header_block_literal(&hdrs).unwrap()
-                } else {
-                    encode_header_block(&hdrs).unwrap()
-                };
-
                 Action::SendHeadersFrame {
                     stream_id,
                     fin_stream,
                     literal_headers,
                     headers: hdrs,
-                    frame: Frame::Headers { header_block },
                     expected_result: Default::default(),
                 }
             },
@@ -645,7 +636,6 @@ fn parse_ex_data(ex_data: &ExData) -> bool {
 mod tests {
     use crate::actions::h3::StreamEvent;
     use crate::actions::h3::StreamEventType;
-    use crate::encode_header_block_literal;
     use std::time::Duration;
 
     use super::*;
@@ -740,14 +730,11 @@ mod tests {
             Header::new(b":path", b"/"),
             Header::new(b":scheme", b"https"),
         ];
-        let header_block = encode_header_block(&headers).unwrap();
-        let frame = Frame::Headers { header_block };
         let expected = Action::SendHeadersFrame {
             stream_id: 0,
             fin_stream: true,
             literal_headers: false,
             headers,
-            frame,
             expected_result: Default::default(),
         };
 
@@ -767,14 +754,11 @@ mod tests {
             Header::new(b":path", b"/"),
             Header::new(b":scheme", b"https"),
         ];
-        let header_block = encode_header_block(&headers).unwrap();
-        let frame = Frame::Headers { header_block };
         let expected = Action::SendHeadersFrame {
             stream_id: 0,
             fin_stream: true,
             literal_headers: false,
             headers,
-            frame,
             expected_result: Default::default(),
         };
 
@@ -795,14 +779,11 @@ mod tests {
             Header::new(b":scheme", b"https"),
             Header::new(b"Foo", b"bar"),
         ];
-        let header_block = encode_header_block_literal(&headers).unwrap();
-        let frame = Frame::Headers { header_block };
         let expected = Action::SendHeadersFrame {
             stream_id: 0,
             fin_stream: true,
             literal_headers: true,
             headers,
-            frame,
             expected_result: Default::default(),
         };
 
