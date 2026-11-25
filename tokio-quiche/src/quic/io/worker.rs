@@ -293,7 +293,7 @@ pub(crate) struct IoWorkerParams<Tx, M> {
     pub(crate) audit_log_stats: Arc<QuicAuditStats>,
     pub(crate) write_state: WriteState,
     pub(crate) dscp_handle: Option<DscpHandle>,
-    pub(crate) route_lease: RouteLease,
+    pub(in crate::quic) route_lease: RouteLease,
     pub(crate) active_connection: GaugeGuard<Gauge>,
     pub(in crate::quic) bw_estimator: BandwidthReporter,
     pub(crate) cid_generator: Option<SharedConnectionIdGenerator>,

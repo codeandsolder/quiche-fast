@@ -529,7 +529,7 @@ where
     pub initial_pkt: Option<Incoming>,
     pub dscp_handle: Option<DscpHandle>,
     pub shutdown_tx: mpsc::Sender<()>,
-    pub route_lease: RouteLease,
+    pub(in crate::quic) route_lease: RouteLease,
     pub scid: ConnectionId<'static>,
     pub cid_generator: Option<SharedConnectionIdGenerator>,
     pub metrics: M,

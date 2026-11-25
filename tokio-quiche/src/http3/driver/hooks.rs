@@ -37,7 +37,7 @@ use crate::quic::QuicheConnection;
 
 /// A `HEADERS` frame received from the [`h3::Connection`], to be processed by
 /// the [`DriverHooks`].
-pub struct InboundHeaders {
+pub(super) struct InboundHeaders {
     pub(crate) stream_id: u64,
     pub(crate) headers: Vec<h3::Header>,
     pub(crate) has_body: bool,
