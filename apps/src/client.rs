@@ -48,7 +48,7 @@ pub enum ClientError {
 
 pub fn connect(
     args: ClientArgs, conn_args: CommonArgs,
-    output_sink: impl FnMut(String) + 'static,
+    output_sink: impl FnMut(&str) + 'static,
 ) -> Result<(), ClientError> {
     let mut buf = vec![0; 65_535];
     let mut out = vec![0; MAX_DATAGRAM_SIZE];
@@ -57,7 +57,7 @@ pub fn connect(
     let mut migrate_tx = DatagramQueue::new(MAX_DATAGRAM_SIZE, false);
 
     let output_sink =
-        Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(_)>>;
+        Rc::new(RefCell::new(output_sink)) as Rc<RefCell<dyn FnMut(&str)>>;
 
     // Setup the event loop.
     let mut poll = mio::Poll::new().unwrap();
@@ -190,7 +190,10 @@ pub fn connect(
     {
         if let Some(dir) = std::env::var_os("QLOGDIR") {
             let id = format!("{scid:?}");
-            let writer = make_qlog_writer(&dir, "client", &id);
+            let writer =
+                make_qlog_writer(&dir, "client", &id).map_err(|error| {
+                    ClientError::Other(format!("open qlog: {error}"))
+                })?;
 
             conn.set_qlog(
                 std::boxed::Box::new(writer),
@@ -383,29 +386,15 @@ pub fn connect(
 
                 app_proto_selected = true;
             } else if alpns::HTTP_3.contains(&app_proto) {
-                let dgram_sender = conn_args.datagrams.as_ref().map(|settings| {
-                    Http3DgramSender::new(
-                        settings.count,
-                        settings.data.clone(),
-                        0,
+                http_conn = Some(
+                    Http3Conn::with_urls(
+                        &mut conn,
+                        &args,
+                        &conn_args,
+                        Rc::clone(&output_sink),
                     )
-                });
-
-                http_conn = Some(Http3Conn::with_urls(
-                    &mut conn,
-                    &args.urls,
-                    args.reqs_cardinal,
-                    &args.req_headers,
-                    &args.body,
-                    &args.method,
-                    args.send_priority_update,
-                    conn_args.max_field_section_size,
-                    conn_args.qpack_max_table_capacity,
-                    conn_args.qpack_blocked_streams,
-                    args.dump_json,
-                    dgram_sender,
-                    Rc::clone(&output_sink),
-                ));
+                    .map_err(ClientError::Other)?,
+                );
 
                 app_proto_selected = true;
             }
@@ -414,8 +403,12 @@ pub fn connect(
         // If we have an HTTP connection, first issue the requests then
         // process received data.
         if let Some(h_conn) = http_conn.as_mut() {
-            h_conn.send_requests(&mut conn, &args.dump_response_path);
-            h_conn.handle_responses(&mut conn, &mut buf, &app_data_start);
+            h_conn
+                .send_requests(&mut conn, args.dump_response_path.as_deref())
+                .map_err(ClientError::Other)?;
+            h_conn
+                .handle_responses(&mut conn, &mut buf, &app_data_start)
+                .map_err(ClientError::Other)?;
         }
 
         // Handle path events.
@@ -466,7 +459,10 @@ pub fn connect(
 
         // Provides as many CIDs as possible.
         while conn.scids_left() > 0 {
-            let (scid, reset_token) = generate_cid_and_reset_token(&rng);
+            let (scid, reset_token) = generate_cid_and_reset_token(&rng)
+                .map_err(|error| {
+                    ClientError::Other(format!("generate CID: {error}"))
+                })?;
 
             if conn.new_scid(&scid, reset_token, false).is_err() {
                 break;

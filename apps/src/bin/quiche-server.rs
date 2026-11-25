@@ -355,13 +355,14 @@ fn main() {
                 {
                     if let Some(dir) = std::env::var_os("QLOGDIR") {
                         let id = format!("{:?}", scid);
-                        let writer = make_qlog_writer(&dir, "server", &id);
-
-                        conn.set_qlog(
-                            std::boxed::Box::new(writer),
-                            "quiche-server qlog".to_string(),
-                            format!("{} id={}", "quiche-server qlog", id),
-                        );
+                        match make_qlog_writer(&dir, "server", &id) {
+                            Ok(writer) => conn.set_qlog(
+                                std::boxed::Box::new(writer),
+                                "quiche-server qlog".to_string(),
+                                format!("quiche-server qlog id={id}"),
+                            ),
+                            Err(error) => error!("open qlog: {error}"),
+                        }
                     }
                 }
 
@@ -431,21 +432,9 @@ fn main() {
 
                     client.app_proto_selected = true;
                 } else if alpns::HTTP_3.contains(&app_proto) {
-                    let dgram_sender =
-                        conn_args.datagrams.as_ref().map(|settings| {
-                            Http3DgramSender::new(
-                                settings.count,
-                                settings.data.clone(),
-                                1,
-                            )
-                        });
-
                     client.http_conn = match Http3Conn::with_conn(
                         &mut client.conn,
-                        conn_args.max_field_section_size,
-                        conn_args.qpack_max_table_capacity,
-                        conn_args.qpack_blocked_streams,
-                        dgram_sender,
+                        &conn_args,
                         Rc::new(RefCell::new(stdout_sink)),
                     ) {
                         Ok(v) => Some(v),
@@ -495,7 +484,14 @@ fn main() {
 
             // Provides as many CIDs as possible.
             while client.conn.scids_left() > 0 {
-                let (scid, reset_token) = generate_cid_and_reset_token(&rng);
+                let (scid, reset_token) = match generate_cid_and_reset_token(&rng)
+                {
+                    Ok(value) => value,
+                    Err(error) => {
+                        error!("generate CID: {error}");
+                        break;
+                    },
+                };
                 if client.conn.new_scid(&scid, reset_token, false).is_err() {
                     break;
                 }
