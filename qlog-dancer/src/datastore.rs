@@ -2280,10 +2280,10 @@ mod input_tests {
             for (target, tracker) in trackers {
                 if target == &recipient {
                     assert_eq!(tracker.get_stream_max(13), Some(10));
-                    assert_eq!(tracker.sum_series, vec![(2.0, 10)]);
+                    assert_eq!(tracker.sum_series(), vec![(2.0, 10)]);
                 } else {
                     assert_eq!(tracker.get_stream_max(13), None);
-                    assert!(tracker.sum_series.is_empty());
+                    assert!(tracker.sum_series().is_empty());
                 }
             }
         }
@@ -2333,7 +2333,7 @@ mod input_tests {
         let mut ds = Datastore::default();
         assert!(ds.consume_qlog_event(&event, false).is_err());
         assert_eq!(ds.last_event_time, 0.0);
-        assert!(ds.stream_buffer_reads_tracker.per_stream.is_empty());
+        assert!(ds.stream_buffer_reads_tracker.streams().is_empty());
     }
 
     #[test]
@@ -2377,7 +2377,7 @@ mod input_tests {
         assert_eq!(ds.last_event_time, 1.0);
         assert!(!ds
             .received_stream_max_data_tracker
-            .per_stream
+            .streams()
             .contains_key(&2));
         assert_eq!(ds.received_stream_max_data_tracker.current_sum(), u64::MAX);
     }
