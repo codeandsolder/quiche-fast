@@ -674,7 +674,7 @@ fn validate_token<'a>(
     Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
 }
 
-fn handle_path_events(client: &mut Client) {
+fn handle_path_events(client: &mut ServerClient) {
     while let Some(qe) = client.conn.path_event_next() {
         match qe {
             quiche::PathEvent::New(local_addr, peer_addr) => {
