@@ -56,6 +56,8 @@ use netlog::h3;
 use netlog::quic;
 use netlog::quic::TransportParameters;
 
+mod h2_flow;
+pub use h2_flow::H2SendWindows;
 mod netlog_reader;
 pub use netlog_reader::with_netlog_reader;
 pub use netlog_reader::NetlogSession;
@@ -433,7 +435,7 @@ pub struct Datastore {
     pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, u64)>>,
 
     // Local send credit changes: received grants minus transmitted DATA.
-    pub h2_send_window_updates_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
+    pub h2_send_windows: H2SendWindows,
 
     pub netlog_quic_server_window_blocked: BTreeMap<i64, Vec<f64>>,
     pub netlog_quic_client_side_window_updates: BTreeMap<i64, Vec<(f64, u64)>>,
@@ -1020,17 +1022,10 @@ impl Datastore {
             Some(u64::from(size)),
             event_time,
         )?;
-        // Each DATA frame consumes both stream and connection credit.
-        // Stream zero is reserved for connection updates, not DATA.
-        self.h2_send_window_updates_balanced
-            .entry(stream_id)
-            .or_default()
-            .push((event_time, -i64::from(size)));
+        self.h2_send_windows
+            .change(stream_id, event_time, -i64::from(size));
         if stream_id != 0 {
-            self.h2_send_window_updates_balanced
-                .entry(0)
-                .or_default()
-                .push((event_time, -i64::from(size)));
+            self.h2_send_windows.change(0, event_time, -i64::from(size));
         }
         Ok(())
     }
@@ -1107,10 +1102,11 @@ impl Datastore {
 
         match direction {
             NetlogH2Direction::Received => {
-                self.h2_send_window_updates_balanced
-                    .entry(stream_id)
-                    .or_default()
-                    .push((event_time, i64::from(delta)));
+                self.h2_send_windows.change(
+                    stream_id,
+                    event_time,
+                    i64::from(delta),
+                );
             },
             NetlogH2Direction::Sent => {
                 self.h2_recv_window_updates
@@ -1127,6 +1123,7 @@ impl Datastore {
         &mut self, direction: NetlogH2Direction, stream_id: u32,
         error_code: &str, description: Option<&str>,
     ) {
+        self.h2_send_windows.close(stream_id);
         let Some(req) = self.http_requests.get_mut(&u64::from(stream_id)) else {
             return;
         };
@@ -1147,6 +1144,7 @@ impl Datastore {
         &mut self, params: &h2::Http2SessionCloseParams,
         constants: &netlog::constants::Constants,
     ) {
+        self.h2_send_windows.close_session();
         self.h2_session_close = Some(H2SessionClose {
             session_id: self.session_id.unwrap_or(-1),
             sni: self
@@ -1179,12 +1177,26 @@ impl Datastore {
 
             h2::Event::Http2SessionRecvSetting(e) => {
                 if let Some(id) = h2::parse_recv_setting_id(&e.params.id) {
-                    self.h2_server_settings.set_from_wire(id, e.params.value);
+                    let value = e.params.value;
+                    if id == h2::H2_INITIAL_WINDOW_SIZE {
+                        if value > h2::H2_MAX_WINDOW_SIZE {
+                            error!("ignoring invalid HTTP/2 initial send window: {value}");
+                            return Ok(());
+                        }
+                        self.h2_send_windows
+                            .set_initial_credit(rel_event_time, value);
+                    }
+                    self.h2_server_settings.set_from_wire(id, value);
                 } else {
                     error!("parsing H2 setting {:?}", e.params);
                 }
             },
             h2::Event::Http2SessionSendHeaders(e) => {
+                self.h2_send_windows
+                    .open(e.params.stream_id, rel_event_time);
+                if e.params.fin {
+                    self.h2_send_windows.close(e.params.stream_id);
+                }
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_tx.get_or_insert(rel_event_time);
@@ -1199,6 +1211,8 @@ impl Datastore {
             },
 
             h2::Event::Http2SessionRecvHeaders(e) => {
+                self.h2_send_windows
+                    .open(e.params.stream_id, rel_event_time);
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
@@ -1213,12 +1227,16 @@ impl Datastore {
                     rel_event_time,
                 )?,
 
-            h2::Event::Http2SessionSendData(e) => self
-                .record_netlog_sent_h2_data(
+            h2::Event::Http2SessionSendData(e) => {
+                self.record_netlog_sent_h2_data(
                     e.params.stream_id,
                     e.params.size,
                     rel_event_time,
-                )?,
+                )?;
+                if e.params.fin {
+                    self.h2_send_windows.close(e.params.stream_id);
+                }
+            },
 
             h2::Event::Http2SessionRecvWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
@@ -2142,7 +2160,7 @@ mod netlog_tests {
     fn h2_received(stream_id: u32, size: u32) -> netlog::Event {
         netlog::Event::H2(h2::Event::Http2SessionRecvData(
             h2::Http2SessionRecvDataEvent {
-                params: h2::Http2SessionSendDataParams {
+                params: h2::Http2SessionRecvDataParams {
                     stream_id,
                     size,
                     fin: false,
@@ -2232,14 +2250,14 @@ mod netlog_tests {
             consume(&constants, &mut datastore, time, &h2_sent(5, length))?;
         }
 
-        assert_eq!(datastore.h2_send_window_updates_balanced[&5], vec![
+        assert_eq!(datastore.h2_send_windows.histories()[&5].changes, vec![
             (1.0, -4),
             (5.0, -9),
             (8.0, 0)
         ]);
         assert_eq!(
-            datastore.h2_send_window_updates_balanced[&0],
-            datastore.h2_send_window_updates_balanced[&5]
+            datastore.h2_send_windows.histories()[&0].changes,
+            datastore.h2_send_windows.histories()[&5].changes
         );
         let request = &datastore.http_requests[&5];
         assert_eq!(request.sent_data.first_time(), Some(1.0));
@@ -2980,15 +2998,15 @@ mod netlog_tests {
         ] {
             consume(&constants, &mut datastore, time, &event)?;
         }
-        assert_eq!(datastore.h2_send_window_updates_balanced[&1], vec![(
+        assert_eq!(datastore.h2_send_windows.histories()[&1].changes, vec![(
             1.0, 50
         )]);
-        assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
+        assert_eq!(datastore.h2_send_windows.histories()[&3].changes, vec![(
             3.0, 8
         )]);
         assert_eq!(datastore.h2_recv_window_updates[&1], vec![(2.0, 7)]);
         assert_eq!(datastore.h2_recv_window_updates[&3], vec![(4.0, 11)]);
-        assert_eq!(datastore.h2_send_window_updates_balanced.len(), 2);
+        assert_eq!(datastore.h2_send_windows.histories().len(), 2);
         assert_eq!(datastore.h2_recv_window_updates.len(), 2);
         Ok(())
     }
@@ -3020,11 +3038,100 @@ mod netlog_tests {
             &h2_window_received(3, 0)
         )
         .is_ok());
-        assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
+        assert_eq!(datastore.h2_send_windows.histories()[&3].changes, vec![(
             10.0, 10
         )]);
         assert_eq!(datastore.h2_recv_window_updates[&3], vec![(20.0, 20)]);
-        assert_eq!(datastore.h2_send_window_updates_balanced[&3].len(), 1);
+        assert_eq!(datastore.h2_send_windows.histories()[&3].changes.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn h2_initial_window_settings_affect_only_open_send_sides(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut datastore = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
+        let setting = |value| {
+            netlog::Event::H2(h2::Event::Http2SessionRecvSetting(
+                h2::Http2SessionRecvSettingEvent {
+                    params: h2::Http2SessionRecvSettingParams {
+                        id: "4 (SETTINGS_INITIAL_WINDOW_SIZE)".to_owned(),
+                        value,
+                    },
+                },
+            ))
+        };
+        let headers = |stream_id, fin| {
+            netlog::Event::H2(h2::Event::Http2SessionSendHeaders(
+                h2::Http2SessionSendHeadersEvent {
+                    params: h2::Http2SessionSendHeadersParams {
+                        stream_id,
+                        fin,
+                        ..Default::default()
+                    },
+                },
+            ))
+        };
+        let send_fin = netlog::Event::H2(h2::Event::Http2SessionSendData(
+            h2::Http2SessionSendDataEvent {
+                params: h2::Http2SessionSendDataParams {
+                    stream_id: 1,
+                    size: 2,
+                    fin: true,
+                },
+            },
+        ));
+        for (time, event) in [
+            (101, setting(100)),
+            (102, headers(1, false)),
+            (103, h2_sent(1, 80)),
+            (104, setting(50)),
+            (105, headers(3, false)),
+            (106, h2_window_received(1, 50)),
+            (107, send_fin),
+            (108, setting(120)),
+            (109, headers(5, true)),
+            (110, setting(0)),
+            (111, setting(u32::MAX)),
+            (112, h2_window_received(1, 100)),
+            (113, h2_window_received(3, 20)),
+        ] {
+            consume(&constants, &mut datastore, time, &event)?;
+        }
+        let histories = datastore.h2_send_windows.histories();
+        assert_eq!(histories[&1].initial, 100);
+        assert_eq!(histories[&1].changes, [
+            (3.0, -80),
+            (4.0, -50),
+            (6.0, 50),
+            (7.0, -2)
+        ]);
+        assert_eq!(histories[&3].initial, 50);
+        assert_eq!(histories[&3].changes, [(8.0, 70), (10.0, -120), (13.0, 20)]);
+        assert_eq!(histories[&5].initial, 120);
+        assert_eq!(histories[&5].changes.as_slice(), []);
+        assert_eq!(histories[&0].initial, 65535);
+        assert_eq!(histories[&0].changes, [(3.0, -80), (7.0, -2)]);
+        assert_eq!(datastore.h2_server_settings.initial_window_size, Some(0));
+        let series = crate::seriesstore::SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(series.h2_send_window_series_balanced[&1], [
+            (2.0, 100),
+            (3.0, 100),
+            (3.0, 20),
+            (4.0, 20),
+            (4.0, -30),
+            (6.0, -30),
+            (6.0, 20),
+            (7.0, 20),
+            (7.0, 18),
+        ]);
+        assert_eq!(
+            series.h2_send_window_series_balanced[&3].last(),
+            Some(&(13.0, 20))
+        );
         Ok(())
     }
 
@@ -3047,7 +3154,7 @@ mod netlog_tests {
         ] {
             consume(&constants, &mut datastore, time, &event)?;
         }
-        assert_eq!(datastore.h2_send_window_updates_balanced[&0], [
+        assert_eq!(datastore.h2_send_windows.histories()[&0].changes, [
             (1.0, -7),
             (2.0, 100),
             (3.0, -11)

@@ -60,7 +60,7 @@ type SeriesResult<T> = Result<T, SeriesBuildError>;
 #[derive(Clone, Copy)]
 enum SeriesShape {
     Samples,
-    Steps,
+    Steps { opened_at: f64 },
 }
 
 /// Build a cumulative series in observation order. The first point establishes
@@ -69,16 +69,22 @@ fn cumulative_series<T: Copy>(
     points: &[(f64, T)], initial: T, checked_add: fn(T, T) -> Option<T>,
     shape: SeriesShape, error: SeriesBuildError,
 ) -> SeriesResult<Vec<(f64, T)>> {
-    let Some(first) = points.first() else {
-        return Ok(Vec::new());
+    let start = match shape {
+        SeriesShape::Samples => {
+            let Some(first) = points.first() else {
+                return Ok(Vec::new());
+            };
+            first.0
+        },
+        SeriesShape::Steps { opened_at } => opened_at,
     };
-    let mut series = vec![(first.0, initial)];
+    let mut series = vec![(start, initial)];
     let mut value = initial;
     for &(time, delta) in points {
         value = checked_add(value, delta).ok_or(error)?;
         match shape {
             SeriesShape::Samples => series.push((time, value)),
-            SeriesShape::Steps => push_interp(&mut series, (time, value)),
+            SeriesShape::Steps { .. } => push_interp(&mut series, (time, value)),
         }
     }
     Ok(series)
@@ -647,27 +653,10 @@ impl SeriesStore {
         Ok(())
     }
 
-    // TODO: hack. Initial window size can theoretically vary through
-    // the connection, which makes calculations hard. Practically,
-    // nobody does that, so just assume the initial window was either
-    // indicated in settings or omitted in order to use defaults.
-    fn initial_h2_fc_value(stream_id: u32, data_store: &Datastore) -> u32 {
-        if stream_id == 0 {
-            // https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.2
-            // Connection-level flow control is 65,535 octets
-            H2_DEFAULT_WINDOW_SIZE
-        } else {
-            data_store
-                .h2_server_settings
-                .initial_window_size
-                .unwrap_or(H2_DEFAULT_WINDOW_SIZE)
-        }
-    }
-
     fn h2_window_series(&mut self, data_store: &Datastore) -> SeriesResult<()> {
         self.h2_send_window_series_balanced = Self::build_h2_windows(
-            &data_store.h2_send_window_updates_balanced,
-            data_store,
+            &data_store.h2_send_windows,
+            &mut self.sent_x_min,
             &mut self.sent_x_max,
         )?;
         self.h2_connection_receive_credit = Self::h2_receive_credit(data_store)?;
@@ -700,41 +689,44 @@ impl SeriesStore {
             .fold((0.0_f64, 0.0_f64), |(start, end), &(time, _)| {
                 (start.min(time), end.max(time))
             });
-        let mut value = u64::from(H2_DEFAULT_WINDOW_SIZE);
-        let mut series = vec![(start, value)];
-        for (time, increment) in updates {
-            value = value.checked_add(increment).ok_or(SeriesBuildError {
+        let mut series = cumulative_series(
+            &updates,
+            u64::from(H2_DEFAULT_WINDOW_SIZE),
+            u64::checked_add,
+            SeriesShape::Steps { opened_at: start },
+            SeriesBuildError {
                 stream_id: 0,
                 series: "h2_connection_receive_credit",
-            })?;
-            push_interp(&mut series, (time, value));
-        }
-        if series.last().is_some_and(|point| point.0 < end) {
-            series.push((end, value));
+            },
+        )?;
+        if let Some(&(time, credit)) = series.last() {
+            if time < end {
+                series.push((end, credit));
+            }
         }
         Ok(series)
     }
 
     fn build_h2_windows(
-        source: &BTreeMap<u32, Vec<(f64, i64)>>, data_store: &Datastore,
+        source: &crate::datastore::H2SendWindows, x_min: &mut f64,
         x_max: &mut f64,
     ) -> SeriesResult<BTreeMap<u32, Vec<(f64, i64)>>> {
         let mut output = BTreeMap::new();
-        for (&stream, points) in source {
+        for (&stream, history) in source.histories() {
             let series = cumulative_series(
-                points,
-                i64::from(Self::initial_h2_fc_value(stream, data_store)),
+                &history.changes,
+                i64::from(history.initial),
                 i64::checked_add,
-                SeriesShape::Steps,
+                SeriesShape::Steps {
+                    opened_at: history.opened_at,
+                },
                 SeriesBuildError {
                     stream_id: u64::from(stream),
                     series: "h2_fc_balanced",
                 },
             )?;
-            if series.is_empty() {
-                continue;
-            }
-            for &(time, _) in points {
+            for &(time, _) in &series {
+                *x_min = x_min.min(time);
                 *x_max = x_max.max(time);
             }
             output.insert(stream, series);
@@ -1090,9 +1082,7 @@ mod tests {
     #[test]
     fn h2_windows_keep_initial_limit_and_reject_overflow() {
         let mut datastore = Datastore::default();
-        datastore
-            .h2_send_window_updates_balanced
-            .insert(1, vec![(1.0, -5)]);
+        datastore.h2_send_windows.change(1, 1.0, -5);
         datastore.h2_recv_window_updates.insert(0, vec![(1.0, 7)]);
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_ok());
@@ -1112,9 +1102,7 @@ mod tests {
         }
 
         let mut datastore = Datastore::default();
-        datastore
-            .h2_send_window_updates_balanced
-            .insert(4, vec![(1.0, i64::MAX)]);
+        datastore.h2_send_windows.change(4, 1.0, i64::MAX);
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_err_and(
             |error| error.stream_id == 4 && error.series == "h2_fc_balanced"
@@ -1129,10 +1117,10 @@ mod tests {
             error.series == "h2_connection_receive_credit"));
 
         let mut datastore = Datastore::default();
-        datastore.h2_server_settings.initial_window_size = Some(u32::MAX);
         datastore
-            .h2_send_window_updates_balanced
-            .insert(1, vec![(1.0, 0)]);
+            .h2_send_windows
+            .set_initial_credit(0.0, netlog::h2::H2_MAX_WINDOW_SIZE);
+        datastore.h2_send_windows.change(1, 1.0, 0);
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_ok());
         if let Ok(series) = result {
@@ -1142,14 +1130,14 @@ mod tests {
                     .get(&1)
                     .and_then(|points| points.last())
                     .map(|point| point.1),
-                Some(i64::from(u32::MAX))
+                Some(i64::from(netlog::h2::H2_MAX_WINDOW_SIZE))
             );
         }
 
         let mut datastore = Datastore::default();
         datastore
-            .h2_send_window_updates_balanced
-            .insert(1, vec![(1.0, -i64::from(u32::MAX))]);
+            .h2_send_windows
+            .change(1, 1.0, -i64::from(u32::MAX));
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_ok());
         if let Ok(series) = result {
