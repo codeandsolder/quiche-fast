@@ -48,6 +48,7 @@ use plotters::prelude::PathElement;
 use plotters::prelude::RGBColor;
 use plotters::prelude::TriangleMarker;
 
+use crate::datastore::ApplicationProto;
 use crate::datastore::VantagePoint;
 use crate::plots::chart_label_style;
 use crate::plots::chart_title_style;
@@ -101,11 +102,10 @@ impl Default for MultiplexPlotsParams {
 /// Determine stream visibility using the protocol's stream-ID rules. HTTP/2
 /// stream IDs have no QUIC initiator/direction bits.
 fn visible_stream(
-    params: &MultiplexPlotsParams, protocol: crate::datastore::ApplicationProto,
-    stream_id: u64,
+    params: &MultiplexPlotsParams, protocol: ApplicationProto, stream_id: u64,
 ) -> bool {
     !params.bidi_only ||
-        protocol == crate::datastore::ApplicationProto::Http2 ||
+        protocol == ApplicationProto::Http2 ||
         (stream_id & 2) == 0
 }
 
@@ -119,15 +119,21 @@ struct MultiplexLayout {
     chart_width: u32,
     data_mini_y: u32,
     bubbles_y: u32,
-    stream_combined_y: u32,
-    stream_mini_y: u32,
+    stream_section: Option<StreamSection>,
     frame_step: u32,
     bubble_step: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StreamSection {
+    combined_y: u32,
+    mini_y: u32,
 }
 
 impl MultiplexLayout {
     fn new(
         params: &MultiplexPlotsParams, request_count: usize,
+        protocol: ApplicationProto,
     ) -> io::Result<Self> {
         let chart_width = params
             .width
@@ -157,33 +163,39 @@ impl MultiplexLayout {
         let bubble_rows_height = mul(rows, bubble_step)?;
         let data_mini_y = add(u64::from(params.combined_plot_height), spacing)?;
         let bubbles_y = add(add(data_mini_y, frame_rows_height)?, spacing)?;
-        let stream_combined_y =
-            add(add(bubbles_y, bubble_rows_height)?, spacing)?;
-        let stream_mini_y = add(
-            add(stream_combined_y, u64::from(params.combined_plot_height))?,
-            spacing,
-        )?;
-        let full_height =
-            add(add(add(stream_mini_y, frame_rows_height)?, spacing)?, 40)?;
-        checked_pixel(u64::from(params.width))?;
-        checked_pixel(full_height)?;
-        for position in [data_mini_y, bubbles_y, stream_combined_y, stream_mini_y]
-        {
-            checked_pixel(position)?;
-        }
+        let data_end = add(add(bubbles_y, bubble_rows_height)?, spacing)?;
         let convert = |v: u64| {
+            checked_pixel(v)?;
             u32::try_from(v).map_err(|_| {
                 invalid_chart("multiplex plot coordinate exceeds u32")
             })
         };
+        let (stream_section, content_end) = match protocol {
+            ApplicationProto::Http2 => (None, data_end),
+            ApplicationProto::Http3 => {
+                let mini_y = add(
+                    add(data_end, u64::from(params.combined_plot_height))?,
+                    spacing,
+                )?;
+                let end = add(add(mini_y, frame_rows_height)?, spacing)?;
+                (
+                    Some(StreamSection {
+                        combined_y: convert(data_end)?,
+                        mini_y: convert(mini_y)?,
+                    }),
+                    end,
+                )
+            },
+        };
+        let full_height = add(content_end, 40)?;
+        checked_pixel(u64::from(params.width))?;
         Ok(Self {
             width: params.width,
             height: convert(full_height)?,
             chart_width,
             data_mini_y: convert(data_mini_y)?,
             bubbles_y: convert(bubbles_y)?,
-            stream_combined_y: convert(stream_combined_y)?,
-            stream_mini_y: convert(stream_mini_y)?,
+            stream_section,
             frame_step: convert(frame_step)?,
             bubble_step: convert(bubble_step)?,
         })
@@ -219,12 +231,12 @@ fn request_data_frames(
 /// of later streams between combined and per-request panels.
 fn colors_for_visible_streams(
     params: &MultiplexPlotsParams, ds: &Datastore,
-    stream_frame_series: &BTreeMap<u64, Vec<QlogPointu64>>,
+    stream_frame_series: Option<&BTreeMap<u64, Vec<QlogPointu64>>>,
 ) -> BTreeMap<u64, RGBColor> {
     let ids: BTreeSet<u64> = ds
         .http_requests
         .keys()
-        .chain(stream_frame_series.keys())
+        .chain(stream_frame_series.into_iter().flat_map(BTreeMap::keys))
         .copied()
         .filter(|&id| visible_stream(params, ds.application_proto, id))
         .collect();
@@ -255,16 +267,12 @@ impl<'a> MultiplexModel<'a> {
     fn new(
         params: &MultiplexPlotsParams, ss: &'a SeriesStore, ds: &'a Datastore,
     ) -> io::Result<Self> {
-        use crate::datastore::ApplicationProto;
         let frame_series = match (ds.application_proto, ds.vantage_point) {
-            (ApplicationProto::Http2, VantagePoint::Client) =>
-                &ss.received_data_frames_series,
-            (ApplicationProto::Http2, VantagePoint::Server) =>
-                &ss.sent_data_frames_series,
+            (ApplicationProto::Http2, _) => None,
             (ApplicationProto::Http3, VantagePoint::Client) =>
-                &ss.received_stream_frames_series,
+                Some(&ss.received_stream_frames_series),
             (ApplicationProto::Http3, VantagePoint::Server) =>
-                &ss.sent_stream_frames_series,
+                Some(&ss.sent_stream_frames_series),
         };
         let colors = colors_for_visible_streams(params, ds, frame_series);
         let lanes = colors
@@ -274,7 +282,9 @@ impl<'a> MultiplexModel<'a> {
                 let data = request.map_or(&[][..], |request| {
                     request_data_frames(request, ds.vantage_point)
                 });
-                let frames = frame_series.get(&id).map_or(&[][..], Vec::as_slice);
+                let frames = frame_series
+                    .and_then(|series| series.get(&id))
+                    .map_or(&[][..], Vec::as_slice);
                 let headers = request.map_or([None, None], |request| {
                     [request.time_first_headers_rx, request.time_first_headers_tx]
                 });
@@ -316,7 +326,8 @@ impl<'a> MultiplexModel<'a> {
                 end = end.max(time);
             }
         }
-        let layout = MultiplexLayout::new(params, lanes.len())?;
+        let layout =
+            MultiplexLayout::new(params, lanes.len(), ds.application_proto)?;
         let x_range = checked_time_range(start, end, &params.clamp)?;
         Ok(Self {
             lanes,
@@ -444,24 +455,27 @@ where
     DB::ErrorType: 'static,
 {
     let layout = &model.layout;
-    let combined = [
-        (0, FrameKind::Data),
-        (
-            checked_pixel(u64::from(layout.stream_combined_y))?,
-            FrameKind::Stream,
-        ),
-    ];
+    let combined = std::iter::once((0, FrameKind::Data)).chain(
+        layout
+            .stream_section
+            .as_ref()
+            .map(|section| (section.combined_y, FrameKind::Stream)),
+    );
     for (y, kind) in combined {
+        let y = checked_pixel(u64::from(y))?;
         let area = root
             .clone()
             .shrink((0, y), (layout.chart_width, params.combined_plot_height));
         draw_combined(&area, params, model, kind)?;
     }
     for (row, lane) in model.lanes.values().enumerate() {
-        let frames = [
-            (layout.data_mini_y, FrameKind::Data),
-            (layout.stream_mini_y, FrameKind::Stream),
-        ];
+        let frames = std::iter::once((layout.data_mini_y, FrameKind::Data))
+            .chain(
+                layout
+                    .stream_section
+                    .as_ref()
+                    .map(|section| (section.mini_y, FrameKind::Stream)),
+            );
         for (offset, kind) in frames {
             let y = MultiplexLayout::row_y(offset, layout.frame_step, row)?;
             let area = root.clone().shrink(
@@ -563,7 +577,6 @@ pub fn plot_stream_multiplexing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::datastore::ApplicationProto;
     use crate::plots::fallible::test_support::TempCharts;
     use crate::request_stub::HttpDataHistory;
 
@@ -601,7 +614,8 @@ mod tests {
             (9, vec![(1.0, 2)]),
         ]);
 
-        let colors = colors_for_visible_streams(&params, &ds, &frame_series);
+        let colors =
+            colors_for_visible_streams(&params, &ds, Some(&frame_series));
         assert_eq!(colors.keys().copied().collect::<Vec<_>>(), vec![1, 5, 9]);
 
         let mut expected = ColorCycle::default();
@@ -615,13 +629,13 @@ mod tests {
         // The mapping is independent of insertion order and remains stable
         // when we repeat the same selection for all three plot sections.
         assert_eq!(
-            colors_for_visible_streams(&params, &ds, &frame_series),
+            colors_for_visible_streams(&params, &ds, Some(&frame_series)),
             colors
         );
 
         // HTTP/2 has no QUIC direction bits: IDs 2 and 6 become visible.
         ds.application_proto = ApplicationProto::Http2;
-        let h2 = colors_for_visible_streams(&params, &ds, &frame_series);
+        let h2 = colors_for_visible_streams(&params, &ds, Some(&frame_series));
         assert_eq!(h2.keys().copied().collect::<Vec<_>>(), vec![1, 2, 5, 6, 9]);
     }
 
@@ -652,7 +666,10 @@ mod tests {
         assert_eq!(model.lanes[&1].data, []);
         assert_eq!(model.x_range, 0.0..9.0);
         assert_eq!(model.max_data, 30);
-        assert_eq!(model.layout, MultiplexLayout::new(&params, 2)?);
+        assert_eq!(
+            model.layout,
+            MultiplexLayout::new(&params, 2, ApplicationProto::Http3)?
+        );
         Ok(())
     }
 
@@ -685,28 +702,41 @@ mod tests {
     fn layout_never_overlaps_and_rejects_impossible_dimensions(
     ) -> Result<(), Box<dyn Error>> {
         let params = test_params();
-        let layout = MultiplexLayout::new(&params, 3)?;
+        let layout = MultiplexLayout::new(&params, 3, ApplicationProto::Http3)?;
         assert!(layout.data_mini_y >= params.combined_plot_height);
         assert!(layout.bubbles_y >= layout.data_mini_y + 3 * layout.frame_step);
-        assert!(
-            layout.stream_combined_y >= layout.bubbles_y + 3 * layout.bubble_step
-        );
-        assert!(
-            layout.stream_mini_y >=
-                layout.stream_combined_y + params.combined_plot_height
-        );
-        assert!(layout.height > layout.stream_mini_y + 3 * layout.frame_step);
+        let stream = layout
+            .stream_section
+            .as_ref()
+            .ok_or("missing HTTP/3 STREAM section")?;
+        assert!(stream.combined_y >= layout.bubbles_y + 3 * layout.bubble_step);
+        assert!(stream.mini_y >= stream.combined_y + params.combined_plot_height);
+        assert!(layout.height > stream.mini_y + 3 * layout.frame_step);
+        let h2 = MultiplexLayout::new(&params, 3, ApplicationProto::Http2)?;
+        assert!(h2.stream_section.is_none());
+        assert!(h2.height > h2.bubbles_y + 3 * h2.bubble_step);
+        assert!(h2.height < layout.height);
         let bad_width = MultiplexPlotsParams {
             right_shrink_margin: params.width + 1,
             ..test_params()
         };
-        assert!(MultiplexLayout::new(&bad_width, 1).is_err());
+        assert!(
+            MultiplexLayout::new(&bad_width, 1, ApplicationProto::Http3).is_err()
+        );
         let bad_height = MultiplexPlotsParams {
             combined_plot_height: u32::MAX,
             ..test_params()
         };
-        assert!(MultiplexLayout::new(&bad_height, 1).is_err());
-        assert!(MultiplexLayout::new(&params, usize::MAX).is_err());
+        assert!(
+            MultiplexLayout::new(&bad_height, 1, ApplicationProto::Http3)
+                .is_err()
+        );
+        assert!(MultiplexLayout::new(
+            &params,
+            usize::MAX,
+            ApplicationProto::Http3
+        )
+        .is_err());
         Ok(())
     }
 
@@ -722,7 +752,10 @@ mod tests {
         let (width, height) = image::image_dimensions(&path)?;
         assert_eq!(
             (width, height),
-            (params.width, MultiplexLayout::new(&params, 0)?.height)
+            (
+                params.width,
+                MultiplexLayout::new(&params, 0, ApplicationProto::Http3)?.height
+            )
         );
         let blocked = TempCharts::new()?;
         let obstacle = blocked.0.join("occupied-file");
@@ -771,13 +804,17 @@ mod tests {
         plot_stream_multiplexing(&params, "h2-id3", &series, &ds, &out.output())?;
         let path = out.only_file()?;
         let rendered = image::open(&path)?.to_rgb8();
-        let layout = MultiplexLayout::new(&params, 1)?;
+        let layout = MultiplexLayout::new(&params, 1, ApplicationProto::Http2)?;
         assert_eq!(
             (rendered.width(), rendered.height()),
             (layout.width, layout.height)
         );
-        // Compare to same request without STREAM/DATA samples. Chart geometry
-        // remains identical; pixel differences prove the H2 stream was drawn.
+        let model = MultiplexModel::new(&params, &series, &ds)?;
+        assert_eq!(model.lanes.keys().copied().collect::<Vec<_>>(), [3]);
+        assert!(model.lanes[&3].frames.is_empty());
+        assert!(model.layout.stream_section.is_none());
+        // Cumulative DATA samples are not transport STREAM events and must
+        // not influence the HTTP/2 multiplex output.
         let no_frames = SeriesStore {
             sent_x_min: 0.0,
             sent_x_max: 8.0,
@@ -793,11 +830,27 @@ mod tests {
             &out_without.output(),
         )?;
         let without = image::open(out_without.only_file()?)?.to_rgb8();
-        assert_ne!(
+        assert_eq!(
             rendered.as_raw(),
             without.as_raw(),
-            "HTTP/2 STREAM lane must render DATA frames"
+            "HTTP/2 multiplex must render only actual DATA observations"
         );
+
+        ds.http_requests
+            .get_mut(&3)
+            .ok_or("missing request")?
+            .sent_data = HttpDataHistory::default();
+        let empty_data = TempCharts::new()?;
+        plot_stream_multiplexing(
+            &params,
+            "h2-empty-data",
+            &series,
+            &ds,
+            &empty_data.output(),
+        )?;
+        let empty_png = image::open(empty_data.only_file()?)?.to_rgb8();
+        assert_eq!(empty_png.dimensions(), rendered.dimensions());
+        assert_ne!(empty_png.as_raw(), rendered.as_raw());
 
         // HTTP/3 does have unidirectional stream IDs; bidi-only filters them.
         ds.application_proto = ApplicationProto::Http3;
@@ -811,8 +864,15 @@ mod tests {
         )?;
         let (_, filtered_height) =
             image::image_dimensions(filtered.only_file()?)?;
-        assert_eq!(filtered_height, MultiplexLayout::new(&params, 0)?.height);
-        assert!(filtered_height < layout.height);
+        assert_eq!(
+            filtered_height,
+            MultiplexLayout::new(&params, 0, ApplicationProto::Http3)?.height
+        );
+        assert!(
+            filtered_height <
+                MultiplexLayout::new(&params, 1, ApplicationProto::Http3)?
+                    .height
+        );
         Ok(())
     }
 
@@ -860,7 +920,8 @@ mod tests {
             &client_output.output(),
         )?;
         let client_png = image::open(client_output.only_file()?)?.to_rgb8();
-        let expected_height = MultiplexLayout::new(&params, 2)?.height;
+        let expected_height =
+            MultiplexLayout::new(&params, 2, ApplicationProto::Http2)?.height;
         assert_eq!(client_png.dimensions(), (params.width, expected_height));
 
         datastore.vantage_point = VantagePoint::Server;
