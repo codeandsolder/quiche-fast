@@ -214,7 +214,7 @@ where
 
         chart
             .draw_series(missing_packets_line)?
-            .label("missing packets")
+            .label("change in missing-packet report")
             .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], BLUE));
 
         draw_line(
@@ -252,7 +252,7 @@ pub fn draw_packet_sent_ack_status_count_plot<'a, DB: DrawingBackend + 'a>(
 where
     DB::ErrorType: 'static,
 {
-    let caption = "Packet sent, ACKed and unconfirmed counts";
+    let caption = "Packet observations by eventual ACK status";
 
     let y_max = packet_count_upper(ss);
 
@@ -281,18 +281,18 @@ where
     draw_packet_lines(&mut chart, &[
         (
             ss.onertt_packet_sent_aggregate_count.as_slice(),
-            "packet sent count",
+            "observed sent packets",
             TAUPE,
         ),
         (
             ss.onertt_packet_delivered_aggregate_count.as_slice(),
-            "ACK-confirmed packet count",
+            "eventually ACK-confirmed",
             BLUE,
         ),
         (
             ss.onertt_packet_without_observed_ack_aggregate_count
                 .as_slice(),
-            "packet without observed ACK count",
+            "without observed ACK",
             SOFT_PINK,
         ),
     ])?;

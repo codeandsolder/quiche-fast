@@ -84,6 +84,13 @@ fn cumulative_series<T: Copy>(
     Ok(series)
 }
 
+/// Sort packet samples by timestamp, with a deterministic packet-number
+/// tie-break.
+fn sort_packet_points(points: &mut [QlogPointu64]) {
+    points
+        .sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+}
+
 #[derive(Default)]
 pub struct SeriesStore {
     pub local_cwnd: Vec<QlogPointu64>,
@@ -314,87 +321,99 @@ impl SeriesStore {
     }
 
     fn packet_sent(&mut self, data_store: &Datastore) {
-        if let Some(onertt_pkts) =
-            &data_store.packet_sent.get(&crate::PacketType::OneRtt)
-        {
-            // TODO: Gather these counts during recovery-metric processing.
-            let mut sent_count = 0;
-            let mut delivered_count = 0;
-            let mut without_ack_count = 0;
+        let Some(packets) =
+            data_store.packet_sent.get(&crate::PacketType::OneRtt)
+        else {
+            return;
+        };
+        let mut observations = packets.values().collect::<Vec<_>>();
+        // Packet numbers are identifiers, not a temporal ordering. The
+        // cumulative counters must remain monotonic on their time axis.
+        observations.sort_unstable_by(|a, b| {
+            a.created_time
+                .total_cmp(&b.created_time)
+                .then_with(|| a.number.cmp(&b.number))
+        });
+        let mut sent_count = 0;
+        let mut delivered_count = 0;
+        let mut without_ack_count = 0;
+        if let Some(first) = observations.first() {
+            for series in [
+                &mut self.onertt_packet_sent_aggregate_count,
+                &mut self.onertt_packet_delivered_aggregate_count,
+                &mut self.onertt_packet_without_observed_ack_aggregate_count,
+            ] {
+                series.push((first.created_time, 0));
+            }
+        }
 
-            for (pkt_num, pkt_info) in *onertt_pkts {
-                sent_count += 1;
-                push_interp(
-                    &mut self.onertt_packet_created,
-                    (pkt_info.created_time, *pkt_num),
-                );
-                push_interp(
-                    &mut self.onertt_packet_sent_aggregate_count,
-                    (pkt_info.created_time, sent_count),
-                );
+        for packet in observations {
+            let time = packet.created_time;
+            self.sent_x_min = self.sent_x_min.min(time);
+            self.update_sent_x_axis_max(time);
+            self.y_max_onertt_pkt_sent_plot =
+                self.y_max_onertt_pkt_sent_plot.max(packet.number);
+            self.onertt_packet_created.push((time, packet.number));
 
-                // No ACK observation is not evidence of loss. Plot those
-                // packets at creation time, since the observation timestamp is
-                // unknown. Only Some(true) establishes that delivery was
-                // confirmed.
-                if pkt_info.acked == Some(true) {
-                    delivered_count += 1;
-                    push_interp(
-                        &mut self.onertt_packet_delivered_aggregate_count,
-                        (pkt_info.created_time, delivered_count),
-                    );
-                } else {
-                    self.onertt_packet_without_observed_ack
-                        .push((pkt_info.created_time, *pkt_num));
-                    without_ack_count += 1;
-                    push_interp(
-                        &mut self
-                            .onertt_packet_without_observed_ack_aggregate_count,
-                        (pkt_info.created_time, without_ack_count),
-                    );
-                }
+            sent_count += 1;
+            // Retrospective classification by packet observation time,
+            // not the time at which an acknowledgement was received.
+            if packet.acked == Some(true) {
+                delivered_count += 1;
+            } else {
+                without_ack_count += 1;
+                self.onertt_packet_without_observed_ack
+                    .push((time, packet.number));
+            }
+            for (series, count) in [
+                (&mut self.onertt_packet_sent_aggregate_count, sent_count),
+                (
+                    &mut self.onertt_packet_delivered_aggregate_count,
+                    delivered_count,
+                ),
+                (
+                    &mut self.onertt_packet_without_observed_ack_aggregate_count,
+                    without_ack_count,
+                ),
+            ] {
+                push_interp(series, (time, count));
+            }
 
-                self.y_max_onertt_pkt_sent_plot =
-                    std::cmp::max(self.y_max_onertt_pkt_sent_plot, *pkt_num);
+            if let Some(sent_at) = packet.send_at_time {
+                self.onertt_packet_sent.push((sent_at, packet.number));
+                self.sent_x_min = self.sent_x_min.min(sent_at);
+                self.update_sent_x_axis_max(sent_at);
+            }
+        }
+        sort_packet_points(&mut self.onertt_packet_sent);
 
-                // send_at_time is optional
-                if let Some(packet_sent_at) = pkt_info.send_at_time {
-                    push_interp(
-                        &mut self.onertt_packet_sent,
-                        (packet_sent_at, *pkt_num),
-                    );
-
-                    let delta = packet_sent_at - pkt_info.created_time;
-                    push_interp(
-                        &mut self.onertt_packet_created_sent_delta,
-                        (*pkt_num, delta),
-                    );
-
-                    // std::cmp hates floats, so go old school
-                    if delta > self.y_max_onertt_packet_created_sent_delta {
-                        self.y_max_onertt_packet_created_sent_delta = delta;
-                    }
-
-                    if delta < self.y_min_onertt_packet_created_sent_delta {
-                        self.y_min_onertt_packet_created_sent_delta = delta;
-                    }
-                }
+        // This series is plotted against packet number, not time.
+        for (&number, packet) in packets {
+            if let Some(sent_at) = packet.send_at_time {
+                let delta = sent_at - packet.created_time;
+                self.onertt_packet_created_sent_delta.push((number, delta));
+                self.y_min_onertt_packet_created_sent_delta =
+                    self.y_min_onertt_packet_created_sent_delta.min(delta);
+                self.y_max_onertt_packet_created_sent_delta =
+                    self.y_max_onertt_packet_created_sent_delta.max(delta);
             }
         }
     }
 
     fn packet_recv(&mut self, data_store: &Datastore) {
-        if let Some(onertt_pkts) =
-            &data_store.packet_received.get(&crate::PacketType::OneRtt)
+        if let Some(packets) =
+            data_store.packet_received.get(&crate::PacketType::OneRtt)
         {
-            for (pkt_num, pkt_info) in *onertt_pkts {
-                self.update_received_x_axis_max(pkt_info.created_time);
+            for (&number, packet) in packets {
+                self.received_x_min =
+                    self.received_x_min.min(packet.created_time);
+                self.update_received_x_axis_max(packet.created_time);
                 self.y_max_onertt_pkt_received_plot =
-                    self.y_max_onertt_pkt_received_plot.max(*pkt_num);
-
+                    self.y_max_onertt_pkt_received_plot.max(number);
                 self.onertt_packet_received
-                    .push((pkt_info.created_time, *pkt_num));
+                    .push((packet.created_time, number));
             }
+            sort_packet_points(&mut self.onertt_packet_received);
         }
     }
 
@@ -408,6 +427,8 @@ impl SeriesStore {
         {
             if previous != missing {
                 self.netlog_missing_packets.push(*event_time);
+                self.received_x_min = self.received_x_min.min(*event_time);
+                self.update_received_x_axis_max(*event_time);
                 previous = missing;
             }
         }
@@ -822,6 +843,70 @@ mod tests {
                 .map(|p| p.1),
             Some(3),
         );
+    }
+
+    #[test]
+    fn packet_timelines_use_observation_time_not_packet_number() {
+        let mut ds = Datastore::default();
+        for (number, created, sent, acked) in [
+            (10, 4.0, Some(9.0), Some(true)),
+            (20, -2.0, Some(6.0), None),
+            (30, 4.0, Some(5.0), Some(true)),
+        ] {
+            let packet = PacketInfoStub {
+                acked,
+                raw: None,
+                created_time: created,
+                send_at_time: sent,
+                ty: PacketType::OneRtt,
+                number,
+            };
+            ds.packet_sent
+                .entry(PacketType::OneRtt)
+                .or_default()
+                .insert(number, packet.clone());
+            ds.packet_received
+                .entry(PacketType::OneRtt)
+                .or_default()
+                .insert(number, packet);
+        }
+        let mut series = SeriesStore::default();
+        series.packet_sent(&ds);
+        series.packet_recv(&ds);
+        assert_eq!(series.onertt_packet_created, [
+            (-2.0, 20),
+            (4.0, 10),
+            (4.0, 30)
+        ]);
+        assert_eq!(series.onertt_packet_received, series.onertt_packet_created);
+        assert_eq!(series.onertt_packet_sent, [(5.0, 30), (6.0, 20), (9.0, 10)]);
+        assert_eq!((series.sent_x_min, series.sent_x_max), (-2.0, 9.0));
+        assert_eq!((series.received_x_min, series.received_x_max), (-2.0, 4.0));
+        assert_eq!(series.y_max_onertt_pkt_sent_plot, 30);
+        assert_eq!(series.y_max_onertt_pkt_received_plot, 30);
+        assert_eq!(series.onertt_packet_created_sent_delta, [
+            (10, 5.0),
+            (20, 8.0),
+            (30, 1.0)
+        ]);
+        let counts = &series.onertt_packet_sent_aggregate_count;
+        let confirmed = &series.onertt_packet_delivered_aggregate_count;
+        let unconfirmed =
+            &series.onertt_packet_without_observed_ack_aggregate_count;
+        assert_eq!(counts.first(), Some(&(-2.0, 0)));
+        assert_eq!(counts.last(), Some(&(4.0, 3)));
+        assert!(counts
+            .windows(2)
+            .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1));
+        assert_eq!(counts.len(), confirmed.len());
+        assert_eq!(counts.len(), unconfirmed.len());
+        for ((total, acked), unknown) in
+            counts.iter().zip(confirmed).zip(unconfirmed)
+        {
+            assert_eq!(total.0, acked.0);
+            assert_eq!(total.0, unknown.0);
+            assert_eq!(total.1, acked.1 + unknown.1);
+        }
     }
 
     #[test]
