@@ -26,14 +26,12 @@
 
 //! Helpers for dealing with quiche stream events and HTTP/3 frames.
 
-use std::cmp;
-use std::convert::TryFrom;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::sync::Arc;
 
 use crate::quiche;
-use multimap::MultiMap;
 
 use quiche::h3::frame::Frame as QFrame;
 use quiche::h3::Header;
@@ -43,7 +41,6 @@ use serde::ser::Serializer;
 use serde::Serialize;
 
 use crate::client::connection_summary::MAX_SERIALIZED_BUFFER_LEN;
-use crate::encode_header_block;
 
 pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 
@@ -53,21 +50,19 @@ pub type BoxError = Box<dyn Error + Send + Sync + 'static>;
 pub enum H3iFrame {
     /// A wrapper around a quiche HTTP/3 frame.
     QuicheH3(QFrame),
-    /// A wrapper around an [EnrichedHeaders] struct.
+    /// A wrapper around an [`EnrichedHeaders`] struct.
     Headers(EnrichedHeaders),
-    /// A wrapper around a [ResetStream] struct
+    /// A wrapper around a [`ResetStream`] struct.
     ResetStream(ResetStream),
 }
 
 impl H3iFrame {
-    /// Try to convert this `H3iFrame` to an [EnrichedHeaders].
-    ///
-    /// Returns `Some` if the operation succeeded.
-    pub fn to_enriched_headers(&self) -> Option<EnrichedHeaders> {
-        if let H3iFrame::Headers(header) = self {
-            Some(header.clone())
-        } else {
-            None
+    /// Borrow decoded headers without copying the field section.
+    #[must_use = "returns headers only for a HEADERS frame"]
+    pub const fn as_enriched_headers(&self) -> Option<&EnrichedHeaders> {
+        match self {
+            Self::Headers(headers) => Some(headers),
+            _ => None,
         }
     }
 }
@@ -78,18 +73,18 @@ impl Serialize for H3iFrame {
         S: Serializer,
     {
         match self {
-            H3iFrame::QuicheH3(frame) => {
+            Self::QuicheH3(frame) => {
                 let mut state = s.serialize_struct("frame", 1)?;
                 let name = frame_name(frame);
                 state.serialize_field(name, &SerializableQFrame(frame))?;
                 state.end()
             },
-            H3iFrame::Headers(headers) => {
+            Self::Headers(headers) => {
                 let mut state = s.serialize_struct("enriched_headers", 1)?;
                 state.serialize_field("enriched_headers", headers)?;
                 state.end()
             },
-            H3iFrame::ResetStream(reset) => {
+            Self::ResetStream(reset) => {
                 let mut state = s.serialize_struct("reset_stream", 1)?;
                 state.serialize_field("reset_stream", reset)?;
                 state.end()
@@ -104,24 +99,24 @@ impl From<QFrame> for H3iFrame {
     }
 }
 
-impl From<Vec<Header>> for H3iFrame {
-    fn from(value: Vec<Header>) -> Self {
-        Self::Headers(EnrichedHeaders::from(value))
+impl TryFrom<Vec<Header>> for H3iFrame {
+    type Error = quiche::h3::qpack::Error;
+
+    fn try_from(headers: Vec<Header>) -> Result<Self, Self::Error> {
+        EnrichedHeaders::try_from(headers).map(Self::Headers)
     }
 }
 
-pub type HeaderMap = MultiMap<Vec<u8>, Vec<u8>>;
-
-/// An HTTP/3 HEADERS frame with decoded headers and a [HeaderMap].
-#[derive(Clone, PartialEq, Eq)]
+/// An HTTP/3 HEADERS frame with decoded headers and its original QPACK block.
+///
+/// Equality compares ordered decoded headers, independently of compression.
+#[derive(Clone)]
 pub struct EnrichedHeaders {
     header_block: Vec<u8>,
     headers: Vec<Header>,
-    /// A multi-map of raw header names to values, similar to http's HeaderMap.
-    header_map: HeaderMap,
 }
 
-/// A wrapper to help serialize an quiche HTTP header.
+/// A wrapper to help serialize a quiche HTTP header.
 pub struct SerializableHeader<'a>(&'a Header);
 
 impl Serialize for SerializableHeader<'_> {
@@ -144,91 +139,67 @@ impl EnrichedHeaders {
         Ok(Self::from_parts(header_block, headers))
     }
 
-    fn from_parts(header_block: Vec<u8>, headers: Vec<Header>) -> Self {
-        let mut header_map = MultiMap::with_capacity(headers.len());
-        for header in &headers {
-            header_map.insert(header.name().to_vec(), header.value().to_vec());
-        }
+    const fn from_parts(header_block: Vec<u8>, headers: Vec<Header>) -> Self {
         Self {
             header_block,
             headers,
-            header_map,
         }
     }
 
-    /// Return the array of headers in this frame.
-    ///
-    /// # Examples
-    /// ```
-    /// use h3i::frame::EnrichedHeaders;
-    /// use quiche::h3::Header;
-    ///
-    /// let raw = vec![
-    ///     Header::new(b"new jersey", b"devils"),
-    ///     Header::new(b"new york", b"jets"),
-    /// ];
-    /// let headers = EnrichedHeaders::from(raw.clone());
-    /// assert_eq!(headers.headers(), raw);
-    /// ```
+    /// Return the decoded headers in wire order.
+    #[must_use = "borrows the decoded header fields"]
     pub fn headers(&self) -> &[Header] {
         &self.headers
     }
 
-    /// Returns a multi-map of header keys to values.
-    ///
-    /// If a single key contains multiple values, the values in the entry will
-    /// be returned in the same order as they appear in the array of headers
-    /// which backs the [`EnrichedHeaders`].
-    ///
-    /// # Examples
-    /// ```
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use multimap::MultiMap;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let header_frame = vec![
-    ///     Header::new(b":status", b"200"),
-    ///     Header::new(b"hello", b"world"),
-    ///     Header::new(b"hello", b"super-earth"),
-    /// ];
-    ///
-    /// let enriched = H3iFrame::Headers(header_frame.into())
-    ///     .to_enriched_headers()
-    ///     .unwrap();
-    ///
-    /// let expected = MultiMap::from_iter([
-    ///     (b":status".to_vec(), vec![b"200".to_vec()]),
-    ///     (b"hello".to_vec(), vec![
-    ///         b"world".to_vec(),
-    ///         b"super-earth".to_vec(),
-    ///     ]),
-    /// ]);
-    ///
-    /// assert_eq!(*enriched.header_map(), expected);
-    /// ```
-    pub fn header_map(&self) -> &HeaderMap {
-        &self.header_map
+    /// Return the encoded QPACK field section, including its prefix.
+    #[must_use = "borrows the original encoded field section"]
+    pub fn header_block(&self) -> &[u8] {
+        &self.header_block
     }
 
-    /// Fetches the value of the `:status` pseudo-header.
-    ///
-    /// # Examples
-    /// ```
-    /// use h3i::frame::EnrichedHeaders;
-    /// use quiche::h3::Header;
-    ///
-    /// let headers = EnrichedHeaders::from(vec![Header::new(b"hello", b"world")]);
-    /// assert!(headers.status_code().is_none());
-    ///
-    /// let headers = EnrichedHeaders::from(vec![Header::new(b":status", b"200")]);
-    /// assert_eq!(headers.status_code().expect("status code is Some"), b"200");
-    /// ```
+    /// Iterate over all values for the given name in field-section order.
+    pub fn header_values<'a>(
+        &'a self, name: &'a [u8],
+    ) -> impl Iterator<Item = &'a [u8]> {
+        self.headers
+            .iter()
+            .filter(move |header| header.name() == name)
+            .map(NameValue::value)
+    }
+
+    /// Fetch the first value of the `:status` pseudo-header, when present.
+    #[must_use = "returns the first status header if present"]
     pub fn status_code(&self) -> Option<&[u8]> {
-        self.header_map
-            .get(b":status".as_slice())
-            .map(Vec::as_slice)
+        self.header_values(b":status").next()
+    }
+
+    /// Match a multiset of expected name/value pairs, including duplicates.
+    fn contains_headers(&self, expected: &Self) -> bool {
+        if expected.headers.len() > self.headers.len() {
+            return false;
+        }
+
+        let mut counts = HashMap::new();
+        for header in &expected.headers {
+            *counts
+                .entry((header.name(), header.value()))
+                .or_insert(0_usize) += 1;
+        }
+
+        for header in &self.headers {
+            let key = (header.name(), header.value());
+            if let Some(count) = counts.get_mut(&key) {
+                *count -= 1;
+                if *count == 0 {
+                    counts.remove(&key);
+                }
+            }
+            if counts.is_empty() {
+                return true;
+            }
+        }
+        counts.is_empty()
     }
 }
 
@@ -246,13 +217,24 @@ impl Serialize for EnrichedHeaders {
     }
 }
 
-impl From<Vec<Header>> for EnrichedHeaders {
-    fn from(headers: Vec<Header>) -> Self {
-        let header_block = encode_header_block(&headers).unwrap();
+impl TryFrom<Vec<Header>> for EnrichedHeaders {
+    type Error = quiche::h3::qpack::Error;
 
-        Self::from_parts(header_block, headers)
+    fn try_from(headers: Vec<Header>) -> Result<Self, Self::Error> {
+        // Literal encoding preserves even deliberately non-compliant names,
+        // which is useful for protocol test expectations.
+        let header_block = quiche::h3::qpack::encode_literal(&headers)?;
+        Ok(Self::from_parts(header_block, headers))
     }
 }
+
+impl PartialEq for EnrichedHeaders {
+    fn eq(&self, other: &Self) -> bool {
+        self.headers == other.headers
+    }
+}
+
+impl Eq for EnrichedHeaders {}
 
 impl TryFrom<QFrame> for EnrichedHeaders {
     type Error = BoxError;
@@ -268,7 +250,10 @@ impl TryFrom<QFrame> for EnrichedHeaders {
 
 impl Debug for EnrichedHeaders {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.headers)
+        f.debug_struct("EnrichedHeaders")
+            .field("headers", &self.headers)
+            .field("header_block_len", &self.header_block.len())
+            .finish_non_exhaustive()
     }
 }
 
@@ -278,13 +263,13 @@ impl Debug for EnrichedHeaders {
 /// more.
 #[derive(Debug, Clone, Eq, PartialEq, Serialize)]
 pub struct ResetStream {
-    /// The stream ID over which the RESET_STREAM frame was sent.
+    /// The stream ID over which the `RESET_STREAM` frame was sent.
     pub stream_id: u64,
     /// The error code sent from the peer.
     pub error_code: u64,
 }
 
-fn frame_name(frame: &QFrame) -> &'static str {
+const fn frame_name(frame: &QFrame) -> &'static str {
     match frame {
         QFrame::Data { .. } => "DATA",
         QFrame::Headers { .. } => "HEADERS",
@@ -302,159 +287,122 @@ fn frame_name(frame: &QFrame) -> &'static str {
 /// A wrapper to help serialize a quiche HTTP/3 frame.
 pub struct SerializableQFrame<'a>(&'a QFrame);
 
+fn serialize_payload<S: SerializeStruct>(
+    state: &mut S, payload: &[u8],
+) -> Result<(), S::Error> {
+    let max = payload.len().min(MAX_SERIALIZED_BUFFER_LEN);
+    state.serialize_field("payload_len", &payload.len())?;
+    state.serialize_field(
+        "payload",
+        &qlog::HexSlice::maybe_string(Some(&payload[..max])),
+    )
+}
+
+fn serialize_priority<S: SerializeStruct>(
+    state: &mut S, id: u64, value: &[u8],
+) -> Result<(), S::Error> {
+    let max = value.len().min(MAX_SERIALIZED_BUFFER_LEN);
+    state.serialize_field("prioritized_element_id", &id)?;
+    state.serialize_field("priority_field_value_len", &value.len())?;
+    state.serialize_field(
+        "priority_field_value",
+        &String::from_utf8_lossy(&value[..max]),
+    )
+}
+
 impl Serialize for SerializableQFrame<'_> {
-    fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         let name = frame_name(self.0);
         match self.0 {
             QFrame::Data { payload } => {
-                let mut state = s.serialize_struct(name, 2)?;
-                let max = cmp::min(payload.len(), MAX_SERIALIZED_BUFFER_LEN);
-                state.serialize_field("payload_len", &payload.len())?;
-                state.serialize_field(
-                    "payload",
-                    &qlog::HexSlice::maybe_string(Some(&payload[..max])),
-                )?;
+                let mut state = serializer.serialize_struct(name, 2)?;
+                serialize_payload(&mut state, payload)?;
                 state.end()
             },
-
             QFrame::Headers { header_block } => {
-                let mut state = s.serialize_struct(name, 1)?;
+                let mut state = serializer.serialize_struct(name, 1)?;
                 state.serialize_field("header_block_len", &header_block.len())?;
                 state.end()
             },
-
-            QFrame::CancelPush { push_id } => {
-                let mut state = s.serialize_struct(name, 1)?;
-                state.serialize_field("push_id", &push_id)?;
+            QFrame::CancelPush { push_id } | QFrame::MaxPushId { push_id } => {
+                let mut state = serializer.serialize_struct(name, 1)?;
+                state.serialize_field("push_id", push_id)?;
                 state.end()
             },
-
             QFrame::Settings {
                 max_field_section_size,
                 qpack_max_table_capacity,
                 qpack_blocked_streams,
                 connect_protocol_enabled,
                 h3_datagram,
-                grease: _,
                 additional_settings,
-                raw: _,
+                ..
             } => {
-                let mut state = s.serialize_struct(name, 6)?;
+                let mut state = serializer.serialize_struct(name, 6)?;
                 state.serialize_field(
                     "max_field_section_size",
-                    &max_field_section_size,
+                    max_field_section_size,
                 )?;
                 state.serialize_field(
                     "qpack_max_table_capacity",
-                    &qpack_max_table_capacity,
+                    qpack_max_table_capacity,
                 )?;
                 state.serialize_field(
                     "qpack_blocked_streams",
-                    &qpack_blocked_streams,
+                    qpack_blocked_streams,
                 )?;
                 state.serialize_field(
                     "connect_protocol_enabled",
-                    &connect_protocol_enabled,
+                    connect_protocol_enabled,
                 )?;
-                state.serialize_field("h3_datagram", &h3_datagram)?;
+                state.serialize_field("h3_datagram", h3_datagram)?;
                 state.serialize_field(
                     "additional_settings",
-                    &additional_settings,
+                    additional_settings,
                 )?;
                 state.end()
             },
-
             QFrame::PushPromise {
                 push_id,
                 header_block,
             } => {
-                let mut state = s.serialize_struct(name, 2)?;
-                state.serialize_field("push_id", &push_id)?;
+                let mut state = serializer.serialize_struct(name, 2)?;
+                state.serialize_field("push_id", push_id)?;
                 state.serialize_field("header_block_len", &header_block.len())?;
                 state.end()
             },
-
             QFrame::GoAway { id } => {
-                let mut state = s.serialize_struct(name, 1)?;
-                state.serialize_field("id", &id)?;
+                let mut state = serializer.serialize_struct(name, 1)?;
+                state.serialize_field("id", id)?;
                 state.end()
             },
-
-            QFrame::MaxPushId { push_id } => {
-                let mut state = s.serialize_struct(name, 1)?;
-                state.serialize_field("push_id", &push_id)?;
-                state.end()
-            },
-
             QFrame::PriorityUpdateRequest {
                 prioritized_element_id,
                 priority_field_value,
-            } => {
-                let mut state = s.serialize_struct(name, 3)?;
-                state.serialize_field(
-                    "prioritized_element_id",
-                    &prioritized_element_id,
-                )?;
-
-                let max = cmp::min(
-                    priority_field_value.len(),
-                    MAX_SERIALIZED_BUFFER_LEN,
-                );
-                state.serialize_field(
-                    "priority_field_value_len",
-                    &priority_field_value.len(),
-                )?;
-                state.serialize_field(
-                    "priority_field_value",
-                    &String::from_utf8_lossy(&priority_field_value[..max]),
-                )?;
-                state.end()
-            },
-
+            } |
             QFrame::PriorityUpdatePush {
                 prioritized_element_id,
                 priority_field_value,
             } => {
-                let mut state = s.serialize_struct(name, 3)?;
-                state.serialize_field(
-                    "prioritized_element_id",
-                    &prioritized_element_id,
-                )?;
-                let max = cmp::min(
-                    priority_field_value.len(),
-                    MAX_SERIALIZED_BUFFER_LEN,
-                );
-                state.serialize_field(
-                    "priority_field_value_len",
-                    &priority_field_value.len(),
-                )?;
-                state.serialize_field(
-                    "priority_field_value",
-                    &String::from_utf8_lossy(&priority_field_value[..max]),
+                let mut state = serializer.serialize_struct(name, 3)?;
+                serialize_priority(
+                    &mut state,
+                    *prioritized_element_id,
+                    priority_field_value,
                 )?;
                 state.end()
             },
-
             QFrame::Unknown { raw_type, payload } => {
-                let mut state = s.serialize_struct(name, 3)?;
-                state.serialize_field("raw_type", &raw_type)?;
-                let max = cmp::min(payload.len(), MAX_SERIALIZED_BUFFER_LEN);
-                state.serialize_field("payload_len", &payload.len())?;
-                state.serialize_field(
-                    "payload",
-                    &qlog::HexSlice::maybe_string(Some(&payload[..max])),
-                )?;
+                let mut state = serializer.serialize_struct(name, 3)?;
+                state.serialize_field("raw_type", raw_type)?;
+                serialize_payload(&mut state, payload)?;
                 state.end()
             },
         }
     }
 }
 
-type CustomEquivalenceHandler =
-    Box<dyn for<'f> Fn(&'f H3iFrame) -> bool + Send + Sync + 'static>;
+type CustomEquivalenceHandler = dyn Fn(&H3iFrame) -> bool + Send + Sync + 'static;
 
 #[derive(Clone)]
 enum Comparator {
@@ -503,8 +451,8 @@ impl CloseTriggerFrame {
     ///
     /// # Note
     ///
-    /// For [QuicheH3] and [ResetStream] variants, equivalence is the same as
-    /// equality.
+    /// For [`QuicheH3`] and [`ResetStream`] variants, equivalence is the same
+    /// as equality.
     ///
     /// For Headers variants, this [`CloseTriggerFrame`] is equivalent to the
     /// incoming [`H3iFrame`] if the [`H3iFrame`] contains all [`Header`]s
@@ -514,12 +462,13 @@ impl CloseTriggerFrame {
     /// This allows users for fuzzy-matching on header frames without needing to
     /// supply every individual header on the frame.
     ///
-    /// [ResetStream]: H3iFrame::ResetStream
-    /// [QuicheH3]: H3iFrame::QuicheH3
-    pub fn new(stream_id: u64, frame: impl Into<H3iFrame>) -> Self {
+    /// [`ResetStream`]: H3iFrame::ResetStream
+    /// [`QuicheH3`]: H3iFrame::QuicheH3
+    #[must_use = "creates a trigger for the supplied stream"]
+    pub const fn new(stream_id: u64, frame: H3iFrame) -> Self {
         Self {
             stream_id,
-            comparator: Comparator::Frame(frame.into()),
+            comparator: Comparator::Frame(frame),
         }
     }
 
@@ -529,17 +478,18 @@ impl CloseTriggerFrame {
     /// The `comparator_fn` will be called with every incoming [`H3iFrame`]. It
     /// should return `true` if the incoming frame is expected, and `false`
     /// if it is not.
+    #[must_use = "creates a trigger using the provided predicate"]
     pub fn new_with_comparator<F>(stream_id: u64, comparator_fn: F) -> Self
     where
         F: Fn(&H3iFrame) -> bool + Send + Sync + 'static,
     {
         Self {
             stream_id,
-            comparator: Comparator::Fn(Arc::new(Box::new(comparator_fn))),
+            comparator: Comparator::Fn(Arc::new(comparator_fn)),
         }
     }
 
-    pub(crate) fn stream_id(&self) -> u64 {
+    pub(crate) const fn stream_id(&self) -> u64 {
         self.stream_id
     }
 
@@ -549,28 +499,10 @@ impl CloseTriggerFrame {
             Comparator::Frame(frame) => frame,
         };
 
-        match frame {
-            H3iFrame::Headers(me) => {
-                let H3iFrame::Headers(other) = other else {
-                    return false;
-                };
-
-                // TODO(evanrittenhouse): we could theoretically hand-roll a
-                // MultiMap which uses a HashSet as the
-                // multi-value collection, but in practice we don't expect very
-                // many headers on an CloseTriggerFrame
-                //
-                // ref: https://docs.rs/multimap/latest/src/multimap/lib.rs.html#89
-                me.headers().iter().all(|m| other.headers().contains(m))
-            },
-            H3iFrame::QuicheH3(me) => match other {
-                H3iFrame::QuicheH3(other) => me == other,
-                _ => false,
-            },
-            H3iFrame::ResetStream(me) => match other {
-                H3iFrame::ResetStream(rs) => me == rs,
-                _ => false,
-            },
+        match (frame, other) {
+            (H3iFrame::Headers(expected), H3iFrame::Headers(received)) =>
+                received.contains_headers(expected),
+            _ => frame == other,
         }
     }
 }
@@ -592,18 +524,36 @@ impl Debug for CloseTriggerFrame {
 
 impl PartialEq for CloseTriggerFrame {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.comparator, &other.comparator) {
-            (Comparator::Frame(this_frame), Comparator::Frame(other_frame)) =>
-                self.stream_id == other.stream_id && this_frame == other_frame,
-            _ => false,
-        }
+        self.stream_id == other.stream_id &&
+            match (&self.comparator, &other.comparator) {
+                (Comparator::Frame(a), Comparator::Frame(b)) => a == b,
+                (Comparator::Fn(a), Comparator::Fn(b)) => Arc::ptr_eq(a, b),
+                _ => false,
+            }
     }
 }
 
+impl Eq for CloseTriggerFrame {}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::BoxError;
+    use super::CloseTriggerFrame;
+    use super::EnrichedHeaders;
+    use super::H3iFrame;
+    use super::ResetStream;
+    use crate::quiche;
     use quiche::h3::frame::Frame;
+    use quiche::h3::Header;
+
+    fn headers(fields: &[(&[u8], &[u8])]) -> Result<H3iFrame, BoxError> {
+        Ok(H3iFrame::try_from(
+            fields
+                .iter()
+                .map(|(name, value)| Header::new(name, value))
+                .collect::<Vec<_>>(),
+        )?)
+    }
 
     #[test]
     fn decoded_header_block_preserves_original_wire_representation(
@@ -613,107 +563,132 @@ mod tests {
             Header::new(b"x-test", b"test"),
         ];
         let literal = crate::encode_header_block_literal(&headers)?;
-        let compressed = encode_header_block(&headers)?;
+        let compressed = crate::encode_header_block(&headers)?;
         assert_ne!(literal, compressed);
         let enriched = EnrichedHeaders::from_wire(literal.clone())?;
-        assert_eq!(enriched.header_block, literal);
-        assert_eq!(enriched.headers(), headers);
-        let decoded = EnrichedHeaders::try_from(QFrame::Headers {
+        let decoded = EnrichedHeaders::try_from(Frame::Headers {
             header_block: compressed.clone(),
         })?;
-        assert_eq!(decoded.header_block, compressed);
+        assert_eq!(enriched.header_block(), literal);
+        assert_eq!(decoded.header_block(), compressed);
+        assert_eq!(enriched.headers(), headers);
         assert_eq!(decoded.headers(), headers);
+        assert_eq!(enriched, decoded);
         Ok(())
     }
 
     #[test]
-    fn test_header_equivalence() {
-        let this = CloseTriggerFrame::new(0, vec![
-            Header::new(b"hello", b"world"),
-            Header::new(b"go", b"jets"),
+    fn header_trigger_matches_multiset_without_requiring_order(
+    ) -> Result<(), BoxError> {
+        let trigger = CloseTriggerFrame::new(
+            0,
+            headers(&[(b"hello", b"world"), (b"go", b"jets"), (b"go", b"jets")])?,
+        );
+        let match_frame = headers(&[
+            (b"go", b"jets"),
+            (b"go", b"devils"),
+            (b"hello", b"world"),
+            (b"go", b"jets"),
+        ])?;
+        let missing_duplicate = headers(&[
+            (b"hello", b"world"),
+            (b"go", b"jets"),
+            (b"go", b"devils"),
+        ])?;
+        assert!(trigger.is_equivalent(&match_frame));
+        let decoded = match_frame
+            .as_enriched_headers()
+            .ok_or("expected headers")?;
+        assert_eq!(decoded.header_values(b"go").collect::<Vec<_>>(), [
+            b"jets".as_slice(),
+            b"devils".as_slice(),
+            b"jets".as_slice()
         ]);
-        let other: H3iFrame = vec![
-            Header::new(b"hello", b"world"),
-            Header::new(b"go", b"jets"),
-            Header::new(b"go", b"devils"),
-        ]
-        .into();
-
-        assert!(this.is_equivalent(&other));
-    }
-
-    #[test]
-    fn test_header_non_equivalence() {
-        let this = CloseTriggerFrame::new(0, vec![
-            Header::new(b"hello", b"world"),
-            Header::new(b"go", b"jets"),
-            Header::new(b"go", b"devils"),
-        ]);
-        let other: H3iFrame =
-            vec![Header::new(b"hello", b"world"), Header::new(b"go", b"jets")]
-                .into();
-
-        // `other` does not contain the `go: devils` header, so it's not
-        // equivalent to `this.
-        assert!(!this.is_equivalent(&other));
-    }
-
-    #[test]
-    fn test_rst_stream_equivalence() {
-        let mut rs = ResetStream {
-            stream_id: 0,
-            error_code: 57,
-        };
-
-        let this = CloseTriggerFrame::new(0, H3iFrame::ResetStream(rs.clone()));
-        let incoming = H3iFrame::ResetStream(rs.clone());
-        assert!(this.is_equivalent(&incoming));
-
-        rs.stream_id = 57;
-        let incoming = H3iFrame::ResetStream(rs);
-        assert!(!this.is_equivalent(&incoming));
-    }
-
-    #[test]
-    fn test_frame_equivalence() {
-        let mut d = Frame::Data {
-            payload: b"57".to_vec(),
-        };
-
-        let this = CloseTriggerFrame::new(0, H3iFrame::QuicheH3(d.clone()));
-        let incoming = H3iFrame::QuicheH3(d.clone());
-        assert!(this.is_equivalent(&incoming));
-
-        d = Frame::Data {
-            payload: b"go jets".to_vec(),
-        };
-        let incoming = H3iFrame::QuicheH3(d.clone());
-        assert!(!this.is_equivalent(&incoming));
-    }
-
-    #[test]
-    fn test_comparator() {
-        let this = CloseTriggerFrame::new_with_comparator(0, |frame| {
-            if let H3iFrame::Headers(..) = frame {
-                frame
-                    .to_enriched_headers()
-                    .unwrap()
-                    .header_map()
-                    .get(&b"cookie".to_vec())
-                    .is_some_and(|v| {
-                        std::str::from_utf8(v)
-                            .map(|s| s.to_lowercase())
-                            .unwrap()
-                            .contains("cookie")
-                    })
-            } else {
-                false
+        assert_eq!(decoded.header_values(b"absent").next(), None);
+        assert!(!trigger.is_equivalent(&missing_duplicate));
+        assert!(!trigger.is_equivalent(
+            &Frame::Data {
+                payload: Vec::new()
             }
+            .into()
+        ));
+        let empty = CloseTriggerFrame::new(0, headers(&[])?);
+        assert!(empty.is_equivalent(&match_frame));
+        assert!(empty.is_equivalent(&headers(&[])?));
+        Ok(())
+    }
+
+    #[test]
+    fn data_and_reset_triggers_require_exact_equality() {
+        let frames = [
+            (
+                H3iFrame::ResetStream(ResetStream {
+                    stream_id: 0,
+                    error_code: 57,
+                }),
+                H3iFrame::ResetStream(ResetStream {
+                    stream_id: 57,
+                    error_code: 57,
+                }),
+            ),
+            (
+                Frame::Data {
+                    payload: b"57".to_vec(),
+                }
+                .into(),
+                Frame::Data {
+                    payload: b"go jets".to_vec(),
+                }
+                .into(),
+            ),
+        ];
+        for (expected, different) in frames {
+            let trigger = CloseTriggerFrame::new(0, expected.clone());
+            assert!(trigger.is_equivalent(&expected));
+            assert!(!trigger.is_equivalent(&different));
+        }
+    }
+
+    #[test]
+    fn comparator_can_borrow_headers_and_has_identity_equality(
+    ) -> Result<(), BoxError> {
+        let trigger = CloseTriggerFrame::new_with_comparator(0, |frame| {
+            frame
+                .as_enriched_headers()
+                .and_then(|headers| headers.header_values(b"cookie").next())
+                .and_then(|value| std::str::from_utf8(value).ok())
+                .is_some_and(|value| value.to_lowercase().contains("cookie"))
         });
+        assert_eq!(trigger, trigger.clone());
+        assert_ne!(trigger, CloseTriggerFrame::new_with_comparator(0, |_| true));
+        assert!(trigger
+            .is_equivalent(&headers(&[(b"cookie", b"SomeRandomCookie1234")])?));
+        assert!(!trigger.is_equivalent(&headers(&[(b"cookie", &[255])])?));
+        Ok(())
+    }
 
-        let incoming: H3iFrame =
-            vec![Header::new(b"cookie", b"SomeRandomCookie1234")].into();
-
-        assert!(this.is_equivalent(&incoming));
+    #[test]
+    fn serialization_keeps_frame_names_and_bounded_payloads(
+    ) -> Result<(), BoxError> {
+        let data = H3iFrame::from(Frame::Data {
+            payload: vec![0x57; super::MAX_SERIALIZED_BUFFER_LEN + 1],
+        });
+        let unknown = H3iFrame::from(Frame::Unknown {
+            raw_type: 123,
+            payload: vec![0x57; super::MAX_SERIALIZED_BUFFER_LEN + 1],
+        });
+        let data = serde_json::to_value(data)?;
+        let unknown = serde_json::to_value(unknown)?;
+        assert_eq!(data["DATA"]["payload"], unknown["UNKNOWN"]["payload"]);
+        assert_eq!(
+            data["DATA"]["payload_len"],
+            super::MAX_SERIALIZED_BUFFER_LEN + 1
+        );
+        assert_eq!(
+            data["DATA"]["payload"].as_str().map(str::len),
+            Some(2 * super::MAX_SERIALIZED_BUFFER_LEN)
+        );
+        assert_eq!(unknown["UNKNOWN"]["raw_type"], 123);
+        Ok(())
     }
 }

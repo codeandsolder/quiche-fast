@@ -131,19 +131,14 @@ pub async fn request(
 pub fn received_status_code_on_stream(
     summary: &ConnectionSummary, stream: u64, code: u16,
 ) -> bool {
-    summary
-        .stream_map
-        .headers_on_stream(stream)
-        .iter()
-        .any(|e| {
-            let u16 =
-                std::str::from_utf8(e.status_code().expect("no status code"))
-                    .expect("invalid utf8 in status code")
-                    .parse::<u16>()
-                    .expect("unparseable status code");
+    summary.stream_map.headers_on_stream(stream).any(|e| {
+        let u16 = std::str::from_utf8(e.status_code().expect("no status code"))
+            .expect("invalid utf8 in status code")
+            .parse::<u16>()
+            .expect("unparseable status code");
 
-            u16 == code
-        })
+        u16 == code
+    })
 }
 
 pub fn stream_body(summary: &ConnectionSummary, stream: u64) -> Option<String> {
@@ -156,7 +151,8 @@ pub fn stream_body(summary: &ConnectionSummary, stream: u64) -> Option<String> {
             if let H3iFrame::QuicheH3(h3::frame::Frame::Data { payload }) = f {
                 has_body = true;
                 return Some(
-                    String::from_utf8(payload).expect("response body not UTF-8"),
+                    std::str::from_utf8(payload)
+                        .expect("response body not UTF-8"),
                 );
             }
             None
