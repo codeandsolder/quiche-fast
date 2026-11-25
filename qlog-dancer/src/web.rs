@@ -215,7 +215,7 @@ impl QlogDancerWeb {
     pub fn process_chunk(&mut self, chunk: &[u8]) -> Result<(), JsValue> {
         self.sqlog_stream
             .push_chunk(chunk)
-            .map_err(|err| JsValue::from_str(&err))
+            .map_err(|err| JsValue::from_str(&err.to_string()))
     }
 
     /// Finalize the stream and decode the last record at EOF.
@@ -226,7 +226,7 @@ impl QlogDancerWeb {
     pub fn finish_stream(&mut self) -> Result<(), JsValue> {
         self.sqlog_stream
             .finish()
-            .map_err(|err| JsValue::from_str(&err))
+            .map_err(|err| JsValue::from_str(&err.to_string()))
     }
 
     #[wasm_bindgen]

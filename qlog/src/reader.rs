@@ -25,6 +25,8 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use std::fs::File;
+use std::io;
+use std::io::BufRead;
 use std::io::BufReader;
 use std::path::Path;
 
@@ -47,13 +49,192 @@ pub enum Event {
     Json(crate::events::JsonEvent),
 }
 
-/// A helper object specialized for reading JSON-SEQ qlog from a [`BufRead`]
-/// trait.
+/// Incremental JSON-SEQ decoding state. Failed input cannot be resumed.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum Phase {
+    #[default]
+    Preamble,
+    Header,
+    Events,
+    Finished,
+    Failed,
+}
+
+/// A record-at-a-time JSON-SEQ decoder shared by buffered readers and
+/// arbitrarily fragmented browser or network input.
 ///
-/// [`BufRead`]: https://doc.rust-lang.org/std/io/trait.BufRead.html
+/// Each ASCII record separator starts a new record. EOF completes the last
+/// record even when there is no trailing newline or separator. Empty records
+/// are ignored. Decoding errors permanently invalidate the sequence.
+#[derive(Default)]
+pub struct QlogSeqDecoder {
+    phase: Phase,
+    header: Option<QlogSeq>,
+    pending: Vec<u8>,
+    record_number: usize,
+}
+
+impl QlogSeqDecoder {
+    /// Borrow the header once it has been decoded.
+    #[must_use = "the header describes the decoded trace"]
+    pub const fn header(&self) -> Option<&QlogSeq> {
+        self.header.as_ref()
+    }
+
+    /// Consume part or all of the supplied fragment, stopping at a record
+    /// boundary. Call repeatedly while input remains. A successful call with
+    /// no event may have consumed the header, an empty record, or part of a
+    /// record.
+    ///
+    /// # Errors
+    /// Reports invalid framing, invalid JSON, or input after finalization.
+    pub fn decode(&mut self, input: &mut &[u8]) -> io::Result<Option<Event>> {
+        let result = self.decode_inner(input);
+        if result.is_err() {
+            self.phase = Phase::Failed;
+        }
+        result
+    }
+
+    fn decode_inner(&mut self, input: &mut &[u8]) -> io::Result<Option<Event>> {
+        match self.phase {
+            Phase::Finished =>
+                return Err(invalid("qlog JSON-SEQ input was already finalized")),
+            Phase::Failed =>
+                return Err(invalid("qlog JSON-SEQ decoder has failed")),
+            Phase::Preamble => {
+                let separator = input.iter().position(|byte| *byte == 0x1e);
+                let prefix = &input[..separator.unwrap_or(input.len())];
+                if prefix.iter().any(|byte| !byte.is_ascii_whitespace()) {
+                    return Err(invalid(
+                        "qlog JSON-SEQ data must begin with a record separator",
+                    ));
+                }
+                let Some(separator) = separator else {
+                    *input = &[];
+                    return Ok(None);
+                };
+                *input = &input[separator + 1..];
+                self.phase = Phase::Header;
+            },
+            Phase::Header | Phase::Events => (),
+        }
+
+        if let Some(separator) = input.iter().position(|byte| *byte == 0x1e) {
+            self.pending.extend_from_slice(&input[..separator]);
+            *input = &input[separator + 1..];
+            return self.complete_record();
+        }
+        self.pending.extend_from_slice(input);
+        *input = &[];
+        Ok(None)
+    }
+
+    fn complete_record(&mut self) -> io::Result<Option<Event>> {
+        if self.pending.iter().all(u8::is_ascii_whitespace) {
+            self.pending.clear();
+            return Ok(None);
+        }
+        if self.phase == Phase::Header {
+            let header: QlogSeq =
+                serde_json::from_slice(&self.pending).map_err(|error| {
+                    invalid(format!("invalid qlog header: {error}"))
+                })?;
+            if header.serialization_format != "JSON-SEQ" {
+                return Err(invalid(format!(
+                    "expected JSON-SEQ serialization format, got {:?}",
+                    header.serialization_format
+                )));
+            }
+            self.header = Some(header);
+            self.phase = Phase::Events;
+            self.pending.clear();
+            return Ok(None);
+        }
+        self.record_number =
+            self.record_number.checked_add(1).ok_or_else(|| {
+                invalid("qlog record count exceeds addressable range")
+            })?;
+        // Custom and unknown event types use the generic JSON representation.
+        let event = if let Ok(event) =
+            serde_json::from_slice::<crate::events::Event>(&self.pending)
+        {
+            Event::Qlog(event)
+        } else {
+            Event::Json(serde_json::from_slice(&self.pending).map_err(
+                |error| {
+                    invalid(format!(
+                        "invalid qlog event #{}: {error}",
+                        self.record_number
+                    ))
+                },
+            )?)
+        };
+        self.pending.clear();
+        Ok(Some(event))
+    }
+
+    /// Complete the last record at EOF. Successful repeated calls are harmless.
+    ///
+    /// # Errors
+    /// Reports a missing header, malformed final record, or prior failure.
+    pub fn finish(&mut self) -> io::Result<Option<Event>> {
+        match self.phase {
+            Phase::Finished => return Ok(None),
+            Phase::Failed =>
+                return Err(invalid("qlog JSON-SEQ decoder has failed")),
+            Phase::Preamble | Phase::Header | Phase::Events => (),
+        }
+        let result = self.complete_record().and_then(|event| {
+            if self.phase == Phase::Events {
+                Ok(event)
+            } else {
+                Err(invalid("qlog JSON-SEQ input has no header"))
+            }
+        });
+        self.phase = if result.is_ok() {
+            Phase::Finished
+        } else {
+            Phase::Failed
+        };
+        result
+    }
+
+    const fn is_terminal(&self) -> bool {
+        matches!(self.phase, Phase::Finished | Phase::Failed)
+    }
+}
+
+fn invalid(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn read_step(
+    reader: &mut (dyn BufRead + Send + Sync), decoder: &mut QlogSeqDecoder,
+) -> io::Result<Option<Event>> {
+    loop {
+        let mut input = match reader.fill_buf() {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        if input.is_empty() {
+            return decoder.finish();
+        }
+        let len = input.len();
+        let result = decoder.decode(&mut input);
+        let consumed = len - input.len();
+        reader.consume(consumed);
+        return result;
+    }
+}
+
+/// A streaming JSON-SEQ reader. Each iterator item is fallible so invalid
+/// records or decompression errors cannot be mistaken for successful EOF.
 pub struct QlogSeqReader<'a> {
     pub qlog: QlogSeq,
-    reader: Box<dyn std::io::BufRead + Send + Sync + 'a>,
+    reader: Box<dyn BufRead + Send + Sync + 'a>,
+    decoder: QlogSeqDecoder,
 }
 
 impl<'a> QlogSeqReader<'a> {
@@ -63,21 +244,18 @@ impl<'a> QlogSeqReader<'a> {
     /// Returns an error if input cannot be read or the header is missing or
     /// malformed.
     pub fn new(
-        mut reader: Box<dyn std::io::BufRead + Send + Sync + 'a>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        // "null record" skip it.
-        let _ = Self::read_record(reader.as_mut());
-
-        let header = Self::read_record(reader.as_mut()).ok_or_else(|| {
-            std::io::Error::other("error reading file header bytes")
-        })?;
-
-        let res: Result<QlogSeq, serde_json::Error> =
-            serde_json::from_slice(&header);
-        match res {
-            Ok(qlog) => Ok(Self { qlog, reader }),
-
-            Err(e) => Err(e.into()),
+        mut reader: Box<dyn BufRead + Send + Sync + 'a>,
+    ) -> io::Result<Self> {
+        let mut decoder = QlogSeqDecoder::default();
+        loop {
+            read_step(reader.as_mut(), &mut decoder)?;
+            if let Some(qlog) = decoder.header.take() {
+                return Ok(Self {
+                    qlog,
+                    reader,
+                    decoder,
+                });
+            }
         }
     }
 
@@ -105,9 +283,7 @@ impl<'a> QlogSeqReader<'a> {
     /// # Errors
     /// Returns an error if opening, decompression, or qlog header parsing
     /// fails.
-    pub fn with_file(
-        path: impl AsRef<Path>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn with_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)?;
         let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -134,8 +310,7 @@ impl<'a> QlogSeqReader<'a> {
                     "qlog file {name:?} requires the `gzip` feature on \
                      the qlog crate to decode"
                 ),
-            )
-            .into());
+            ));
         }
         if name.ends_with(SQLOG_ZST_EXT) {
             #[cfg(feature = "zstd")]
@@ -152,8 +327,7 @@ impl<'a> QlogSeqReader<'a> {
                     "qlog file {name:?} requires the `zstd` feature on \
                      the qlog crate to decode"
                 ),
-            )
-            .into());
+            ));
         }
         if name.ends_with(SQLOG_EXT) {
             let reader: Box<dyn std::io::BufRead + Send + Sync> =
@@ -167,52 +341,26 @@ impl<'a> QlogSeqReader<'a> {
                 "qlog file {name:?} does not match a known qlog \
                  extension ({SQLOG_EXT}, {SQLOG_GZ_EXT}, {SQLOG_ZST_EXT})"
             ),
-        )
-        .into())
-    }
-
-    fn read_record(
-        reader: &mut (dyn std::io::BufRead + Send + Sync),
-    ) -> Option<Vec<u8>> {
-        let mut buf = Vec::<u8>::new();
-
-        // An I/O error (e.g. a corrupt or truncated compressed stream) ends
-        // the input. Keep whatever was read before the error so a final
-        // complete JSON record can still be returned.
-        let size = reader.read_until(b'\x1e', &mut buf).unwrap_or(buf.len());
-        if size <= 1 {
-            return None;
-        }
-
-        buf.truncate(buf.len() - 1);
-
-        Some(buf)
+        ))
     }
 }
 
 impl Iterator for QlogSeqReader<'_> {
-    type Item = Event;
+    type Item = io::Result<Event>;
 
-    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        // Attempt to deserialize events but skip them if that fails for any
-        // reason, ensuring we always read all bytes in the reader.
-        while let Some(bytes) = Self::read_record(&mut self.reader) {
-            let r: serde_json::Result<crate::events::Event> =
-                serde_json::from_slice(&bytes);
-
-            if let Ok(event) = r {
-                return Some(Event::Qlog(event));
-            }
-
-            let r: serde_json::Result<crate::events::JsonEvent> =
-                serde_json::from_slice(&bytes);
-
-            if let Ok(event) = r {
-                return Some(Event::Json(event));
+        while !self.decoder.is_terminal() {
+            match read_step(self.reader.as_mut(), &mut self.decoder) {
+                Ok(Some(event)) => return Some(Ok(event)),
+                Ok(None) => (),
+                Err(error) => {
+                    self.decoder.phase = Phase::Failed;
+                    return Some(Err(error));
+                },
             }
         }
-
         None
     }
 }
+
+impl std::iter::FusedIterator for QlogSeqReader<'_> {}

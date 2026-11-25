@@ -13248,7 +13248,7 @@ fn server_qlog() -> TestResult {
     assert!(ref_time.wall_clock_time.is_some());
 
     // First event yielded by the iterator is TransportParametersSet.
-    let first = reader.next().ok_or("qlog event stream is empty")?;
+    let first = reader.next().ok_or("qlog event stream is empty")??;
     let qlog::reader::Event::Qlog(event) = first else {
         return Err("expected Qlog event".into());
     };
