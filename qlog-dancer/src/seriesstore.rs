@@ -593,25 +593,41 @@ impl SeriesStore {
     }
 
     fn data_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
-        for (source, output, x_max, y_max, name) in [
-            (
-                &data_store.received_data_frames,
-                &mut self.received_data_frames_series,
-                &mut self.received_x_max,
-                &mut self.y_max_stream_recv_plot,
-                "received_data_frames",
-            ),
-            (
-                &data_store.sent_data_frames,
-                &mut self.sent_data_frames_series,
-                &mut self.sent_x_max,
-                &mut self.y_max_stream_send_plot,
-                "sent_data_frames",
-            ),
-        ] {
-            for (&stream_id, points) in source {
+        for (&stream_id, request) in &data_store.http_requests {
+            for (history, output, x_min, x_max, y_max, name) in [
+                (
+                    &request.received_data,
+                    &mut self.received_data_frames_series,
+                    &mut self.received_x_min,
+                    &mut self.received_x_max,
+                    &mut self.y_max_stream_recv_plot,
+                    "received_data_frames",
+                ),
+                (
+                    &request.sent_data,
+                    &mut self.sent_data_frames_series,
+                    &mut self.sent_x_min,
+                    &mut self.sent_x_max,
+                    &mut self.y_max_stream_send_plot,
+                    "sent_data_frames",
+                ),
+            ] {
+                if let Some(first) = history.first_time() {
+                    *x_min = x_min.min(first);
+                }
+                if let Some(last) = history.last_time() {
+                    *x_max = x_max.max(last);
+                }
+                let mut points = history
+                    .observations()
+                    .iter()
+                    .filter_map(|&(time, length)| {
+                        length.map(|length| (time, length))
+                    })
+                    .collect::<Vec<_>>();
+                points.sort_by(|a, b| a.0.total_cmp(&b.0));
                 let series = cumulative_series(
-                    points,
+                    &points,
                     0,
                     u64::checked_add,
                     SeriesShape::Samples,
@@ -620,14 +636,10 @@ impl SeriesStore {
                         series: name,
                     },
                 )?;
-                if series.is_empty() {
-                    continue;
+                if !series.is_empty() {
+                    *y_max = (*y_max).max(history.known_bytes());
+                    output.insert(stream_id, series);
                 }
-                for &(time, value) in &series {
-                    *x_max = x_max.max(time);
-                    *y_max = (*y_max).max(value);
-                }
-                output.insert(stream_id, series);
             }
         }
         Ok(())
@@ -792,6 +804,8 @@ mod tests {
     use crate::datastore::Datastore;
     use crate::datastore::PacketInfoStub;
     use crate::datastore::StreamDatapoint;
+    use crate::request_stub::HttpDataHistory;
+    use crate::request_stub::HttpRequestStub;
     use crate::PacketType;
     use qlog::events::quic::QuicFrame;
     use qlog::events::RawInfo;
@@ -928,56 +942,62 @@ mod tests {
     }
 
     #[test]
-    fn h2_data_cumulative_series_has_exactly_one_point_per_frame() {
+    fn h2_data_cumulative_series_has_exactly_one_point_per_frame(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut datastore = Datastore::default();
+        datastore.http_requests.insert(3, HttpRequestStub {
+            sent_data: HttpDataHistory::with_known_frames(&[(1.0, 4), (2.0, 5)])?,
+            received_data: HttpDataHistory::with_known_frames(&[
+                (1.5, 2),
+                (2.5, 7),
+            ])?,
+            ..HttpRequestStub::default()
+        });
         datastore
-            .sent_data_frames
-            .insert(3, vec![(1.0, 4), (2.0, 5)]);
-        datastore
-            .received_data_frames
-            .insert(3, vec![(1.5, 2), (2.5, 7)]);
-        datastore.sent_data_frames.insert(5, Vec::new());
-        datastore.received_data_frames.insert(5, Vec::new());
-        let result = SeriesStore::from_datastore(&datastore);
-        assert!(result.is_ok());
-        if let Ok(series) = result {
-            assert_eq!(
-                series.sent_data_frames_series.get(&3),
-                Some(&vec![(1.0, 0), (1.0, 4), (2.0, 9)])
-            );
-            assert_eq!(
-                series.received_data_frames_series.get(&3),
-                Some(&vec![(1.5, 0), (1.5, 2), (2.5, 9)])
-            );
-            assert_eq!(series.y_max_stream_send_plot, 9);
-            assert_eq!(series.y_max_stream_recv_plot, 9);
-            assert!(!series.sent_data_frames_series.contains_key(&5));
-            assert!(!series.received_data_frames_series.contains_key(&5));
-        }
+            .http_requests
+            .insert(5, HttpRequestStub::default());
+        let series = SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(
+            series.sent_data_frames_series.get(&3),
+            Some(&vec![(1.0, 0), (1.0, 4), (2.0, 9)])
+        );
+        assert_eq!(
+            series.received_data_frames_series.get(&3),
+            Some(&vec![(1.5, 0), (1.5, 2), (2.5, 9)])
+        );
+        assert_eq!(series.y_max_stream_send_plot, 9);
+        assert_eq!(series.y_max_stream_recv_plot, 9);
+        assert!(!series.sent_data_frames_series.contains_key(&5));
+        assert!(!series.received_data_frames_series.contains_key(&5));
+        Ok(())
     }
 
     #[test]
-    fn invalid_cumulative_lengths_are_rejected_without_wrapping() {
-        for sent in [true, false] {
-            let mut datastore = Datastore::default();
-            let stream_id = 7;
-            let points = vec![(1.0, u64::MAX), (2.0, 1)];
-            if sent {
-                datastore.sent_data_frames.insert(stream_id, points);
-            } else {
-                datastore.received_data_frames.insert(stream_id, points);
-            }
-            let result = SeriesStore::from_datastore(&datastore);
-            assert!(result.is_err_and(|error| {
-                error.stream_id == stream_id &&
-                    error.series ==
-                        if sent {
-                            "sent_data_frames"
-                        } else {
-                            "received_data_frames"
-                        }
-            }));
+    fn data_cumulative_series_sorts_out_of_order_observations(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut datastore = Datastore::default();
+        let mut request = HttpRequestStub::default();
+        for (time, length) in [
+            (5.0, Some(4)),
+            (-2.0, None),
+            (1.0, Some(7)),
+            (9.0, None),
+            (5.0, Some(2)),
+        ] {
+            request.received_data.record(time, length)?;
         }
+        assert_eq!(request.received_data.known_bytes(), 13);
+        assert_eq!(request.received_data.complete_bytes(), None);
+        datastore.http_requests.insert(7, request);
+        let series = SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(
+            series.received_data_frames_series.get(&7),
+            Some(&vec![(1.0, 0), (1.0, 7), (5.0, 11), (5.0, 13)])
+        );
+        assert_eq!(series.received_x_min, -2.0);
+        assert_eq!(series.received_x_max, 9.0);
+        assert_eq!(series.y_max_stream_recv_plot, 13);
+        Ok(())
     }
 
     #[test]

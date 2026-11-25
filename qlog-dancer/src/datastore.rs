@@ -424,21 +424,7 @@ pub struct Datastore {
     pub sent_stream_frames_count_based: BTreeMap<u64, Vec<(u64, QuicFrame)>>,
     pub total_sent_stream_frame_count: u64,
 
-    pub received_data_frames: BTreeMap<u64, Vec<(f64, u64)>>,
-    pub received_data_frames_count_based: BTreeMap<u64, Vec<(u64, u64)>>,
-    pub total_received_data_frame_count: u64,
-    pub received_data_cumulative: BTreeMap<u64, Vec<(f64, u64)>>,
-    pub received_data_cumulative_max: BTreeMap<u64, u64>,
-
-    pub sent_data_frames: BTreeMap<u64, Vec<(f64, u64)>>,
-    pub sent_data_frames_count_based: BTreeMap<u64, Vec<(u64, u64)>>,
-    pub total_sent_data_frame_count: u64,
-    pub sent_data_cumulative: BTreeMap<u64, Vec<(f64, u64)>>,
-    pub sent_data_cumulative_max: BTreeMap<u64, u64>,
-
     pub http_requests: BTreeMap<u64, HttpRequestStub>,
-    pub largest_data_frame_rx_length_global: u64,
-    pub largest_data_frame_tx_length_global: u64,
 
     pub local_initial_stream_limits: InitialStreamLimits,
     pub peer_initial_stream_limits: InitialStreamLimits,
@@ -594,48 +580,6 @@ impl HttpDataDirection {
             (Self::Sent, VantagePoint::Client) |
                 (Self::Received, VantagePoint::Server)
         )
-    }
-}
-
-/// All directional DATA history fields are updated by the same operation.
-struct HttpDataHistoryMut<'a> {
-    frames: &'a mut BTreeMap<u64, Vec<(f64, u64)>>,
-    count_frames: &'a mut BTreeMap<u64, Vec<(u64, u64)>>,
-    count: &'a mut u64,
-    cumulative: &'a mut BTreeMap<u64, Vec<(f64, u64)>>,
-    maxima: &'a mut BTreeMap<u64, u64>,
-    largest: &'a mut u64,
-    count_field: &'static str,
-    cumulative_field: &'static str,
-}
-
-impl HttpDataHistoryMut<'_> {
-    fn record(
-        &mut self, stream_id: u64, length: u64, time: f64,
-    ) -> Result<u64, DatastoreError> {
-        let next_count = checked_counter_sum(*self.count, 1, self.count_field)?;
-        let cumulative = cumulative_total(
-            self.cumulative.get(&stream_id).map_or(&[], Vec::as_slice),
-            length,
-            self.cumulative_field,
-        )?;
-        self.frames
-            .entry(stream_id)
-            .or_default()
-            .push((time, length));
-        self.count_frames
-            .entry(stream_id)
-            .or_default()
-            .push((*self.count, length));
-        *self.count = next_count;
-        self.cumulative
-            .entry(stream_id)
-            .or_default()
-            .push((time, cumulative));
-        let maximum = self.maxima.entry(stream_id).or_default();
-        *maximum = (*maximum).max(cumulative);
-        *self.largest = (*self.largest).max(length);
-        Ok(cumulative)
     }
 }
 
@@ -1031,78 +975,15 @@ impl Datastore {
         &mut self, direction: HttpDataDirection, stream_id: u64,
         length: Option<u64>, time: f64,
     ) -> Result<(), DatastoreError> {
-        let cumulative = length
-            .map(|length| {
-                self.record_known_http_data(direction, stream_id, length, time)
-            })
-            .transpose()?;
-        let client_data = direction.is_client_data(self.vantage_point);
         let req = self.get_or_insert_http_req(stream_id);
-        let (first, last, samples) = match direction {
-            HttpDataDirection::Sent => (
-                &mut req.time_first_data_tx,
-                &mut req.time_last_data_tx,
-                &mut req.time_data_tx_set,
-            ),
-            HttpDataDirection::Received => (
-                &mut req.time_first_data_rx,
-                &mut req.time_last_data_rx,
-                &mut req.time_data_rx_set,
-            ),
+        let (history, field) = match direction {
+            HttpDataDirection::Sent => (&mut req.sent_data, "sent_data_bytes"),
+            HttpDataDirection::Received =>
+                (&mut req.received_data, "received_data_bytes"),
         };
-        *first = Some(first.map_or(time, |value| value.min(time)));
-        *last = Some(last.map_or(time, |value| value.max(time)));
-        if let Some(length) = length {
-            samples.push((time, length));
-        }
-        let (observed, incomplete) = if client_data {
-            (
-                &mut req.client_observed_data_bytes,
-                &mut req.client_data_lengths_incomplete,
-            )
-        } else {
-            (
-                &mut req.server_observed_data_bytes,
-                &mut req.server_data_lengths_incomplete,
-            )
-        };
-        if let Some(cumulative) = cumulative {
-            *observed = NaOption::new(Some(cumulative));
-        } else {
-            *incomplete = true;
-        }
-        Ok(())
-    }
-
-    /// Apply a known length to directional series only after validating
-    /// the new aggregate.
-    fn record_known_http_data(
-        &mut self, direction: HttpDataDirection, stream_id: u64, length: u64,
-        time: f64,
-    ) -> Result<u64, DatastoreError> {
-        let mut history = match direction {
-            HttpDataDirection::Sent => HttpDataHistoryMut {
-                frames: &mut self.sent_data_frames,
-                count_frames: &mut self.sent_data_frames_count_based,
-                count: &mut self.total_sent_data_frame_count,
-                cumulative: &mut self.sent_data_cumulative,
-                maxima: &mut self.sent_data_cumulative_max,
-                largest: &mut self.largest_data_frame_tx_length_global,
-                count_field: "total_sent_data_frame_count",
-                cumulative_field: "sent_data_cumulative",
-            },
-            HttpDataDirection::Received => HttpDataHistoryMut {
-                frames: &mut self.received_data_frames,
-                count_frames: &mut self.received_data_frames_count_based,
-                count: &mut self.total_received_data_frame_count,
-                cumulative: &mut self.received_data_cumulative,
-                maxima: &mut self.received_data_cumulative_max,
-                largest: &mut self.largest_data_frame_rx_length_global,
-                count_field: "total_received_data_frame_count",
-                cumulative_field: "received_data_cumulative",
-            },
-        };
-        history.record(stream_id, length, time)
+        history
+            .record(time, length)
+            .map_err(|_| DatastoreError::CounterOverflow { field })
     }
 
     /// Chrome HTTP/2 additionally records a connection-wide DATA total.
@@ -2309,34 +2190,24 @@ mod netlog_tests {
         }
 
         for ds in [&h2, &h3] {
-            assert_eq!(ds.total_received_data_frame_count, 3);
-            assert_eq!(ds.received_data_frames[&9], vec![
-                (2.0, 5),
-                (4.0, 7),
-                (6.0, 0)
-            ]);
-            assert_eq!(ds.received_data_frames_count_based[&9], vec![
-                (0, 5),
-                (1, 7),
-                (2, 0)
-            ]);
-            assert_eq!(ds.received_data_cumulative[&9], vec![
-                (2.0, 5),
-                (4.0, 12),
-                (6.0, 12)
-            ]);
-            assert_eq!(ds.received_data_cumulative_max[&9], 12);
-            assert_eq!(ds.largest_data_frame_rx_length_global, 7);
-
             let request = &ds.http_requests[&9];
-            assert_eq!(request.time_first_data_rx, Some(2.0));
-            assert_eq!(request.time_last_data_rx, Some(6.0));
-            assert_eq!(request.time_data_rx_set, vec![
-                (2.0, 5),
-                (4.0, 7),
-                (6.0, 0)
+            assert_eq!(request.received_data.first_time(), Some(2.0));
+            assert_eq!(request.received_data.last_time(), Some(6.0));
+            assert_eq!(request.received_data.observations(), [
+                (2.0, Some(5)),
+                (4.0, Some(7)),
+                (6.0, Some(0))
             ]);
-            assert_eq!(request.server_observed_data_bytes.inner, Some(12));
+            assert_eq!(request.server_data().complete_bytes(), Some(12));
+            assert_eq!(request.sent_data.observations(), []);
+            let series = crate::seriesstore::SeriesStore::from_datastore(ds)?;
+            assert_eq!(
+                series
+                    .received_data_frames_series
+                    .get(&9)
+                    .map(Vec::as_slice),
+                Some([(2.0, 0), (2.0, 5), (4.0, 12), (6.0, 12)].as_slice())
+            );
         }
 
         // Only HTTP/2 records connection-wide received DATA. HTTP/3 uses
@@ -2359,73 +2230,21 @@ mod netlog_tests {
             consume(&constants, &mut datastore, time, &h2_sent(5, length))?;
         }
 
-        assert_eq!(datastore.total_sent_data_frame_count, 3);
-        assert_eq!(datastore.sent_data_frames[&5], vec![
-            (1.0, 4),
-            (5.0, 9),
-            (8.0, 0)
-        ]);
-        assert_eq!(datastore.sent_data_frames_count_based[&5], vec![
-            (0, 4),
-            (1, 9),
-            (2, 0)
-        ]);
-        assert_eq!(datastore.sent_data_cumulative[&5], vec![
-            (1.0, 4),
-            (5.0, 13),
-            (8.0, 13)
-        ]);
-        assert_eq!(datastore.sent_data_cumulative_max[&5], 13);
-        assert_eq!(datastore.largest_data_frame_tx_length_global, 9);
         assert_eq!(datastore.h2_send_window_updates_balanced[&5], vec![
             (1.0, -4),
             (5.0, -9),
             (8.0, 0)
         ]);
         let request = &datastore.http_requests[&5];
-        assert_eq!(request.time_first_data_tx, Some(1.0));
-        assert_eq!(request.time_last_data_tx, Some(8.0));
-        assert_eq!(request.client_observed_data_bytes.inner, Some(13));
-        assert_eq!(request.time_data_tx_set, vec![(1.0, 4), (5.0, 9), (8.0, 0)]);
-        assert!(datastore.received_data_frames.is_empty());
-        Ok(())
-    }
-
-    #[test]
-    fn netlog_data_counter_overflow_does_not_mutate_request_state(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let constants = constants()?;
-        for event in [h2_received(5, 1), h3_received(5, 1)] {
-            let mut datastore = Datastore {
-                total_received_data_frame_count: u64::MAX,
-                ..Default::default()
-            };
-            assert!(matches!(
-                consume(&constants, &mut datastore, 105, &event),
-                Err(DatastoreError::CounterOverflow {
-                    field: "total_received_data_frame_count"
-                })
-            ));
-            assert!(datastore.http_requests.is_empty());
-            assert!(datastore.received_data_frames.is_empty());
-            assert!(datastore.received_data_cumulative.is_empty());
-            assert!(datastore.received_data_frames_count_based.is_empty());
-        }
-
-        let mut datastore = Datastore {
-            total_sent_data_frame_count: u64::MAX,
-            ..Default::default()
-        };
-        assert!(matches!(
-            consume(&constants, &mut datastore, 105, &h2_sent(5, 1)),
-            Err(DatastoreError::CounterOverflow {
-                field: "total_sent_data_frame_count"
-            })
-        ));
-        assert!(datastore.http_requests.is_empty());
-        assert!(datastore.sent_data_frames.is_empty());
-        assert!(datastore.sent_data_cumulative.is_empty());
-        assert!(datastore.h2_send_window_updates_balanced.is_empty());
+        assert_eq!(request.sent_data.first_time(), Some(1.0));
+        assert_eq!(request.sent_data.last_time(), Some(8.0));
+        assert_eq!(request.client_data().complete_bytes(), Some(13));
+        assert_eq!(request.sent_data.observations(), [
+            (1.0, Some(4)),
+            (5.0, Some(9)),
+            (8.0, Some(0))
+        ]);
+        assert_eq!(request.received_data.observations(), []);
         Ok(())
     }
 
@@ -2650,36 +2469,37 @@ mod netlog_tests {
     fn netlog_h3_and_h2_counter_overflow_is_rejected_before_mutation(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;
-        let mut h3 = Datastore::default();
-        h3.received_data_cumulative.insert(9, vec![(0.0, u64::MAX)]);
-        let event = netlog::Event::H3(h3::Event::Http3DataFrameReceived(
-            h3::Http3DataFrameReceivedEvent {
-                params: h3::Http3DataFrameReceivedParams {
-                    stream_id: 9,
-                    payload_length: 1,
-                },
-            },
-        ));
-        assert!(matches!(
-            consume(&constants, &mut h3, 120, &event),
-            Err(DatastoreError::CounterOverflow {
-                field: "received_data_cumulative"
-            })
-        ));
-        assert!(!h3.http_requests.contains_key(&9));
-        assert_eq!(h3.total_received_data_frame_count, 0);
+        for (event, sent, field) in [
+            (h3_received(9, 1), false, "received_data_bytes"),
+            (h2_received(9, 1), false, "received_data_bytes"),
+            (h2_sent(9, 1), true, "sent_data_bytes"),
+        ] {
+            let mut ds = Datastore::default();
+            let request = ds.get_or_insert_http_req(9);
+            let history = if sent {
+                &mut request.sent_data
+            } else {
+                &mut request.received_data
+            };
+            history.record(0.0, Some(u64::MAX))?;
+            let result = consume(&constants, &mut ds, 120, &event);
+            assert!(
+                matches!(result, Err(DatastoreError::CounterOverflow { field: actual }) if actual == field)
+            );
+            let request = &ds.http_requests[&9];
+            let history = if sent {
+                &request.sent_data
+            } else {
+                &request.received_data
+            };
+            assert_eq!(history.observations(), [(0.0, Some(u64::MAX))]);
+            assert_eq!(history.complete_bytes(), Some(u64::MAX));
+            assert!(ds.h2_send_window_updates_balanced.is_empty());
+            assert_eq!(ds.netlog_h2_stream_received_connection_cumulative, []
+                as [(f64, u64); 0]);
+        }
 
         let mut h2 = Datastore::default();
-        h2.received_data_cumulative
-            .insert(11, vec![(0.0, u64::MAX)]);
-        assert!(matches!(
-            consume(&constants, &mut h2, 120, &h2_received(11, 1)),
-            Err(DatastoreError::CounterOverflow {
-                field: "received_data_cumulative"
-            })
-        ));
-        assert!(!h2.http_requests.contains_key(&11));
-        h2.received_data_cumulative.clear();
         h2.netlog_h2_stream_received_connection_cumulative
             .push((0.0, u64::MAX));
         assert!(matches!(
@@ -2689,18 +2509,10 @@ mod netlog_tests {
             })
         ));
         assert!(!h2.http_requests.contains_key(&11));
-        assert_eq!(h2.total_received_data_frame_count, 0);
-
-        let mut h2 = Datastore::default();
-        h2.sent_data_cumulative.insert(11, vec![(0.0, u64::MAX)]);
-        assert!(matches!(
-            consume(&constants, &mut h2, 120, &h2_sent(11, 1)),
-            Err(DatastoreError::CounterOverflow {
-                field: "sent_data_cumulative"
-            })
-        ));
-        assert!(!h2.http_requests.contains_key(&11));
-        assert_eq!(h2.total_sent_data_frame_count, 0);
+        assert_eq!(h2.netlog_h2_stream_received_connection_cumulative, [(
+            0.0,
+            u64::MAX
+        )]);
         Ok(())
     }
 
@@ -3410,31 +3222,21 @@ mod qlog_h3_direction_tests {
             assert_eq!(req.status.inner.as_deref(), Some("201"));
             assert_eq!(req.server_content_length.inner.as_deref(), Some("17"));
 
-            assert_eq!(req.time_first_data_tx, Some(3.0));
-            assert_eq!(req.time_last_data_tx, Some(3.0));
-            assert_eq!(req.time_data_tx_set, vec![(3.0, 11)]);
-            assert_eq!(req.time_first_data_rx, Some(4.0));
-            assert_eq!(req.time_last_data_rx, Some(4.0));
-            assert_eq!(req.time_data_rx_set, vec![(4.0, 17)]);
-            assert_eq!(ds.largest_data_frame_tx_length_global, 11);
-            assert_eq!(ds.largest_data_frame_rx_length_global, 17);
+            assert_eq!(req.sent_data.first_time(), Some(3.0));
+            assert_eq!(req.sent_data.last_time(), Some(3.0));
+            assert_eq!(req.sent_data.observations(), [(3.0, Some(11))]);
+            assert_eq!(req.received_data.first_time(), Some(4.0));
+            assert_eq!(req.received_data.last_time(), Some(4.0));
+            assert_eq!(req.received_data.observations(), [(4.0, Some(17))]);
 
             let priority_req =
                 ds.http_requests.get(&12).ok_or("priority target missing")?;
             assert_eq!(priority_req.priority_updates, vec!["u=2"]);
 
-            assert_eq!(
-                ds.received_data_frames.get(&8).map(Vec::as_slice),
-                Some([(4.0, 17)].as_slice())
-            );
-            assert_eq!(
-                ds.sent_data_frames.get(&8).map(Vec::as_slice),
-                Some([(3.0, 11)].as_slice())
-            );
             let (client_bytes, server_bytes) =
                 if request_created { (11, 17) } else { (17, 11) };
-            assert_eq!(req.client_observed_data_bytes.inner, Some(client_bytes));
-            assert_eq!(req.server_observed_data_bytes.inner, Some(server_bytes));
+            assert_eq!(req.client_data().complete_bytes(), Some(client_bytes));
+            assert_eq!(req.server_data().complete_bytes(), Some(server_bytes));
         }
         Ok(())
     }
@@ -3489,23 +3291,21 @@ mod qlog_h3_direction_tests {
             )?,
         ] {
             let request = ds.http_requests.get(&8).ok_or("missing request")?;
-            assert_eq!(request.time_first_data_tx, Some(2.0));
-            assert_eq!(request.time_last_data_tx, Some(7.0));
-            assert_eq!(request.client_observed_data_bytes.inner, Some(4));
-            assert!(request.client_data_lengths_incomplete);
+            assert_eq!(request.sent_data.first_time(), Some(2.0));
+            assert_eq!(request.sent_data.last_time(), Some(7.0));
+            assert_eq!(request.client_data().known_bytes(), 4);
+            assert!(request.client_data().complete_bytes().is_none());
             assert!(request.avg_upload_rate.inner.is_none());
-            assert!(!request.server_data_lengths_incomplete);
-            assert_eq!(request.server_observed_data_bytes.inner, Some(15));
-            assert_eq!(ds.total_sent_data_frame_count, 2);
-            assert_eq!(ds.total_received_data_frame_count, 2);
-            assert_eq!(
-                ds.sent_data_frames.get(&8).map(Vec::as_slice),
-                Some([(5.0, 4), (2.0, 0)].as_slice())
-            );
-            assert_eq!(
-                ds.received_data_cumulative.get(&8).map(Vec::as_slice),
-                Some([(8.0, 12), (9.0, 15)].as_slice())
-            );
+            assert_eq!(request.server_data().complete_bytes(), Some(15));
+            assert_eq!(request.sent_data.observations(), [
+                (5.0, Some(4)),
+                (2.0, Some(0)),
+                (7.0, None)
+            ]);
+            assert_eq!(request.received_data.observations(), [
+                (8.0, Some(12)),
+                (9.0, Some(3))
+            ]);
         }
         Ok(())
     }
@@ -3522,36 +3322,22 @@ mod qlog_h3_direction_tests {
             let result =
                 ds.consume_qlog_event(&event(2.0, sent, data(), Some(1)), false);
             let field = if sent {
-                "sent_data_cumulative"
+                "sent_data_bytes"
             } else {
-                "received_data_cumulative"
+                "received_data_bytes"
             };
             assert!(
                 matches!(result, Err(super::DatastoreError::CounterOverflow { field: actual }) if actual == field)
             );
             let request = ds.http_requests.get(&8).ok_or("missing request")?;
-            let (count, frames, last, bytes) = if sent {
-                (
-                    ds.total_sent_data_frame_count,
-                    &ds.sent_data_frames,
-                    request.time_last_data_tx,
-                    request.client_observed_data_bytes.inner,
-                )
+            let history = if sent {
+                &request.sent_data
             } else {
-                (
-                    ds.total_received_data_frame_count,
-                    &ds.received_data_frames,
-                    request.time_last_data_rx,
-                    request.server_observed_data_bytes.inner,
-                )
+                &request.received_data
             };
-            assert_eq!(count, 1);
-            assert_eq!(
-                frames.get(&8).map(Vec::as_slice),
-                Some([(1.0, u64::MAX)].as_slice())
-            );
-            assert_eq!(last, Some(1.0));
-            assert_eq!(bytes, Some(u64::MAX));
+            assert_eq!(history.observations(), [(1.0, Some(u64::MAX))]);
+            assert_eq!(history.last_time(), Some(1.0));
+            assert_eq!(history.complete_bytes(), Some(u64::MAX));
             assert_eq!(ds.last_event_time, 1.0);
         }
         Ok(())

@@ -80,6 +80,95 @@ impl<T: std::fmt::Display> Display for NaOption<T> {
     }
 }
 
+/// One observation of a DATA frame, including frames whose length is absent.
+pub type DataObservation = (f64, Option<u64>);
+
+/// A request's DATA observations in one local direction. Keep a single
+/// history; cumulative plot series are derived from it, not maintained as
+/// independent copies of the same event stream.
+#[derive(Debug, Default)]
+pub struct HttpDataHistory {
+    observations: Vec<DataObservation>,
+    known_bytes: u64,
+    incomplete: bool,
+    first_time: Option<f64>,
+    last_time: Option<f64>,
+}
+
+#[derive(Debug)]
+pub struct DataLengthOverflow;
+
+impl Display for DataLengthOverflow {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DATA payload length total overflows u64")
+    }
+}
+
+impl std::error::Error for DataLengthOverflow {}
+
+impl HttpDataHistory {
+    /// Record an observation, preserving even an unknown length.
+    ///
+    /// # Errors
+    /// Returns an error without changing the history if the sum of known
+    /// payload lengths would overflow.
+    pub fn record(
+        &mut self, time: f64, length: Option<u64>,
+    ) -> Result<(), DataLengthOverflow> {
+        let known_bytes = self
+            .known_bytes
+            .checked_add(length.unwrap_or_default())
+            .ok_or(DataLengthOverflow)?;
+        self.observations.push((time, length));
+        self.known_bytes = known_bytes;
+        self.incomplete |= length.is_none();
+        self.first_time =
+            Some(self.first_time.map_or(time, |first| first.min(time)));
+        self.last_time = Some(self.last_time.map_or(time, |last| last.max(time)));
+        Ok(())
+    }
+
+    #[must_use = "the slice contains every DATA observation"]
+    pub const fn observations(&self) -> &[DataObservation] {
+        self.observations.as_slice()
+    }
+
+    #[must_use = "the timestamp identifies the first observed DATA frame"]
+    pub const fn first_time(&self) -> Option<f64> {
+        self.first_time
+    }
+
+    #[must_use = "the timestamp identifies the last observed DATA frame"]
+    pub const fn last_time(&self) -> Option<f64> {
+        self.last_time
+    }
+
+    #[must_use = "the total includes only observations with known lengths"]
+    pub const fn known_bytes(&self) -> u64 {
+        self.known_bytes
+    }
+
+    #[must_use = "an absent total indicates missing length evidence"]
+    pub const fn complete_bytes(&self) -> Option<u64> {
+        if self.incomplete || self.observations.is_empty() {
+            None
+        } else {
+            Some(self.known_bytes)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_known_frames(
+        frames: &[(f64, u64)],
+    ) -> Result<Self, DataLengthOverflow> {
+        let mut history = Self::default();
+        for &(time, length) in frames {
+            history.record(time, Some(length))?;
+        }
+        Ok(history)
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HttpRequestStub {
     pub request_actor: RequestActor,
@@ -98,24 +187,9 @@ pub struct HttpRequestStub {
     pub time_first_headers_rx: Option<f64>,
     pub time_first_headers_tx: Option<f64>,
 
-    pub time_first_data_rx: Option<f64>,
-    pub time_first_data_tx: Option<f64>,
-
-    pub time_last_data_rx: Option<f64>,
-    pub time_last_data_tx: Option<f64>,
-
     pub time_fin_rx: Option<f64>,
-
-    // TODO, Option<u64>
-    pub time_data_rx_set: Vec<(f64, u64)>,
-    pub time_data_tx_set: Vec<(f64, u64)>,
-
-    pub client_observed_data_bytes: NaOption<u64>,
-    pub server_observed_data_bytes: NaOption<u64>,
-    /// A DATA observation omitted its payload length. The known-byte sum
-    /// must not be presented as a complete observed total in reports.
-    pub client_data_lengths_incomplete: bool,
-    pub server_data_lengths_incomplete: bool,
+    pub sent_data: HttpDataHistory,
+    pub received_data: HttpDataHistory,
 
     pub avg_upload_rate: NaOption<f64>,
     pub avg_download_rate_d2d: NaOption<f64>,
@@ -242,10 +316,12 @@ impl tabled::Tabled for HttpRequestStub {
 
         // A response without a body ends at the response headers.
         let req_end = match self.request_actor {
-            RequestActor::Client =>
-                self.time_last_data_rx.or(self.time_first_headers_rx),
+            RequestActor::Client => self
+                .received_data
+                .last_time()
+                .or(self.time_first_headers_rx),
             RequestActor::Server =>
-                self.time_last_data_tx.or(self.time_first_headers_tx),
+                self.sent_data.last_time().or(self.time_first_headers_tx),
         };
 
         let req_end = NaOption::new(req_end);
@@ -287,7 +363,9 @@ impl tabled::Tabled for HttpRequestStub {
             path.into(),
             self.status.to_string().into(),
             self.server_content_length.to_string().into(),
-            self.complete_server_data_bytes().to_string().into(),
+            NaOption::new(self.server_data().complete_bytes())
+                .to_string()
+                .into(),
             NaOption::new(self.time_discovery).to_string().into(),
             req_start.to_string().into(),
             req_end.to_string().into(),
@@ -300,7 +378,9 @@ impl tabled::Tabled for HttpRequestStub {
             client_deltas.tx_hdr_rx_first_data.into(),
             client_deltas.tx_hdr_rx_last_data.into(),
             self.client_content_length.to_string().into(),
-            self.complete_client_data_bytes().to_string().into(),
+            NaOption::new(self.client_data().complete_bytes())
+                .to_string()
+                .into(),
             client_deltas.upload_time.into(),
             self.avg_upload_rate.to_string().into(),
             server_rx_hdr_tx_hdr.into(),
@@ -399,19 +479,19 @@ impl HttpRequestStub {
         NaOption::new(rate.is_finite().then_some(rate))
     }
 
-    const fn complete_client_data_bytes(&self) -> NaOption<u64> {
-        if self.client_data_lengths_incomplete {
-            NaOption::new(None)
-        } else {
-            self.client_observed_data_bytes
+    #[must_use = "the history describes client-originated DATA"]
+    pub const fn client_data(&self) -> &HttpDataHistory {
+        match self.request_actor {
+            RequestActor::Client => &self.sent_data,
+            RequestActor::Server => &self.received_data,
         }
     }
 
-    const fn complete_server_data_bytes(&self) -> NaOption<u64> {
-        if self.server_data_lengths_incomplete {
-            NaOption::new(None)
-        } else {
-            self.server_observed_data_bytes
+    #[must_use = "the history describes server-originated DATA"]
+    pub const fn server_data(&self) -> &HttpDataHistory {
+        match self.request_actor {
+            RequestActor::Client => &self.received_data,
+            RequestActor::Server => &self.sent_data,
         }
     }
 
@@ -419,35 +499,35 @@ impl HttpRequestStub {
         match self.request_actor {
             RequestActor::Client => {
                 self.avg_upload_rate = Self::maybe_megabits_per_second(
-                    self.time_first_data_tx,
-                    self.time_last_data_tx,
-                    self.complete_client_data_bytes().inner,
+                    self.sent_data.first_time(),
+                    self.sent_data.last_time(),
+                    self.client_data().complete_bytes(),
                 );
 
                 self.avg_download_rate_d2d = Self::maybe_megabits_per_second(
-                    self.time_first_data_rx,
-                    self.time_last_data_rx,
-                    self.complete_server_data_bytes().inner,
+                    self.received_data.first_time(),
+                    self.received_data.last_time(),
+                    self.server_data().complete_bytes(),
                 );
 
                 self.avg_download_rate_h2d = Self::maybe_megabits_per_second(
                     self.time_first_headers_tx,
-                    self.time_last_data_rx,
-                    self.complete_server_data_bytes().inner,
+                    self.received_data.last_time(),
+                    self.server_data().complete_bytes(),
                 );
             },
 
             RequestActor::Server => {
                 self.avg_upload_rate = Self::maybe_megabits_per_second(
-                    self.time_first_data_rx,
-                    self.time_last_data_rx,
-                    self.complete_client_data_bytes().inner,
+                    self.received_data.first_time(),
+                    self.received_data.last_time(),
+                    self.client_data().complete_bytes(),
                 );
 
                 self.avg_download_rate_d2d = Self::maybe_megabits_per_second(
-                    self.time_first_data_tx,
-                    self.time_last_data_tx,
-                    self.complete_server_data_bytes().inner,
+                    self.sent_data.first_time(),
+                    self.sent_data.last_time(),
+                    self.server_data().complete_bytes(),
                 );
             },
         }
@@ -476,27 +556,27 @@ impl HttpRequestStub {
 
                 let tx_hdr_rx_first_data = Self::maybe_time_delta(
                     self.time_first_headers_tx,
-                    self.time_first_data_rx,
+                    self.received_data.first_time(),
                 );
 
                 let tx_hdr_rx_last_data = Self::maybe_time_delta(
                     self.time_first_headers_tx,
-                    self.time_last_data_rx,
+                    self.received_data.last_time(),
                 );
 
                 let tx_first_data_tx_last_data = Self::maybe_time_delta(
-                    self.time_first_data_tx,
-                    self.time_last_data_tx,
+                    self.sent_data.first_time(),
+                    self.sent_data.last_time(),
                 );
 
                 let rx_first_data_rx_last_data = Self::maybe_time_delta(
-                    self.time_first_data_rx,
-                    self.time_last_data_rx,
+                    self.received_data.first_time(),
+                    self.received_data.last_time(),
                 );
 
                 let rx_hdr_rx_last_data = Self::maybe_time_delta(
                     self.time_first_headers_rx,
-                    self.time_last_data_rx,
+                    self.received_data.last_time(),
                 );
 
                 self.at_client_deltas = Some(RequestAtClientDeltas {
@@ -517,15 +597,15 @@ impl HttpRequestStub {
                 );
                 let rx_hdr_tx_first_data = Self::maybe_time_delta(
                     self.time_first_headers_rx,
-                    self.time_first_data_tx,
+                    self.sent_data.first_time(),
                 );
                 let rx_hdr_tx_last_data = Self::maybe_time_delta(
                     self.time_first_headers_rx,
-                    self.time_last_data_tx,
+                    self.sent_data.last_time(),
                 );
                 let tx_first_data_tx_last_data = Self::maybe_time_delta(
-                    self.time_first_data_tx,
-                    self.time_last_data_tx,
+                    self.sent_data.first_time(),
+                    self.sent_data.last_time(),
                 );
 
                 self.at_server_deltas = Some(RequestAtServerDeltas {
@@ -639,16 +719,21 @@ mod report_tests {
     use tabled::Tabled;
 
     #[test]
-    fn report_fields_match_headers_and_use_last_response_timestamp() {
+    fn report_fields_match_headers_and_use_last_response_timestamp(
+    ) -> Result<(), super::DataLengthOverflow> {
         for actor in [RequestActor::Client, RequestActor::Server] {
             let request = HttpRequestStub {
                 request_actor: actor,
                 time_first_headers_rx: Some(1.0),
                 time_first_headers_tx: Some(2.0),
-                time_first_data_rx: Some(3.0),
-                time_first_data_tx: Some(4.0),
-                time_last_data_rx: Some(5.0),
-                time_last_data_tx: Some(6.0),
+                received_data: super::HttpDataHistory::with_known_frames(&[
+                    (3.0, 1),
+                    (5.0, 2),
+                ])?,
+                sent_data: super::HttpDataHistory::with_known_frames(&[
+                    (4.0, 1),
+                    (6.0, 2),
+                ])?,
                 path: NaOption::new(Some(format!("/{}", "é".repeat(50)))),
                 ..HttpRequestStub::default()
             };
@@ -661,6 +746,7 @@ mod report_tests {
                 RequestActor::Server => "6",
             });
         }
+        Ok(())
     }
 
     #[test]

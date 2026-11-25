@@ -1285,10 +1285,12 @@ fn draw_request_timing_lines<DB: DrawingBackend>(
         }
 
         let (first_data_to_plot, last_data_to_plot) = match ds.vantage_point {
-            VantagePoint::Client =>
-                (req.time_first_data_rx, req.time_last_data_rx),
+            VantagePoint::Client => (
+                req.received_data.first_time(),
+                req.received_data.last_time(),
+            ),
             VantagePoint::Server =>
-                (req.time_first_data_tx, req.time_last_data_tx),
+                (req.sent_data.first_time(), req.sent_data.last_time()),
         };
 
         if let Some(t) = first_data_to_plot {
