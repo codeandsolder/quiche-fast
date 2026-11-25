@@ -94,8 +94,6 @@ pub struct RequestAtClientDeltas {
     pub tx_hdr_rx_first_data: NaOption<f64>,
     pub tx_hdr_rx_last_data: NaOption<f64>,
     pub tx_first_data_tx_last_data: NaOption<f64>,
-    pub rx_first_data_rx_last_data: NaOption<f64>,
-    pub rx_hdr_rx_last_data: NaOption<f64>,
 }
 
 #[derive(Debug, Default)]
@@ -1372,7 +1370,6 @@ impl Datastore {
     pub fn hydrate_http_requests(&mut self) {
         for req in self.http_requests.values_mut() {
             req.calculate_deltas();
-            req.calculate_upload_download_rate();
         }
     }
 
@@ -3326,7 +3323,7 @@ mod qlog_h3_direction_tests {
             assert_eq!(request.sent_data.last_time(), Some(7.0));
             assert_eq!(request.client_data().known_bytes(), 4);
             assert!(request.client_data().complete_bytes().is_none());
-            assert!(request.avg_upload_rate.inner.is_none());
+            assert!(request.upload_measurement().rate.inner.is_none());
             assert_eq!(request.server_data().complete_bytes(), Some(15));
             assert_eq!(request.sent_data.observations(), [
                 (5.0, Some(4)),

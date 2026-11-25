@@ -247,16 +247,17 @@ pub fn requests(
                     <li><strong>Status</strong> - the response Status</li>
                     <li><strong>Response Content-Length</strong> - for downloads; the value of the response Content-Length, if any. A response can omit this header. </li>
                     <li><strong>Response Observed DATA</strong> - sum of known response DATA payload lengths. A missing length produces n/a. A qlog DATA frame may describe a declared payload before its body has been received, so matching Content-Length is not proof of completed delivery.</li>
-                    <li><strong>Download Duration (d2d) (ms)</strong> - the time duration between receiving the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
-                    <li><strong>Download Duration (h2d) (ms)</strong> - the time duration between receiving the first HEADERS and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
+                    <li><strong>Last observed response activity</strong> - latest of first observed response HEADERS and last observed response DATA. This does not establish completion.</li>
+                    <li><strong>Download Duration (d2d) (ms)</strong> - the observed interval between first and last response DATA frames at the logged endpoint. Equal timestamps give zero duration.</li>
+                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
+                    <li><strong>Download Duration (h2d) (ms)</strong> - the observed interval between first response HEADERS and last response DATA at the logged endpoint.</li>
+                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
                     <li><strong>Client Tx Hdr, Rx First Data</strong> - the duration between the client sending a HEADERS frame, and the first DATA frame being received. This is analogous to TTFB.</li>
                     <li><strong>Client Tx Hdr, Rx Last Data</strong> - the duration between the client sending a HEADERS frame, and the last DATA frame being received. This is analogous to TTLB.</li>
                     <li><strong>Request Content-Length</strong> - for uploads; the value of the request Content-Length, if any. A request can omit this header. </li>
                     <li><strong>Request Observed DATA</strong> - sum of known request DATA payload lengths. Missing lengths produce n/a; logged DATA sizes do not prove peer delivery.</li>
-                    <li><strong>Upload Duration (ms)</strong> - the time duration between sending the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
+                    <li><strong>Upload Duration (ms)</strong> - the observed interval between first and last request DATA at the logged endpoint.</li>
+                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
                     <li><strong>Client Priority Header</strong> - the value of the RFC 9218 request Priority header, if any.</li>
                     <li><strong>Server Priority Header</strong> - the value of the RFC 9218 response Priority header, if any.</li>
                     <li><strong>Reset Stream Sent</strong> - the value of the error code in a Reset Stream, if sent.</li>
