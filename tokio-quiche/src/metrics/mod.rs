@@ -43,8 +43,8 @@ pub trait Metrics: Send + Sync + Clone + Unpin + 'static {
     /// Number of QUIC connections currently in memory
     fn connections_in_memory(&self) -> Gauge;
 
-    /// Maximum number of writable QUIC streams in a connection
-    fn maximum_writable_streams(&self) -> Histogram;
+    /// Number of opened request QUIC streams in a connection
+    fn request_streams_opened(&self) -> Histogram;
 
     /// Overhead of QUIC handshake processing stage
     fn handshake_time_seconds(
@@ -147,8 +147,8 @@ impl Metrics for DefaultMetrics {
         quic::connections_in_memory()
     }
 
-    fn maximum_writable_streams(&self) -> Histogram {
-        quic::maximum_writable_streams()
+    fn request_streams_opened(&self) -> Histogram {
+        quic::request_streams_opened()
     }
 
     fn handshake_time_seconds(
@@ -266,10 +266,10 @@ pub(crate) mod quic {
     /// Number of QUIC connections currently in memory
     pub fn connections_in_memory() -> Gauge;
 
-    /// Maximum number of writable QUIC streams in a connection
+    /// Number of opened request QUIC streams in a connection
     #[optional]
     #[ctor = HistogramBuilder { buckets: &[0.0, 5.0, 10.0, 100.0, 1000.0, 2000.0, 3000.0, 10000.0, 20000.0, 50000.0], }]
-    pub fn maximum_writable_streams() -> Histogram;
+    pub fn request_streams_opened() -> Histogram;
 
     /// Overhead of QUIC handshake processing stage
     #[ctor = HistogramBuilder { buckets: &[1E-5, 2E-5, 5E-5, 1E-4, 2E-4, 5E-4, 1E-3, 2E-3, 5E-3, 1E-2, 2E-2, 5E-2, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0], }]
@@ -386,9 +386,16 @@ pub(crate) fn quic_expensive_metrics_ip_reduce(ip: IpAddr) -> Option<IpAddr> {
         QUIC_INITIAL_METRICS_V6_PREFIX
     };
 
-    if let Ok(ip_net) = ipnetwork::IpNetwork::new(ip, prefix) {
-        Some(ip_net.network())
-    } else {
-        None
-    }
+    ipnetwork::IpNetwork::new(ip, prefix)
+        .ok()
+        .map(|network| network.network())
+}
+
+/// Metrics histograms represent samples as floating point, including counts.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the histogram backend represents samples as f64"
+)]
+pub(crate) fn histogram_value(value: u64) -> f64 {
+    value as f64
 }

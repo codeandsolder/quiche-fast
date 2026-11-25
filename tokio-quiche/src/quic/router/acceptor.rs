@@ -58,7 +58,7 @@ use super::InitialPacketHandler;
 
 /// A [`ConnectionAcceptor`] is an [`InitialPacketHandler`] that acts as a
 /// server and accepts quic connections.
-pub(crate) struct ConnectionAcceptor<M> {
+pub struct ConnectionAcceptor<M> {
     config: ConnectionAcceptorConfig,
     replies: mpsc::Sender<StatelessReply>,
     token_manager: Option<AddrValidationTokenManager>,
@@ -77,7 +77,7 @@ struct StatelessReply {
     deadline: Instant,
 }
 
-pub(crate) struct ConnectionAcceptorConfig {
+pub struct ConnectionAcceptorConfig {
     pub(crate) disable_client_ip_validation: bool,
     pub(crate) reply_backlog: usize,
     pub(crate) enable_per_connection_dscp: bool,
@@ -196,7 +196,7 @@ impl<M: Metrics> ConnectionAcceptor<M> {
     }
 
     fn handshake_reply(
-        &self, incoming: Incoming,
+        &self, incoming: &Incoming,
         writer: impl FnOnce(&mut [u8]) -> io::Result<usize>,
     ) -> io::Result<Option<NewConnection>> {
         let permit = match self.replies.try_reserve() {
@@ -245,7 +245,7 @@ impl<M: Metrics> ConnectionAcceptor<M> {
     }
 
     fn stateless_retry(
-        &self, incoming: Incoming, hdr: &Header,
+        &self, incoming: &Incoming, hdr: &Header,
         manager: &AddrValidationTokenManager,
     ) -> io::Result<Option<NewConnection>> {
         let scid = crate::quic::connection::generate_routable_cid(
@@ -289,7 +289,7 @@ impl<M: Metrics> InitialPacketHandler for ConnectionAcceptor<M> {
         }
 
         if !quiche::version_is_supported(hdr.version) {
-            return self.handshake_reply(incoming, |buf| {
+            return self.handshake_reply(&incoming, |buf| {
                 quiche::negotiate_version(&hdr.scid, &hdr.dcid, buf).into_io()
             });
         }
@@ -303,7 +303,7 @@ impl<M: Metrics> InitialPacketHandler for ConnectionAcceptor<M> {
             .as_deref()
             .ok_or(labels::QuicInvalidInitialPacketError::FailedToParse)?;
         if token.is_empty() {
-            return self.stateless_retry(incoming, &hdr, manager);
+            return self.stateless_retry(&incoming, &hdr, manager);
         }
 
         let original_dcid = manager
@@ -376,7 +376,7 @@ mod tests {
             gro: None,
             so_mark_data: None,
         };
-        acceptor.handshake_reply(incoming, |buf| {
+        acceptor.handshake_reply(&incoming, |buf| {
             buf[..5].copy_from_slice(b"reply");
             Ok(5)
         })?;
@@ -496,12 +496,12 @@ mod initial_size_tests {
             so_mark_data: None,
         };
         // Single-thread runtime: neither call yields to the send task.
-        acceptor.handshake_reply(packet(), |buf| {
+        acceptor.handshake_reply(&packet(), |buf| {
             buf[..5].copy_from_slice(b"first");
             Ok(5)
         })?;
         let mut generated = false;
-        acceptor.handshake_reply(packet(), |_| {
+        acceptor.handshake_reply(&packet(), |_| {
             generated = true;
             Ok(0)
         })?;
@@ -681,7 +681,7 @@ mod initial_size_tests {
             local_addr,
         )?;
         let error = acceptor
-            .handshake_reply(incoming, |buf| Ok(buf.len() + 1))
+            .handshake_reply(&incoming, |buf| Ok(buf.len() + 1))
             .err()
             .ok_or("oversize reply accepted")?;
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

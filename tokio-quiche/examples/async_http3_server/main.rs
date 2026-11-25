@@ -66,7 +66,7 @@ async fn main() {
 
     let mut listeners = listen(
         [socket],
-        ConnectionParams::new_server(
+        &ConnectionParams::new_server(
             quic_settings,
             TlsCertificatePaths {
                 cert: &args.tls_cert_path,
@@ -75,7 +75,7 @@ async fn main() {
             },
             Hooks::default(),
         ),
-        DefaultMetrics,
+        &DefaultMetrics,
     )
     .expect("should be able to create a listener from a UDP socket");
 

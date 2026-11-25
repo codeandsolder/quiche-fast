@@ -143,6 +143,9 @@ pub type QuicheConnection = quiche::Connection<crate::buf_factory::BufFactory>;
 /// tokio-quiche currently only supports one client connection per socket.
 /// Sharing a socket among multiple connections will lead to lost packets as
 /// both connections try to read from the shared socket.
+///
+/// # Errors
+/// Returns socket, configuration, or handshake errors.
 pub async fn connect<Tx, Rx, S>(
     socket: S, host: Option<&str>,
 ) -> QuicResult<(QuicConnection, ClientH3Controller)>
@@ -177,6 +180,9 @@ where
 /// tokio-quiche currently only supports one client connection per socket.
 /// Sharing a socket among multiple connections will lead to lost packets as
 /// both connections try to read from the shared socket.
+///
+/// # Errors
+/// Returns socket, configuration, or handshake errors.
 pub async fn connect_with_config<Tx, Rx, App>(
     socket: Socket<Tx, Rx>, host: Option<&str>, params: &ConnectionParams<'_>,
     app: App,

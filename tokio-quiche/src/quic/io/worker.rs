@@ -1,3 +1,4 @@
+use std::future::Future;
 // Copyright (C) 2025, Cloudflare, Inc.
 // All rights reserved.
 //
@@ -83,11 +84,11 @@ use tokio::time;
 use tokio_util::sync::CancellationToken;
 
 // Number of incoming packets to be buffered in the incoming channel.
-pub(crate) const INCOMING_QUEUE_SIZE: usize = 2048;
+pub const INCOMING_QUEUE_SIZE: usize = 2048;
 
 // Check if there are any incoming packets while sending data every this number
 // of sent packets
-pub(crate) const CHECK_INCOMING_QUEUE_RATIO: usize = INCOMING_QUEUE_SIZE / 16;
+const CHECK_INCOMING_QUEUE_RATIO: usize = INCOMING_QUEUE_SIZE / 16;
 
 // Only used when the core has no armed timer (e.g. idle timeout disabled).
 // A permanently blocked custom transport must not retain an egress buffer
@@ -270,7 +271,7 @@ pub struct WriterConfig {
 }
 
 #[derive(Default)]
-pub(crate) struct WriteState {
+pub struct WriteState {
     conn_established: bool,
     bytes_written: usize,
     segment_size: usize,
@@ -287,7 +288,7 @@ pub(crate) struct WriteState {
     pending_paths: quiche::SocketAddrIter,
 }
 
-pub(crate) struct IoWorkerParams<Tx, M> {
+pub struct IoWorkerParams<Tx, M> {
     pub(crate) socket: MaybeConnectedSocket<Tx>,
     pub(crate) shutdown_tx: mpsc::Sender<()>,
     pub(crate) cfg: WriterConfig,
@@ -318,7 +319,7 @@ fn notify_path_events(
     }
 }
 
-pub(crate) struct IoWorker<Tx, M, S> {
+pub struct IoWorker<Tx, M, S> {
     socket: MaybeConnectedSocket<Tx>,
     /// A field that signals to the listener task that the connection has gone
     /// away (nothing is sent here, listener task just detects the sender
@@ -376,34 +377,31 @@ where
         }
     }
 
-    async fn fill_available_scids(
-        &mut self, qconn: &mut QuicheConnection,
+    async fn refresh_connection_ids(
+        route_lease: &RouteLease,
+        cid_generator: Option<&SharedConnectionIdGenerator>,
+        qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
-        let Some(cid_generator) = self.cid_generator.as_deref() else {
+        while let Some(retired_cid) = qconn.retired_scid_next() {
+            route_lease.retire(retired_cid);
+        }
+        let Some(cid_generator) = cid_generator else {
             return Ok(());
         };
         for _ in 0..qconn.scids_left() {
             let reset_token = random_u128()?;
-            let new_cid =
-                crate::quic::connection::generate_routable_cid(cid_generator)?;
+            let new_cid = crate::quic::connection::generate_routable_cid(
+                cid_generator.as_ref(),
+            )?;
             // The router must acknowledge ownership before the core can
             // advertise the CID. A collision must never reach the wire.
-            self.route_lease.register(new_cid.clone()).await?;
+            route_lease.register(new_cid.clone()).await?;
             if let Err(error) = qconn.new_scid(&new_cid, reset_token, false) {
-                self.route_lease.retire(new_cid);
+                route_lease.retire(new_cid);
                 return Err(error.into());
             }
         }
         Ok(())
-    }
-
-    async fn refresh_connection_ids(
-        &mut self, qconn: &mut QuicheConnection,
-    ) -> QuicResult<()> {
-        while let Some(retired_cid) = qconn.retired_scid_next() {
-            self.route_lease.retire(retired_cid);
-        }
-        self.fill_available_scids(qconn).await
     }
 
     /// Cancellation covers the whole I/O loop, including blocked writes and
@@ -447,122 +445,13 @@ where
             self.enforce_handshake_deadline(qconn)?;
             let now = Instant::now();
 
-            self.write_state.has_pending_data = true;
-
-            // Transient egress buffer for this wakeup's send burst when pooling
-            // is enabled. Borrowed from the per-worker pool on demand (see
-            // below) and returned after the burst, before the worker sleeps in
-            // the `select!` further down, so idle connections still hold no
-            // egress buffer. Stays `None` when a persistent buffer is used.
-            let mut pooled_send_buf: Option<PooledSendBuf> = None;
-
-            while self.write_state.has_pending_data ||
-                !ctx.incoming_pkt_receiver.is_empty() ||
-                ctx.in_pkt.is_some()
+            if self
+                .drive_io_burst(qconn, ctx, &mut persistent_send_buf)
+                .await?
+                .is_break()
             {
-                self.service_connection_timers(qconn)?;
-                if qconn.is_closed() {
-                    return Ok(());
-                }
-                let mut packets_sent = 0;
-
-                // Drain received packets periodically because they contain ACKs
-                // and the bounded receive queue stalls new packets when full.
-                let mut did_recv = false;
-                for _ in 0..CHECK_INCOMING_QUEUE_RATIO {
-                    let Some(pkt) = ctx
-                        .in_pkt
-                        .take()
-                        .or_else(|| ctx.incoming_pkt_receiver.try_recv().ok())
-                    else {
-                        break;
-                    };
-                    self.process_incoming(qconn, pkt)?;
-                    did_recv = true;
-                }
-                self.write_state.has_pending_data |= did_recv;
-
-                // Deliver transport-generated events before the application can
-                // consume them.
-                notify_path_events(ctx.connection_hook.as_deref(), qconn);
-
-                self.conn_stage.on_read(did_recv, qconn, ctx)?;
-
-                // Deliver events generated by application reads or writes.
-                notify_path_events(ctx.connection_hook.as_deref(), qconn);
-                self.refresh_connection_ids(qconn).await?;
-
-                let can_release = match self.write_state.next_release_time {
-                    None => true,
-                    Some(next_release) =>
-                        next_release
-                            .checked_duration_since(Instant::now())
-                            .unwrap_or_default() <
-                            RELEASE_TIMER_THRESHOLD,
-                };
-
-                self.write_state.has_pending_data &= can_release;
-
-                while self.write_state.has_pending_data &&
-                    packets_sent < CHECK_INCOMING_QUEUE_RATIO
-                {
-                    // Use the persistent per-connection buffer when pooling is
-                    // disabled. Otherwise borrow a buffer from the per-worker
-                    // pool on the first gather of this send burst and reuse it
-                    // for the remainder of the burst; it is returned at the end
-                    // of the enclosing block (below), before the worker sleeps,
-                    // so idle connections hold no egress buffer.
-                    let send_buf: &mut [u8] =
-                        if let Some(buf) = persistent_send_buf.as_deref_mut() {
-                            buf
-                        } else {
-                            &mut pooled_send_buf
-                                .get_or_insert_with(PooledSendBuf::acquire)[..]
-                        };
-
-                    self.service_connection_timers(qconn)?;
-                    if qconn.is_closed() {
-                        return Ok(());
-                    }
-                    self.gather_data_from_quiche_conn(qconn, send_buf, false)?;
-
-                    // Break if the connection is closed
-                    if qconn.is_closed() {
-                        return Ok(());
-                    }
-
-                    let mut flush_operation_token =
-                        TrackMidHandshakeFlush::new(self.metrics.clone());
-
-                    self.flush_active(qconn, send_buf).await?;
-                    if qconn.is_closed() {
-                        return Ok(());
-                    }
-
-                    flush_operation_token.mark_complete();
-
-                    packets_sent += self.write_state.num_pkts;
-
-                    if let ControlFlow::Break(reason) =
-                        self.conn_stage.on_flush(qconn, ctx)
-                    {
-                        return reason;
-                    }
-                }
-                // Bound each uninterrupted receive/send burst even when the
-                // transport and application always make immediate progress.
-                if self.write_state.has_pending_data ||
-                    !ctx.incoming_pkt_receiver.is_empty()
-                {
-                    tokio::task::yield_now().await;
-                }
+                return Ok(());
             }
-
-            // Return the borrowed egress buffer to the per-worker pool before
-            // sleeping so it is not held while the connection is idle. The
-            // persistent buffer (when pooling is disabled) is intentionally
-            // kept across sleeps for the connection's lifetime.
-            drop(pooled_send_buf);
 
             self.bw_estimator.update(qconn, Instant::now());
 
@@ -623,6 +512,136 @@ where
 
             self.enforce_handshake_deadline(qconn)?;
         }
+    }
+
+    /// Drain a wakeup's input and output, returning transient buffers before
+    /// the connection goes idle.
+    async fn drive_io_burst<A: ApplicationOverQuic>(
+        &mut self, qconn: &mut QuicheConnection,
+        ctx: &mut ConnectionStageContext<A>,
+        persistent_send_buf: &mut Option<Box<[u8]>>,
+    ) -> QuicResult<ControlFlow<()>> {
+        self.write_state.has_pending_data = true;
+
+        // Transient egress buffer for this wakeup's send burst when pooling
+        // is enabled. Borrowed from the per-worker pool on demand (see
+        // below) and returned after the burst, before the worker sleeps in
+        // the `select!` further down, so idle connections still hold no
+        // egress buffer. Stays `None` when a persistent buffer is used.
+        let mut pooled_send_buf: Option<PooledSendBuf> = None;
+
+        while self.write_state.has_pending_data ||
+            !ctx.incoming_pkt_receiver.is_empty() ||
+            ctx.in_pkt.is_some()
+        {
+            self.service_connection_timers(qconn)?;
+            if qconn.is_closed() {
+                return Ok(ControlFlow::Break(()));
+            }
+            let mut packets_sent = 0;
+
+            // Drain received packets periodically because they contain ACKs
+            // and the bounded receive queue stalls new packets when full.
+            let mut did_recv = false;
+            for _ in 0..CHECK_INCOMING_QUEUE_RATIO {
+                let Some(pkt) = ctx
+                    .in_pkt
+                    .take()
+                    .or_else(|| ctx.incoming_pkt_receiver.try_recv().ok())
+                else {
+                    break;
+                };
+                self.process_incoming(qconn, pkt)?;
+                did_recv = true;
+            }
+            self.write_state.has_pending_data |= did_recv;
+
+            // Deliver transport-generated events before the application can
+            // consume them.
+            notify_path_events(ctx.connection_hook.as_deref(), qconn);
+
+            self.conn_stage.on_read(did_recv, qconn, ctx)?;
+
+            // Deliver events generated by application reads or writes.
+            notify_path_events(ctx.connection_hook.as_deref(), qconn);
+            Self::refresh_connection_ids(
+                &self.route_lease,
+                self.cid_generator.as_ref(),
+                qconn,
+            )
+            .await?;
+
+            let can_release =
+                self.write_state
+                    .next_release_time
+                    .is_none_or(|next_release| {
+                        next_release.saturating_duration_since(Instant::now()) <
+                            RELEASE_TIMER_THRESHOLD
+                    });
+
+            self.write_state.has_pending_data &= can_release;
+
+            while self.write_state.has_pending_data &&
+                packets_sent < CHECK_INCOMING_QUEUE_RATIO
+            {
+                // Use the persistent per-connection buffer when pooling is
+                // disabled. Otherwise borrow a buffer from the per-worker
+                // pool on the first gather of this send burst and reuse it
+                // for the remainder of the burst; it is returned at the end
+                // of the enclosing block (below), before the worker sleeps,
+                // so idle connections hold no egress buffer.
+                let send_buf =
+                    persistent_send_buf.as_deref_mut().unwrap_or_else(|| {
+                        &mut pooled_send_buf
+                            .get_or_insert_with(PooledSendBuf::acquire)[..]
+                    });
+
+                self.service_connection_timers(qconn)?;
+                if qconn.is_closed() {
+                    return Ok(ControlFlow::Break(()));
+                }
+                self.gather_data_from_quiche_conn(qconn, send_buf, false)?;
+
+                // Break if the connection is closed
+                if qconn.is_closed() {
+                    return Ok(ControlFlow::Break(()));
+                }
+
+                let mut flush_operation_token =
+                    TrackMidHandshakeFlush::new(self.metrics.clone());
+
+                self.flush_active(qconn, send_buf).await?;
+                if qconn.is_closed() {
+                    return Ok(ControlFlow::Break(()));
+                }
+
+                flush_operation_token.mark_complete();
+
+                packets_sent += self.write_state.num_pkts;
+
+                if let ControlFlow::Break(reason) =
+                    self.conn_stage.on_flush(qconn, ctx)
+                {
+                    reason?;
+                    return Ok(ControlFlow::Break(()));
+                }
+            }
+            // Bound each uninterrupted receive/send burst even when the
+            // transport and application always make immediate progress.
+            if self.write_state.has_pending_data ||
+                !ctx.incoming_pkt_receiver.is_empty()
+            {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // Return the borrowed egress buffer to the per-worker pool before
+        // sleeping so it is not held while the connection is idle. The
+        // persistent buffer (when pooling is disabled) is intentionally
+        // kept across sleeps for the connection's lifetime.
+        drop(pooled_send_buf);
+
+        Ok(ControlFlow::Continue(()))
     }
 
     #[cfg(feature = "perf-quic-listener-metrics")]
@@ -786,23 +805,27 @@ where
         self.write_state.segment_size =
             segment_size.unwrap_or(self.write_state.bytes_written);
 
-        if !gcongestion_enabled {
-            if let Some(time) = tx_time {
-                const DEFAULT_MAX_INTO_FUTURE: Duration =
-                    Duration::from_millis(1);
-                if time
-                    .checked_duration_since(now)
-                    .is_some_and(|d| d > DEFAULT_MAX_INTO_FUTURE)
-                {
-                    self.write_state.next_release_time =
-                        Some(now + DEFAULT_MAX_INTO_FUTURE.mul_f32(0.8));
-                    self.write_state.has_pending_data = false;
-                    return Ok(0);
-                }
-            }
+        if !gcongestion_enabled && self.defer_legacy_pacing(tx_time, now) {
+            return Ok(0);
         }
 
         buffer_write_outcome
+    }
+
+    fn defer_legacy_pacing(
+        &mut self, tx_time: Option<Instant>, now: Instant,
+    ) -> bool {
+        const MAX_INTO_FUTURE: Duration = Duration::from_millis(1);
+        if tx_time.is_some_and(|time| {
+            time.saturating_duration_since(now) > MAX_INTO_FUTURE
+        }) {
+            self.write_state.next_release_time =
+                Some(now + MAX_INTO_FUTURE.mul_f32(0.8));
+            self.write_state.has_pending_data = false;
+            true
+        } else {
+            false
+        }
     }
 
     /// Selects a network path, if none already selected.
@@ -918,20 +941,12 @@ where
         }
     }
 
-    async fn flush_buffer_to_socket(
-        &mut self, send_buf: &[u8], deadline: Instant,
-    ) -> std::io::Result<SendOutcome> {
-        if self.write_state.bytes_written == 0 {
-            return Ok(SendOutcome::Sent);
-        }
-        let current_send_buf = send_buf
-            .get(..self.write_state.bytes_written)
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "gathered packet length exceeds send buffer",
-                )
-            })?;
+    fn flush_buffer_to_socket<'a>(
+        &'a self, send_buf: &'a [u8], deadline: Instant,
+    ) -> impl Future<Output = std::io::Result<SendOutcome>> + Send + 'a {
+        let bytes_written = self.write_state.bytes_written;
+        let socket = &self.socket;
+        let metrics = &self.metrics;
         let (from, to) = self.write_state.selected_path.unzip();
         let packet = PacketSend {
             to: to.unwrap_or(self.cfg.peer_addr),
@@ -947,20 +962,26 @@ where
             tx_time: self.write_state.tx_time,
             dscp: self.dscp_handle.as_ref().and_then(DscpHandle::get),
         };
-        let result = send_packets_before(
-            &self.socket,
-            current_send_buf,
-            packet,
-            &self.metrics,
-            deadline,
-        )
-        .await;
-
-        #[cfg(feature = "perf-quic-listener-metrics")]
-        if matches!(result, Ok(SendOutcome::Sent)) {
-            self.measure_complete_handshake_time();
+        async move {
+            if bytes_written == 0 {
+                return Ok(SendOutcome::Sent);
+            }
+            let current_send_buf =
+                send_buf.get(..bytes_written).ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "gathered packet length exceeds send buffer",
+                    )
+                })?;
+            send_packets_before(
+                socket,
+                current_send_buf,
+                packet,
+                metrics,
+                deadline,
+            )
+            .await
         }
-        result
     }
 
     async fn flush_active(
@@ -971,7 +992,11 @@ where
             min_of_some(qconn.timeout_instant(), self.handshake_deadline(qconn))
                 .unwrap_or_else(|| Instant::now() + MAX_UNTIMED_SEND_WAIT);
         match self.flush_buffer_to_socket(send_buf, deadline).await {
-            Ok(SendOutcome::Sent) => (),
+            Ok(SendOutcome::Sent) =>
+                #[cfg(feature = "perf-quic-listener-metrics")]
+                if self.write_state.bytes_written != 0 {
+                    self.measure_complete_handshake_time();
+                },
             Ok(SendOutcome::DeadlineExpired) => {
                 // The core already assigned packet numbers. Do not replay the
                 // buffer; recovery will generate new packets as needed.
@@ -1178,7 +1203,7 @@ impl<Tx, M, A> Running<Tx, M, A> {
     }
 }
 
-pub(crate) struct Closing<Tx, M, A> {
+pub struct Closing<Tx, M, A> {
     pub(crate) params: IoWorkerParams<Tx, M>,
     pub(crate) context: ConnectionStageContext<A>,
     pub(crate) work_loop_result: QuicResult<()>,
@@ -1362,9 +1387,10 @@ where
         {
             let metrics = &self.metrics;
 
-            metrics
-                .max_bandwidth_mbps()
-                .observe(self.bw_estimator.max_bandwidth as f64 * 1e-6);
+            metrics.max_bandwidth_mbps().observe(
+                crate::metrics::histogram_value(self.bw_estimator.max_bandwidth) *
+                    1e-6,
+            );
 
             metrics
                 .max_loss_pct()
@@ -1406,7 +1432,13 @@ where
                 .flush_buffer_to_socket(send_buf.as_ref(), close_deadline)
                 .await
             {
-                Ok(SendOutcome::Sent) => Ok(()),
+                Ok(SendOutcome::Sent) => {
+                    #[cfg(feature = "perf-quic-listener-metrics")]
+                    if self.write_state.bytes_written != 0 {
+                        self.measure_complete_handshake_time();
+                    }
+                    Ok(())
+                },
                 Ok(SendOutcome::DeadlineExpired) => Err(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "final QUIC send deadline expired",

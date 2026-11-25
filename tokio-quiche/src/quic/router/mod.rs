@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-pub(crate) mod acceptor;
+pub mod acceptor;
 #[cfg(target_os = "linux")]
 mod linux_recv;
 
@@ -241,16 +241,15 @@ where
             self.config.as_mut(),
         )?;
 
-        match new_connection {
-            Some(new_connection) => self.spawn_new_connection(
+        new_connection.map_or(Ok(()), |new_connection| {
+            self.spawn_new_connection(
                 new_connection,
                 local_addr,
                 peer_addr,
                 #[cfg(feature = "perf-quic-listener-metrics")]
                 init_rx_time,
-            ),
-            None => Ok(()),
-        }
+            )
+        })
     }
 
     /// Creates a new [`QuicConnection`](super::QuicConnection) and spawns an
@@ -909,7 +908,7 @@ mod tests {
         let mut params =
             ConnectionParams::new_server(settings, tls_cert, Hooks::default());
         params.enable_per_connection_dscp = true;
-        let mut incoming = crate::listen(vec![socket], params, DefaultMetrics)
+        let mut incoming = crate::listen(vec![socket], &params, &DefaultMetrics)
             .unwrap()
             .remove(0);
 
@@ -987,9 +986,12 @@ mod tests {
     async fn idle_listener_releases_socket_after_stream_drop() {
         let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let addr = socket.local_addr().unwrap();
-        let streams =
-            crate::listen([socket], ConnectionParams::default(), DefaultMetrics)
-                .unwrap();
+        let streams = crate::listen(
+            [socket],
+            &ConnectionParams::default(),
+            &DefaultMetrics,
+        )
+        .unwrap();
 
         time::sleep(Duration::from_millis(20)).await;
         drop(streams);

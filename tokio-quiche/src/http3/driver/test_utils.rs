@@ -460,7 +460,7 @@ impl Metrics for TestMetrics {
         Gauge::default()
     }
 
-    fn maximum_writable_streams(&self) -> Histogram {
+    fn request_streams_opened(&self) -> Histogram {
         Histogram::new(std::iter::empty())
     }
 

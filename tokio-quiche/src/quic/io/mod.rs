@@ -25,6 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub mod connection_stage;
-pub(crate) mod gso;
-pub(crate) mod utilization_estimator;
-pub(crate) mod worker;
+pub mod gso;
+pub mod utilization_estimator;
+pub mod worker;

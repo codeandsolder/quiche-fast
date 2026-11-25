@@ -200,7 +200,7 @@ async fn test_ioworker_state_machine_pause() {
         tls_cert_settings,
         hooks,
     );
-    let mut stream = listen(vec![socket], params, DefaultMetrics)
+    let mut stream = listen(vec![socket], &params, &DefaultMetrics)
         .unwrap()
         .remove(0);
 

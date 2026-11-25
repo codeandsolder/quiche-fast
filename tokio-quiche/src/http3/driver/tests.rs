@@ -106,6 +106,29 @@ async fn late_first_headers_are_rejected_without_polling_idle_timer(
     Ok(())
 }
 
+/// Regression: a parser can append data before reporting a reset or error.
+#[test]
+fn failed_body_read_does_not_leak_bytes_into_another_stream() -> anyhow::Result<()>
+{
+    use bytes::BufMut as _;
+    let mut scratch = None;
+    let failure = read_body_chunk(&mut scratch, 16, |buffer| {
+        buffer.put_slice(b"first stream");
+        Err(h3::Error::Transport(quiche::Error::StreamReset(42)))
+    });
+    assert_eq!(
+        failure,
+        Err(h3::Error::Transport(quiche::Error::StreamReset(42)))
+    );
+    assert!(scratch.is_none());
+    let body = read_body_chunk(&mut scratch, 16, |buffer| {
+        buffer.put_slice(b"second");
+        Ok(6)
+    })?;
+    assert_eq!(&body[..], b"second");
+    Ok(())
+}
+
 /// Tests for the body receive buffer sizing helper.
 mod body_recv_buf_size {
     use super::*;

@@ -287,7 +287,7 @@ where
 
     let params =
         ConnectionParams::new_server(quic_settings, tls_cert_settings, hooks);
-    let mut stream = listen(vec![socket], params, DefaultMetrics)
+    let mut stream = listen(vec![socket], &params, &DefaultMetrics)
         .unwrap()
         .remove(0);
 
