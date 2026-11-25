@@ -28,7 +28,7 @@ use crate::config::PlotTheme;
 use crate::plots::congestion_control::plot_cc_plot;
 use crate::plots::conn_flow_control::plot_conn_flow_control_canvas;
 use crate::plots::conn_overview::plot_main_plot;
-use crate::plots::packet_received::plot_packet_received;
+use crate::plots::packet_received::plot_packet_received_canvas;
 use crate::plots::packet_sent::plot_packet_sent_ack_status_count_plot;
 use crate::plots::packet_sent::plot_packet_sent_delta_plot_canvas;
 use crate::plots::packet_sent::plot_packet_sent_pacing_rate_plot_canvas;
@@ -56,7 +56,8 @@ use plotters::chart::ChartContext;
 use plotters::prelude::Cartesian2d;
 use plotters::prelude::Ranged;
 use plotters_canvas::CanvasBackend;
-use wasm_bindgen::prelude::*;
+use wasm_bindgen::prelude::wasm_bindgen;
+use wasm_bindgen::JsValue;
 
 use crate::seriesstore::SeriesStore;
 use crate::sqlog_stream::SqlogStream;
@@ -82,10 +83,29 @@ const CHART_MARGIN_TIGHT: ChartMargin = ChartMargin {
     right: 5,
 };
 
-#[wasm_bindgen]
-pub struct Pointu64 {
-    pub x: f64,
-    pub y: u64,
+/// Shared browser plot defaults, with the caller selecting panel margins.
+fn plot_parameters(
+    display_legend: bool, start: Option<f64>, end: Option<f64>,
+    chart_margin: ChartMargin, area_margin: AreaMargin,
+) -> PlotParameters {
+    PlotParameters {
+        clamp: ClampParams {
+            start,
+            end,
+            stream_y_max: None,
+        },
+        cwnd_y_max: None,
+        chart_size: ChartSize {
+            width: 1042,
+            height: 800,
+        },
+        colors: PlotTheme::Light.colors(),
+        chart_margin,
+        area_margin,
+        display_chart_title: false,
+        display_legend,
+        display_minor_lines: false,
+    }
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -173,15 +193,7 @@ pub fn new_qlog_dancer(display_name: &str) -> QlogDancerWeb {
         display_name: display_name.into(),
         sqlog_stream: SqlogStream::default(),
 
-        mp_chart_info: None,
-        cc_chart_info: None,
-        rtt_chart_info: None,
-        fc_chart_info: None,
-        pkt_rx_chart_info: None,
-        pkt_tx_chart_info: None,
-        pkt_tx_counts_chart_info: None,
-        pkt_tx_delta_chart_info: None,
-        pkt_tx_pacing_chart_info: None,
+        charts: ChartInfos::default(),
     }
 }
 
@@ -192,6 +204,11 @@ pub struct QlogDancerWeb {
     ss: Option<SeriesStore>,
     sqlog_stream: SqlogStream,
 
+    charts: ChartInfos,
+}
+
+#[derive(Default)]
+struct ChartInfos {
     mp_chart_info: Option<ChartInfo<f64, u64>>,
     cc_chart_info: Option<ChartInfo<f64, u64>>,
     rtt_chart_info: Option<ChartInfo<f64, f32>>,
@@ -254,12 +271,11 @@ impl QlogDancerWeb {
     /// A simple function to demonstrate how to access basic information from
     /// parsed log files.
     pub fn total_packets_sent(&self) -> usize {
-        let mut ret = 0;
-        for v in self.ds.packet_sent.values() {
-            ret += v.len();
-        }
-
-        ret
+        self.ds
+            .packet_sent
+            .values()
+            .map(std::collections::BTreeMap::len)
+            .sum()
     }
 
     #[wasm_bindgen]
@@ -269,6 +285,8 @@ impl QlogDancerWeb {
     /// Returns a JavaScript error if the input is incomplete or if the qlog
     /// vantage point or event data is unsupported.
     pub fn populate_datastore(&mut self) -> Result<(), JsValue> {
+        self.ss = None;
+        self.charts = ChartInfos::default();
         self.finish_stream()?;
         let vantage_point = self
             .sqlog_stream
@@ -278,7 +296,6 @@ impl QlogDancerWeb {
 
         // Construct the datastore separately so a rejected event never exposes
         // partially updated stream stats or stale plot data.
-        self.ss = None;
         let ds = Datastore::with_sqlog_reader_events(
             self.sqlog_stream.events(),
             &vantage_point,
@@ -296,6 +313,7 @@ impl QlogDancerWeb {
     /// if that's the case.
     pub fn populate_seriesstore(&mut self) -> Result<(), JsValue> {
         self.ss = None;
+        self.charts = ChartInfos::default();
         let series = SeriesStore::from_datastore(&self.ds)
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         self.ss = Some(series);
@@ -310,17 +328,18 @@ impl QlogDancerWeb {
     /// Returns a JavaScript error if chart bounds cannot be serialized.
     pub fn get_chart_info(&self, canvas_id: &str) -> Result<JsValue, JsValue> {
         match canvas_id {
-            "overview_canvas" => chart_info_js(self.mp_chart_info),
-            "rtt_canvas" => chart_info_js(self.rtt_chart_info),
-            "cc_canvas" => chart_info_js(self.cc_chart_info),
-            "flow_control_canvas" => chart_info_js(self.fc_chart_info),
-            "pkt-rx-canvas" => chart_info_js(self.pkt_rx_chart_info),
-            "pkt-tx-canvas" => chart_info_js(self.pkt_tx_chart_info),
+            "overview_canvas" => chart_info_js(self.charts.mp_chart_info),
+            "rtt_canvas" => chart_info_js(self.charts.rtt_chart_info),
+            "cc_canvas" => chart_info_js(self.charts.cc_chart_info),
+            "flow_control_canvas" => chart_info_js(self.charts.fc_chart_info),
+            "pkt-rx-canvas" => chart_info_js(self.charts.pkt_rx_chart_info),
+            "pkt-tx-canvas" => chart_info_js(self.charts.pkt_tx_chart_info),
             "pkt-tx-counts-canvas" =>
-                chart_info_js(self.pkt_tx_counts_chart_info),
-            "pkt-tx-delta-canvas" => chart_info_js(self.pkt_tx_delta_chart_info),
+                chart_info_js(self.charts.pkt_tx_counts_chart_info),
+            "pkt-tx-delta-canvas" =>
+                chart_info_js(self.charts.pkt_tx_delta_chart_info),
             "pkt-tx-pacing-canvas" =>
-                chart_info_js(self.pkt_tx_pacing_chart_info),
+                chart_info_js(self.charts.pkt_tx_pacing_chart_info),
             _ => Ok(JsValue::null()),
         }
     }
@@ -334,31 +353,20 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN,
-                area_margin: AREA_MARGIN,
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN,
+                AREA_MARGIN,
+            );
 
-            self.mp_chart_info = None;
+            self.charts.mp_chart_info = None;
             let chart =
-                plot_main_plot(&params, &self.display_name, ss, &mp_canvas_id)
+                plot_main_plot(&params, &self.display_name, ss, mp_canvas_id)
                     .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.mp_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.mp_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -371,30 +379,19 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN,
-                area_margin: AREA_MARGIN,
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN,
+                AREA_MARGIN,
+            );
 
-            self.cc_chart_info = None;
-            let chart = plot_cc_plot(&params, ss, &self.ds, &cc_canvas_id)
+            self.charts.cc_chart_info = None;
+            let chart = plot_cc_plot(&params, ss, &self.ds, cc_canvas_id)
                 .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.cc_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.cc_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -407,29 +404,18 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN,
-                area_margin: AREA_MARGIN,
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN,
+                AREA_MARGIN,
+            );
 
-            self.rtt_chart_info = None;
-            let chart = plot_rtt_plot(&params, ss, &rtt_canvas_id)
+            self.charts.rtt_chart_info = None;
+            let chart = plot_rtt_plot(&params, ss, rtt_canvas_id)
                 .map_err(|error| JsValue::from_str(&error.to_string()))?;
-            self.rtt_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.rtt_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -437,33 +423,23 @@ impl QlogDancerWeb {
     #[wasm_bindgen]
     /// Draws the flow control plot into the provided canvas_id.
     pub fn draw_flow_control(
-        &mut self, canvas_id: &str, display_legend: bool,
+        &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
+        x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: None,
-                    end: None,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN,
-                area_margin: AreaMargin { x: 40, y: 80 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN,
+                AreaMargin { x: 40, y: 80 },
+            );
 
             let chart_type = ChartOutputType::Canvas {
                 canvas_id: canvas_id.to_string(),
             };
 
-            self.fc_chart_info = None;
+            self.charts.fc_chart_info = None;
             let chart = plot_conn_flow_control_canvas(
                 &params,
                 &self.display_name,
@@ -472,7 +448,7 @@ impl QlogDancerWeb {
                 &chart_type,
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
-            self.fc_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.fc_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -531,40 +507,27 @@ impl QlogDancerWeb {
     #[wasm_bindgen]
     /// Draws the packet received plot into the provided canvas_id.
     pub fn draw_packet_received(
-        &mut self, canvas_id: &str, display_legend: bool,
+        &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
+        x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: None,
-                    end: None,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN,
-                area_margin: AreaMargin { x: 40, y: 80 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN,
+                AreaMargin { x: 40, y: 80 },
+            );
 
-            let chart_type = ChartOutputType::Canvas {
-                canvas_id: canvas_id.to_string(),
-            };
-
-            plot_packet_received(
+            self.charts.pkt_rx_chart_info = None;
+            let chart = plot_packet_received_canvas(
                 &params,
                 &self.display_name,
                 ss,
-                &self.ds,
-                &chart_type,
+                canvas_id,
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
+            self.charts.pkt_rx_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -610,26 +573,15 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN_TIGHT,
-                area_margin: AreaMargin { x: 40, y: 80 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN_TIGHT,
+                AreaMargin { x: 40, y: 80 },
+            );
 
-            self.pkt_tx_chart_info = None;
+            self.charts.pkt_tx_chart_info = None;
             let chart = plot_packet_sent_plot_canvas(
                 &params,
                 &self.display_name,
@@ -638,7 +590,7 @@ impl QlogDancerWeb {
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.pkt_tx_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.pkt_tx_chart_info = Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -650,31 +602,21 @@ impl QlogDancerWeb {
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN_TIGHT,
-                area_margin: AreaMargin { x: 40, y: 80 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN_TIGHT,
+                AreaMargin { x: 40, y: 80 },
+            );
 
-            self.pkt_tx_counts_chart_info = None;
+            self.charts.pkt_tx_counts_chart_info = None;
             let chart =
                 plot_packet_sent_ack_status_count_plot(&params, ss, canvas_id)
                     .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.pkt_tx_counts_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.pkt_tx_counts_chart_info =
+                Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -686,26 +628,15 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN_TIGHT,
-                area_margin: AreaMargin { x: 40, y: 5 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN_TIGHT,
+                AreaMargin { x: 40, y: 5 },
+            );
 
-            self.pkt_tx_delta_chart_info = None;
+            self.charts.pkt_tx_delta_chart_info = None;
             let chart = plot_packet_sent_delta_plot_canvas(
                 &params,
                 ss,
@@ -713,7 +644,8 @@ impl QlogDancerWeb {
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.pkt_tx_delta_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.pkt_tx_delta_chart_info =
+                Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -725,26 +657,15 @@ impl QlogDancerWeb {
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
-            let params = PlotParameters {
-                clamp: ClampParams {
-                    start: x_start,
-                    end: x_end,
-                    stream_y_max: None,
-                },
-                cwnd_y_max: None,
-                chart_size: ChartSize {
-                    width: 1042,
-                    height: 800,
-                },
-                colors: PlotTheme::Light.colors(),
-                chart_margin: CHART_MARGIN_TIGHT,
-                area_margin: AreaMargin { x: 40, y: 80 },
-                display_chart_title: false,
+            let params = plot_parameters(
                 display_legend,
-                display_minor_lines: false,
-            };
+                x_start,
+                x_end,
+                CHART_MARGIN_TIGHT,
+                AreaMargin { x: 40, y: 80 },
+            );
 
-            self.pkt_tx_pacing_chart_info = None;
+            self.charts.pkt_tx_pacing_chart_info = None;
             let chart = plot_packet_sent_pacing_rate_plot_canvas(
                 &params,
                 ss,
@@ -753,7 +674,8 @@ impl QlogDancerWeb {
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
 
-            self.pkt_tx_pacing_chart_info = Some(ChartInfo::from_chart(&chart));
+            self.charts.pkt_tx_pacing_chart_info =
+                Some(ChartInfo::from_chart(&chart));
         }
         Ok(())
     }
@@ -812,12 +734,5 @@ impl QlogDancerWeb {
         );
         target_div.set_inner_html(&event_table);
         Ok(())
-    }
-
-    #[wasm_bindgen]
-    /// TODO: example of accessing richer data from a parsed log
-    pub fn packet_sent(&self) -> Vec<Pointu64> {
-        let v = vec![Pointu64 { x: 0.1, y: 1 }];
-        v
     }
 }

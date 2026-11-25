@@ -75,8 +75,6 @@ function setupDarkmode() {
     });
 }
 
-let showFcLegend = false;
-let showPktRxLegend = false;
 
 function setupCanvas(div_id, canvas_id) {
     const div = document.getElementById(div_id);
@@ -229,7 +227,7 @@ function drawOverview(resize) {
         let cc_canvas = canvasMap.get(CC_CANVAS);
         qlog_dancer.draw_cc_plot(CC_CANVAS, cc_canvas.show_legend, cc_canvas.x_start, cc_canvas.x_end);
         let rtt_canvas = canvasMap.get(RTT_CANVAS);
-        qlog_dancer.draw_rtt_plot(RTT_CANVAS, cc_canvas.show_legend, rtt_canvas.x_start, cc_canvas.x_end);
+        qlog_dancer.draw_rtt_plot(RTT_CANVAS, rtt_canvas.show_legend, rtt_canvas.x_start, rtt_canvas.x_end);
         console.log(`complete conn overview draw duration: ${Date.now() - sub_start_draw} ms`);
         window.overviewDrawn = true;
         setupCanvasInteraction(OVERVIEW_CANVAS);
@@ -243,7 +241,8 @@ function drawOverview(resize) {
 function drawFlowControl(resize) {
     if (resize || !window.flowControlDrawn) {
         let sub_start_draw = Date.now();
-        qlog_dancer.draw_flow_control(FLOW_CONTROL_CANVAS, showFcLegend);
+        const canvas = canvasMap.get(FLOW_CONTROL_CANVAS);
+        qlog_dancer.draw_flow_control(FLOW_CONTROL_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
         console.log(`flow control draw duration: ${Date.now() - sub_start_draw} ms`);
         window.flowControlDrawn = true;
         setupCanvasInteraction(FLOW_CONTROL_CANVAS);
@@ -255,7 +254,8 @@ function drawFlowControl(resize) {
 function drawPacketReceived(resize) {
     if (resize || !window.packetReceivedDrawn) {
         let sub_start_draw = Date.now();
-        qlog_dancer.draw_packet_received(PKT_RX_CANVAS, showPktRxLegend);
+        const canvas = canvasMap.get(PKT_RX_CANVAS);
+        qlog_dancer.draw_packet_received(PKT_RX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
         console.log(`packet received draw duration: ${Date.now() - sub_start_draw} ms`);
         window.packetReceivedDrawn = true;
         setupCanvasInteraction(PKT_RX_CANVAS);
@@ -670,8 +670,11 @@ function setupCanvasInteraction(canvasId) {
         if (!canvasData) return;
         // The WASM zoom API accepts f64; preserve full u64 precision in
         // metadata and tooltips, narrowing only at this float zoom boundary.
-        canvasData.x_start = Number(start.x);
-        canvasData.x_end = Number(position.plot.x);
+        const first = Number(start.x);
+        const last = Number(position.plot.x);
+        if (!(Math.abs(first - last) > 0)) return;
+        canvasData.x_start = Math.min(first, last);
+        canvasData.x_end = Math.max(first, last);
         redrawByCanvasId(canvasId);
 
         console.log(`Start at: (${formatPlotCoordinate(start.x, 1)}, ${formatPlotCoordinate(start.y, 1)}), end at (${formatPlotCoordinate(position.plot.x, 1)}, ${formatPlotCoordinate(position.plot.y, 1)})`);

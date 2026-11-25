@@ -81,6 +81,28 @@ pub fn plot_packet_received(
     Ok(())
 }
 
+#[cfg(target_arch = "wasm32")]
+/// Render the received packet timeline and return its interactive chart.
+///
+/// # Errors
+/// Propagates validation and canvas drawing errors.
+pub fn plot_packet_received_canvas<'a>(
+    params: &PlotParameters, filename: &str, ss: &SeriesStore, canvas_id: &str,
+) -> Result<
+    plotters::chart::ChartContext<
+        'a,
+        plotters_canvas::CanvasBackend,
+        plotters::coord::cartesian::Cartesian2d<
+            plotters::coord::types::RangedCoordf64,
+            plotters::coord::types::RangedCoordu64,
+        >,
+    >,
+    Box<dyn Error>,
+> {
+    let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
+    draw_packet_sent_received_plot(false, filename, params, ss, &root)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
