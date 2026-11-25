@@ -28,14 +28,14 @@ use std::env;
 use std::io::BufReader;
 use std::result::Result;
 use std::time;
-use std::time::Instant;
 
 use h3i::actions::h3::Action;
 use h3i::client::connection_summary::ConnectionSummary;
 use h3i::client::ClientError;
 use h3i::prompts::h3::Prompter;
+use h3i::recordreplay::qlog::actions_from_qlog;
+use h3i::recordreplay::qlog::H3Actions;
 use h3i::recordreplay::qlog::QlogEvent;
-use h3i::recordreplay::qlog::*;
 use qlog::events::HTTP3_URI;
 use qlog::events::QUIC_URI;
 use qlog::reader::QlogSeqReader;
@@ -339,33 +339,11 @@ fn prompt_frames(config: &Config) -> Result<Vec<Action>, ClientError> {
         let mut streamer = make_streamer(Box::new(writer))?;
 
         for action in &actions {
-            let events = QlogEvents::try_from(action)?;
-            for event in events {
-                match event {
-                    QlogEvent::Event { data, ex_data } => {
-                        streamer.add_event_data_ex_now(*data, ex_data).map_err(
-                            |error| {
-                                ClientError::Other(format!(
-                                    "write qlog event: {error:?}"
-                                ))
-                            },
-                        )?;
-                    },
-
-                    QlogEvent::JsonEvent(mut ev) => {
-                        // need to rewrite the event time
-                        ev.time = Instant::now()
-                            .duration_since(streamer.start_time())
-                            .as_secs_f64() *
-                            1000.0;
-                        streamer.add_event(ev).map_err(|error| {
-                            ClientError::Other(format!(
-                                "write qlog event: {error:?}"
-                            ))
-                        })?;
-                    },
-                }
-            }
+            QlogEvent::try_from(action)?.write(&mut streamer).map_err(
+                |error| {
+                    ClientError::Other(format!("write qlog event: {error:?}"))
+                },
+            )?;
         }
         streamer.finish_log().map_err(|error| {
             ClientError::Other(format!("finish qlog: {error:?}"))

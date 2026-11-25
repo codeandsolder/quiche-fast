@@ -34,6 +34,8 @@ pub type Result<T> = std::result::Result<T, Error>;
 
 /// A QUIC error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "internal", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "internal", serde(rename_all = "snake_case"))]
 pub enum Error {
     /// There is no more work to do.
     Done,
