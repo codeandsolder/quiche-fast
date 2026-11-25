@@ -246,13 +246,9 @@ where
         // Clients must expand datagrams carrying Initial packets to at least
         // 1200 bytes (RFC 9000 Section 14.1). Drop shorter datagrams before
         // any stateless reply so spoofed-source traffic cannot amplify.
-        let dgram_len = match incoming.gro {
-            Some(gro) =>
-                incoming.buf.len().min(usize::try_from(gro).map_err(|_| {
-                    labels::QuicInvalidInitialPacketError::FailedToParse
-                })?),
-            None => incoming.buf.len(),
-        };
+        let dgram_len = incoming.gro.map_or(incoming.buf.len(), |size| {
+            incoming.buf.len().min(size.get())
+        });
 
         if dgram_len < MIN_CLIENT_INITIAL_LEN {
             Err(labels::QuicInvalidInitialPacketError::DatagramTooShort)?;
@@ -449,32 +445,43 @@ mod initial_size_tests {
     #[tokio::test]
     async fn short_initial_dgram_is_dropped_without_reply(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let (mut acceptor, local_addr) = acceptor().await?;
-        let peer = UdpSocket::bind("127.0.0.1:0").await?;
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+        for gro in [
+            None,
+            std::num::NonZeroUsize::new(MIN_CLIENT_INITIAL_LEN - 1),
+        ] {
+            let (mut acceptor, local_addr) = acceptor().await?;
+            let peer = UdpSocket::bind("127.0.0.1:0").await?;
+            let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
-        let (incoming, hdr) = incoming(
-            initial_dgram(MIN_CLIENT_INITIAL_LEN - 1),
-            peer.local_addr()?,
-            local_addr,
-        )?;
+            let (mut incoming, hdr) = incoming(
+                initial_dgram(if gro.is_some() {
+                    MIN_CLIENT_INITIAL_LEN * 2
+                } else {
+                    MIN_CLIENT_INITIAL_LEN - 1
+                }),
+                peer.local_addr()?,
+                local_addr,
+            )?;
 
-        let err = acceptor
-            .handle_initials(incoming, hdr, &mut config)
-            .err()
-            .ok_or("short Initial datagram was not rejected")?;
+            incoming.gro = gro;
+            let err = acceptor
+                .handle_initials(incoming, hdr, &mut config)
+                .err()
+                .ok_or("short Initial datagram was not rejected")?;
 
-        assert_eq!(
-            initial_packet_error_type(&err),
-            QuicInvalidInitialPacketError::DatagramTooShort
-        );
+            assert_eq!(
+                initial_packet_error_type(&err),
+                QuicInvalidInitialPacketError::DatagramTooShort
+            );
 
-        let mut out = [0u8; MAX_DATAGRAM_SIZE];
-        assert!(
-            timeout(Duration::from_millis(200), peer.recv_from(&mut out))
-                .await
-                .is_err()
-        );
+            let mut out = [0u8; MAX_DATAGRAM_SIZE];
+            assert!(timeout(
+                Duration::from_millis(200),
+                peer.recv_from(&mut out)
+            )
+            .await
+            .is_err());
+        }
         Ok(())
     }
 

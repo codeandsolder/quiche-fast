@@ -26,6 +26,8 @@
 
 pub(crate) mod acceptor;
 pub(crate) mod connector;
+#[cfg(target_os = "linux")]
+mod linux_recv;
 
 use super::connection::ConnectionMap;
 use super::connection::HandshakeInfo;
@@ -60,15 +62,6 @@ use std::time::SystemTime;
 use task_killswitch::spawn_with_killswitch;
 use tokio::sync::mpsc;
 
-#[cfg(target_os = "linux")]
-use foundations::telemetry::metrics::Counter;
-#[cfg(target_os = "linux")]
-use foundations::telemetry::metrics::TimeHistogram;
-#[cfg(target_os = "linux")]
-use libc::sockaddr_in;
-#[cfg(target_os = "linux")]
-use libc::sockaddr_in6;
-
 type ConnStream<Tx, M> = mpsc::Receiver<io::Result<InitialQuicConnection<Tx, M>>>;
 
 /// How many incoming packets (GRO batches) to process before checking the
@@ -98,24 +91,12 @@ mod listener_stage_timer {
 
     impl Drop for ListenerStageTimer {
         fn drop(&mut self) {
-            self.time_hist
-                .observe((Instant::now() - self.start).as_nanos() as u64);
+            self.time_hist.observe(
+                u64::try_from(self.start.elapsed().as_nanos())
+                    .unwrap_or(u64::MAX),
+            );
         }
     }
-}
-
-#[derive(Debug)]
-struct PollRecvData {
-    buf: Vec<u8>,
-    // The packet's source, e.g., the peer's address
-    src_addr: SocketAddr,
-    // The packet's original destination. If the original destination is
-    // different from the local listening address, this will be `None`.
-    dst_addr_override: Option<SocketAddr>,
-    rx_time: Option<SystemTime>,
-    gro: Option<i32>,
-    #[cfg(target_os = "linux")]
-    so_mark_data: Option<[u8; 4]>,
 }
 
 /// A message to the listener notifiying a mapping for a connection should be
@@ -166,19 +147,7 @@ where
     accept_sink_closed: Pin<Box<dyn Future<Output = ()> + Send>>,
     metrics: M,
     #[cfg(target_os = "linux")]
-    udp_drop_count: u32,
-
-    #[cfg(target_os = "linux")]
-    reusable_cmsg_space: Vec<u8>,
-
-    #[cfg(target_os = "linux")]
-    buf: Vec<u8>,
-
-    // We keep the metrics in here, to avoid cloning them each packet
-    #[cfg(target_os = "linux")]
-    metrics_handshake_time_seconds: TimeHistogram,
-    #[cfg(target_os = "linux")]
-    metrics_udp_drop_count: Counter,
+    receiver: linux_recv::LinuxReceiver,
 }
 
 impl<Tx, Rx, M, I> InboundPacketRouter<Tx, Rx, M, I>
@@ -214,33 +183,10 @@ where
                 conn_map_cmd_buf: Vec::with_capacity(4),
                 accept_sink,
                 accept_sink_closed,
-                #[cfg(target_os = "linux")]
-                udp_drop_count: 0,
-                #[cfg(target_os = "linux")]
-                // Specify CMSG space. Even if they're not all currently used, the cmsg buffer may
-                // have been configured by a previous version of Tokio-Quiche with the socket
-                // re-used on graceful restart. As such, this vector should _only grow_, and care
-                // should be taken when adding new cmsgs.
-                reusable_cmsg_space: nix::cmsg_space!(
-                    u32, // GRO
-                    nix::sys::time::TimeSpec, // timestamp
-                    u16, // drop count
-                    sockaddr_in, // IP_RECVORIGDSTADDR
-                    sockaddr_in6, // IPV6_RECVORIGDSTADDR
-                    u32 // SO_MARK
-                ),
-
                 config,
-
                 #[cfg(target_os = "linux")]
-                buf: Vec::new(),
-                #[cfg(target_os = "linux")]
-                metrics_handshake_time_seconds: metrics.handshake_time_seconds(labels::QuicHandshakeStage::QueueWaiting),
-                #[cfg(target_os = "linux")]
-                metrics_udp_drop_count: metrics.udp_drop_count(),
-
+                receiver: linux_recv::LinuxReceiver::new(&metrics),
                 metrics,
-
             },
             accept_stream,
         )
@@ -377,10 +323,9 @@ where
             peer_addr,
         });
 
-        conn.audit_log_stats
-            .set_transport_handshake_start(instant_to_system(
-                handshake_start_time,
-            ));
+        if let Some(start) = instant_to_system(handshake_start_time) {
+            conn.audit_log_stats.set_transport_handshake_start(start);
+        }
 
         self.conns.insert(&scid, &conn);
 
@@ -418,25 +363,25 @@ where
     /// system or socket does not support rx_time nor GRO.
     fn poll_recv_from(
         &mut self, cx: &mut Context<'_>,
-    ) -> Poll<io::Result<PollRecvData>> {
+    ) -> Poll<io::Result<Incoming>> {
         let mut buf = Vec::with_capacity(datagram_socket::MAX_DATAGRAM_SIZE);
         // We use ReadBuf's ability to write to uninitialized memory to avoid
         // the cost of having to initialize the Vec.
         let mut read_buf = tokio::io::ReadBuf::uninit(buf.spare_capacity_mut());
         let addr = ready!(self.socket_rx.poll_recv_from(cx, &mut read_buf))?;
         let n = read_buf.filled().len();
+        // SAFETY: ReadBuf has guaranteed that `n` initialized bytes have
+        // been written to the buffer, so we can set the vec's length
+        // accordingly.
         unsafe {
-            // Safety: ReadBuf has guaranteed that `n` initialized bytes have
-            // been written to the buffer, so we can set the vec's length
-            // accordingly
             buf.set_len(n);
         }
-        Poll::Ready(Ok(PollRecvData {
+        Poll::Ready(Ok(Incoming {
             buf,
-            src_addr: addr,
+            peer_addr: addr,
+            local_addr: self.local_addr,
             rx_time: None,
             gro: None,
-            dst_addr_override: None,
             #[cfg(target_os = "linux")]
             so_mark_data: None,
         }))
@@ -444,194 +389,12 @@ where
 
     fn poll_recv_and_rx_time(
         &mut self, cx: &mut Context<'_>,
-    ) -> Poll<io::Result<PollRecvData>> {
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.poll_recv_from(cx)
-        }
-
+    ) -> Poll<io::Result<Incoming>> {
         #[cfg(target_os = "linux")]
-        {
-            use nix::errno::Errno;
-            use nix::sys::socket::*;
-            use std::net::SocketAddrV4;
-            use std::net::SocketAddrV6;
-            use std::os::fd::AsRawFd;
-            use tokio::io::Interest;
-
-            use crate::buf_factory::BufFactory;
-
-            let Some(udp_socket) = self.socket_rx.as_udp_socket() else {
-                // the given socket is not a UDP socket, fall back to the
-                // simple poll_recv_from.
-                return self.poll_recv_from(cx);
-            };
-
-            // Note, the resize will be a no-op after the first call since
-            // we never truncate the `self.buf`
-            self.buf.resize(BufFactory::MAX_BUF_SIZE, 0u8);
-            loop {
-                let iov_s = &mut [io::IoSliceMut::new(&mut self.buf)];
-                match udp_socket.try_io(Interest::READABLE, || {
-                    recvmsg::<SockaddrStorage>(
-                        udp_socket.as_raw_fd(),
-                        iov_s,
-                        Some(&mut self.reusable_cmsg_space),
-                        MsgFlags::empty(),
-                    )
-                    .map_err(|x| x.into())
-                }) {
-                    Ok(r) => {
-                        let filled_buf =
-                            r.iovs().next().map(Vec::from).unwrap_or_default();
-                        // Verify that the `recvmsg` slices total `r.bytes`.
-                        debug_assert_eq!(r.bytes, filled_buf.len());
-
-                        let address = match r.address {
-                            Some(inner) => inner,
-                            _ => return Poll::Ready(Err(Errno::EINVAL.into())),
-                        };
-
-                        let peer_addr = match address.family() {
-                            Some(AddressFamily::Inet) => SocketAddrV4::from(
-                                *address.as_sockaddr_in().unwrap(),
-                            )
-                            .into(),
-                            Some(AddressFamily::Inet6) => SocketAddrV6::from(
-                                *address.as_sockaddr_in6().unwrap(),
-                            )
-                            .into(),
-                            _ => {
-                                return Poll::Ready(Err(Errno::EINVAL.into()));
-                            },
-                        };
-
-                        let mut rx_time = None;
-                        let mut gro = None;
-                        let mut dst_addr_override = None;
-                        let mut mark_bytes: Option<[u8; 4]> = None;
-
-                        let Ok(cmsgs) = r.cmsgs() else {
-                            // Best-effort if we can't read cmsgs.
-                            return Poll::Ready(Ok(PollRecvData {
-                                buf: filled_buf,
-                                src_addr: peer_addr,
-                                dst_addr_override,
-                                rx_time,
-                                gro,
-                                so_mark_data: mark_bytes,
-                            }));
-                        };
-
-                        for cmsg in cmsgs {
-                            match cmsg {
-                                ControlMessageOwned::RxqOvfl(c) => {
-                                    if c != self.udp_drop_count {
-                                        self.metrics_udp_drop_count.inc_by(
-                                            (c - self.udp_drop_count) as u64,
-                                        );
-                                        self.udp_drop_count = c;
-                                    }
-                                },
-                                ControlMessageOwned::ScmTimestampns(val) => {
-                                    rx_time = SystemTime::UNIX_EPOCH
-                                        .checked_add(val.into());
-                                    if let Some(delta) =
-                                        rx_time.and_then(|rx_time| {
-                                            rx_time.elapsed().ok()
-                                        })
-                                    {
-                                        self.metrics_handshake_time_seconds
-                                            .observe(delta.as_nanos() as u64);
-                                    }
-                                },
-                                ControlMessageOwned::UdpGroSegments(val) =>
-                                    gro = Some(val),
-                                ControlMessageOwned::Ipv4OrigDstAddr(val) => {
-                                    let source_addr = std::net::Ipv4Addr::from(
-                                        u32::to_be(val.sin_addr.s_addr),
-                                    );
-                                    let source_port = u16::to_be(val.sin_port);
-
-                                    let parsed_addr =
-                                        SocketAddr::V4(SocketAddrV4::new(
-                                            source_addr,
-                                            source_port,
-                                        ));
-
-                                    dst_addr_override = resolve_dst_addr(
-                                        &self.local_addr,
-                                        &parsed_addr,
-                                    );
-                                },
-                                ControlMessageOwned::Ipv6OrigDstAddr(val) => {
-                                    // IPv6 is a byte array and needs no swap.
-                                    // IPv4 is parsed as a `u32` and does.
-                                    let source_addr = std::net::Ipv6Addr::from(
-                                        val.sin6_addr.s6_addr,
-                                    );
-                                    let source_port = u16::to_be(val.sin6_port);
-                                    let source_flowinfo =
-                                        u32::to_be(val.sin6_flowinfo);
-                                    let source_scope =
-                                        u32::to_be(val.sin6_scope_id);
-
-                                    let parsed_addr =
-                                        SocketAddr::V6(SocketAddrV6::new(
-                                            source_addr,
-                                            source_port,
-                                            source_flowinfo,
-                                            source_scope,
-                                        ));
-
-                                    dst_addr_override = resolve_dst_addr(
-                                        &self.local_addr,
-                                        &parsed_addr,
-                                    );
-                                },
-                                ControlMessageOwned::Ipv4PacketInfo(_) |
-                                ControlMessageOwned::Ipv6PacketInfo(_) => {
-                                    // We only want the destination address from
-                                    // IP_RECVORIGDSTADDR, but we'll get these
-                                    // messages because we set IP_PKTINFO on the
-                                    // socket.
-                                },
-                                ControlMessageOwned::SoMark(mark) => {
-                                    // Preserve the native-endian byte
-                                    // representation expected by the connection
-                                    // audit metadata.
-                                    mark_bytes = Some(mark.to_ne_bytes());
-                                },
-                                _ => {
-                                    // Unrecognized cmsg received, just ignore
-                                    // it.
-                                },
-                            };
-                        }
-
-                        return Poll::Ready(Ok(PollRecvData {
-                            buf: filled_buf,
-                            src_addr: peer_addr,
-                            dst_addr_override,
-                            rx_time,
-                            gro,
-                            so_mark_data: mark_bytes,
-                        }));
-                    },
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // NOTE: we manually poll the socket here to register
-                        // interest in the socket to become
-                        // writable for the given `cx`. Under the hood, tokio's
-                        // implementation just checks for
-                        // EWOULDBLOCK and if socket is busy registers provided
-                        // waker to be invoked when the
-                        // socket is free and consequently drive the event loop.
-                        ready!(udp_socket.poll_recv_ready(cx))?
-                    },
-                    Err(e) => return Poll::Ready(Err(e)),
-                }
-            }
+        if let Some(socket) = self.socket_rx.as_udp_socket() {
+            return self.receiver.poll(socket, self.local_addr, cx);
         }
+        self.poll_recv_from(cx)
     }
 
     fn poll_process_packet(&mut self, cx: &mut Context) -> Poll<()> {
@@ -643,32 +406,11 @@ where
             },
         };
 
-        let PollRecvData {
-            buf,
-            src_addr: peer_addr,
-            dst_addr_override,
-            rx_time,
-            gro,
-            #[cfg(target_os = "linux")]
-            so_mark_data,
-        } = pkt_data;
-
-        let send_from = if let Some(dst_addr) = dst_addr_override {
-            log::trace!("overriding local address"; "actual_local" => dst_addr, "configured_local" => self.local_addr);
-            dst_addr
-        } else {
-            self.local_addr
-        };
-
-        let res = self.on_incoming(Incoming {
-            peer_addr,
-            local_addr: send_from,
-            buf,
-            rx_time,
-            gro,
-            #[cfg(target_os = "linux")]
-            so_mark_data,
-        });
+        let peer_addr = pkt_data.peer_addr;
+        if pkt_data.local_addr != self.local_addr {
+            log::trace!("overriding local address"; "actual_local" => pkt_data.local_addr, "configured_local" => self.local_addr);
+        }
+        let res = self.on_incoming(pkt_data);
 
         // Only error handling below - if `on_incoming` was successful,
         // we return here
@@ -738,35 +480,14 @@ fn short_dcid(buf: &[u8]) -> Option<ConnectionId<'_>> {
 
 /// Converts an [`Instant`] to a [`SystemTime`], based on the current delta
 /// between both clocks.
-fn instant_to_system(ts: Instant) -> SystemTime {
+fn instant_to_system(ts: Instant) -> Option<SystemTime> {
     let now = Instant::now();
     let system_now = SystemTime::now();
     if let Some(delta) = now.checked_duration_since(ts) {
-        return system_now - delta;
+        system_now.checked_sub(delta)
+    } else {
+        system_now.checked_add(ts.checked_duration_since(now)?)
     }
-
-    let delta = ts.checked_duration_since(now).expect("now < ts");
-    system_now + delta
-}
-
-/// Determine if we should store the destination address for a packet, based on
-/// an address parsed from a
-/// [`ControlMessageOwned`](nix::sys::socket::ControlMessageOwned).
-///
-/// This is to prevent overriding the destination address if the packet was
-/// originally addressed to `local`, as that would cause us to incorrectly
-/// address packets when sending.
-///
-/// Returns the parsed address if it should be stored.
-#[cfg(target_os = "linux")]
-fn resolve_dst_addr(
-    local: &SocketAddr, parsed: &SocketAddr,
-) -> Option<SocketAddr> {
-    if local != parsed {
-        return Some(*parsed);
-    }
-
-    None
 }
 
 impl<Tx, Rx, M, I> Future for InboundPacketRouter<Tx, Rx, M, I>

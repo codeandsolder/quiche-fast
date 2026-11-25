@@ -959,7 +959,7 @@ where
         };
 
         if let Some(gro) = pkt.gro {
-            for dgram in pkt.buf.chunks_mut(gro as usize) {
+            for dgram in pkt.buf.chunks_mut(gro.get()) {
                 qconn.recv(dgram, recv_info)?;
             }
         } else {
