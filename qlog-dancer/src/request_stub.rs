@@ -635,7 +635,7 @@ mod report_tests {
             assert_eq!(fields.len(), HttpRequestStub::LENGTH);
             assert_eq!(HttpRequestStub::headers().len(), HttpRequestStub::LENGTH);
             assert_eq!(fields[3], format!("/{}<snip>", "é".repeat(39)));
-            assert_eq!(fields[9], match actor {
+            assert_eq!(fields[9], match request.request_actor {
                 RequestActor::Client => "5",
                 RequestActor::Server => "6",
             });
