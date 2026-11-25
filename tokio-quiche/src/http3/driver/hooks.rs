@@ -95,6 +95,20 @@ pub trait DriverHooks: Sized + Send + 'static {
         cmd: Self::Command,
     ) -> H3ConnectionResult<()>;
 
+    /// Retry endpoint-specific pending writes after transport progress.
+    fn process_pending_writes(
+        _driver: &mut H3Driver<Self>, _qconn: &mut QuicheConnection,
+    ) -> H3ConnectionResult<()> {
+        Ok(())
+    }
+
+    /// Notifies endpoint-specific state after the peer sends GOAWAY.
+    fn peer_goaway(
+        _driver: &mut H3Driver<Self>, _goaway_id: u64,
+    ) -> H3ConnectionResult<()> {
+        Ok(())
+    }
+
     /// Whether the extended CONNECT protocol is enabled. Used to gate
     /// datagram flow creation.
     fn extended_connect_enabled(&self) -> bool {
