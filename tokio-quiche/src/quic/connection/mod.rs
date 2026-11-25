@@ -29,6 +29,7 @@ mod id;
 mod map;
 
 pub use self::error::HandshakeError;
+pub(crate) use self::id::generate_routable_cid;
 pub use self::id::ConnectionIdGenerator;
 pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;

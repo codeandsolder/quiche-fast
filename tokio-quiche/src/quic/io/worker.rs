@@ -358,7 +358,8 @@ where
         };
         for _ in 0..qconn.scids_left() {
             let reset_token = random_u128()?;
-            let new_cid = cid_generator.new_connection_id()?;
+            let new_cid =
+                crate::quic::connection::generate_routable_cid(cid_generator)?;
             // The router must acknowledge ownership before the core can
             // advertise the CID. A collision must never reach the wire.
             self.route_lease.register(new_cid.clone()).await?;
@@ -530,7 +531,9 @@ where
                     current_deadline = None;
                     sleep.as_mut().reset((now + DEFAULT_SLEEP).into());
                 }
-                Some(pkt) = incoming_recv.recv() => ctx.in_pkt = Some(pkt),
+                packet = incoming_recv.recv() => {
+                    ctx.in_pkt = Some(packet.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::BrokenPipe, "incoming packet source closed"))?);
+                },
                 directive = self.wait_for_data_or_handshake(qconn, application) => {
                     match directive? {
                         WaitForDataOrHandshakeDirective::Flush(send_buf) => {
