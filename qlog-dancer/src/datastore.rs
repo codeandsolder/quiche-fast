@@ -2296,7 +2296,7 @@ mod input_tests {
             assert_eq!(
                 datastore.sent_max_data,
                 if expected_local {
-                    vec![(0.0, 123)]
+                    vec![(1.0, 123)]
                 } else {
                     Vec::new()
                 }
@@ -2306,7 +2306,7 @@ mod input_tests {
                 if expected_local {
                     Vec::new()
                 } else {
-                    vec![(0.0, 123)]
+                    vec![(1.0, 123)]
                 }
             );
         }

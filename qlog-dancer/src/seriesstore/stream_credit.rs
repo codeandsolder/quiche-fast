@@ -36,8 +36,8 @@ use crate::trackers::StreamMaxTracker;
 use crate::QlogPointu64;
 
 /// Known initial limits and subsequent grants for transport directions with
-/// actual STREAM, RESET_STREAM or MAX_STREAM_DATA evidence. These are
-/// derived plot points, never invented raw MAX_STREAM_DATA frames.
+/// actual STREAM, `RESET_STREAM` or `MAX_STREAM_DATA` evidence. These are
+/// derived plot points, never invented raw `MAX_STREAM_DATA` frames.
 #[derive(Default)]
 pub(super) struct StreamCreditPlot {
     pub(super) streams: BTreeMap<u64, Vec<QlogPointu64>>,
