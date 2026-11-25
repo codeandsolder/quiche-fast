@@ -76,16 +76,12 @@ fn main() -> Result<(), ClientError> {
     #[cfg(feature = "async")]
     let summary = async_client(config, actions);
 
-    match summary {
-        Ok(s) => {
-            log::debug!(
-                "received connection_summary: {}",
-                serde_json::to_string_pretty(&s)
-                    .unwrap_or_else(|e| e.to_string())
-            );
-        },
-        Err(error) => return Err(error),
-    }
+    let summary = summary?;
+    log::debug!(
+        "received connection_summary: {}",
+        serde_json::to_string_pretty(&summary)
+            .map_err(|error| ClientError::Other(error.to_string()))?
+    );
 
     Ok(())
 }
