@@ -23,7 +23,6 @@ qlog = { workspace = true, features = ["gzip", "zstd"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tabled = "0.22.0"
-table_to_html = "0.11.0"
 
 wirefilter-engine = { git = "https://github.com/cloudflare/wirefilter.git", rev="a101f7c0fc60012803ee23432b5514644d9fbe4f" }
 

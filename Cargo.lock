@@ -2771,7 +2771,6 @@ dependencies = [
  "serde-wasm-bindgen",
  "serde_json",
  "smallvec",
- "table_to_html",
  "tabled",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -3513,15 +3512,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.10",
-]
-
-[[package]]
-name = "table_to_html"
-version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4639af37f25fbc26756d3f12ccb8872264c00f68a077fcb88430b6c5958c25eb"
-dependencies = [
- "tabled",
 ]
 
 [[package]]

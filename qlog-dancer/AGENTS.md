@@ -34,7 +34,7 @@ src/
     minmax.rs          Axis range utilities
   reports/             Output reports
     mod.rs             report() dispatcher
-    html.rs            HTML report generation (table_to_html)
+    html.rs            escaped HTML report generation
     text.rs            Plain-text summary
     events.rs          Event-level report details
   trackers/            Stateful metric accumulators
