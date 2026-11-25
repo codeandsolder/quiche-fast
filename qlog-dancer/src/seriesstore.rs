@@ -714,20 +714,9 @@ impl SeriesStore {
         Ok(())
     }
 
-    fn populate_series_values(
+    fn stream_credit_series(
         &mut self, data_store: &Datastore,
     ) -> SeriesResult<()> {
-        self.cwnd(data_store);
-        self.bif(data_store);
-        self.min_rtt(data_store);
-        self.latest_rtt(data_store);
-        self.pacing_rate(data_store);
-        self.delivery_rate(data_store);
-        self.send_rate(data_store);
-        self.ack_rate(data_store);
-        self.ssthresh(data_store);
-        self.smoothed_rtt(data_store);
-
         Self::max_data_series(
             &data_store.sent_max_data,
             None,
@@ -745,10 +734,6 @@ impl SeriesStore {
             "sum_sent_stream_max_data",
         )?;
 
-        self.packet_sent(data_store);
-        self.packet_recv(data_store);
-        self.missing_packets(data_store);
-
         Self::stream_max_data(
             &data_store.sent_stream_max_data_tracker,
             &mut self.sent_stream_max_data,
@@ -763,6 +748,44 @@ impl SeriesStore {
             &mut self.received_x_max,
             &mut self.y_max_stream_send_plot,
         );
+
+        Self::max_data_series(
+            &data_store.received_max_data,
+            None,
+            &mut self.received_max_data,
+            &mut self.received_x_min,
+            &mut self.received_x_max,
+            &mut self.y_max_stream_send_plot,
+        );
+        Self::tracker_sum(
+            &data_store.received_stream_max_data_tracker,
+            &mut self.sum_received_stream_max_data,
+            &mut self.received_x_min,
+            &mut self.received_x_max,
+            &mut self.y_max_stream_send_plot,
+            "sum_received_stream_max_data",
+        )?;
+        Ok(())
+    }
+
+    fn populate_series_values(
+        &mut self, data_store: &Datastore,
+    ) -> SeriesResult<()> {
+        self.cwnd(data_store);
+        self.bif(data_store);
+        self.min_rtt(data_store);
+        self.latest_rtt(data_store);
+        self.pacing_rate(data_store);
+        self.delivery_rate(data_store);
+        self.send_rate(data_store);
+        self.ack_rate(data_store);
+        self.ssthresh(data_store);
+        self.smoothed_rtt(data_store);
+
+        self.stream_credit_series(data_store)?;
+        self.packet_sent(data_store);
+        self.packet_recv(data_store);
+        self.missing_packets(data_store);
 
         self.stream_buffers(data_store)?;
 
@@ -802,22 +825,6 @@ impl SeriesStore {
             "quic_send_credit_consumed",
         )?;
 
-        Self::max_data_series(
-            &data_store.received_max_data,
-            None,
-            &mut self.received_max_data,
-            &mut self.received_x_min,
-            &mut self.received_x_max,
-            &mut self.y_max_stream_send_plot,
-        );
-        Self::tracker_sum(
-            &data_store.received_stream_max_data_tracker,
-            &mut self.sum_received_stream_max_data,
-            &mut self.received_x_min,
-            &mut self.received_x_max,
-            &mut self.y_max_stream_send_plot,
-            "sum_received_stream_max_data",
-        )?;
         Ok(())
     }
 }
