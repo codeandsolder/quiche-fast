@@ -42,7 +42,7 @@ fn main() {
     let args =
         ClientArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
 
-    match connect(args, conn_args, stdout_sink) {
+    match connect(&args, &conn_args, stdout_sink) {
         Err(ClientError::HandshakeFail) => std::process::exit(-1),
 
         Err(ClientError::HttpFail) => std::process::exit(-2),

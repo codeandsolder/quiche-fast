@@ -368,10 +368,10 @@ fn main() {
 
                 let client_id = next_client_id;
 
-                let client = Client {
+                let client = ServerClient {
                     conn,
                     http_conn: None,
-                    client_id,
+                    id: client_id,
                     partial_requests: HashMap::new(),
                     partial_responses: HashMap::new(),
                     app_proto_selected: false,
@@ -496,7 +496,7 @@ fn main() {
                     break;
                 }
 
-                clients_ids.insert(scid, client.client_id);
+                clients_ids.insert(scid, client.id);
             }
         }
 
