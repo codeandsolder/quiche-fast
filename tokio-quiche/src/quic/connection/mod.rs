@@ -29,13 +29,13 @@ mod id;
 mod map;
 
 pub use self::error::HandshakeError;
-pub use self::id::generate_routable_cid;
+pub(super) use self::id::generate_routable_cid;
 pub use self::id::ConnectionIdGenerator;
 pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
-pub use self::map::ConnectionMap;
-pub use self::map::ConnectionMapCommand;
-pub use self::map::RouteLease;
+pub(super) use self::map::ConnectionMap;
+pub(super) use self::map::ConnectionMapCommand;
+pub(super) use self::map::RouteLease;
 
 use btls::ssl::SslRef;
 use datagram_socket::AsSocketStats;
