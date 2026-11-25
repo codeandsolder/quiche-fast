@@ -229,6 +229,27 @@ fn read_step(
     }
 }
 
+/// The filename convention is independent of available Cargo features.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FileEncoding {
+    Raw,
+    Gzip,
+    Zstd,
+}
+
+fn file_encoding(name: &std::ffi::OsStr) -> Option<FileEncoding> {
+    let bytes = name.as_encoded_bytes();
+    if bytes.ends_with(SQLOG_GZ_EXT.as_bytes()) {
+        Some(FileEncoding::Gzip)
+    } else if bytes.ends_with(SQLOG_ZST_EXT.as_bytes()) {
+        Some(FileEncoding::Zstd)
+    } else if bytes.ends_with(SQLOG_EXT.as_bytes()) {
+        Some(FileEncoding::Raw)
+    } else {
+        None
+    }
+}
+
 /// A streaming JSON-SEQ reader. Each iterator item is fallible so invalid
 /// records or decompression errors cannot be mistaken for successful EOF.
 pub struct QlogSeqReader<'a> {
@@ -288,60 +309,40 @@ impl<'a> QlogSeqReader<'a> {
         let path = path.as_ref();
         let file = File::open(path)?;
         let name = path.file_name().unwrap_or_default();
-        let suffix = name.as_encoded_bytes();
-
-        // Match complete ASCII suffixes, including on non-UTF-8 filenames.
-        // Each compound suffix is matched exactly once. The
-        // `#[cfg(feature = "...")]` lives inside the `if` body so the
-        // disabled-feature path can return a helpful error rather
-        // than falling through to the unknown-extension branch.
-        if suffix.ends_with(SQLOG_GZ_EXT.as_bytes()) {
-            #[cfg(feature = "gzip")]
-            {
-                let reader: Box<dyn std::io::BufRead + Send + Sync> = Box::new(
-                    BufReader::new(flate2::read::MultiGzDecoder::new(file)),
-                );
-                return Self::new(reader);
-            }
-            #[cfg(not(feature = "gzip"))]
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                format!(
-                    "qlog file {name:?} requires the `gzip` feature on \
-                     the qlog crate to decode"
-                ),
-            ));
+        let encoding = file_encoding(name).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("qlog file {name:?} does not match a known qlog extension ({SQLOG_EXT}, {SQLOG_GZ_EXT}, {SQLOG_ZST_EXT})"),
+            )
+        })?;
+        match encoding {
+            FileEncoding::Raw => Self::new(Box::new(BufReader::new(file))),
+            FileEncoding::Gzip => {
+                #[cfg(feature = "gzip")]
+                {
+                    Self::new(Box::new(BufReader::new(
+                        flate2::read::MultiGzDecoder::new(file),
+                    )))
+                }
+                #[cfg(not(feature = "gzip"))]
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("qlog file {name:?} requires the `gzip` feature on the qlog crate to decode"),
+                ))
+            },
+            FileEncoding::Zstd => {
+                #[cfg(feature = "zstd")]
+                {
+                    let decoder = zstd::Decoder::new(file)?;
+                    Self::new(Box::new(BufReader::new(decoder)))
+                }
+                #[cfg(not(feature = "zstd"))]
+                Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!("qlog file {name:?} requires the `zstd` feature on the qlog crate to decode"),
+                ))
+            },
         }
-        if suffix.ends_with(SQLOG_ZST_EXT.as_bytes()) {
-            #[cfg(feature = "zstd")]
-            {
-                let decoder = zstd::Decoder::new(file)?;
-                let reader: Box<dyn std::io::BufRead + Send + Sync> =
-                    Box::new(BufReader::new(decoder));
-                return Self::new(reader);
-            }
-            #[cfg(not(feature = "zstd"))]
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                format!(
-                    "qlog file {name:?} requires the `zstd` feature on \
-                     the qlog crate to decode"
-                ),
-            ));
-        }
-        if suffix.ends_with(SQLOG_EXT.as_bytes()) {
-            let reader: Box<dyn std::io::BufRead + Send + Sync> =
-                Box::new(BufReader::new(file));
-            return Self::new(reader);
-        }
-
-        Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            format!(
-                "qlog file {name:?} does not match a known qlog \
-                 extension ({SQLOG_EXT}, {SQLOG_GZ_EXT}, {SQLOG_ZST_EXT})"
-            ),
-        ))
     }
 }
 
@@ -364,3 +365,37 @@ impl Iterator for QlogSeqReader<'_> {
 }
 
 impl std::iter::FusedIterator for QlogSeqReader<'_> {}
+
+#[cfg(test)]
+mod filename_tests {
+    use super::file_encoding;
+    use super::FileEncoding;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn only_complete_suffixes_are_recognized() {
+        for (name, expected) in [
+            ("trace.sqlog", Some(FileEncoding::Raw)),
+            ("trace.sqlog.gz", Some(FileEncoding::Gzip)),
+            ("trace.sqlog.zst", Some(FileEncoding::Zstd)),
+            ("trace.gz", None),
+            ("trace.tar.zst", None),
+            ("trace.sqlog.gz.tmp", None),
+        ] {
+            assert_eq!(file_encoding(OsStr::new(name)), expected);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_prefix_does_not_prevent_suffix_recognition() {
+        use std::os::unix::ffi::OsStrExt;
+        for (name, expected) in [
+            (b"trace-\xff.sqlog".as_slice(), FileEncoding::Raw),
+            (b"trace-\xff.sqlog.gz".as_slice(), FileEncoding::Gzip),
+            (b"trace-\xff.sqlog.zst".as_slice(), FileEncoding::Zstd),
+        ] {
+            assert_eq!(file_encoding(OsStr::from_bytes(name)), Some(expected));
+        }
+    }
+}

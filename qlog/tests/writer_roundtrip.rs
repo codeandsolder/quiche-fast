@@ -399,16 +399,3 @@ fn truncated_zstd_reports_error() -> TestResult {
         .is_err());
     Ok(())
 }
-
-#[cfg(unix)]
-#[test]
-fn recognizes_sqlog_suffix_on_non_utf8_filename() -> TestResult {
-    use std::os::unix::ffi::OsStrExt;
-    let dir = tempfile::tempdir()?;
-    let path = emit_one_event(QlogCompression::None, dir.path())?;
-    let renamed = dir
-        .path()
-        .join(std::ffi::OsStr::from_bytes(b"trace-\xff.sqlog"));
-    std::fs::rename(path, &renamed)?;
-    assert_roundtrip(&renamed)
-}
