@@ -306,21 +306,11 @@ function drawStreamMultiplex(resize) {
 }
 
 function drawSparks(resize) {
-    if (resize) {
-        let sub_start_draw = Date.now();
-        qlog_dancer.draw_sparks("abs_dl_canvas", "rel_dl_canvas", "abs_ul_canvas", "rel_ul_canvas")
-        console.log(`sparks draw duration: ${Date.now() - sub_start_draw} ms`);
-        return;
-    }
-
-    if (!window.streamSparksDrawn) {
-        let sub_start_draw = Date.now();
-        qlog_dancer.draw_sparks("abs_dl_canvas", "rel_dl_canvas", "abs_ul_canvas", "rel_ul_canvas")
-        console.log(`sparks draw duration: ${Date.now() - sub_start_draw} ms`);
-        window.streamSparksDrawn = true;
-    } else {
-        console.log("no need to redraw")
-    }
+    if (!resize && window.streamSparksDrawn) return;
+    const started = Date.now();
+    qlog_dancer.draw_sparks(["abs_dl_canvas", "rel_dl_canvas"], ["abs_ul_canvas", "rel_ul_canvas"]);
+    console.log(`sparks draw duration: ${Date.now() - started} ms`);
+    window.streamSparksDrawn = true;
 }
 
 function drawPending(resize) {

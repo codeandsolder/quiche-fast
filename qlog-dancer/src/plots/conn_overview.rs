@@ -498,10 +498,9 @@ pub fn plot_main_plot<'a>(
     Box<dyn Error>,
 > {
     let root = canvas_area(canvas_id, params.colors, params.chart_margin)?;
-    let stream_y = params
-        .clamp
-        .stream_y_max
-        .unwrap_or(ss.y_max_stream_send_plot.max(ss.y_max_stream_recv_plot));
+    let stream_y = params.clamp.stream_y_max.unwrap_or_else(|| {
+        ss.y_max_stream_send_plot.max(ss.y_max_stream_recv_plot)
+    });
     let axis = XYMinMax::init(params, ss, stream_y)?;
     draw_main_plot(filename, params, &axis, ss, &root)
 }

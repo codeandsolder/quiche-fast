@@ -38,6 +38,8 @@ use crate::plots::rtt::plot_rtt_plot;
 use crate::plots::stream_multiplex::plot_stream_multiplexing;
 use crate::plots::stream_multiplex::MultiplexPlotsParams;
 use crate::plots::stream_sparks::plot_sparks;
+use crate::plots::stream_sparks::SparkOutputs;
+use crate::plots::stream_sparks::SparkPair;
 use crate::plots::stream_sparks::SparkPlotsParams;
 use crate::plots::AreaMargin;
 use crate::plots::ChartMargin;
@@ -193,10 +195,25 @@ fn render_chart<X: Ranged, Y: Ranged>(
     Ok(())
 }
 
+fn canvas_pair(ids: Vec<String>) -> Result<SparkPair<ChartOutputType>, JsValue> {
+    let [absolute, relative]: [String; 2] = ids.try_into().map_err(|_| {
+        JsValue::from_str("expected absolute and relative canvas IDs")
+    })?;
+    Ok(SparkPair {
+        absolute: ChartOutputType::Canvas {
+            canvas_id: absolute,
+        },
+        relative: ChartOutputType::Canvas {
+            canvas_id: relative,
+        },
+    })
+}
+
 #[wasm_bindgen]
-/// Creates a QlogDancerWeb object to interact with logs.
+/// Creates a `QlogDancerWeb` object to interact with logs.
 ///
 /// The `display_name` parameter is reflected into drawn plots.
+#[must_use = "the returned decoder and chart state are needed to analyze logs"]
 pub fn new_qlog_dancer(display_name: &str) -> QlogDancerWeb {
     let ds = Datastore {
         total_sent_stream_frame_count: 0,
@@ -226,15 +243,15 @@ pub struct QlogDancerWeb {
 
 #[derive(Default)]
 struct ChartInfos {
-    mp_chart_info: Option<ChartInfo<f64, u64>>,
-    cc_chart_info: Option<ChartInfo<f64, u64>>,
-    rtt_chart_info: Option<ChartInfo<f64, f32>>,
-    fc_chart_info: Option<ChartInfo<f64, u64>>,
-    pkt_rx_chart_info: Option<ChartInfo<f64, u64>>,
-    pkt_tx_chart_info: Option<ChartInfo<f64, u64>>,
-    pkt_tx_counts_chart_info: Option<ChartInfo<f64, u64>>,
-    pkt_tx_delta_chart_info: Option<ChartInfo<u64, f64>>,
-    pkt_tx_pacing_chart_info: Option<ChartInfo<f64, u64>>,
+    overview: Option<ChartInfo<f64, u64>>,
+    congestion: Option<ChartInfo<f64, u64>>,
+    rtt: Option<ChartInfo<f64, f32>>,
+    flow_control: Option<ChartInfo<f64, u64>>,
+    received: Option<ChartInfo<f64, u64>>,
+    sent: Option<ChartInfo<f64, u64>>,
+    ack_counts: Option<ChartInfo<f64, u64>>,
+    send_delta: Option<ChartInfo<u64, f64>>,
+    pacing: Option<ChartInfo<f64, u64>>,
 }
 
 #[wasm_bindgen]
@@ -261,25 +278,6 @@ impl QlogDancerWeb {
         self.sqlog_stream
             .finish()
             .map_err(|err| JsValue::from_str(&err.to_string()))
-    }
-
-    #[wasm_bindgen]
-    /// Consume a ReadableStream as a qlog JSON-SEQ input.
-    ///
-    /// # Errors
-    /// Propagates stream read failures and malformed/truncated qlog records.
-    pub async fn read_stream(
-        &mut self, readable: web_sys::ReadableStream,
-    ) -> Result<(), JsValue> {
-        use futures_util::StreamExt;
-
-        let mut stream =
-            wasm_streams::ReadableStream::from_raw(readable).into_stream();
-        while let Some(chunk) = stream.next().await {
-            let bytes = js_sys::Uint8Array::new(&chunk?).to_vec();
-            self.process_chunk(&bytes)?;
-        }
-        self.finish_stream()
     }
 
     #[wasm_bindgen]
@@ -348,18 +346,15 @@ impl QlogDancerWeb {
     /// Returns a JavaScript error if chart bounds cannot be serialized.
     pub fn get_chart_info(&self, canvas_id: &str) -> Result<JsValue, JsValue> {
         match canvas_id {
-            "overview_canvas" => chart_info_js(self.charts.mp_chart_info),
-            "rtt_canvas" => chart_info_js(self.charts.rtt_chart_info),
-            "cc_canvas" => chart_info_js(self.charts.cc_chart_info),
-            "flow_control_canvas" => chart_info_js(self.charts.fc_chart_info),
-            "pkt-rx-canvas" => chart_info_js(self.charts.pkt_rx_chart_info),
-            "pkt-tx-canvas" => chart_info_js(self.charts.pkt_tx_chart_info),
-            "pkt-tx-counts-canvas" =>
-                chart_info_js(self.charts.pkt_tx_counts_chart_info),
-            "pkt-tx-delta-canvas" =>
-                chart_info_js(self.charts.pkt_tx_delta_chart_info),
-            "pkt-tx-pacing-canvas" =>
-                chart_info_js(self.charts.pkt_tx_pacing_chart_info),
+            "overview_canvas" => chart_info_js(self.charts.overview),
+            "rtt_canvas" => chart_info_js(self.charts.rtt),
+            "cc_canvas" => chart_info_js(self.charts.congestion),
+            "flow_control_canvas" => chart_info_js(self.charts.flow_control),
+            "pkt-rx-canvas" => chart_info_js(self.charts.received),
+            "pkt-tx-canvas" => chart_info_js(self.charts.sent),
+            "pkt-tx-counts-canvas" => chart_info_js(self.charts.ack_counts),
+            "pkt-tx-delta-canvas" => chart_info_js(self.charts.send_delta),
+            "pkt-tx-pacing-canvas" => chart_info_js(self.charts.pacing),
             _ => Ok(JsValue::null()),
         }
     }
@@ -367,7 +362,7 @@ impl QlogDancerWeb {
     #[wasm_bindgen]
     #[cfg(target_arch = "wasm32")]
     /// Draws the multi-panel connection overview plot into the provided
-    /// canvas_id.
+    /// `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -383,7 +378,7 @@ impl QlogDancerWeb {
             AREA_MARGIN,
         );
         render_chart(
-            &mut self.charts.mp_chart_info,
+            &mut self.charts.overview,
             self.ss.as_ref(),
             &params,
             |params, ss| {
@@ -394,7 +389,7 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     #[cfg(target_arch = "wasm32")]
-    /// Draws the congestion plot into the provided canvas_id.
+    /// Draws the congestion plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -410,7 +405,7 @@ impl QlogDancerWeb {
             AREA_MARGIN,
         );
         render_chart(
-            &mut self.charts.cc_chart_info,
+            &mut self.charts.congestion,
             self.ss.as_ref(),
             &params,
             |params, ss| plot_cc_plot(params, ss, &self.ds, cc_canvas_id),
@@ -419,7 +414,7 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     #[cfg(target_arch = "wasm32")]
-    /// Draws the rtt plot into the provided canvas_id.
+    /// Draws the rtt plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -435,7 +430,7 @@ impl QlogDancerWeb {
             AREA_MARGIN,
         );
         render_chart(
-            &mut self.charts.rtt_chart_info,
+            &mut self.charts.rtt,
             self.ss.as_ref(),
             &params,
             |params, ss| plot_rtt_plot(params, ss, rtt_canvas_id),
@@ -443,7 +438,7 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the flow control plot into the provided canvas_id.
+    /// Draws the flow control plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -462,7 +457,7 @@ impl QlogDancerWeb {
             canvas_id: canvas_id.to_string(),
         };
         render_chart(
-            &mut self.charts.fc_chart_info,
+            &mut self.charts.flow_control,
             self.ss.as_ref(),
             &params,
             |params, ss| {
@@ -478,13 +473,12 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the stream sparks plot into the provided canvas_id.
+    /// Draws the stream sparks plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_sparks(
-        &mut self, abs_dl_canvas_id: &str, abs_ul_canvas_id: &str,
-        rel_dl_canvas_id: &str, rel_ul_canvas_id: &str,
+        &self, download: Vec<String>, upload: Vec<String>,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let spark_params = SparkPlotsParams {
@@ -502,29 +496,16 @@ impl QlogDancerWeb {
                 ..Default::default()
             };
 
+            let outputs = SparkOutputs {
+                download: canvas_pair(download)?,
+                upload: canvas_pair(upload)?,
+            };
             plot_sparks(
                 &spark_params,
                 &self.display_name,
                 ss,
                 &self.ds,
-                crate::plots::stream_sparks::SparkOutputs {
-                    download: crate::plots::stream_sparks::SparkPair {
-                        absolute: &ChartOutputType::Canvas {
-                            canvas_id: abs_dl_canvas_id.to_owned(),
-                        },
-                        relative: &ChartOutputType::Canvas {
-                            canvas_id: rel_dl_canvas_id.to_owned(),
-                        },
-                    },
-                    upload: crate::plots::stream_sparks::SparkPair {
-                        absolute: &ChartOutputType::Canvas {
-                            canvas_id: abs_ul_canvas_id.to_owned(),
-                        },
-                        relative: &ChartOutputType::Canvas {
-                            canvas_id: rel_ul_canvas_id.to_owned(),
-                        },
-                    },
-                },
+                outputs.as_ref(),
             )
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
@@ -542,10 +523,8 @@ impl QlogDancerWeb {
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
         let (is_sent, slot, margin) = match canvas_id {
-            "pkt-tx-canvas" =>
-                (true, &mut self.charts.pkt_tx_chart_info, CHART_MARGIN_TIGHT),
-            "pkt-rx-canvas" =>
-                (false, &mut self.charts.pkt_rx_chart_info, CHART_MARGIN),
+            "pkt-tx-canvas" => (true, &mut self.charts.sent, CHART_MARGIN_TIGHT),
+            "pkt-rx-canvas" => (false, &mut self.charts.received, CHART_MARGIN),
             _ => return Err(JsValue::from_str("unknown packet timeline canvas")),
         };
         let params =
@@ -565,11 +544,11 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the stream pending plot into the provided canvas_id.
+    /// Draws the stream pending plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
-    pub fn draw_pending(&mut self, canvas_id: &str) -> Result<(), JsValue> {
+    pub fn draw_pending(&self, canvas_id: &str) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let pending_params = PendingPlotParams {
                 clamp: ClampParams {
@@ -602,7 +581,7 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the packet sent plot into the provided canvas_id.
+    /// Draws the packet sent plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -618,7 +597,7 @@ impl QlogDancerWeb {
             AreaMargin { x: 40, y: 80 },
         );
         render_chart(
-            &mut self.charts.pkt_tx_counts_chart_info,
+            &mut self.charts.ack_counts,
             self.ss.as_ref(),
             &params,
             |params, ss| {
@@ -628,7 +607,7 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the packet sent plot into the provided canvas_id.
+    /// Draws the packet sent plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -644,7 +623,7 @@ impl QlogDancerWeb {
             AreaMargin { x: 40, y: 5 },
         );
         render_chart(
-            &mut self.charts.pkt_tx_delta_chart_info,
+            &mut self.charts.send_delta,
             self.ss.as_ref(),
             &params,
             |params, ss| {
@@ -658,7 +637,7 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the packet sent plot into the provided canvas_id.
+    /// Draws the packet sent plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
@@ -674,7 +653,7 @@ impl QlogDancerWeb {
             AreaMargin { x: 40, y: 80 },
         );
         render_chart(
-            &mut self.charts.pkt_tx_pacing_chart_info,
+            &mut self.charts.pacing,
             self.ss.as_ref(),
             &params,
             |params, ss| {
@@ -689,12 +668,12 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the stream multiplexing plot into the provided canvas_id.
+    /// Draws the stream multiplexing plot into the provided `canvas_id`.
     ///
     /// # Errors
     /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_stream_multiplexing(
-        &mut self, canvas_id: &str,
+        &self, canvas_id: &str,
     ) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let multiplex_params = MultiplexPlotsParams {
