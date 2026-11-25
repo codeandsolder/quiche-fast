@@ -92,3 +92,12 @@ jobs:
       cargo-args: ${{ matrix['cargo-args'] }}
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
       ban-python-outside-ci: true
+
+
+  strict-qlog-dancer-wasm:
+    name: "qlog-dancer (wasm32)"
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    with:
+      cargo-args: "--locked --no-deps -p qlog-dancer --lib --target wasm32-unknown-unknown"
+      rust-targets: "wasm32-unknown-unknown"
+      ban-python-outside-ci: true
