@@ -2726,12 +2726,12 @@ mod netlog_tests {
             (
                 102,
                 "QUIC_SESSION_WINDOW_UPDATE_FRAME_SENT",
-                serde_json::json!({"stream_id":-2147483648,"byte_offset":100}),
+                serde_json::json!({"stream_id":-2_147_483_648,"byte_offset":100}),
             ),
             (
                 103,
                 "QUIC_SESSION_STREAM_FRAME_RECEIVED",
-                serde_json::json!({"stream_id":-2147483648,"offset":0,"length":50,"fin":true}),
+                serde_json::json!({"stream_id":-2_147_483_648,"offset":0,"length":50,"fin":true}),
             ),
             (
                 104,
@@ -2741,7 +2741,7 @@ mod netlog_tests {
             (
                 105,
                 "QUIC_SESSION_BLOCKED_FRAME_RECEIVED",
-                serde_json::json!({"stream_id":-2147483648}),
+                serde_json::json!({"stream_id":-2_147_483_648}),
             ),
             (
                 106,
