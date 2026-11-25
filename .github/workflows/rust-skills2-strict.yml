@@ -39,3 +39,20 @@ jobs:
       cargo-args: ${{ matrix['cargo-args'] }}
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
       ban-python-outside-ci: true
+
+
+  strict-quiche-apps:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - configuration: default
+            cargo-args: "--locked --no-deps -p quiche_apps --all-targets"
+          - configuration: minimal
+            cargo-args: "--locked --no-deps -p quiche_apps --all-targets --no-default-features"
+    name: "quiche apps (${{ matrix.configuration }})"
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    with:
+      cargo-args: ${{ matrix['cargo-args'] }}
+      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
+      ban-python-outside-ci: true
