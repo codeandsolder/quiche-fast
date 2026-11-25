@@ -121,6 +121,20 @@ pub mod socket;
 #[cfg(test)]
 mod test_credentials;
 
+#[cfg(test)]
+fn poison_test_mutex<T>(mutex: &std::sync::Mutex<T>) {
+    // Unwind while the guard is alive without invoking the process-global
+    // panic hook. This intentionally exercises std's poison recovery path.
+    let result = std::panic::catch_unwind(|| {
+        let _guard = mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::panic::resume_unwind(Box::new("intentional test mutex poison"));
+    });
+    assert!(result.is_err());
+    assert!(mutex.is_poisoned());
+}
+
 pub use datagram_socket;
 
 use foundations::telemetry::settings::LogVerbosity;

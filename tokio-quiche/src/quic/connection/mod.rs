@@ -925,24 +925,12 @@ mod stats_lock_tests {
     use super::*;
 
     #[test]
-    #[expect(
-        clippy::panic,
-        reason = "this test must unwind while holding the mutex to poison it"
-    )]
     fn connection_stats_recover_after_lock_poisoning() {
         let stats = Arc::new(Mutex::new(QuicConnectionStats {
             stats: quiche::Stats::default(),
             path_stats: None,
         }));
-        let poisoner = Arc::clone(&stats);
-
-        let thread_result = std::thread::spawn(move || {
-            let Ok(_guard) = poisoner.lock() else { return };
-            panic!("poison stats lock");
-        })
-        .join();
-        assert!(thread_result.is_err());
-        assert!(stats.is_poisoned());
+        crate::poison_test_mutex(&stats);
 
         assert_eq!(shared_socket_stats(&stats).packets_sent, 0);
 
