@@ -2523,7 +2523,7 @@ mod netlog_tests {
             };
             assert_eq!(history.observations(), [(0.0, Some(u64::MAX))]);
             assert_eq!(history.complete_bytes(), Some(u64::MAX));
-            assert!(ds.h2_send_window_updates_balanced.is_empty());
+            assert!(ds.h2_send_windows.histories().is_empty());
             assert_eq!(ds.netlog_h2_stream_received_connection_cumulative, []
                 as [(f64, u64); 0]);
         }
