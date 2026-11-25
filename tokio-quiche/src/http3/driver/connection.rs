@@ -99,10 +99,9 @@ impl<H: DriverHooks> H3Connection<H> {
 impl<H: DriverHooks> ShutdownConnection for H3Connection<H> {
     #[inline]
     fn poll_shutdown(
-        &mut self, _cx: &mut std::task::Context,
+        &mut self, cx: &mut std::task::Context<'_>,
     ) -> Poll<std::io::Result<()>> {
-        // TODO: does nothing at the moment
-        Poll::Ready(Ok(()))
+        self.quic_connection.poll_shutdown(cx)
     }
 }
 

@@ -284,6 +284,29 @@ async fn native_client_handshakes_and_exchanges_http3_request(
 }
 
 #[tokio::test]
+async fn native_client_shutdown_waits_for_worker_and_is_idempotent(
+) -> tokio_quiche::QuicResult<()> {
+    use datagram_socket::ShutdownConnectionExt as _;
+    let (url, _hook, _audit) = start_server();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(extract_host_ipv4(&url)).await?;
+    let (mut connection, mut controller) = timeout(
+        Duration::from_secs(5),
+        tokio_quiche::quic::connect(socket, Some("test.com")),
+    )
+    .await??;
+
+    // Keep the controller alive: shutdown must not depend on dropping it.
+    timeout(Duration::from_secs(3), connection.shutdown_connection()).await??;
+    connection.shutdown_connection().await?;
+    timeout(Duration::from_secs(2), async {
+        while controller.event_receiver_mut().recv().await.is_some() {}
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
 #[cfg(feature = "custom-client-dcid")]
 async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
     use tokio_quiche::http3::settings::Http3Settings;

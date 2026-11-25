@@ -51,6 +51,7 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -59,6 +60,8 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use self::error::make_handshake_result;
@@ -352,12 +355,19 @@ where
             self.params.metrics.connections_in_memory(),
         );
 
+        // The application does not need to service a command channel for
+        // shutdown to work. The worker owns the completion sender throughout
+        // its lifetime, including a paused handshake and close.
+        let shutdown_request = CancellationToken::new();
+        let (completion, completion_rx) = oneshot::channel();
         let conn = QuicConnection {
             local_addr: self.params.local_addr,
             peer_addr: self.params.peer_addr,
             audit_log_stats: Arc::clone(&self.audit_log_stats),
             stats: Arc::clone(&self.stats),
             scid: self.params.scid,
+            shutdown_request: shutdown_request.clone(),
+            shutdown_completion: Some(completion_rx),
         };
         let context = ConnectionStageContext {
             in_pkt: self.params.initial_pkt,
@@ -387,6 +397,8 @@ where
             init_rx_time: self.params.init_rx_time,
             metrics: self.params.metrics.clone(),
             handshake_info: self.params.handshake_info,
+            shutdown_request,
+            completion,
         };
 
         let handshake_fut = async move {
@@ -536,7 +548,11 @@ where
     pub peer_addr: SocketAddr,
 }
 
-/// Metadata about an established QUIC connection.
+/// Metadata and shutdown control for an established QUIC connection.
+///
+/// Shutdown requests a best-effort transport close and completes when the
+/// worker releases its connection resources. Dropping this metadata handle
+/// alone does not request shutdown.
 ///
 /// While this struct allows access to some facets of a QUIC connection, it
 /// notably does not represent the [quiche::Connection] itself. The crate
@@ -552,6 +568,8 @@ pub struct QuicConnection {
     audit_log_stats: Arc<QuicAuditStats>,
     stats: QuicConnectionStatsShared,
     scid: ConnectionId<'static>,
+    shutdown_request: CancellationToken,
+    shutdown_completion: Option<oneshot::Receiver<()>>,
 }
 
 impl QuicConnection {
@@ -635,28 +653,25 @@ where
     }
 }
 
-impl<Tx, M> ShutdownConnection for InitialQuicConnection<Tx, M>
-where
-    Tx: DatagramSocketSend + Send + 'static + ?Sized,
-    M: Metrics,
-{
-    #[inline]
-    fn poll_shutdown(
-        &mut self, _cx: &mut std::task::Context,
-    ) -> std::task::Poll<io::Result<()>> {
-        // TODO: Does nothing at the moment. We always call Self::start
-        // anyway so it's not really important at this moment.
-        Poll::Ready(Ok(()))
-    }
-}
-
+// An unstarted InitialQuicConnection owns its resources directly. Dropping
+// it releases them; it has no asynchronous shutdown operation.
 impl ShutdownConnection for QuicConnection {
-    #[inline]
     fn poll_shutdown(
-        &mut self, _cx: &mut std::task::Context,
-    ) -> std::task::Poll<io::Result<()>> {
-        // TODO: does nothing at the moment
-        Poll::Ready(Ok(()))
+        &mut self, cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.shutdown_request.cancel();
+        let Some(completion) = self.shutdown_completion.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(completion).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => {
+                // Even an aborted worker has released its owned resources.
+                // Do not repoll the completed oneshot.
+                self.shutdown_completion = None;
+                Poll::Ready(Ok(()))
+            },
+        }
     }
 }
 

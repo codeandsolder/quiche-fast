@@ -68,7 +68,9 @@ use quiche::Error as QuicheError;
 use quiche::SendInfo;
 use tokio::select;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time;
+use tokio_util::sync::CancellationToken;
 
 // Number of incoming packets to be buffered in the incoming channel.
 pub(crate) const INCOMING_QUEUE_SIZE: usize = 2048;
@@ -292,6 +294,9 @@ pub(crate) struct IoWorkerParams<Tx, M> {
     pub(crate) init_rx_time: Option<SystemTime>,
     pub(crate) metrics: M,
     pub(crate) handshake_info: HandshakeInfo,
+    pub(crate) shutdown_request: CancellationToken,
+    // Dropped after the worker-owned route, gauge and socket handles.
+    pub(crate) completion: oneshot::Sender<()>,
 }
 
 fn notify_path_events(
@@ -329,6 +334,8 @@ pub(crate) struct IoWorker<Tx, M, S> {
     handshake_info: HandshakeInfo,
     conn_stage: S,
     bw_estimator: BandwidthReporter,
+    shutdown_request: CancellationToken,
+    completion: oneshot::Sender<()>,
 }
 
 impl<Tx, M, S> IoWorker<Tx, M, S>
@@ -356,6 +363,8 @@ where
             handshake_info: params.handshake_info,
             conn_stage,
             bw_estimator: params.bw_estimator,
+            shutdown_request: params.shutdown_request,
+            completion: params.completion,
         }
     }
 
@@ -389,7 +398,29 @@ where
         self.fill_available_scids(qconn).await
     }
 
+    /// Cancellation covers the whole I/O loop, including blocked writes and
+    /// CID registration. Egress generated before cancellation is never
+    /// replayed; close emits a fresh best-effort CONNECTION_CLOSE flight.
     async fn work_loop<A: ApplicationOverQuic>(
+        &mut self, qconn: &mut QuicheConnection,
+        ctx: &mut ConnectionStageContext<A>,
+    ) -> QuicResult<()> {
+        let request = self.shutdown_request.clone();
+        tokio::select! {
+            biased;
+            () = request.cancelled() => {
+                let _ = qconn.close(false, quiche::WireErrorCode::NoError as u64, &[]);
+                if qconn.is_established() {
+                    Ok(())
+                } else {
+                    Err(HandshakeError::ConnectionClosed.into())
+                }
+            },
+            result = self.drive_connection(qconn, ctx) => result,
+        }
+    }
+
+    async fn drive_connection<A: ApplicationOverQuic>(
         &mut self, qconn: &mut QuicheConnection,
         ctx: &mut ConnectionStageContext<A>,
     ) -> QuicResult<()> {
@@ -1241,6 +1272,8 @@ impl<Tx, M, S> From<IoWorker<Tx, M, S>> for IoWorkerParams<Tx, M> {
             init_rx_time: value.init_rx_time,
             metrics: value.metrics,
             handshake_info: value.handshake_info,
+            shutdown_request: value.shutdown_request,
+            completion: value.completion,
         }
     }
 }
@@ -1258,7 +1291,7 @@ where
         // handshake deadline, in which case no data must be passed to it.
         let mut work_loop_result = self.enforce_handshake_deadline(&mut qconn);
 
-        if work_loop_result.is_ok() {
+        if work_loop_result.is_ok() && !self.shutdown_request.is_cancelled() {
             // Perform a single call to process_reads()/process_writes(),
             // unconditionally, to ensure that any application data (e.g.
             // STREAM frames or datagrams) processed by the Handshake
