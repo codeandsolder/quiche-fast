@@ -1061,7 +1061,14 @@ mod tests {
         assert_eq!(router.socket_rx.calls, 1);
         assert!(router.poll_unpin(&mut cx).is_pending());
         assert_eq!(router.socket_rx.calls, 1);
-        tokio::time::advance(RECEIVE_RETRY_MIN).await;
+        // Wait on the actual registered deadline, including the runtime's
+        // timer-wheel rounding, rather than assuming a one-tick advance.
+        router
+            .receive_retry
+            .as_mut()
+            .ok_or("missing retry timer")?
+            .as_mut()
+            .await;
         assert!(router.poll_unpin(&mut cx).is_pending());
         assert_eq!(router.socket_rx.calls, 2);
         assert_eq!(router.retry_delay, RECEIVE_RETRY_MIN * 4);
