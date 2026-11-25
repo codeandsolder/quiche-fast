@@ -35,23 +35,25 @@ use datagram_socket::DatagramSocketSend;
 use datagram_socket::DatagramSocketSendExt;
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-mod linux_imports {
-    pub(super) use nix::sys::socket::sendmsg;
-    pub(super) use nix::sys::socket::ControlMessage;
-    pub(super) use nix::sys::socket::MsgFlags;
-    pub(super) use nix::sys::socket::SockaddrStorage;
-    pub(super) use smallvec::SmallVec;
-    pub(super) use std::io::ErrorKind;
-    pub(super) use std::os::fd::AsRawFd;
-    pub(super) use tokio::io::Interest;
-}
-
+use nix::sys::socket::sendmsg;
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-use self::linux_imports::*;
+use nix::sys::socket::ControlMessage;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use nix::sys::socket::MsgFlags;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use nix::sys::socket::SockaddrStorage;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use smallvec::SmallVec;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use std::io::ErrorKind;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use std::os::fd::AsRawFd;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use tokio::io::Interest;
 
 /// Metadata for one UDP datagram or one equal-sized GSO batch.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PacketSend {
+pub(in crate::quic) struct PacketSend {
     pub(crate) to: SocketAddr,
     pub(crate) from: Option<SocketAddr>,
     pub(crate) segment_size: Option<usize>,
@@ -71,7 +73,7 @@ impl PacketSend {
 /// Preserve UDP datagram boundaries even on a non-UDP transport wrapper.
 /// Ancillary options are independent of segmentation: a source address,
 /// pacing deadline or DSCP alone is sufficient to use sendmsg on Linux.
-pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
+async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
     socket: &S, buffer: &[u8], packet: PacketSend, metrics: &M,
 ) -> io::Result<()> {
     let segment_size = match checked_segment_size(packet.segment_size) {
@@ -116,7 +118,7 @@ pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
 /// Result of a deadline-bounded send. Expired batches are treated as packet
 /// loss by the QUIC worker, not retried with the same packet numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SendOutcome {
+pub(in crate::quic) enum SendOutcome {
     Sent,
     DeadlineExpired,
 }
@@ -124,7 +126,7 @@ pub(crate) enum SendOutcome {
 /// Cancel a pending datagram send when its owner needs to service a timer.
 /// Software segmentation may have already sent a prefix of the batch; the
 /// transport recovery machinery, rather than this layer, recovers its suffix.
-pub(crate) async fn send_packets_before<
+pub(in crate::quic) async fn send_packets_before<
     S: DatagramSocketSend + ?Sized,
     M: Metrics,
 >(
@@ -185,7 +187,7 @@ fn check_datagram_send<M: Metrics>(
 /// path-local or temporary network failure is therefore recoverable as
 /// ordinary loss. Local transport contract/configuration errors must not be
 /// silently converted into endless retransmission.
-pub(crate) fn recoverable_send_error(error: &io::Error) -> bool {
+pub(super) fn recoverable_send_error(error: &io::Error) -> bool {
     #[cfg(target_os = "linux")]
     if matches!(error.raw_os_error(), Some(libc::EMSGSIZE | libc::ENOBUFS)) {
         return true;
@@ -205,50 +207,48 @@ pub(crate) fn recoverable_send_error(error: &io::Error) -> bool {
 }
 
 // Maximum number of packets can be sent in UDP GSO.
-pub(crate) const UDP_MAX_SEGMENT_COUNT: usize = 64;
+pub(super) const UDP_MAX_SEGMENT_COUNT: usize = 64;
 
 #[cfg(not(feature = "gcongestion"))]
 /// Returns a new max send buffer size to avoid the fragmentation
-/// at the end. Maximum send buffer size is min(MAX_SEND_BUF_SIZE,
-/// connection's send_quantum).
+/// at the end. Maximum send buffer size is min(`MAX_SEND_BUF_SIZE`,
+/// connection's `send_quantum`).
 /// For example,
 ///
-/// - max_send_buf = 1000 and mss = 100, return 1000
-/// - max_send_buf = 1000 and mss = 90, return 990
+/// - `max_send_buf` = 1000 and `mss` = 100, return 1000
+/// - `max_send_buf` = 1000 and `mss` = 90, return 990
 ///
 /// not to have last 10 bytes packet.
-pub(crate) fn tune_max_send_size(
+pub(super) fn tune_max_send_size(
     segment_size: Option<usize>, send_quantum: usize, max_capacity: usize,
 ) -> usize {
     let max_send_buf_size = send_quantum.min(max_capacity);
 
-    if let Some(mss) = segment_size {
-        max_send_buf_size / mss * mss
-    } else {
-        max_send_buf_size
-    }
+    segment_size
+        .filter(|size| *size != 0)
+        .map_or(max_send_buf_size, |mss| max_send_buf_size / mss * mss)
 }
 
 // https://wiki.cfdata.org/pages/viewpage.action?pageId=436188159
-pub(crate) const UDP_MAX_GSO_PACKET_SIZE: usize = 65507;
+pub(super) const UDP_MAX_GSO_PACKET_SIZE: usize = 65507;
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum PktInfo {
+enum PktInfo {
     V4(libc::in_pktinfo),
     V6(libc::in6_pktinfo),
 }
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 impl PktInfo {
-    fn make_cmsg(&'_ self) -> ControlMessage<'_> {
+    const fn make_cmsg(&'_ self) -> ControlMessage<'_> {
         match self {
             Self::V4(pkt) => ControlMessage::Ipv4PacketInfo(pkt),
             Self::V6(pkt) => ControlMessage::Ipv6PacketInfo(pkt),
         }
     }
 
-    fn from_socket_addr(addr: SocketAddr) -> Self {
+    const fn from_socket_addr(addr: SocketAddr) -> Self {
         match addr {
             SocketAddr::V4(ipv4) => {
                 // This is basically a safe wrapper around `mem::transmute()`.
@@ -289,8 +289,8 @@ fn monotonic_timespec_ns(ts: libc::timespec) -> io::Result<u64> {
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-/// Translate an opaque Rust Instant relative to a sampled CLOCK_MONOTONIC
-/// value, without relying on Instant's private layout.
+/// Translate an opaque Rust Instant relative to a sampled `CLOCK_MONOTONIC`
+/// value, without relying on `Instant`'s private layout.
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 fn tx_time_from_anchor(
     deadline: Instant, anchor: Instant, anchor_ns: u64,
@@ -408,7 +408,7 @@ async fn send_to<M: Metrics>(
                     );
                 }
                 metrics.write_errors(QuicWriteError::WouldBlock).inc();
-                socket.writable().await?
+                socket.writable().await?;
             },
             res => return res,
         }

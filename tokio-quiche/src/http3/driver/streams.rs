@@ -74,8 +74,8 @@ pub(super) struct StreamCtx {
 }
 
 impl StreamCtx {
-    /// Creates a new [StreamCtx]. This method returns the [StreamCtx] itself
-    /// as well as the sender/receiver that it communicates with.
+    /// Creates a new [`StreamCtx`]. This method returns the [`StreamCtx`]
+    /// itself as well as the sender/receiver that it communicates with.
     pub(super) fn new(
         stream_id: u64, capacity: usize,
     ) -> (Self, OutboundFrameSender, InboundFrameStream) {
@@ -165,7 +165,7 @@ impl StreamCtx {
         self.audit_stats
             .set_sent_stop_sending_error_code(wire_err_code);
         // The peer must still send
-        // FIN or RESET_STREAM with its final size, but `quiche` handles
+        // FIN or `RESET_STREAM` with its final size, but `quiche` handles
         // that without an application read.
         self.close_read();
     }
@@ -293,7 +293,7 @@ impl Future for WaitForStream {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         match self.get_mut() {
             Self::Downstream { stream_id, chan } =>
-                poll_channel(chan, cx, |chan, cx| chan.poll_recv(cx)).map(
+                poll_channel(chan, cx, OutboundFrameStream::poll_recv).map(
                     |(chan, data)| {
                         StreamReady::Downstream(ReceivedDownstreamData {
                             stream_id: *stream_id,
@@ -303,7 +303,7 @@ impl Future for WaitForStream {
                     },
                 ),
             Self::Upstream { stream_id, chan } =>
-                poll_channel(chan, cx, |chan, cx| chan.poll_reserve(cx)).map(
+                poll_channel(chan, cx, InboundFrameSender::poll_reserve).map(
                     |(chan, _)| {
                         StreamReady::Upstream(HaveUpstreamCapacity {
                             stream_id: *stream_id,

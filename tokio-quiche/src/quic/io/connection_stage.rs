@@ -37,14 +37,14 @@ use crate::quic::hooks::ConnectionHook;
 use crate::quic::QuicheConnection;
 use crate::QuicResult;
 
-/// Represents the current lifecycle stage of a [quiche::Connection].
+/// Represents the current lifecycle stage of a [`quiche::Connection`].
 /// Implementors of this trait inform the underlying I/O loop as to how to
 /// behave.
 ///
 /// The I/O loop will always handle sending/receiving packets - this trait
 /// simply serves to augment its functionality. For example, an established
 /// HTTP/3 connection may want its `on_read` to include handing packets off to
-/// an [ApplicationOverQuic].
+/// an [`ApplicationOverQuic`].
 ///
 /// To prevent borrow checker conflicts, we inject a `qconn` into all methods.
 /// This also simplifies state transitions, since the `IoWorker` must maintain
@@ -65,7 +65,7 @@ pub trait ConnectionStage: Send + Debug {
     }
 }
 
-/// Global context shared across all [ConnectionStage]s for a given connection
+/// Global context shared across all [`ConnectionStage`]s for a given connection
 pub struct ConnectionStageContext<A> {
     pub in_pkt: Option<Incoming>,
     pub application: A,

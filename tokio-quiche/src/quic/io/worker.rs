@@ -38,7 +38,14 @@ use super::connection_stage::ConnectionStage;
 use super::connection_stage::ConnectionStageContext;
 use super::connection_stage::Handshake;
 use super::connection_stage::RunningApplication;
-use super::gso::*;
+use super::gso::recoverable_send_error;
+use super::gso::send_packets_before;
+#[cfg(not(feature = "gcongestion"))]
+use super::gso::tune_max_send_size;
+use super::gso::PacketSend;
+use super::gso::SendOutcome;
+use super::gso::UDP_MAX_GSO_PACKET_SIZE;
+use super::gso::UDP_MAX_SEGMENT_COUNT;
 use super::utilization_estimator::BandwidthReporter;
 
 use crate::metrics::labels;

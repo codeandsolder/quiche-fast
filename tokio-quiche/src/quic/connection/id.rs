@@ -59,7 +59,7 @@ pub type SharedConnectionIdGenerator = Arc<dyn ConnectionIdGenerator<'static>>;
 
 /// The short-header router has a fixed local CID length; reject an
 /// incompatible custom generator before publishing or sending its ID.
-pub(crate) fn generate_routable_cid(
+pub(in crate::quic) fn generate_routable_cid(
     generator: &dyn ConnectionIdGenerator<'static>,
 ) -> QuicResult<ConnectionId<'static>> {
     let cid = generator.new_connection_id()?;

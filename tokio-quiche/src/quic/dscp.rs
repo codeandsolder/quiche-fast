@@ -34,6 +34,7 @@ pub struct Dscp(u8);
 
 impl Dscp {
     /// Creates a DSCP value, rejecting values outside the six-bit range.
+    #[must_use = "invalid six-bit values are rejected"]
     pub const fn new(value: u8) -> Option<Self> {
         if value < UNMARKED {
             Some(Self(value))
@@ -43,6 +44,7 @@ impl Dscp {
     }
 
     /// Returns the six-bit DSCP value.
+    #[must_use = "the returned value is the six-bit code point"]
     pub const fn value(self) -> u8 {
         self.0
     }
@@ -75,6 +77,7 @@ impl DscpHandle {
     }
 
     /// Returns the currently selected marking, or `None` if disabled.
+    #[must_use = "the returned value is the configured marking"]
     pub fn get(&self) -> Option<Dscp> {
         Dscp::new(self.0.load(Ordering::Relaxed))
     }

@@ -130,7 +130,7 @@ impl LinuxReceiver {
             })
             .ok_or_else(|| invalid("UDP source address is missing or not IP"))?;
         let metadata = Ancillary::decode(message.cmsgs()?)?;
-        let payload = message.iovs().next().map(Vec::from).unwrap_or_default();
+        let payload = message.iovs().next().map_or_else(Vec::new, Vec::from);
         if payload.len() != message.bytes {
             return Err(invalid(
                 "UDP payload length does not match recvmsg result",
@@ -196,7 +196,7 @@ impl Ancillary {
                     let size = usize::try_from(size)
                         .ok()
                         .and_then(NonZeroUsize::new)
-                        .filter(|size| size.get() <= usize::from(u16::MAX))
+                        .filter(|size| u16::try_from(size.get()).is_ok())
                         .ok_or_else(|| invalid("invalid UDP GRO segment size"))?;
                     metadata.segment_size = Some(size);
                 },
