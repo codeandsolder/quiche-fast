@@ -27,7 +27,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -47,22 +46,21 @@ use crate::request_stub::NaOption;
 use crate::trackers::StreamBufferTracker;
 use crate::trackers::StreamMaxTracker;
 use crate::trackers::TrackerError;
-use crate::LogFileData;
 use crate::PacketType;
 use crate::QlogPointRtt;
 use crate::QlogPointu64;
-use crate::RawLogEvents::Netlog;
 use netlog;
 use netlog::h2;
-use netlog::h2::Event::*;
-use netlog::h2::*;
+use netlog::h2::Http2Settings;
 use netlog::h3;
-use netlog::h3::Event::*;
-use netlog::http;
 use netlog::quic;
-use netlog::quic::Event::*;
-use netlog::quic::*;
-use netlog::read_netlog_record;
+use netlog::quic::TransportParameters;
+
+mod netlog_reader;
+pub use netlog_reader::with_netlog_reader;
+pub use netlog_reader::NetlogSession;
+pub use netlog_reader::QuicRequestDiscovery;
+pub use netlog_reader::StreamBindingMap;
 
 pub type ParseResult<T> = Result<T, serde_json::Error>;
 #[derive(Debug, Clone)]
@@ -110,8 +108,8 @@ pub enum RequestActor {
 impl From<VantagePoint> for RequestActor {
     fn from(value: VantagePoint) -> Self {
         match value {
-            VantagePoint::Client => RequestActor::Client,
-            VantagePoint::Server => RequestActor::Server,
+            VantagePoint::Client => Self::Client,
+            VantagePoint::Server => Self::Server,
         }
     }
 }
@@ -218,11 +216,11 @@ impl Debug for ApplicationProto {
 impl Display for ApplicationProto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let v = match self {
-            ApplicationProto::Http2 => "HTTP/2",
-            ApplicationProto::Http3 => "HTTP/3",
+            Self::Http2 => "HTTP/2",
+            Self::Http3 => "HTTP/3",
         };
 
-        write!(f, "{}", v)
+        write!(f, "{v}")
     }
 }
 
@@ -300,7 +298,7 @@ pub struct H2StreamReset {
 
 impl Display for H2StreamReset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "code={}, {}", self.error, self.description,)
+        write!(f, "code={}, {}", self.error, self.description)
     }
 }
 
@@ -514,8 +512,9 @@ fn cumulative_total(
     checked_netlog_sum(values.last().map_or(0, |value| value.1), length, field)
 }
 
-/// Initial receive limits are relative to the endpoint advertising them,
-/// not the vantage point of the log. For bidirectional streams bit zero
+/// Initial receive limits are relative to the endpoint advertising them.
+///
+/// For bidirectional streams bit zero
 /// selects the initiator; bit one identifies unidirectional streams.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InitialStreamLimits {
@@ -651,7 +650,7 @@ impl Datastore {
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         event: &netlog::Event, constants: &netlog::constants::Constants,
         stream_bind: &StreamBindingMap,
-        h3_session_requests: Option<&[ReqOverH3]>,
+        h3_session_requests: Option<&QuicRequestDiscovery>,
     ) -> Result<(), DatastoreError> {
         match event {
             // nothing to do for this type just now
@@ -858,34 +857,36 @@ impl Datastore {
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            QuicSessionStreamFrameReceived(e) => self
+            quic::Event::QuicSessionStreamFrameReceived(e) => self
                 .record_netlog_received_quic_stream_frame(
                     &e.params,
                     rel_event_time,
                 )?,
 
-            QuicSessionUnauthenticatedPacketHeaderReceived(e) => self
-                .record_netlog_received_packet_header(
+            quic::Event::QuicSessionUnauthenticatedPacketHeaderReceived(e) =>
+                self.record_netlog_received_packet_header(
                     &e.params,
                     rel_event_time,
                 )?,
 
-            QuicSessionPacketSent(e) =>
+            quic::Event::QuicSessionPacketSent(e) =>
                 self.record_netlog_sent_packet(&e.params, rel_event_time),
 
-            QuicSessionAckFrameSent(e) => self.record_netlog_ack_gaps(
-                NetlogAckDirection::Sent,
-                &e.params.missing_packets,
-                rel_event_time,
-            )?,
+            quic::Event::QuicSessionAckFrameSent(e) => self
+                .record_netlog_ack_gaps(
+                    NetlogAckDirection::Sent,
+                    &e.params.missing_packets,
+                    rel_event_time,
+                )?,
 
-            QuicSessionAckFrameReceived(e) => self.record_netlog_ack_gaps(
-                NetlogAckDirection::Received,
-                &e.params.missing_packets,
-                rel_event_time,
-            )?,
+            quic::Event::QuicSessionAckFrameReceived(e) => self
+                .record_netlog_ack_gaps(
+                    NetlogAckDirection::Received,
+                    &e.params.missing_packets,
+                    rel_event_time,
+                )?,
 
-            QuicSessionClosed(e) => {
+            quic::Event::QuicSessionClosed(e) => {
                 self.quic_session_close = Some(QuicSessionClose {
                     session_id: self.session_id.unwrap_or(-1),
                     sni: self
@@ -904,7 +905,7 @@ impl Datastore {
                 });
             },
 
-            QuicSessionRstStreamFrameReceived(e) => self
+            quic::Event::QuicSessionRstStreamFrameReceived(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -914,7 +915,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionRstStreamFrameSent(e) => self
+            quic::Event::QuicSessionRstStreamFrameSent(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -924,7 +925,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionStopSendingFrameSent(e) => self
+            quic::Event::QuicSessionStopSendingFrameSent(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -932,7 +933,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionBlockedFrameReceived(e) => {
+            quic::Event::QuicSessionBlockedFrameReceived(e) => {
                 let s = self
                     .netlog_quic_server_window_blocked
                     .entry(e.params.stream_id)
@@ -940,7 +941,7 @@ impl Datastore {
                 s.push(rel_event_time);
             },
 
-            QuicSessionWindowUpdateFrameSent(e) => {
+            quic::Event::QuicSessionWindowUpdateFrameSent(e) => {
                 let s = self
                     .netlog_quic_client_side_window_updates
                     .entry(e.params.stream_id)
@@ -949,7 +950,7 @@ impl Datastore {
                 s.push((rel_event_time, e.params.byte_offset));
             },
 
-            QuicSessionTransportParametersSent(e) => {
+            quic::Event::QuicSessionTransportParametersSent(e) => {
                 self.client_quic_tps =
                     e.params.quic_transport_parameters.clone().into();
 
@@ -965,7 +966,8 @@ impl Datastore {
             },
 
             // ignore the other events for now
-            QuicSession(_) | QuicSessionTransportParametersReceived(_) => (),
+            quic::Event::QuicSession(_) |
+            quic::Event::QuicSessionTransportParametersReceived(_) => (),
         }
         Ok(())
     }
@@ -1097,61 +1099,50 @@ impl Datastore {
 
     fn consume_netlog_h3(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
-        ev: &h3::Event, h3_session_requests: Option<&[ReqOverH3]>,
+        ev: &h3::Event, h3_session_requests: Option<&QuicRequestDiscovery>,
     ) -> Result<(), DatastoreError> {
         let rel_event_time =
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            Http3PriorityUpdateSent(e) => {
+            h3::Event::Http3PriorityUpdateSent(e) => {
                 let req =
                     self.get_or_insert_http_req(e.params.prioritized_element_id);
                 req.priority_updates
                     .push(e.params.priority_field_value.clone());
             },
 
-            Http3HeadersSent(e) => {
+            h3::Event::Http3HeadersSent(e) => {
                 let req = self.get_or_insert_http_req(e.params.stream_id);
                 req.time_first_headers_tx.get_or_insert(rel_event_time);
                 req.set_request_info_from_netlog(&e.params.headers);
 
-                if let Some(reqs) = h3_session_requests {
-                    for r in reqs {
-                        if let Some(stream_id) = r.quic_stream_id {
-                            if stream_id == e.params.stream_id {
-                                // Request discovery may precede session start.
-                                req.time_discovery = Some(netlog_relative_time(
-                                    r.discover_time,
-                                    session_start_time,
-                                ));
-                                break;
-                            }
-                        }
-                    }
+                if let Some(time) = h3_session_requests
+                    .and_then(|requests| requests.get(&e.params.stream_id))
+                {
+                    req.time_discovery =
+                        Some(netlog_relative_time(*time, session_start_time));
                 }
             },
 
-            // TODO: this is reception of headers frame, before the field
-            // section is decoded. Ignore for now and just use the decoded
-            // event.
-            Http3HeadersReceived(_) => (),
-
-            Http3HeadersDecoded(e) => {
+            h3::Event::Http3HeadersDecoded(e) => {
                 let req = self.get_or_insert_http_req(e.params.stream_id);
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http3DataFrameReceived(e) => self.record_netlog_received_data(
-                ApplicationProto::Http3,
-                e.params.stream_id,
-                e.params.payload_length,
-                rel_event_time,
-            )?,
+            h3::Event::Http3DataFrameReceived(e) => self
+                .record_netlog_received_data(
+                    ApplicationProto::Http3,
+                    e.params.stream_id,
+                    e.params.payload_length,
+                    rel_event_time,
+                )?,
 
-            // TODO: track outbound HTTP/3 DATA once netlog exposes the needed
-            // accounting.
-            Http3DataSent(_) => (),
+            // Decoded headers are handled above; outbound DATA still lacks
+            // complete accounting in the datastore.
+            h3::Event::Http3HeadersReceived(_) | h3::Event::Http3DataSent(_) =>
+                (),
         }
         Ok(())
     }
@@ -1245,22 +1236,21 @@ impl Datastore {
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            Http2SessionSendSettings(e) => {
+            h2::Event::Http2SessionSendSettings(e) =>
                 match Http2Settings::try_from(e.params.settings.as_slice()) {
                     Ok(v) => self.h2_client_settings = v,
 
-                    Err(e) => error!("{}", e),
-                }
-            },
+                    Err(e) => error!("{e}"),
+                },
 
-            Http2SessionRecvSetting(e) => {
+            h2::Event::Http2SessionRecvSetting(e) => {
                 if let Some(id) = h2::parse_recv_setting_id(&e.params.id) {
                     self.h2_server_settings.set_from_wire(id, e.params.value);
                 } else {
                     error!("parsing H2 setting {:?}", e.params);
                 }
             },
-            Http2SessionSendHeaders(e) => {
+            h2::Event::Http2SessionSendHeaders(e) => {
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_tx.get_or_insert(rel_event_time);
@@ -1269,34 +1259,34 @@ impl Datastore {
                 if let Some(sb) = stream_bind.get(&e.params.source_dependency.id)
                 {
                     // Discovery can precede the session's creation.
-                    req.time_discovery = Some(netlog_relative_time(
-                        sb.request_discovery_time,
-                        session_start_time,
-                    ));
+                    req.time_discovery =
+                        Some(netlog_relative_time(*sb, session_start_time));
                 }
             },
 
-            Http2SessionRecvHeaders(e) => {
+            h2::Event::Http2SessionRecvHeaders(e) => {
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http2SessionRecvData(e) => self.record_netlog_received_data(
-                ApplicationProto::Http2,
-                u64::from(e.params.stream_id),
-                u64::from(e.params.size),
-                rel_event_time,
-            )?,
+            h2::Event::Http2SessionRecvData(e) => self
+                .record_netlog_received_data(
+                    ApplicationProto::Http2,
+                    u64::from(e.params.stream_id),
+                    u64::from(e.params.size),
+                    rel_event_time,
+                )?,
 
-            Http2SessionSendData(e) => self.record_netlog_sent_h2_data(
-                e.params.stream_id,
-                e.params.size,
-                rel_event_time,
-            )?,
+            h2::Event::Http2SessionSendData(e) => self
+                .record_netlog_sent_h2_data(
+                    e.params.stream_id,
+                    e.params.size,
+                    rel_event_time,
+                )?,
 
-            Http2SessionRecvWindowUpdate(e) => self
+            h2::Event::Http2SessionRecvWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
                     NetlogH2Direction::Received,
                     e.params.stream_id,
@@ -1304,7 +1294,7 @@ impl Datastore {
                     rel_event_time,
                 ),
 
-            Http2SessionSendWindowUpdate(e) => self
+            h2::Event::Http2SessionSendWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
                     NetlogH2Direction::Sent,
                     e.params.stream_id,
@@ -1312,37 +1302,37 @@ impl Datastore {
                     rel_event_time,
                 ),
 
-            Http2SessionClose(e) =>
+            h2::Event::Http2SessionClose(e) =>
                 self.record_netlog_h2_session_close(&e.params, constants),
 
-            Http2SessionSendRstStream(e) => self.record_netlog_h2_stream_reset(
-                NetlogH2Direction::Sent,
-                e.params.stream_id,
-                &e.params.error_code,
-                Some(&e.params.description),
-            ),
+            h2::Event::Http2SessionSendRstStream(e) => self
+                .record_netlog_h2_stream_reset(
+                    NetlogH2Direction::Sent,
+                    e.params.stream_id,
+                    &e.params.error_code,
+                    Some(&e.params.description),
+                ),
 
-            Http2SessionRecvRstStream(e) => self.record_netlog_h2_stream_reset(
-                NetlogH2Direction::Received,
-                e.params.stream_id,
-                &e.params.error_code,
-                None,
-            ),
+            h2::Event::Http2SessionRecvRstStream(e) => self
+                .record_netlog_h2_stream_reset(
+                    NetlogH2Direction::Received,
+                    e.params.stream_id,
+                    &e.params.error_code,
+                    None,
+                ),
 
-            // ignore the other events for now
-            Http2Session(_) => (),
-            Http2SessionInitialized(_) => (),
-            Http2SessionUpdateRecvWindow(_) => (),
-            Http2SessionUpdateSendWindow(_) => (),
-            Http2SessionUpdateStreamsSendWindowSize(_) => (),
-            Http2SessionStalledMaxStreams(_) => (),
-
-            Http2StreamUpdateSendWindow(_) => (),
-            Http2StreamUpdateRecvWindow(_) => (),
-            Http2StreamStalledByStreamSendWindow(_) => (),
-            Http2SessionPing(_) => (),
-
-            Http2SessionRecvGoaway(_) => (),
+            // Recognized netlog events with no datastore series.
+            h2::Event::Http2Session(_) |
+            h2::Event::Http2SessionInitialized(_) |
+            h2::Event::Http2SessionUpdateRecvWindow(_) |
+            h2::Event::Http2SessionUpdateSendWindow(_) |
+            h2::Event::Http2SessionUpdateStreamsSendWindowSize(_) |
+            h2::Event::Http2SessionStalledMaxStreams(_) |
+            h2::Event::Http2StreamUpdateSendWindow(_) |
+            h2::Event::Http2StreamUpdateRecvWindow(_) |
+            h2::Event::Http2StreamStalledByStreamSendWindow(_) |
+            h2::Event::Http2SessionPing(_) |
+            h2::Event::Http2SessionRecvGoaway(_) => (),
         }
         Ok(())
     }
@@ -1412,7 +1402,7 @@ impl Datastore {
     ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
-        let mut ds = Datastore {
+        let mut ds = Self {
             vantage_point: vp,
             ..Default::default()
         };
@@ -1428,12 +1418,12 @@ impl Datastore {
     }
 
     pub fn finalize(&mut self) {
-        if let Some(last) = self.local_cwnd.last().cloned() {
+        if let Some(last) = self.local_cwnd.last().copied() {
             self.local_cwnd.push((self.last_event_time, last.1));
         }
 
-        if let Some(last) = self.local_pacing_rate.last().cloned() {
-            trace!("pushing last {:?}", last);
+        if let Some(last) = self.local_pacing_rate.last().copied() {
+            trace!("pushing last {last:?}");
             self.local_pacing_rate.push((self.last_event_time, last.1));
         }
     }
@@ -1663,21 +1653,14 @@ impl Datastore {
                     },
 
                     QuicFrame::DataBlocked { limit, .. } => {
-                        trace!(
-                            "todo DATA_BLOCKED t={} limit={}",
-                            event_time,
-                            limit
-                        );
+                        trace!("todo DATA_BLOCKED t={event_time} limit={limit}");
                     },
 
                     QuicFrame::StreamDataBlocked {
                         stream_id, limit, ..
                     } => {
                         trace!(
-                            "todo STREAM_DATA_BLOCKED t={} stream={} limit={}",
-                            event_time,
-                            stream_id,
-                            limit
+                            "todo STREAM_DATA_BLOCKED t={event_time} stream={stream_id} limit={limit}"
                         );
                     },
 
@@ -1755,19 +1738,26 @@ impl Datastore {
         }
 
         // Extract rate metrics from ex_data
-        if let Some(rate) =
-            mu.ex_data.get("cf_delivery_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_delivery_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_delivery_rate.push((ev_time, rate));
         }
 
-        if let Some(rate) =
-            mu.ex_data.get("cf_send_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_send_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_send_rate.push((ev_time, rate));
         }
 
-        if let Some(rate) = mu.ex_data.get("cf_ack_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_ack_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_ack_rate.push((ev_time, rate));
         }
@@ -1845,7 +1835,7 @@ impl Datastore {
                         req.time_data_rx_set.push((ev_time, length));
                         self.largest_data_frame_rx_length_global =
                             self.largest_data_frame_rx_length_global.max(length);
-                        if let VantagePoint::Client = self.vantage_point {
+                        if matches!(self.vantage_point, VantagePoint::Client) {
                             self.received_data_frames
                                 .entry(stream_id)
                                 .or_default()
@@ -1886,7 +1876,7 @@ impl Datastore {
     ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
-        let mut ds = Datastore {
+        let mut ds = Self {
             total_sent_stream_frame_count: 0,
             vantage_point: vp,
             ..Default::default()
@@ -1900,7 +1890,7 @@ impl Datastore {
 
                 qlog::reader::Event::Json(ev) => {
                     // Just swallow the failure and move on
-                    error!("unhandled Json event {:?}", ev);
+                    error!("unhandled Json event {ev:?}");
                 },
             }
         }
@@ -1910,284 +1900,6 @@ impl Datastore {
 
         Ok(ds)
     }
-}
-
-#[derive(Tabled)]
-pub struct NetlogSession {
-    #[tabled(rename = "ID")]
-    session_id: i64,
-    #[tabled(rename = "Protocol")]
-    application_proto: ApplicationProto,
-    #[tabled(rename = "SNI")]
-    host: String,
-    start_time: u64,
-}
-
-impl Debug for NetlogSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "app proto={:?}, host={}",
-            self.application_proto, self.host
-        )
-    }
-}
-
-pub struct RequestDiscovery {
-    pub time: u64,
-    pub stream_job_id: Option<i64>,
-}
-
-pub struct StreamBind {
-    pub time: u64,
-    pub request_discovery_id: i64,
-    pub request_discovery_time: u64,
-}
-
-pub type RequestDiscoveryMap = BTreeMap<i64, RequestDiscovery>;
-pub type StreamBindingMap = BTreeMap<i64, StreamBind>;
-
-#[derive(Debug)]
-pub struct ReqOverH3 {
-    pub id: i64,
-    pub discover_time: u64,
-    pub session_id: Option<i64>,
-    pub quic_stream_id: Option<u64>,
-}
-
-pub type RequestOverH3Map = BTreeMap<i64, Vec<ReqOverH3>>;
-
-/// Parse selected Chrome netlog sessions into independent datastores.
-///
-/// # Errors
-/// Returns arithmetic overflow instead of producing wrapped byte histories;
-/// callers discard the partially built session collection on failure.
-pub fn with_netlog_reader<R: std::io::BufRead, S: std::hash::BuildHasher>(
-    reader: &mut R, hostname_filter: &HashSet<String, S>,
-    constants: &netlog::constants::Constants,
-) -> Result<(Vec<LogFileData>, BTreeMap<i64, NetlogSession>), DatastoreError> {
-    // second line in a netlog is always `"events": [` so skip it
-    let _ = read_netlog_record(reader);
-
-    let mut sessions: BTreeMap<i64, NetlogSession> = BTreeMap::new();
-    let mut session_events: BTreeMap<
-        i64,
-        Vec<(netlog::EventHeader, netlog::Event)>,
-    > = BTreeMap::new();
-
-    let mut h3_session_requests: RequestOverH3Map = BTreeMap::new();
-
-    let mut req_id_to_session_id: BTreeMap<i64, i64> = BTreeMap::new();
-
-    let mut request_discovery: RequestDiscoveryMap = BTreeMap::new();
-    let mut stream_bind: StreamBindingMap = BTreeMap::new();
-
-    while let Some(event) = read_netlog_record(reader) {
-        let res: Result<netlog::EventHeader, serde_json::Error> =
-            serde_json::from_slice(&event);
-
-        match res {
-            Ok(mut event_hdr) => {
-                if let Err(error) = event_hdr.populate_strings(constants) {
-                    log::warn!(
-                        "Skipping netlog record with undefined event ID: {error}"
-                    );
-                    continue;
-                }
-                let Ok(time) = event_hdr.time.parse::<u64>() else {
-                    log::warn!(
-                        "Skipping netlog {} record with invalid timestamp {:?}",
-                        event_hdr.ty_string,
-                        event_hdr.time
-                    );
-                    continue;
-                };
-                event_hdr.time_num = time;
-
-                // If this is a session creation, store the session, so we can
-                // link events with it. The source ID of these events is the
-                // unique value that we will use to link things together.
-                // This assumes events belonging to a session do not occur
-                // before the session is created.
-                if event_hdr.phase_string == "PHASE_BEGIN" {
-                    match event_hdr.ty_string.as_str() {
-                        "QUIC_SESSION" => {
-                            let ev: QuicSessionEvent =
-                                match serde_json::from_slice(&event) {
-                                    Ok(value) => value,
-                                    Err(error) => {
-                                        log::warn!("Skipping malformed QUIC_SESSION: {error}");
-                                        continue;
-                                    },
-                                };
-
-                            // QUIC sessions split host and port, which
-                            // interferes with filter expression, so merge them
-                            let host =
-                                format!("{}:{}", ev.params.host, ev.params.port,);
-
-                            sessions.insert(event_hdr.source.id, NetlogSession {
-                                session_id: event_hdr.source.id,
-                                application_proto: ApplicationProto::Http3,
-                                host: host.clone(),
-                                start_time: event_hdr.time_num,
-                            });
-
-                            let do_insert = hostname_filter.is_empty() ||
-                                hostname_filter.contains(&host);
-
-                            if do_insert {
-                                session_events
-                                    .insert(event_hdr.source.id, Vec::new());
-
-                                h3_session_requests
-                                    .insert(event_hdr.source.id, Vec::new());
-                            }
-                        },
-
-                        "HTTP2_SESSION" => {
-                            let ev: Http2SessionEvent =
-                                match serde_json::from_slice(&event) {
-                                    Ok(value) => value,
-                                    Err(error) => {
-                                        log::warn!("Skipping malformed HTTP2_SESSION: {error}");
-                                        continue;
-                                    },
-                                };
-
-                            sessions.insert(event_hdr.source.id, NetlogSession {
-                                session_id: event_hdr.source.id,
-                                application_proto: ApplicationProto::Http2,
-                                host: ev.params.host.clone(),
-                                start_time: event_hdr.time_num,
-                            });
-
-                            let do_insert = hostname_filter.is_empty() ||
-                                hostname_filter.contains(&ev.params.host);
-
-                            if do_insert {
-                                session_events
-                                    .insert(event_hdr.source.id, Vec::new());
-                            }
-                        },
-
-                        "CORS_REQUEST" => {
-                            // Seems to be the earliest netlog event related to
-                            // any request.
-                            request_discovery.insert(
-                                event_hdr.source.id,
-                                RequestDiscovery {
-                                    time: event_hdr.time_num,
-                                    stream_job_id: None,
-                                },
-                            );
-                        },
-
-                        _ => (),
-                    }
-                }
-
-                if event_hdr.ty_string.starts_with("HTTP_") {
-                    let event = netlog::http::parse_event(&event_hdr, &event);
-
-                    if let Some(netlog::Event::Http(e)) = event {
-                        match e {
-                                http::Event::HttpStreamJobBoundToRequest(v)  => {
-                                    let request_discovery_id = v.params.source_dependency.id;
-                                    if let Some(rd) = request_discovery.get_mut(&request_discovery_id) {
-                                        stream_bind.insert(event_hdr.source.id, StreamBind{time: event_hdr.time_num, request_discovery_id, request_discovery_time: rd.time});
-                                        rd.stream_job_id = Some(event_hdr.source.id);
-                                    }
-                                },
-
-                                http::Event::HttpStreamRequestBoundToQuicSession(v) => {
-                                    let request_discovery_id = event_hdr.source.id;
-                                    if let Some(rd) = request_discovery.get(&request_discovery_id) {
-
-                                        if let Some(session_requests) = h3_session_requests.get_mut(&v.params.source_dependency.id) {
-                                            let req = ReqOverH3{id: event_hdr.source.id, discover_time: rd.time, session_id: Some(v.params.source_dependency.id), quic_stream_id: None };
-                                            session_requests.push(req);
-
-                                            // populate reverse mapping, each unique request ID has a session ID
-                                            req_id_to_session_id.insert(event_hdr.source.id, v.params.source_dependency.id);
-                                        }
-                                    }
-                                }
-
-                                http::Event::HttpTransactionQuicSendRequestHeaders(v) => {
-                                    let req_id = event_hdr.source.id;
-                                    if let Some(session_id) = req_id_to_session_id.get(&req_id) {
-                                        if let Some(reqs) = h3_session_requests.get_mut(session_id) {
-                                            // todo replace vec with map?
-                                            for req in reqs {
-                                                if req.id == req_id {
-                                                    req.quic_stream_id = Some(v.params.quic_stream_id);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                            _ => (),
-                        }
-                    }
-                }
-
-                if let Some(session) =
-                    session_events.get_mut(&event_hdr.source.id)
-                {
-                    if let Some(ev) = netlog::parse_event(&event_hdr, &event) {
-                        session.push((event_hdr, ev));
-                    }
-                }
-            },
-
-            Err(e) => {
-                error!("Error deserializing: {}", e);
-                error!("input value {}", String::from_utf8_lossy(&event));
-
-                // Just swallow the failure and move on
-            },
-        }
-    }
-
-    println!("All sessions in this netlog = {:#?}", sessions);
-
-    let mut log_file_data = Vec::new();
-
-    for (session_id, details) in &sessions {
-        if let Some(events) = session_events.remove(session_id) {
-            let mut ds = Datastore {
-                session_id: Some(*session_id),
-                application_proto: details.application_proto,
-                host: Some(details.host.clone()),
-                total_sent_stream_frame_count: 0,
-                ..Default::default()
-            };
-
-            for (ev_hdr, event) in &events {
-                ds.consume_netlog_event(
-                    details.start_time,
-                    ev_hdr,
-                    event,
-                    constants,
-                    &stream_bind,
-                    h3_session_requests.get(session_id).map(Vec::as_slice),
-                )?;
-            }
-
-            ds.hydrate_http_requests();
-            ds.finalize();
-            log_file_data.push(LogFileData {
-                datastore: ds,
-                raw: Netlog { events },
-                trace: None,
-            });
-        }
-    }
-
-    Ok((log_file_data, sessions))
 }
 
 #[cfg(test)]
@@ -2283,7 +1995,7 @@ mod input_tests {
                     assert_eq!(tracker.sum_series(), vec![(2.0, 10)]);
                 } else {
                     assert_eq!(tracker.get_stream_max(13), None);
-                    assert!(tracker.sum_series().is_empty());
+                    assert_eq!(tracker.sum_series(), []);
                 }
             }
         }
@@ -2400,8 +2112,8 @@ mod input_tests {
                 false,
             )
             .is_ok());
-        assert!(datastore.sent_max_data.is_empty());
-        assert!(datastore.received_max_data.is_empty());
+        assert_eq!(datastore.sent_max_data, []);
+        assert_eq!(datastore.received_max_data, []);
         assert_eq!(
             datastore.local_initial_stream_limits,
             super::InitialStreamLimits::default()
@@ -2453,9 +2165,11 @@ mod input_tests {
 #[cfg(test)]
 mod netlog_tests {
     use super::*;
+    use std::collections::HashSet;
+    use std::fmt::Write;
     use std::io::Cursor;
 
-    fn constants() -> netlog::constants::Constants {
+    fn constants() -> Result<netlog::constants::Constants, serde_json::Error> {
         let mut constants: netlog::constants::Constants =
             serde_json::from_value(serde_json::json!({
                 "activeFieldTrialGroups": [],
@@ -2479,14 +2193,14 @@ mod netlog_tests {
                 "quicRstStreamError": {"STREAM_CANCELLED": 42},
                 "secureDnsMode": {},
                 "timeTickOffset": 0
-            }))
-            .expect("valid minimal netlog constants fixture");
+            }))?;
         constants.populate_id_keyed();
-        constants
+        Ok(constants)
     }
 
     fn consume(
-        datastore: &mut Datastore, time: u64, event: &netlog::Event,
+        constants: &netlog::constants::Constants, datastore: &mut Datastore,
+        time: u64, event: &netlog::Event,
     ) -> Result<(), DatastoreError> {
         datastore.consume_netlog_event(
             100,
@@ -2495,7 +2209,7 @@ mod netlog_tests {
                 ..Default::default()
             },
             event,
-            &constants(),
+            constants,
             &StreamBindingMap::new(),
             None,
         )
@@ -2550,15 +2264,20 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_h2_h3_received_data_record_identical_per_stream_histories() {
+    fn netlog_h2_h3_received_data_record_identical_per_stream_histories(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut h2 = Datastore::default();
         let mut h3 = Datastore::default();
 
         for (time, length) in [(102, 5), (104, 7), (106, 0)] {
-            consume(&mut h2, time, &h2_received(9, length))
-                .expect("valid HTTP/2 DATA");
-            consume(&mut h3, time, &h3_received(9, u64::from(length)))
-                .expect("valid HTTP/3 DATA");
+            consume(&constants, &mut h2, time, &h2_received(9, length))?;
+            consume(
+                &constants,
+                &mut h3,
+                time,
+                &h3_received(9, u64::from(length)),
+            )?;
         }
 
         for ds in [&h2, &h3] {
@@ -2599,17 +2318,17 @@ mod netlog_tests {
             (4.0, 12),
             (6.0, 12)
         ]);
-        assert!(h3
-            .netlog_h2_stream_received_connection_cumulative
-            .is_empty());
+        assert_eq!(h3.netlog_h2_stream_received_connection_cumulative, []);
+        Ok(())
     }
 
     #[test]
-    fn netlog_h2_sent_data_updates_upload_histories_and_send_credit() {
+    fn netlog_h2_sent_data_updates_upload_histories_and_send_credit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         for (time, length) in [(101, 4), (105, 9), (108, 0)] {
-            consume(&mut datastore, time, &h2_sent(5, length))
-                .expect("valid HTTP/2 outbound DATA");
+            consume(&constants, &mut datastore, time, &h2_sent(5, length))?;
         }
 
         assert_eq!(datastore.total_sent_data_frame_count, 3);
@@ -2641,17 +2360,20 @@ mod netlog_tests {
         assert_eq!(request.client_transferred_bytes.inner, Some(13));
         assert_eq!(request.time_data_tx_set, vec![(1.0, 4), (5.0, 9), (8.0, 0)]);
         assert!(datastore.received_data_frames.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn netlog_data_counter_overflow_does_not_mutate_request_state() {
+    fn netlog_data_counter_overflow_does_not_mutate_request_state(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         for event in [h2_received(5, 1), h3_received(5, 1)] {
             let mut datastore = Datastore {
                 total_received_data_frame_count: u64::MAX,
                 ..Default::default()
             };
             assert!(matches!(
-                consume(&mut datastore, 105, &event),
+                consume(&constants, &mut datastore, 105, &event),
                 Err(DatastoreError::NetlogCounterOverflow {
                     field: "total_received_data_frame_count"
                 })
@@ -2667,7 +2389,7 @@ mod netlog_tests {
             ..Default::default()
         };
         assert!(matches!(
-            consume(&mut datastore, 105, &h2_sent(5, 1)),
+            consume(&constants, &mut datastore, 105, &h2_sent(5, 1)),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "total_sent_data_frame_count"
             })
@@ -2676,10 +2398,13 @@ mod netlog_tests {
         assert!(datastore.sent_data_frames.is_empty());
         assert!(datastore.sent_data_cumulative.is_empty());
         assert!(datastore.h2_send_window_updates_balanced.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn netlog_quic_reset_and_stop_sending_preserve_direction_and_error_names() {
+    fn netlog_quic_reset_and_stop_sending_preserve_direction_and_error_names(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
 
         let reset_received =
@@ -2713,32 +2438,28 @@ mod netlog_tests {
             ));
 
         // A termination frame on a non-request stream is ignored.
-        consume(&mut datastore, 101, &reset_received)
-            .expect("non-request reset event");
-        consume(&mut datastore, 102, &reset_sent)
-            .expect("non-request reset-sent event");
-        consume(&mut datastore, 103, &stop)
-            .expect("non-request stop-sending event");
+        consume(&constants, &mut datastore, 101, &reset_received)?;
+        consume(&constants, &mut datastore, 102, &reset_sent)?;
+        consume(&constants, &mut datastore, 103, &stop)?;
         assert!(datastore.http_requests.is_empty());
 
         datastore.get_or_insert_http_req(7);
         for event in [&reset_received, &reset_sent, &stop] {
-            consume(&mut datastore, 104, event)
-                .expect("known request stream termination");
+            consume(&constants, &mut datastore, 104, event)?;
         }
         let request = &datastore.http_requests[&7];
         let received = request
             .quic_stream_reset_received
             .as_ref()
-            .expect("received reset recorded");
+            .ok_or("received reset recorded")?;
         let sent = request
             .quic_stream_reset_sent
             .as_ref()
-            .expect("sent reset recorded");
+            .ok_or("sent reset recorded")?;
         let stopped = request
             .quic_stream_stop_sending_sent
             .as_ref()
-            .expect("sent stop-sending recorded");
+            .ok_or("sent stop-sending recorded")?;
         assert_eq!((received.offset, received.quic_rst_stream_error), (11, 42));
         assert_eq!((sent.offset, sent.quic_rst_stream_error), (29, 42));
         assert_eq!(stopped.quic_rst_stream_error, 42);
@@ -2768,12 +2489,12 @@ mod netlog_tests {
                     },
                 },
             ));
-        consume(&mut datastore, 105, &huge).expect("large-code reset event");
+        consume(&constants, &mut datastore, 105, &huge)?;
         let request = &datastore.http_requests[&7];
         let received = request
             .quic_stream_reset_received
             .as_ref()
-            .expect("large-code received reset recorded");
+            .ok_or("large-code received reset recorded")?;
         assert_eq!(received.offset, u64::MAX);
         assert_eq!(received.quic_rst_stream_error, u64::MAX);
         assert!(received.quic_rst_stream_error_friendly.is_none());
@@ -2781,14 +2502,17 @@ mod netlog_tests {
             request
                 .quic_stream_reset_sent
                 .as_ref()
-                .expect("sent reset preserved")
+                .ok_or("sent reset preserved")?
                 .offset,
             29
         );
+        Ok(())
     }
 
     #[test]
-    fn netlog_quic_stream_fin_only_updates_existing_request_after_validation() {
+    fn netlog_quic_stream_fin_only_updates_existing_request_after_validation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         let fin =
             netlog::Event::Quic(quic::Event::QuicSessionStreamFrameReceived(
@@ -2801,12 +2525,11 @@ mod netlog_tests {
                     },
                 },
             ));
-        consume(&mut datastore, 111, &fin)
-            .expect("first FIN without discovered request");
+        consume(&constants, &mut datastore, 111, &fin)?;
         assert!(datastore.http_requests.is_empty());
         assert_eq!(datastore.total_received_stream_frame_count, 1);
         datastore.get_or_insert_http_req(7);
-        consume(&mut datastore, 115, &fin).expect("FIN with discovered request");
+        consume(&constants, &mut datastore, 115, &fin)?;
         assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
         assert_eq!(datastore.total_received_stream_frame_count, 2);
         assert_eq!(datastore.received_stream_frames[&7].len(), 2);
@@ -2824,43 +2547,50 @@ mod netlog_tests {
 
         datastore.total_received_stream_frame_count = u64::MAX;
         assert!(matches!(
-            consume(&mut datastore, 120, &fin),
+            consume(&constants, &mut datastore, 120, &fin),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "total_received_stream_frame_count"
             })
         ));
         assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
         assert_eq!(datastore.received_stream_frames[&7].len(), 2);
+        Ok(())
     }
 
     #[test]
     fn netlog_signed_time_handles_events_before_session_and_wide_absolute_timestamps(
-    ) {
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         assert_eq!(netlog_relative_time(90, 100), -10.0);
         assert_eq!(netlog_relative_time(110, 100), 10.0);
         assert_eq!(netlog_relative_time(100, 100), 0.0);
         assert_eq!(netlog_relative_time(u64::MAX, u64::MAX - 1), 1.0);
         assert_eq!(netlog_relative_time(u64::MAX - 1, u64::MAX), -1.0);
-        assert_eq!(netlog_relative_time(0, u64::MAX), -(u64::MAX as f64));
+        assert_eq!(
+            netlog_relative_time(0, u64::MAX),
+            -18_446_744_073_709_551_616.0
+        );
         let mut datastore = Datastore::default();
-        assert!(consume(&mut datastore, 90, &quic_stream(1)).is_ok());
+        assert!(consume(&constants, &mut datastore, 90, &quic_stream(1)).is_ok());
         assert_eq!(datastore.received_stream_frames[&7][0].0, -10.0);
         assert_eq!(
             datastore.netlog_quic_stream_received_connection_cumulative,
             vec![(-10.0, 1)]
         );
+        Ok(())
     }
 
     #[test]
     fn netlog_quic_counter_overflow_is_reported_without_updating_any_event_fields(
-    ) {
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         datastore
             .netlog_quic_stream_received_connection_cumulative
             .push((0.0, u64::MAX));
         let event = quic_stream(1);
         assert!(matches!(
-            consume(&mut datastore, 120, &event),
+            consume(&constants, &mut datastore, 120, &event),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "netlog_quic_stream_received_connection_cumulative"
             })
@@ -2879,16 +2609,19 @@ mod netlog_tests {
             .clear();
         datastore.total_received_stream_frame_count = u64::MAX;
         assert!(matches!(
-            consume(&mut datastore, 120, &event),
+            consume(&constants, &mut datastore, 120, &event),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "total_received_stream_frame_count"
             })
         ));
         assert!(datastore.received_stream_frames.is_empty());
+        Ok(())
     }
 
     #[test]
-    fn netlog_h3_and_h2_counter_overflow_is_rejected_before_mutation() {
+    fn netlog_h3_and_h2_counter_overflow_is_rejected_before_mutation(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut h3 = Datastore::default();
         h3.received_data_cumulative.insert(9, vec![(0.0, u64::MAX)]);
         let event = netlog::Event::H3(h3::Event::Http3DataFrameReceived(
@@ -2900,7 +2633,7 @@ mod netlog_tests {
             },
         ));
         assert!(matches!(
-            consume(&mut h3, 120, &event),
+            consume(&constants, &mut h3, 120, &event),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "received_data_cumulative"
             })
@@ -2912,7 +2645,7 @@ mod netlog_tests {
         h2.received_data_cumulative
             .insert(11, vec![(0.0, u64::MAX)]);
         assert!(matches!(
-            consume(&mut h2, 120, &h2_received(11, 1)),
+            consume(&constants, &mut h2, 120, &h2_received(11, 1)),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "received_data_cumulative"
             })
@@ -2922,7 +2655,7 @@ mod netlog_tests {
         h2.netlog_h2_stream_received_connection_cumulative
             .push((0.0, u64::MAX));
         assert!(matches!(
-            consume(&mut h2, 120, &h2_received(11, 1)),
+            consume(&constants, &mut h2, 120, &h2_received(11, 1)),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "netlog_h2_stream_received_connection_cumulative"
             })
@@ -2933,13 +2666,14 @@ mod netlog_tests {
         let mut h2 = Datastore::default();
         h2.sent_data_cumulative.insert(11, vec![(0.0, u64::MAX)]);
         assert!(matches!(
-            consume(&mut h2, 120, &h2_sent(11, 1)),
+            consume(&constants, &mut h2, 120, &h2_sent(11, 1)),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "sent_data_cumulative"
             })
         ));
         assert!(!h2.http_requests.contains_key(&11));
         assert_eq!(h2.total_sent_data_frame_count, 0);
+        Ok(())
     }
 
     fn quic_ack_received(missing_packets: Vec<u64>) -> netlog::Event {
@@ -2965,10 +2699,16 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_received_ack_without_packet_header_keeps_unknown_space_gaps() {
+    fn netlog_received_ack_without_packet_header_keeps_unknown_space_gaps(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
-        consume(&mut datastore, 105, &quic_ack_received(vec![3, 4, 4]))
-            .expect("ACK event");
+        consume(
+            &constants,
+            &mut datastore,
+            105,
+            &quic_ack_received(vec![3, 4, 4]),
+        )?;
         assert_eq!(datastore.total_rx_ack, 1);
         assert_eq!(datastore.max_ack_received_missing_packets_size, 3);
         assert_eq!(
@@ -2990,9 +2730,8 @@ mod netlog_tests {
                 },
             ),
         );
-        consume(&mut datastore, 106, &header).expect("packet header");
-        consume(&mut datastore, 107, &quic_ack_received(vec![8]))
-            .expect("ACK with known parent packet");
+        consume(&constants, &mut datastore, 106, &header)?;
+        consume(&constants, &mut datastore, 107, &quic_ack_received(vec![8]))?;
         assert_eq!(
             datastore.netlog_ack_received_missing_packet[&PacketType::OneRtt],
             BTreeSet::from([8])
@@ -3001,15 +2740,21 @@ mod netlog_tests {
             datastore.netlog_ack_received_missing_packet[&PacketType::Unknown],
             BTreeSet::from([3, 4])
         );
+        Ok(())
     }
 
     #[test]
-    fn netlog_sent_ack_gaps_reclassify_when_packet_header_follows() {
+    fn netlog_sent_ack_gaps_reclassify_when_packet_header_follows(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
-        consume(&mut datastore, 101, &quic_ack_sent(vec![9, 11]))
-            .expect("sent ACK");
-        consume(&mut datastore, 102, &quic_ack_sent(vec![11, 12]))
-            .expect("second sent ACK");
+        consume(&constants, &mut datastore, 101, &quic_ack_sent(vec![9, 11]))?;
+        consume(
+            &constants,
+            &mut datastore,
+            102,
+            &quic_ack_sent(vec![11, 12]),
+        )?;
         assert_eq!(datastore.total_tx_ack, 2);
         assert_eq!(datastore.max_ack_sent_missing_packets_size, 2);
         assert_eq!(
@@ -3031,14 +2776,13 @@ mod netlog_tests {
                     "sent_time_us": 0,
                     "transmission_type": "NOT_RETRANSMISSION"
                 }
-            }))
-            .expect("valid Chrome QUIC packet event");
+            }))?;
         consume(
+            &constants,
             &mut datastore,
             103,
             &netlog::Event::Quic(quic::Event::QuicSessionPacketSent(packet)),
-        )
-        .expect("sent packet following ACK");
+        )?;
         assert_eq!(
             datastore.netlog_ack_sent_missing_packet[&PacketType::Handshake],
             BTreeSet::from([9, 11, 12])
@@ -3052,14 +2796,16 @@ mod netlog_tests {
         );
 
         // An empty ACK does not create a misleading empty packet-space entry.
-        consume(&mut datastore, 104, &quic_ack_sent(vec![]))
-            .expect("empty sent ACK");
+        consume(&constants, &mut datastore, 104, &quic_ack_sent(vec![]))?;
         assert_eq!(datastore.total_tx_ack, 3);
         assert_eq!(datastore.netlog_ack_sent_missing_packet.len(), 1);
+        Ok(())
     }
 
     #[test]
-    fn netlog_ack_count_overflow_does_not_change_gap_histories() {
+    fn netlog_ack_count_overflow_does_not_change_gap_histories(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore {
             total_rx_ack: usize::MAX,
             total_tx_ack: usize::MAX,
@@ -3070,7 +2816,7 @@ mod netlog_tests {
             (quic_ack_sent(vec![2, 3]), "total_tx_ack"),
         ] {
             assert!(matches!(
-                consume(&mut datastore, 120, &event),
+                consume(&constants, &mut datastore, 120, &event),
                 Err(DatastoreError::NetlogCounterOverflow {
                     field: actual
                 }) if actual == field
@@ -3078,9 +2824,10 @@ mod netlog_tests {
         }
         assert!(datastore.netlog_ack_received_missing_packet.is_empty());
         assert!(datastore.netlog_ack_sent_missing_packet.is_empty());
-        assert!(datastore.netlog_ack_sent_missing_packets_raw.is_empty());
+        assert_eq!(datastore.netlog_ack_sent_missing_packets_raw, []);
         assert_eq!(datastore.max_ack_sent_missing_packets_size, 0);
         assert_eq!(datastore.max_ack_received_missing_packets_size, 0);
+        Ok(())
     }
 
     fn quic_received_packet_header(
@@ -3101,7 +2848,9 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_packet_gaps_are_counted_only_within_each_packet_number_space() {
+    fn netlog_packet_gaps_are_counted_only_within_each_packet_number_space(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         let initial = |number| {
             quic_received_packet_header(
@@ -3134,8 +2883,7 @@ mod netlog_tests {
             application(200),
             application(201),
         ] {
-            consume(&mut datastore, 101, &event)
-                .expect("valid received packet header");
+            consume(&constants, &mut datastore, 101, &event)?;
         }
         assert_eq!(datastore.discontinuous_packet_number_count, 0);
 
@@ -3147,19 +2895,18 @@ mod netlog_tests {
             (application(198), 3),
             (application(199), 3),
         ] {
-            consume(&mut datastore, 102, &event).expect("valid packet header");
+            consume(&constants, &mut datastore, 102, &event)?;
             assert_eq!(datastore.discontinuous_packet_number_count, expected);
         }
 
         // Unclassified headers cannot establish a packet-number space.
         consume(
+            &constants,
             &mut datastore,
             103,
             &quic_received_packet_header("UNRECOGNIZED", None, 9000),
-        )
-        .expect("unknown packet header should be preserved");
-        consume(&mut datastore, 104, &initial(15))
-            .expect("continuation of Initial space");
+        )?;
+        consume(&constants, &mut datastore, 104, &initial(15))?;
         assert_eq!(datastore.discontinuous_packet_number_count, 3);
         assert_eq!(datastore.received_packets_netlog.len(), 12);
         assert_eq!(
@@ -3168,6 +2915,7 @@ mod netlog_tests {
                 .previous(PacketType::Initial),
             Some(15)
         );
+        Ok(())
     }
 
     #[test]
@@ -3185,7 +2933,9 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_discontinuity_overflow_preserves_last_observed_packet_number() {
+    fn netlog_discontinuity_overflow_preserves_last_observed_packet_number(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         datastore
             .received_netlog_packet_numbers
@@ -3198,7 +2948,7 @@ mod netlog_tests {
             104,
         );
         assert!(matches!(
-            consume(&mut datastore, 120, &event),
+            consume(&constants, &mut datastore, 120, &event),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "discontinuous_packet_number_count"
             })
@@ -3212,10 +2962,13 @@ mod netlog_tests {
         assert!(datastore.packet_received.is_empty());
         assert!(datastore.received_packets_netlog.is_empty());
         assert_eq!(datastore.discontinuous_packet_number_count, u64::MAX);
+        Ok(())
     }
 
     #[test]
-    fn netlog_recv_acks_have_independent_maximum_from_sent_acks() {
+    fn netlog_recv_acks_have_independent_maximum_from_sent_acks(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         let sent = netlog::Event::Quic(quic::Event::QuicSessionAckFrameSent(
             quic::QuicSessionAckFrameSent {
@@ -3234,19 +2987,20 @@ mod netlog_tests {
                     },
                 },
             ));
-        assert!(consume(&mut datastore, 101, &sent).is_ok());
-        assert!(consume(&mut datastore, 102, &received).is_ok());
+        assert!(consume(&constants, &mut datastore, 101, &sent).is_ok());
+        assert!(consume(&constants, &mut datastore, 102, &received).is_ok());
         assert_eq!(datastore.total_tx_ack, 1);
         assert_eq!(datastore.total_rx_ack, 1);
         assert_eq!(datastore.max_ack_sent_missing_packets_size, 7);
         assert_eq!(datastore.max_ack_received_missing_packets_size, 2);
         datastore.total_rx_ack = usize::MAX;
         assert!(matches!(
-            consume(&mut datastore, 103, &received),
+            consume(&constants, &mut datastore, 103, &received),
             Err(DatastoreError::NetlogCounterOverflow {
                 field: "total_rx_ack"
             })
         ));
+        Ok(())
     }
 
     fn h2_window_received(stream_id: u32, delta: i32) -> netlog::Event {
@@ -3272,7 +3026,9 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_h2_close_preserves_error_label_and_session_metadata() {
+    fn netlog_h2_close_preserves_error_label_and_session_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let event = netlog::Event::H2(h2::Event::Http2SessionClose(
             h2::Http2SessionCloseEvent {
                 params: h2::Http2SessionCloseParams {
@@ -3282,8 +3038,8 @@ mod netlog_tests {
             },
         ));
         let mut datastore = Datastore::default();
-        consume(&mut datastore, 120, &event).expect("H2 close event");
-        let close = datastore.h2_session_close.as_ref().expect("close record");
+        consume(&constants, &mut datastore, 120, &event)?;
+        let close = datastore.h2_session_close.as_ref().ok_or("close record")?;
         assert_eq!(close.session_id, -1);
         assert_eq!(close.sni, "ERROR UNKNOWN");
         assert_eq!(close.details, "protocol error");
@@ -3295,15 +3051,18 @@ mod netlog_tests {
 
         datastore.session_id = Some(42);
         datastore.host = Some("server.example.test".to_owned());
-        consume(&mut datastore, 121, &event).expect("close with known host");
-        let close = datastore.h2_session_close.as_ref().expect("close record");
+        consume(&constants, &mut datastore, 121, &event)?;
+        let close = datastore.h2_session_close.as_ref().ok_or("close record")?;
         assert_eq!(close.session_id, 42);
         assert_eq!(close.sni, "server.example.test");
         assert_eq!(close.details, "protocol error");
+        Ok(())
     }
 
     #[test]
-    fn netlog_h2_stream_reset_preserves_direction_and_missing_description() {
+    fn netlog_h2_stream_reset_preserves_direction_and_missing_description(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         let sent = netlog::Event::H2(h2::Event::Http2SessionSendRstStream(
             h2::Http2SessionSendRstStreamEvent {
@@ -3324,41 +3083,44 @@ mod netlog_tests {
         ));
 
         // Reset events do not create a request for non-request streams.
-        consume(&mut datastore, 102, &received).expect("unknown recv reset");
-        consume(&mut datastore, 103, &sent).expect("unknown sent reset");
+        consume(&constants, &mut datastore, 102, &received)?;
+        consume(&constants, &mut datastore, 103, &sent)?;
         assert!(datastore.http_requests.is_empty());
 
         datastore.get_or_insert_http_req(23);
-        consume(&mut datastore, 104, &sent).expect("sent H2 reset");
-        consume(&mut datastore, 105, &received).expect("received H2 reset");
+        consume(&constants, &mut datastore, 104, &sent)?;
+        consume(&constants, &mut datastore, 105, &received)?;
         let request = &datastore.http_requests[&23];
         let sent_reset = request
             .h2_stream_reset_sent
             .as_ref()
-            .expect("sent reset retained");
+            .ok_or("sent reset retained")?;
         assert_eq!(sent_reset.error, "CANCEL");
         assert_eq!(sent_reset.description, "peer cancelled");
         let received_reset = request
             .h2_stream_reset_receive
             .as_ref()
-            .expect("received reset retained");
+            .ok_or("received reset retained")?;
         assert_eq!(received_reset.error, "REFUSED_STREAM");
-        assert!(received_reset.description.is_empty());
+        assert_eq!(received_reset.description, "");
 
         // Sending a later reset must not erase the received direction.
-        consume(&mut datastore, 106, &sent).expect("repeat sent reset");
+        consume(&constants, &mut datastore, 106, &sent)?;
         assert_eq!(
             datastore.http_requests[&23]
                 .h2_stream_reset_receive
                 .as_ref()
-                .expect("received direction preserved")
+                .ok_or("received direction preserved")?
                 .error,
             "REFUSED_STREAM"
         );
+        Ok(())
     }
 
     #[test]
-    fn netlog_h2_window_update_keeps_independent_stream_and_direction_series() {
+    fn netlog_h2_window_update_keeps_independent_stream_and_direction_series(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
         for (time, event) in [
             (101, h2_window_received(1, 50)),
@@ -3370,8 +3132,7 @@ mod netlog_tests {
             (107, h2_window_received(1, 0)),
             (108, h2_window_sent(3, -9)),
         ] {
-            consume(&mut datastore, time, &event)
-                .expect("H2 WINDOW_UPDATE event");
+            consume(&constants, &mut datastore, time, &event)?;
         }
         assert_eq!(datastore.h2_send_window_updates_balanced[&1], vec![(
             1.0, 50
@@ -3389,15 +3150,36 @@ mod netlog_tests {
         assert_eq!(datastore.h2_recv_window_updates[&3], vec![(4.0, 11)]);
         assert_eq!(datastore.h2_send_window_updates_balanced.len(), 2);
         assert_eq!(datastore.h2_recv_window_updates.len(), 2);
+        Ok(())
     }
 
     #[test]
-    fn http2_window_updates_separate_peer_send_credit_and_our_receive_credit() {
+    fn http2_window_updates_separate_peer_send_credit_and_our_receive_credit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
         let mut datastore = Datastore::default();
-        assert!(consume(&mut datastore, 110, &h2_window_received(3, 10)).is_ok());
-        assert!(consume(&mut datastore, 120, &h2_window_sent(3, 20)).is_ok());
-        assert!(consume(&mut datastore, 130, &h2_window_sent(3, -1)).is_ok());
-        assert!(consume(&mut datastore, 140, &h2_window_received(3, 0)).is_ok());
+        assert!(consume(
+            &constants,
+            &mut datastore,
+            110,
+            &h2_window_received(3, 10)
+        )
+        .is_ok());
+        assert!(
+            consume(&constants, &mut datastore, 120, &h2_window_sent(3, 20))
+                .is_ok()
+        );
+        assert!(
+            consume(&constants, &mut datastore, 130, &h2_window_sent(3, -1))
+                .is_ok()
+        );
+        assert!(consume(
+            &constants,
+            &mut datastore,
+            140,
+            &h2_window_received(3, 0)
+        )
+        .is_ok());
         assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
             10.0, 10
         )]);
@@ -3406,6 +3188,7 @@ mod netlog_tests {
         )]);
         assert_eq!(datastore.h2_recv_window_updates[&3], vec![(20.0, 20)]);
         assert_eq!(datastore.h2_send_window_updates_balanced[&3].len(), 1);
+        Ok(())
     }
 
     #[test]
@@ -3461,10 +3244,7 @@ mod netlog_tests {
                 }),
             ),
         ];
-        source.push_str(&format!(
-            ",\n\"events\": [\n{}\n]\n}}",
-            records.join(",\n")
-        ));
+        write!(source, ",\n\"events\": [\n{}\n]\n}}", records.join(",\n"))?;
         let mut reader = Cursor::new(source.as_bytes());
         let parsed_constants = netlog::read_netlog_constants(&mut reader)?;
         let result =
@@ -3561,7 +3341,8 @@ mod qlog_h3_direction_tests {
     }
 
     #[test]
-    fn h3_frames_preserve_direction_and_complete_request_response_metadata() {
+    fn h3_frames_preserve_direction_and_complete_request_response_metadata(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for (vantage, request_created) in [
             (VantagePointType::Client, true),
             (VantagePointType::Server, false),
@@ -3591,9 +3372,8 @@ mod qlog_h3_direction_tests {
                 event(6.0, !request_created, priority("ignored"), None),
             ];
 
-            let ds =
-                Datastore::with_qlog_events(&events, &vantage, false).unwrap();
-            let req = ds.http_requests.get(&8).unwrap();
+            let ds = Datastore::with_qlog_events(&events, &vantage, false)?;
+            let req = ds.http_requests.get(&8).ok_or("request stream missing")?;
             assert_eq!(req.method.inner.as_deref(), Some("POST"));
             assert_eq!(req.host.inner.as_deref(), Some("example.test"));
             assert_eq!(req.path.inner.as_deref(), Some("/upload"));
@@ -3611,7 +3391,8 @@ mod qlog_h3_direction_tests {
             assert_eq!(ds.largest_data_frame_tx_length_global, 11);
             assert_eq!(ds.largest_data_frame_rx_length_global, 17);
 
-            let priority_req = ds.http_requests.get(&12).unwrap();
+            let priority_req =
+                ds.http_requests.get(&12).ok_or("priority target missing")?;
             assert_eq!(priority_req.priority_updates, vec!["u=2"]);
 
             let observed = ds.received_data_frames.get(&8);
@@ -3619,9 +3400,10 @@ mod qlog_h3_direction_tests {
                 VantagePointType::Client =>
                     assert_eq!(observed, Some(&vec![(4.0, 17)])),
                 VantagePointType::Server => assert!(observed.is_none()),
-                _ => unreachable!(),
+                _ => return Err("unexpected vantage in fixture".into()),
             }
         }
+        Ok(())
     }
 }
 
