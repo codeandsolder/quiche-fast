@@ -32,9 +32,7 @@ use quiche::Stats;
 use serde::ser::SerializeStruct;
 use serde::ser::Serializer;
 use serde::Serialize;
-use std::cmp;
 use std::collections::HashMap;
-use std::iter::FromIterator;
 
 use crate::frame::CloseTriggerFrame;
 use crate::frame::EnrichedHeaders;
@@ -43,14 +41,14 @@ use crate::quiche;
 
 /// Maximum length of any serialized element's unstructured data such as reason
 /// phrase.
-pub const MAX_SERIALIZED_BUFFER_LEN: usize = 16384;
+pub const MAX_SERIALIZED_BUFFER_LEN: usize = 16_384;
 
 /// A summary of all frames received on a connection. There are some extra
 /// fields included to provide additional context into the connection's
 /// behavior.
 ///
-/// ConnectionSummary implements [Serialize]. HTTP/3 frames that contain binary
-/// payload are serialized using the qlog
+/// `ConnectionSummary` implements [`Serialize`]. HTTP/3 frames that contain
+/// binary payload are serialized using the qlog
 /// [hexstring](https://www.ietf.org/archive/id/draft-ietf-quic-qlog-main-schema-10.html#section-1.2)
 /// format - "an even-length lowercase string of hexadecimally encoded bytes
 /// examples: 82dc, 027339, 4cdbfd9bf0"
@@ -70,7 +68,7 @@ impl Serialize for ConnectionSummary {
     where
         S: Serializer,
     {
-        let mut state = s.serialize_struct("path_stats", 4)?;
+        let mut state = s.serialize_struct("connection_summary", 5)?;
         state.serialize_field("stream_map", &self.stream_map)?;
         state.serialize_field(
             "stats",
@@ -104,7 +102,7 @@ where
     T: IntoIterator<Item = (u64, Vec<H3iFrame>)>,
 {
     fn from(value: T) -> Self {
-        let stream_frame_map = HashMap::from_iter(value);
+        let stream_frame_map = value.into_iter().collect();
 
         Self {
             stream_frame_map,
@@ -114,174 +112,66 @@ where
 }
 
 impl StreamMap {
-    /// Flatten all received frames into a single vector. The ordering is
-    /// non-deterministic.
+    /// Iterate over all frames without copying payloads.
     ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let headers = H3iFrame::Headers(EnrichedHeaders::from(vec![h]));
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone()])].into();
-    /// assert_eq!(stream_map.all_frames(), vec![headers]);
-    /// ```
-    pub fn all_frames(&self) -> Vec<H3iFrame> {
-        self.stream_frame_map
-            .values()
-            .flatten()
-            .map(Clone::clone)
-            .collect::<Vec<H3iFrame>>()
+    /// Ordering between streams is unspecified.
+    pub fn all_frames(&self) -> impl Iterator<Item = &H3iFrame> {
+        self.stream_frame_map.values().flatten()
     }
 
-    /// Get all frames on a given `stream_id`.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let mut stream_map = StreamMap::default();
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let headers = H3iFrame::Headers(EnrichedHeaders::from(vec![h]));
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone()])].into();
-    /// assert_eq!(stream_map.stream(0), vec![headers]);
-    /// ```
-    pub fn stream(&self, stream_id: u64) -> Vec<H3iFrame> {
+    /// Borrow all frames on the given stream in receive order.
+    #[must_use = "borrows frames on the requested stream"]
+    pub fn stream(&self, stream_id: u64) -> &[H3iFrame] {
         self.stream_frame_map
             .get(&stream_id)
-            .cloned()
-            .unwrap_or_default()
+            .map_or(&[], Vec::as_slice)
     }
 
-    /// Check if a provided [`H3iFrame`] was received, regardless of what stream
-    /// it was received on.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let headers = H3iFrame::Headers(EnrichedHeaders::from(vec![h]));
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone()])].into();
-    /// assert!(stream_map.received_frame(&headers));
-    /// ```
+    /// Check whether a frame was received on any stream.
+    #[must_use = "reports whether a matching frame was received"]
     pub fn received_frame(&self, frame: &H3iFrame) -> bool {
-        self.all_frames().contains(frame)
+        self.all_frames().any(|received| received == frame)
     }
 
-    /// Check if a provided [`H3iFrame`] was received over a specified stream.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let headers = H3iFrame::Headers(EnrichedHeaders::from(vec![h]));
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone()])].into();
-    /// assert!(stream_map.received_frame_on_stream(0, &headers));
-    /// ```
+    /// Check whether a frame was received on the specified stream.
+    #[must_use = "reports whether the stream contains the requested frame"]
     pub fn received_frame_on_stream(
         &self, stream: u64, frame: &H3iFrame,
     ) -> bool {
-        self.stream_frame_map
-            .get(&stream)
-            .map(|v| v.contains(frame))
-            .is_some()
+        self.stream(stream).contains(frame)
     }
 
-    /// Check if the stream map is empty, e.g., no frames were received.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let mut stream_map = StreamMap::default();
-    /// assert!(stream_map.is_empty());
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let headers = H3iFrame::Headers(EnrichedHeaders::from(vec![h]));
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone()])].into();
-    /// assert!(!stream_map.is_empty());
-    /// ```
+    /// Check whether any frames have been received.
+    #[must_use = "reports whether any frames are present"]
     pub fn is_empty(&self) -> bool {
-        self.stream_frame_map.is_empty()
+        self.stream_frame_map.values().all(Vec::is_empty)
     }
 
-    /// See all HEADERS received on a given stream.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use h3i::client::connection_summary::StreamMap;
-    /// use h3i::frame::EnrichedHeaders;
-    /// use h3i::frame::H3iFrame;
-    /// use quiche::h3::Header;
-    /// use std::iter::FromIterator;
-    ///
-    /// let h = Header::new(b"hello", b"world");
-    /// let enriched = EnrichedHeaders::from(vec![h]);
-    /// let headers = H3iFrame::Headers(enriched.clone());
-    /// let data = H3iFrame::QuicheH3(quiche::h3::frame::Frame::Data {
-    ///     payload: b"hello world".to_vec(),
-    /// });
-    ///
-    /// let stream_map: StreamMap = [(0, vec![headers.clone(), data.clone()])].into();
-    /// assert_eq!(stream_map.headers_on_stream(0), vec![enriched]);
-    /// ```
-    pub fn headers_on_stream(&self, stream_id: u64) -> Vec<EnrichedHeaders> {
+    /// Iterate over decoded header sections on a stream without copying them.
+    pub fn headers_on_stream(
+        &self, stream_id: u64,
+    ) -> impl Iterator<Item = &EnrichedHeaders> {
         self.stream(stream_id)
-            .into_iter()
-            .filter_map(|h3i_frame| h3i_frame.to_enriched_headers())
-            .collect()
+            .iter()
+            .filter_map(H3iFrame::as_enriched_headers)
     }
 
-    /// If all [`CloseTriggerFrame`]s were seen. If no triggers were expected,
-    /// this will return `false`.
+    /// Whether all configured triggers have matched.
+    ///
+    /// Returns false if there are no configured triggers.
+    #[must_use = "reports whether the close condition has been satisfied"]
     pub fn all_close_trigger_frames_seen(&self) -> bool {
-        if let Some(triggers) = self.close_trigger_frames.as_ref() {
-            triggers.saw_all_trigger_frames()
-        } else {
-            false
-        }
-    }
-
-    /// The set of all [`CloseTriggerFrame`]s that were _not_ seen on the
-    /// connection. Returns `None` if
-    pub fn missing_close_trigger_frames(&self) -> Option<Vec<CloseTriggerFrame>> {
         self.close_trigger_frames
             .as_ref()
-            .map(|e| e.missing_triggers())
+            .is_some_and(CloseTriggerFrames::saw_all_trigger_frames)
+    }
+
+    /// Borrow unmatched triggers, or return `None` when none were configured.
+    #[must_use = "borrows the remaining trigger conditions"]
+    pub fn missing_close_trigger_frames(&self) -> Option<&[CloseTriggerFrame]> {
+        self.close_trigger_frames
+            .as_ref()
+            .map(CloseTriggerFrames::missing_triggers)
     }
 
     ///  Not `pub` as users aren't expected to build their own [`StreamMap`]s.
@@ -303,9 +193,9 @@ impl StreamMap {
             .push(frame);
     }
 
-    /// Close a [`quiche::Connection`] with the CONNECTION_CLOSE frame specified
-    /// by [`CloseTriggerFrames`]. If no [`CloseTriggerFrames`] exist, this is a
-    /// no-op.
+    /// Close a [`quiche::Connection`] with the `CONNECTION_CLOSE` frame
+    /// specified by [`CloseTriggerFrames`]. If no [`CloseTriggerFrames`] exist,
+    /// this is a no-op.
     pub(crate) fn close_due_to_trigger_frames(
         &self, qconn: &mut quiche::Connection,
     ) {
@@ -321,13 +211,14 @@ impl StreamMap {
 }
 
 /// A container for frames that h3i expects to see over a given connection. If
-/// h3i receives all the frames it expects, it will send a CONNECTION_CLOSE
-/// frame to the server. This bypasses the idle timeout and vastly quickens test
-/// suites which depend heavily on h3i.
+/// h3i receives all the frames it expects, it will send a `CONNECTION_CLOSE`
+/// frame to the server.
 ///
-/// The specific CONNECTION_CLOSE frame can be customized by passing a
+/// This bypasses the idle timeout for test suites.
+///
+/// The specific `CONNECTION_CLOSE` frame can be customized by passing a
 /// [`ConnectionError`] to [`Self::new_with_connection_close`]. h3i will send an
-/// application CONNECTION_CLOSE frame with error code 0x100 if this struct is
+/// application `CONNECTION_CLOSE` frame with error code 0x100 if this struct is
 /// constructed with the [`Self::new`] constructor.
 #[derive(Clone, Serialize, Debug)]
 pub struct CloseTriggerFrames {
@@ -339,7 +230,8 @@ pub struct CloseTriggerFrames {
 impl CloseTriggerFrames {
     /// Create a new [`CloseTriggerFrames`]. If all expected frames are
     /// received, h3i will close the connection with an application-level
-    /// CONNECTION_CLOSE frame with error code 0x100.
+    /// `CONNECTION_CLOSE` frame with error code 0x100.
+    #[must_use = "creates a close condition from the expected frames"]
     pub fn new(frames: Vec<CloseTriggerFrame>) -> Self {
         Self::new_with_connection_close(frames, ConnectionError {
             is_app: true,
@@ -351,7 +243,8 @@ impl CloseTriggerFrames {
     /// Create a new [`CloseTriggerFrames`] with a custom close frame. When all
     /// close trigger frames are received, h3i will close the connection with
     /// the level, error code, and reason from `close_with`.
-    pub fn new_with_connection_close(
+    #[must_use = "creates a close condition with the requested error"]
+    pub const fn new_with_connection_close(
         frames: Vec<CloseTriggerFrame>, close_with: ConnectionError,
     ) -> Self {
         Self {
@@ -361,20 +254,19 @@ impl CloseTriggerFrames {
     }
 
     fn receive_frame(&mut self, stream_id: u64, frame: &H3iFrame) {
-        for (i, trigger) in self.missing.iter_mut().enumerate() {
-            if trigger.is_equivalent(frame) && trigger.stream_id() == stream_id {
-                self.missing.remove(i);
-                break;
-            }
+        if let Some(index) = self.missing.iter().position(|trigger| {
+            trigger.stream_id() == stream_id && trigger.is_equivalent(frame)
+        }) {
+            self.missing.remove(index);
         }
     }
 
-    fn saw_all_trigger_frames(&self) -> bool {
+    const fn saw_all_trigger_frames(&self) -> bool {
         self.missing.is_empty()
     }
 
-    fn missing_triggers(&self) -> Vec<CloseTriggerFrame> {
-        self.missing.clone()
+    fn missing_triggers(&self) -> &[CloseTriggerFrame] {
+        &self.missing
     }
 }
 
@@ -402,13 +294,14 @@ impl core::fmt::Debug for ConnectionCloseDetails {
             .field("peer_error", &self.peer_error)
             .field("local_error", &self.local_error)
             .field("timed_out", &self.timed_out)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
 impl ConnectionCloseDetails {
+    #[must_use = "captures connection close state"]
     pub fn new<F: quiche::BufFactory>(qconn: &quiche::Connection<F>) -> Self {
-        let session = qconn.session().map(|s| s.to_vec());
+        let session = qconn.session().map(<[u8]>::to_vec);
         Self {
             peer_error: qconn.peer_error().cloned(),
             local_error: qconn.local_error().cloned(),
@@ -418,18 +311,21 @@ impl ConnectionCloseDetails {
     }
 
     /// The error sent from the peer, if any.
-    pub fn peer_error(&self) -> Option<&ConnectionError> {
+    #[must_use = "borrows the peer error if present"]
+    pub const fn peer_error(&self) -> Option<&ConnectionError> {
         self.peer_error.as_ref()
     }
 
     /// The error generated locally, if any.
-    pub fn local_error(&self) -> Option<&ConnectionError> {
+    #[must_use = "borrows the local error if present"]
+    pub const fn local_error(&self) -> Option<&ConnectionError> {
         self.local_error.as_ref()
     }
 
     /// If the connection didn't see an error, either one from the peer or
     /// generated locally.
-    pub fn no_err(&self) -> bool {
+    #[must_use = "reports whether no connection error occurred"]
+    pub const fn no_err(&self) -> bool {
         self.peer_error.is_none() && self.local_error.is_none()
     }
 }
@@ -439,8 +335,11 @@ impl Serialize for ConnectionCloseDetails {
     where
         S: Serializer,
     {
-        let mut state: <S as Serializer>::SerializeStruct =
-            s.serialize_struct("enriched_connection_error", 3)?;
+        let mut state: <S as Serializer>::SerializeStruct = s.serialize_struct(
+            "enriched_connection_error",
+            1 + usize::from(self.peer_error.is_some()) +
+                usize::from(self.local_error.is_some()),
+        )?;
         if let Some(pe) = &self.peer_error {
             state.serialize_field(
                 "peer_error",
@@ -460,7 +359,7 @@ impl Serialize for ConnectionCloseDetails {
     }
 }
 
-/// A wrapper to help serialize [quiche::PathStats]
+/// A wrapper to help serialize [`quiche::PathStats`]
 pub struct SerializablePathStats<'a>(&'a quiche::PathStats);
 
 impl Serialize for SerializablePathStats<'_> {
@@ -479,7 +378,11 @@ impl Serialize for SerializablePathStats<'_> {
         state.serialize_field("rtt", &self.0.rtt.as_secs_f64())?;
         state.serialize_field(
             "min_rtt",
-            &self.0.min_rtt.map(|x| x.as_secs_f64()),
+            &self
+                .0
+                .min_rtt
+                .as_ref()
+                .map(std::time::Duration::as_secs_f64),
         )?;
         state.serialize_field("rttvar", &self.0.rttvar.as_secs_f64())?;
         state.serialize_field("cwnd", &self.0.cwnd)?;
@@ -496,7 +399,7 @@ impl Serialize for SerializablePathStats<'_> {
     }
 }
 
-/// A wrapper to help serialize [quiche::Stats]
+/// A wrapper to help serialize [`quiche::Stats`].
 pub struct SerializableStats<'a>(&'a quiche::Stats);
 
 impl Serialize for SerializableStats<'_> {
@@ -504,7 +407,7 @@ impl Serialize for SerializableStats<'_> {
     where
         S: Serializer,
     {
-        let mut state = s.serialize_struct("path_stats", 14)?;
+        let mut state = s.serialize_struct("stats", 14)?;
         state.serialize_field("recv", &self.0.recv)?;
         state.serialize_field("sent", &self.0.sent)?;
         state.serialize_field("lost", &self.0.lost)?;
@@ -541,7 +444,7 @@ impl Serialize for SerializableStats<'_> {
     }
 }
 
-/// A wrapper to help serialize a [quiche::ConnectionError]
+/// A wrapper to help serialize a [`quiche::ConnectionError`]
 #[derive(Clone, Debug)]
 pub struct SerializableConnectionError<'a>(&'a quiche::ConnectionError);
 
@@ -550,10 +453,10 @@ impl Serialize for SerializableConnectionError<'_> {
     where
         S: Serializer,
     {
-        let mut state = s.serialize_struct("path_stats", 3)?;
+        let mut state = s.serialize_struct("connection_error", 3)?;
         state.serialize_field("is_app", &self.0.is_app)?;
         state.serialize_field("error_code", &self.0.error_code)?;
-        let max = cmp::min(self.0.reason.len(), MAX_SERIALIZED_BUFFER_LEN);
+        let max = self.0.reason.len().min(MAX_SERIALIZED_BUFFER_LEN);
         state.serialize_field(
             "reason",
             &String::from_utf8_lossy(&self.0.reason[..max]),
@@ -564,76 +467,113 @@ impl Serialize for SerializableConnectionError<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::frame::EnrichedHeaders;
+    use super::CloseTriggerFrames;
+    use super::ConnectionSummary;
+    use super::StreamMap;
+    use crate::frame::BoxError;
+    use crate::frame::CloseTriggerFrame;
+    use crate::frame::H3iFrame;
+    use crate::quiche;
+    use quiche::h3::frame::Frame;
     use quiche::h3::Header;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
-    fn h3i_frame() -> H3iFrame {
-        vec![Header::new(b"hello", b"world")].into()
+    fn headers() -> Result<H3iFrame, BoxError> {
+        Ok(H3iFrame::try_from(vec![Header::new(b"hello", b"world")])?)
     }
 
-    #[test]
-    fn close_trigger_frame() {
-        let frame = h3i_frame();
-        let mut triggers = CloseTriggerFrames::new(vec![CloseTriggerFrame::new(
-            0,
-            frame.clone(),
-        )]);
-
-        triggers.receive_frame(0, &frame);
-
-        assert!(triggers.saw_all_trigger_frames());
-    }
-
-    #[test]
-    fn trigger_frame_missing() {
-        let frame = h3i_frame();
-        let expected_frames = vec![
-            CloseTriggerFrame::new(0, frame.clone()),
-            CloseTriggerFrame::new(4, frame.clone()),
-            CloseTriggerFrame::new(8, vec![Header::new(b"go", b"jets")]),
-        ];
-        let mut expected = CloseTriggerFrames::new(expected_frames.clone());
-
-        expected.receive_frame(0, &frame);
-
-        assert!(!expected.saw_all_trigger_frames());
-        assert_eq!(expected.missing_triggers(), expected_frames[1..].to_vec());
-    }
-
-    fn stream_map_data() -> Vec<H3iFrame> {
-        let headers =
-            H3iFrame::Headers(EnrichedHeaders::from(vec![Header::new(
-                b"hello", b"world",
-            )]));
-        let data = H3iFrame::QuicheH3(quiche::h3::frame::Frame::Data {
+    fn data() -> H3iFrame {
+        Frame::Data {
             payload: b"hello world".to_vec(),
+        }
+        .into()
+    }
+
+    #[test]
+    fn stream_lookup_checks_requested_frame_and_borrows_storage(
+    ) -> Result<(), BoxError> {
+        let h = headers()?;
+        let d = data();
+        let missing = Frame::Data {
+            payload: b"missing".to_vec(),
+        }
+        .into();
+        let map: StreamMap = [(0, vec![h.clone()]), (4, vec![d.clone()])].into();
+        assert!(map.received_frame(&h));
+        assert!(map.received_frame(&d));
+        assert!(!map.received_frame(&missing));
+        assert!(map.received_frame_on_stream(0, &h));
+        assert!(!map.received_frame_on_stream(0, &d));
+        assert!(!map.received_frame_on_stream(0, &missing));
+        assert!(!map.received_frame_on_stream(8, &h));
+        assert_eq!(map.stream(8), &[] as &[H3iFrame]);
+        assert_eq!(map.all_frames().count(), 2);
+        assert_eq!(map.headers_on_stream(0).count(), 1);
+        assert_eq!(map.headers_on_stream(4).count(), 0);
+        assert!(StreamMap::from([(0, Vec::new())]).is_empty());
+        assert!(!map.is_empty());
+        assert!(!map.all_close_trigger_frames_seen());
+        Ok(())
+    }
+
+    #[test]
+    fn trigger_frames_are_consumed_one_at_a_time_on_the_right_stream(
+    ) -> Result<(), BoxError> {
+        let h = headers()?;
+        let d = data();
+        let pending = vec![
+            CloseTriggerFrame::new(0, h.clone()),
+            CloseTriggerFrame::new(4, h.clone()),
+            CloseTriggerFrame::new(0, h.clone()),
+            CloseTriggerFrame::new(0, d.clone()),
+        ];
+        let mut map =
+            StreamMap::new(Some(CloseTriggerFrames::new(pending.clone())));
+        map.insert(8, h.clone());
+        assert_eq!(map.missing_close_trigger_frames(), Some(pending.as_slice()));
+        map.insert(0, h.clone());
+        assert_eq!(map.missing_close_trigger_frames(), Some(&pending[1..]));
+        map.insert(4, h.clone());
+        map.insert(0, d);
+        assert!(!map.all_close_trigger_frames_seen());
+        map.insert(0, h);
+        assert!(map.all_close_trigger_frames_seen());
+        assert_eq!(
+            map.missing_close_trigger_frames(),
+            Some(&[] as &[CloseTriggerFrame])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn comparator_is_not_evaluated_on_other_streams() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&calls);
+        let trigger = CloseTriggerFrame::new_with_comparator(4, move |_| {
+            count.fetch_add(1, Ordering::Relaxed);
+            true
         });
-
-        vec![headers, data]
+        let mut map =
+            StreamMap::new(Some(CloseTriggerFrames::new(vec![trigger])));
+        map.insert(0, data());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        map.insert(4, data());
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert!(map.all_close_trigger_frames_seen());
     }
 
     #[test]
-    fn test_stream_map_trigger_frames_with_none() {
-        let stream_map: StreamMap = vec![(0, stream_map_data())].into();
-        assert!(!stream_map.all_close_trigger_frames_seen());
-    }
-
-    #[test]
-    fn test_stream_map_trigger_frames() {
-        let data = stream_map_data();
-        let mut stream_map = StreamMap::new(Some(
-            vec![
-                CloseTriggerFrame::new(0, data[0].clone()),
-                CloseTriggerFrame::new(0, data[1].clone()),
-            ]
-            .into(),
-        ));
-
-        stream_map.insert(0, data[0].clone());
-        assert!(!stream_map.all_close_trigger_frames_seen());
-        assert_eq!(stream_map.missing_close_trigger_frames().unwrap(), vec![
-            CloseTriggerFrame::new(0, data[1].clone())
-        ]);
+    fn summary_serialization_does_not_expose_resumption_secrets(
+    ) -> Result<(), BoxError> {
+        let mut summary = ConnectionSummary::default();
+        summary.conn_close_details.session = Some(b"private session".to_vec());
+        let serialized = serde_json::to_value(&summary)?;
+        assert_eq!(serialized["error"]["timed_out"], false);
+        assert!(serialized["error"].get("session").is_none());
+        assert!(!format!("{summary:?}").contains("private session"));
+        assert!(serialized.get("missed_close_trigger_frames").is_some());
+        Ok(())
     }
 }

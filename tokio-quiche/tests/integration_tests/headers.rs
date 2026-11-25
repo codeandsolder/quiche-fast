@@ -92,7 +92,7 @@ async fn test_additional_headers() {
         .await
         .expect("request failed");
 
-    let mut headers = summary.stream_map.headers_on_stream(0).into_iter();
+    let mut headers = summary.stream_map.headers_on_stream(0);
 
     assert_eq!(
         headers.next().expect("initial headers").status_code(),
