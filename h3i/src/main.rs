@@ -90,7 +90,7 @@ fn main() -> Result<(), ClientError> {
 }
 
 struct Config {
-    library_config: h3i::config::Config,
+    library: h3i::config::Config,
     pub qlog_input: Option<PathBuf>,
     pub qlog_actions_output: bool,
     pub host_override: Option<String>,
@@ -218,22 +218,21 @@ fn config_from_matches(matches: &ArgMatches) -> Result<Config, String> {
     let authority = matches
         .get_one::<String>("host:port")
         .ok_or("missing server authority")?;
-    let mut library_config =
+    let mut library =
         h3i::config::Config::new(authority).map_err(|error| error.to_string())?;
-    library_config.endpoint.connect_to = matches.get_one("connect-to").copied();
-    library_config.endpoint.source_port =
-        optional_number(matches, "source-port", 0);
-    library_config.tls.omit_sni = matches.get_flag("omit-sni");
-    library_config.tls.verify_peer = !matches.get_flag("no-verify");
-    library_config.tls.early_data = matches.get_flag("early-data");
-    library_config.idle_timeout =
-        optional_number(matches, "idle-timeout", library_config.idle_timeout);
-    library_config.send_capacity_factor = optional_number(
+    library.endpoint.connect_to = matches.get_one("connect-to").copied();
+    library.endpoint.source_port = optional_number(matches, "source-port", 0);
+    library.tls.omit_sni = matches.get_flag("omit-sni");
+    library.tls.verify_peer = !matches.get_flag("no-verify");
+    library.tls.early_data = matches.get_flag("early-data");
+    library.idle_timeout =
+        optional_number(matches, "idle-timeout", library.idle_timeout);
+    library.send_capacity_factor = optional_number(
         matches,
         "send-capacity-factor",
-        library_config.send_capacity_factor,
+        library.send_capacity_factor,
     );
-    let flow = &mut library_config.flow;
+    let flow = &mut library.flow;
     flow.data = optional_number(matches, "max-data", flow.data);
     flow.stream_data_bidi_local = optional_number(
         matches,
@@ -256,7 +255,7 @@ fn config_from_matches(matches: &ArgMatches) -> Result<Config, String> {
         optional_number(matches, "max-stream-window", flow.stream_window);
     if matches.get_flag("enable-dgram") {
         let defaults = DatagramQueues::default();
-        library_config.datagrams = Some(DatagramQueues {
+        library.datagrams = Some(DatagramQueues {
             receive: optional_number(
                 matches,
                 "dgram-recv-queue-len",
@@ -265,14 +264,12 @@ fn config_from_matches(matches: &ArgMatches) -> Result<Config, String> {
             send: optional_number(matches, "dgram-send-queue-len", defaults.send),
         });
     }
-    library_config
-        .validate()
-        .map_err(|error| error.to_string())?;
+    library.validate().map_err(|error| error.to_string())?;
     Ok(Config {
         qlog_input: matches.get_one("qlog-input").cloned(),
         qlog_actions_output: !matches.get_flag("no-qlog-actions-output"),
         host_override: matches.get_one("replay-host-override").cloned(),
-        library_config,
+        library,
     })
 }
 
@@ -287,7 +284,7 @@ fn async_client(
 
     rt.block_on(async {
         let summary = h3i::client::async_client::connect(
-            &config.library_config,
+            &config.library,
             frame_actions,
             None,
         )
@@ -301,7 +298,7 @@ fn sync_client(
     config: Config, actions: Vec<Action>,
 ) -> Result<ConnectionSummary, ClientError> {
     // TODO: CLI/qlog don't support passing close trigger frames at the moment
-    h3i::client::sync_client::connect(config.library_config, actions, None)
+    h3i::client::sync_client::connect(config.library, actions, None)
 }
 
 fn read_qlog(
@@ -334,7 +331,7 @@ fn read_qlog(
 }
 
 fn prompt_frames(config: &Config) -> Result<Option<Vec<Action>>, ClientError> {
-    let mut prompter = Prompter::with_config(&config.library_config);
+    let mut prompter = Prompter::with_config(&config.library);
     let Some(actions) = prompter.prompt().map_err(|error| {
         ClientError::Other(format!("interactive prompt: {error}"))
     })?
@@ -424,9 +421,9 @@ mod config_tests {
         let defaults = config_from_matches(
             &command().try_get_matches_from(["h3i", "example.org"])?,
         )?;
-        assert_eq!(defaults.library_config.flow.data, 10_000_000);
-        assert_eq!(defaults.library_config.flow.stream_data_uni, 1_000_000);
-        assert!(defaults.library_config.datagrams.is_none());
+        assert_eq!(defaults.library.flow.data, 10_000_000);
+        assert_eq!(defaults.library.flow.stream_data_uni, 1_000_000);
+        assert!(defaults.library.datagrams.is_none());
         let matches = command().try_get_matches_from([
             "h3i",
             "example.org:8443",
@@ -442,7 +439,7 @@ mod config_tests {
             "--qlog-input=fixtures/replay.sqlog",
         ])?;
         let config = config_from_matches(&matches)?;
-        let library = config.library_config;
+        let library = config.library;
         assert_eq!(library.endpoint.authority(), "example.org:8443");
         assert_eq!(
             library.endpoint.socket_addresses()?.0.to_string(),
