@@ -104,7 +104,9 @@ impl DgramBuffer {
     /// beyond that point. If count is greater or equal to the buffer’s current
     /// length, this has no effect.
     pub fn truncate(&mut self, count: usize) {
-        self.data.truncate(self.start + count);
+        if count < self.len() {
+            self.data.truncate(self.start + count);
+        }
     }
 
     /// Advances the cursor by `count` bytes.
@@ -113,7 +115,7 @@ impl DgramBuffer {
     ///
     /// Panics if `count` exceeds the number of readable bytes.
     pub fn advance(&mut self, count: usize) {
-        assert!(self.start + count <= self.data.len());
+        assert!(count <= self.len());
         self.start += count;
     }
 
@@ -132,9 +134,22 @@ impl DgramBuffer {
             return Err(());
         }
 
-        self.start -= prefix.len();
-        self.data[self.start..self.start + prefix.len()].copy_from_slice(prefix);
+        self.write_prefix(prefix);
         Ok(())
+    }
+
+    /// Prepends bytes, growing headroom only if necessary. Existing headroom
+    /// provides a zero-copy fast path for the payload.
+    pub fn prepend(&mut self, prefix: &[u8]) {
+        self.splice_headroom(prefix.len());
+        self.write_prefix(prefix);
+    }
+
+    /// Both callers guarantee sufficient initialized headroom.
+    fn write_prefix(&mut self, prefix: &[u8]) {
+        let end = self.start;
+        self.start -= prefix.len();
+        self.data[self.start..end].copy_from_slice(prefix);
     }
 
     /// Ensures that at least `headroom` bytes of headroom are available,
@@ -144,8 +159,10 @@ impl DgramBuffer {
         if self.start >= headroom {
             return;
         }
-        self.data
-            .splice(0..self.start, std::iter::repeat_n(0u8, headroom));
+        let old_len = self.data.len();
+        self.data.resize(old_len + (headroom - self.start), 0);
+        self.data.copy_within(self.start..old_len, headroom);
+        self.data[..headroom].fill(0);
         self.start = headroom;
     }
 
@@ -353,6 +370,46 @@ mod tests {
     fn try_add_prefix_fails_when_headroom_insufficient() {
         let mut b = DgramBuffer::with_capacity_and_headroom(8, 1);
         assert!(b.try_add_prefix(&[0x01, 0x02]).is_err());
+    }
+
+    #[test]
+    fn prepend_preserves_payload_at_every_cursor_and_prefix_length() {
+        let payload = [0xaa, 0xbb, 0xcc, 0xdd];
+        let prefix = [0x11; 32];
+        for cursor in 0..=payload.len() {
+            for headroom in 0..=16 {
+                for length in 0..=prefix.len() {
+                    let mut buf =
+                        DgramBuffer::with_capacity_and_headroom(128, headroom);
+                    buf.put_slice(&payload);
+                    buf.advance(cursor);
+                    let old_payload_ptr = buf.as_slice().as_ptr();
+                    let existing_headroom = headroom + cursor;
+                    buf.prepend(&prefix[..length]);
+                    let mut expected = prefix[..length].to_vec();
+                    expected.extend_from_slice(&payload[cursor..]);
+                    assert_eq!(buf.as_slice(), expected);
+                    if length <= existing_headroom {
+                        assert_eq!(
+                            buf.as_slice()[length..].as_ptr(),
+                            old_payload_ptr
+                        );
+                    }
+                    buf.advance(length);
+                    assert_eq!(buf.as_slice(), &payload[cursor..]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn truncation_beyond_readable_length_is_a_noop_even_at_usize_max() {
+        let mut buf = DgramBuffer::with_capacity_and_headroom(16, 8);
+        buf.put_slice(&[1, 2, 3]);
+        buf.truncate(usize::MAX);
+        assert_eq!(buf.as_slice(), &[1, 2, 3]);
+        buf.truncate(2);
+        assert_eq!(buf.as_slice(), &[1, 2]);
     }
 
     #[test]

@@ -21,7 +21,7 @@ src/
 
 | Task | File | Notes |
 |------|------|-------|
-| Prepend a flow ID to an outbound datagram | `buffer.rs` | `try_add_prefix` (fast, zero-copy) or `splice_headroom` + retry (slow, O(n)) |
+| Prepend a flow ID to an outbound datagram | `buffer.rs` | `try_add_prefix` (fast, zero-copy) or `prepend` (grows headroom only when needed) |
 | Strip a prefix from an inbound datagram | `buffer.rs` | `advance(n)` — zero copy |
 | Implement a new socket type | `datagram.rs` | Implement `DatagramSocketSend` + `DatagramSocketRecv`; `DatagramSocket` is automatic |
 | Batch recv/send on Linux | `mmsg.rs` | Use `poll_recvmmsg!` / `poll_sendmmsg!` macros; `sendmmsg_with_suffix` appends shared framing to every message |
@@ -33,7 +33,7 @@ Wraps a `Vec<u8>` with a `pos` cursor dividing it into `[headroom: 0..pos][paylo
 
 **Fast path:** allocate with `with_capacity_and_headroom`, fill payload via `BufMut`, call `try_add_prefix` to slide `pos` left and write the prefix into headroom — no allocation, no memmove.
 
-**Slow path:** if no headroom was pre-allocated, `splice_headroom(n)` does an O(payload_len) memmove to insert n bytes at the front; then retry `try_add_prefix`.
+**Automatic path:** `prepend(prefix)` uses the same zero-copy fast path when headroom fits; otherwise it grows headroom with one overlap-safe payload move. Use `try_add_prefix` when allocation is explicitly disallowed.
 
 **Stripping a prefix:** `advance(n)` increments `pos` — zero-copy.
 

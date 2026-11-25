@@ -31,12 +31,11 @@ use quiche::h3::{
 };
 
 use super::InboundFrame;
-use crate::buf_factory::BufFactory;
 use crate::quic::QuicheConnection;
 
 /// Extracts the DATAGRAM flow ID or quarter stream id proxied over the given
 /// `stream_id`, or `None` if this is not a proxy request.
-pub(crate) fn extract_quarter_stream_id(
+pub(super) fn extract_quarter_stream_id(
     stream_id: u64, headers: &[h3::Header],
 ) -> Option<u64> {
     let mut method = None;
@@ -50,15 +49,9 @@ pub(crate) fn extract_quarter_stream_id(
             b"datagram-flow-id" =>
                 datagram_flow_id = std::str::from_utf8(header.value())
                     .ok()
-                    .and_then(|v| v.parse().ok()),
+                    .and_then(|v| v.parse().ok())
+                    .filter(|id| *id <= octets::MAX_VAR_INT),
             _ => {},
-        };
-
-        // We have all of the information needed to get a flow_id or
-        // quarter_stream_id
-        if method.is_some() && (datagram_flow_id.is_some() || protocol.is_some())
-        {
-            break;
         }
     }
 
@@ -78,7 +71,7 @@ pub(crate) fn extract_quarter_stream_id(
 /// Sends an HTTP/3 datagram over the QUIC connection with the given
 /// `quarter_stream_id`.
 #[inline]
-pub(crate) fn send_h3_dgram(
+pub(super) fn send_h3_dgram(
     conn: &mut QuicheConnection, quarter_stream_id: u64, dgram: DgramBuffer,
 ) -> quiche::Result<()> {
     conn.dgram_send_buf(h3_dgram_add_quarter_stream_id(quarter_stream_id, dgram)?)
@@ -92,17 +85,7 @@ fn h3_dgram_add_quarter_stream_id(
     let mut enc = octets::OctetsMut::with_slice(&mut prefix_buf);
     let prefix = enc.put_varint(quarter_stream_id)?;
 
-    if dgram.try_add_prefix(prefix).is_err() {
-        // There wasn't enough room. Let's add more headroom and add the
-        // prefix again. DGRAM_HEADROOM is large enough, so
-        // try_add_prefix cannot fail after splice_headroom.
-        const {
-            // Note, since this is const, it asserts at compile time.
-            assert!(BufFactory::DGRAM_HEADROOM >= /* max varint len */ 8);
-        }
-        dgram.splice_headroom(BufFactory::DGRAM_HEADROOM);
-        dgram.try_add_prefix(prefix).unwrap();
-    }
+    dgram.prepend(prefix);
     Ok(dgram)
 }
 
@@ -124,7 +107,7 @@ fn h3_dgram_remove_quarter_stream_id(
 ///
 /// [`quiche::Error::Done`] is returned if there is no datagram to read.
 #[inline]
-pub(crate) fn receive_h3_dgram(
+pub(super) fn receive_h3_dgram(
     conn: &mut QuicheConnection,
 ) -> quiche::Result<(u64, InboundFrame)> {
     let dgram = conn.dgram_recv_buf()?;
@@ -140,50 +123,115 @@ mod tests {
     use super::*;
 
     #[test]
-    fn h3_dgram_add_quarter_stream_id_enough_headroom() {
+    fn h3_dgram_add_quarter_stream_id_enough_headroom() -> quiche::Result<()> {
         let mut dgram = DgramBuffer::with_capacity_and_headroom(16, 8);
         dgram.put_slice(&[0xaa, 0xbb, 0xcc]);
 
         // 67 requires two bytes to encode
-        let result = h3_dgram_add_quarter_stream_id(67, dgram).unwrap();
+        let result = h3_dgram_add_quarter_stream_id(67, dgram)?;
         assert_eq!(result.as_slice(), &[64, 67, 0xaa, 0xbb, 0xcc]);
+        Ok(())
     }
 
     /// When there is no headroom, splice_headroom is invoked automatically.
     #[test]
-    fn h3_dgram_add_quarter_stream_id_need_more_headroom() {
+    fn h3_dgram_add_quarter_stream_id_need_more_headroom() -> quiche::Result<()> {
         let dgram = DgramBuffer::from_slice(&[1, 2]);
 
         // 42 requires a single byte for encoding
-        let result = h3_dgram_add_quarter_stream_id(42, dgram).unwrap();
+        let result = h3_dgram_add_quarter_stream_id(42, dgram)?;
         assert_eq!(result.as_slice(), &[42, 1, 2]);
+        Ok(())
     }
 
     #[test]
-    fn h3_dgram_remove_quarter_stream_id_tests() {
+    fn h3_dgram_remove_quarter_stream_id_tests() -> quiche::Result<()> {
         let dgram = DgramBuffer::from_slice(&[1, 2, 3, 4]);
-        let dgram = h3_dgram_add_quarter_stream_id(67, dgram).unwrap();
-        let (quarter_stream_id, rest) =
-            h3_dgram_remove_quarter_stream_id(dgram).unwrap();
+        let dgram = h3_dgram_add_quarter_stream_id(67, dgram)?;
+        let (quarter_stream_id, rest) = h3_dgram_remove_quarter_stream_id(dgram)?;
 
         assert_eq!(quarter_stream_id, 67);
         assert_eq!(rest.as_slice(), &[1, 2, 3, 4]);
+        Ok(())
     }
 
     #[test]
-    fn h3_dgram_remove_quarter_stream_id_non_minimal_varint() {
+    fn h3_dgram_remove_quarter_stream_id_non_minimal_varint() -> quiche::Result<()>
+    {
         // Quarter Stream ID = 0 encoded NON-minimally as a 2-byte varint (0x40
         // 0x00), followed by application payload [1, 2, 3, 4].
         // RFC 9000 §16 permits non-minimal encodings; quiche's get_varint()
         // accepts them.
         let dgram = DgramBuffer::from_slice(&[0x40, 0x00, 1, 2, 3, 4]);
-        let (qsid, rest) = h3_dgram_remove_quarter_stream_id(dgram).unwrap();
+        let (qsid, rest) = h3_dgram_remove_quarter_stream_id(dgram)?;
         assert_eq!(qsid, 0);
 
         assert_eq!(
             rest.as_slice(),
             &[1, 2, 3, 4],
             "leftover non-minimal varint byte leaked into payload prefix"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn every_varint_width_roundtrips_for_each_headroom_size() -> quiche::Result<()>
+    {
+        let payload = [0xff, 0x01, 0x02];
+        for id in [
+            0,
+            63,
+            64,
+            16_383,
+            16_384,
+            (1 << 30) - 1,
+            1 << 30,
+            octets::MAX_VAR_INT,
+        ] {
+            for headroom in 0..=16 {
+                let mut dgram =
+                    DgramBuffer::with_capacity_and_headroom(32, headroom);
+                dgram.put_slice(&payload);
+                let encoded = h3_dgram_add_quarter_stream_id(id, dgram)?;
+                let (decoded, body) = h3_dgram_remove_quarter_stream_id(encoded)?;
+                assert_eq!(decoded, id);
+                assert_eq!(body.as_slice(), &payload);
+            }
+        }
+        assert!(h3_dgram_add_quarter_stream_id(
+            octets::MAX_VAR_INT + 1,
+            DgramBuffer::new()
+        )
+        .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_flow_id_is_independent_of_header_order_and_must_fit_varint() {
+        let method = h3::Header::new(b":method", b"CONNECT-UDP");
+        let protocol = h3::Header::new(b":protocol", b"connect-udp");
+        let valid = h3::Header::new(b"datagram-flow-id", b"42");
+        let invalid =
+            h3::Header::new(b"datagram-flow-id", b"4611686018427387904");
+        assert_eq!(
+            extract_quarter_stream_id(0, &[
+                method.clone(),
+                protocol.clone(),
+                valid.clone()
+            ]),
+            Some(42)
+        );
+        assert_eq!(
+            extract_quarter_stream_id(0, &[
+                valid,
+                protocol.clone(),
+                method.clone()
+            ]),
+            Some(42)
+        );
+        assert_eq!(
+            extract_quarter_stream_id(0, &[method, protocol, invalid]),
+            None
         );
     }
 
