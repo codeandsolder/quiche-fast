@@ -28,12 +28,11 @@ use std::collections::BTreeMap;
 
 use crate::datastore::Datastore;
 use crate::push_interp;
+use crate::trackers::QuicStreamTracker;
 use crate::trackers::StreamBufferTracker;
 use crate::QlogPointRtt;
 use crate::QlogPointu64;
 use netlog::h2::H2_DEFAULT_WINDOW_SIZE;
-
-use qlog::events::quic::QuicFrame;
 
 /// A log contains stream/window values whose sum cannot fit the chart's
 /// integer coordinate type. Never wrap and render a fabricated measurement.
@@ -155,6 +154,7 @@ pub struct SeriesStore {
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
     pub quic_receive_credit_consumed: Vec<QlogPointu64>,
+    pub quic_send_credit_consumed: Vec<QlogPointu64>,
 
     pub sum_received_stream_max_data: Vec<QlogPointu64>,
     pub sum_sent_stream_max_data: Vec<QlogPointu64>,
@@ -308,17 +308,19 @@ impl SeriesStore {
         }
     }
 
-    fn sent_max_data(&mut self, data_store: &Datastore) {
-        // Old MAX_DATA frames may be retransmitted after a larger grant.
-        // Flow control only increases; the advertised limit cannot regress.
-        let mut points = data_store.sent_max_data.clone();
+    fn max_data_series(
+        points: &[QlogPointu64], output: &mut Vec<QlogPointu64>, x_min: &mut f64,
+        x_max: &mut f64, y_max: &mut u64,
+    ) {
+        let mut points = points.to_vec();
         points.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut maximum = 0;
         for (time, value) in points {
             maximum = maximum.max(value);
-            self.update_sent_x_axis_max(time);
-            self.update_stream_recv_y_axis_max(maximum);
-            push_interp(&mut self.sent_max_data, (time, maximum));
+            *x_min = x_min.min(time);
+            *x_max = x_max.max(time);
+            *y_max = (*y_max).max(maximum);
+            push_interp(output, (time, maximum));
         }
     }
 
@@ -547,51 +549,25 @@ impl SeriesStore {
         Ok(())
     }
 
-    fn sent_stream_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
-        for (stream, points) in &data_store.sent_stream_frames {
-            let mut series_points = vec![];
-
-            for point in points {
-                if let (_, QuicFrame::Stream { offset, raw, .. }) = point {
-                    let offset = offset.unwrap_or_default();
-                    let length = raw
-                        .as_ref()
-                        .and_then(|info| info.payload_length)
-                        .unwrap_or_default();
-                    let y =
-                        offset.checked_add(length).ok_or(SeriesBuildError {
-                            stream_id: *stream,
-                            series: "sent_stream_frames",
-                        })?;
-
-                    self.update_sent_x_axis_max(point.0);
-                    self.update_stream_send_y_axis_max(y);
-
-                    series_points.push((point.0, y));
-                }
-            }
-
-            self.sent_stream_frames_series
-                .insert(*stream, series_points);
-        }
-        Ok(())
-    }
-
-    fn received_stream_frames(&mut self, data_store: &Datastore) {
-        for (&stream_id, history) in data_store.received_quic_streams.streams() {
+    fn quic_stream_frames(
+        tracker: &QuicStreamTracker,
+        output: &mut BTreeMap<u64, Vec<QlogPointu64>>, x_min: &mut f64,
+        x_max: &mut f64, y_max: &mut u64,
+    ) {
+        for (&stream_id, history) in tracker.streams() {
             let mut points = Vec::new();
             for &(time, observation) in history.points() {
                 let Some(end) = observation.frame_end() else {
                     continue;
                 };
-                self.received_x_min = self.received_x_min.min(time);
-                self.update_received_x_axis_max(time);
-                self.update_stream_recv_y_axis_max(end);
+                *x_min = x_min.min(time);
+                *x_max = x_max.max(time);
+                *y_max = (*y_max).max(end);
                 points.push((time, end));
             }
             if !points.is_empty() {
                 points.sort_by(|a, b| a.0.total_cmp(&b.0));
-                self.received_stream_frames_series.insert(stream_id, points);
+                output.insert(stream_id, points);
             }
         }
     }
@@ -739,38 +715,30 @@ impl SeriesStore {
         }
     }
 
-    fn quic_receive_credit(
-        &mut self, data_store: &Datastore,
+    fn quic_credit(
+        tracker: &QuicStreamTracker, output: &mut Vec<QlogPointu64>,
+        x_min: &mut f64, x_max: &mut f64, y_max: &mut u64, series: &'static str,
     ) -> SeriesResult<()> {
-        let points = data_store
-            .received_quic_streams
-            .chronological_sum_series()
-            .map_err(|error| {
-                let stream_id = match error {
-                    crate::trackers::TrackerError::StreamEndOverflow {
-                        stream_id,
-                        ..
-                    } |
-                    crate::trackers::TrackerError::RunningSumOverflow {
-                        stream_id,
-                        ..
-                    } => stream_id,
-                };
-                SeriesBuildError {
+        let points = tracker.chronological_sum_series().map_err(|error| {
+            let stream_id = match error {
+                crate::trackers::TrackerError::StreamEndOverflow {
                     stream_id,
-                    series: "quic_receive_credit_consumed",
-                }
-            })?;
-        for &point in points.as_ref() {
-            push_interp(&mut self.quic_receive_credit_consumed, point);
+                    ..
+                } |
+                crate::trackers::TrackerError::RunningSumOverflow {
+                    stream_id,
+                    ..
+                } => stream_id,
+            };
+            SeriesBuildError { stream_id, series }
+        })?;
+        for &(time, value) in points.as_ref() {
+            *x_min = x_min.min(time);
+            *x_max = x_max.max(time);
+            *y_max = (*y_max).max(value);
+            push_interp(output, (time, value));
         }
         Ok(())
-    }
-
-    fn received_max_data(&mut self, data_store: &Datastore) {
-        for point in &data_store.received_max_data {
-            push_interp(&mut self.received_max_data, *point);
-        }
     }
 
     fn sum_received_stream_max_data(&mut self, data_store: &Datastore) {
@@ -793,7 +761,13 @@ impl SeriesStore {
         self.ssthresh(data_store);
         self.smoothed_rtt(data_store);
 
-        self.sent_max_data(data_store);
+        Self::max_data_series(
+            &data_store.sent_max_data,
+            &mut self.sent_max_data,
+            &mut self.sent_x_min,
+            &mut self.sent_x_max,
+            &mut self.y_max_stream_recv_plot,
+        );
         self.sum_sent_stream_max_data(data_store);
 
         self.packet_sent(data_store);
@@ -805,16 +779,49 @@ impl SeriesStore {
 
         self.stream_buffers(data_store)?;
 
-        self.sent_stream_frames(data_store)?;
-        self.received_stream_frames(data_store);
+        Self::quic_stream_frames(
+            &data_store.sent_quic_streams,
+            &mut self.sent_stream_frames_series,
+            &mut self.sent_x_min,
+            &mut self.sent_x_max,
+            &mut self.y_max_stream_send_plot,
+        );
+        Self::quic_stream_frames(
+            &data_store.received_quic_streams,
+            &mut self.received_stream_frames_series,
+            &mut self.received_x_min,
+            &mut self.received_x_max,
+            &mut self.y_max_stream_recv_plot,
+        );
 
         self.data_frames(data_store)?;
         self.h2_window_series(data_store)?;
 
         self.netlog_h2_stream_received_connection_cumulative(data_store);
-        self.quic_receive_credit(data_store)?;
+        Self::quic_credit(
+            &data_store.received_quic_streams,
+            &mut self.quic_receive_credit_consumed,
+            &mut self.received_x_min,
+            &mut self.received_x_max,
+            &mut self.y_max_stream_recv_plot,
+            "quic_receive_credit_consumed",
+        )?;
+        Self::quic_credit(
+            &data_store.sent_quic_streams,
+            &mut self.quic_send_credit_consumed,
+            &mut self.sent_x_min,
+            &mut self.sent_x_max,
+            &mut self.y_max_stream_send_plot,
+            "quic_send_credit_consumed",
+        )?;
 
-        self.received_max_data(data_store);
+        Self::max_data_series(
+            &data_store.received_max_data,
+            &mut self.received_max_data,
+            &mut self.received_x_min,
+            &mut self.received_x_max,
+            &mut self.y_max_stream_send_plot,
+        );
         self.sum_received_stream_max_data(data_store);
         Ok(())
     }
@@ -1020,38 +1027,47 @@ mod tests {
     }
 
     #[test]
-    fn receive_credit_plots_only_known_stream_endpoints(
+    fn directional_credit_plots_only_known_stream_endpoints(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use crate::trackers::QuicReceiveObservation;
+        use crate::trackers::QuicStreamObservation;
         let mut datastore = Datastore::default();
         let observations = [
-            (5.0, QuicReceiveObservation::Frame {
+            (5.0, QuicStreamObservation::Frame {
                 offset: Some(10),
                 length: Some(20),
                 fin: None,
             }),
-            (1.0, QuicReceiveObservation::Frame {
+            (1.0, QuicStreamObservation::Frame {
                 offset: Some(0),
                 length: Some(5),
                 fin: None,
             }),
-            (6.0, QuicReceiveObservation::Frame {
+            (6.0, QuicStreamObservation::Frame {
                 offset: Some(40),
                 length: None,
                 fin: None,
             }),
-            (7.0, QuicReceiveObservation::Reset { final_size: 50 }),
+            (7.0, QuicStreamObservation::Reset { final_size: 50 }),
         ];
         for (time, observation) in observations {
             datastore
                 .received_quic_streams
                 .observe(9, observation, time)?;
+            datastore.sent_quic_streams.observe(9, observation, time)?;
         }
         let series = SeriesStore::from_datastore(&datastore)?;
         assert_eq!(series.received_stream_frames_series[&9], [
             (1.0, 5),
             (5.0, 30)
         ]);
+        assert_eq!(
+            series.sent_stream_frames_series,
+            series.received_stream_frames_series
+        );
+        assert_eq!(
+            series.quic_send_credit_consumed,
+            series.quic_receive_credit_consumed
+        );
         assert_eq!(series.quic_receive_credit_consumed, [
             (1.0, 5),
             (5.0, 5),
