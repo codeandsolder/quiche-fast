@@ -33,6 +33,8 @@ pub use self::id::ConnectionIdGenerator;
 pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
 pub(crate) use self::map::ConnectionMap;
+pub(crate) use self::map::ConnectionMapCommand;
+pub(crate) use self::map::RouteLease;
 
 use btls::ssl::SslRef;
 use datagram_socket::AsSocketStats;
@@ -75,7 +77,6 @@ use crate::metrics::Metrics;
 use crate::quic::io::worker::IoWorker;
 use crate::quic::io::worker::WriterConfig;
 use crate::quic::io::worker::INCOMING_QUEUE_SIZE;
-use crate::quic::router::ConnectionMapCommand;
 use crate::QuicResult;
 
 /// Wrapper for connection statistics recorded by [quiche].
@@ -363,7 +364,7 @@ where
             audit_log_stats: self.audit_log_stats,
             write_state: WriteState::default(),
             dscp_handle: self.params.dscp_handle,
-            conn_map_cmd_tx: self.params.conn_map_cmd_tx,
+            route_lease: self.params.route_lease,
             cid_generator: self.params.cid_generator,
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time: self.params.init_rx_time,
@@ -496,7 +497,7 @@ where
     pub initial_pkt: Option<Incoming>,
     pub dscp_handle: Option<DscpHandle>,
     pub shutdown_tx: mpsc::Sender<()>,
-    pub conn_map_cmd_tx: mpsc::UnboundedSender<ConnectionMapCommand>, /* channel that signals connection map changes */
+    pub route_lease: RouteLease,
     pub scid: ConnectionId<'static>,
     pub cid_generator: Option<SharedConnectionIdGenerator>,
     pub metrics: M,
