@@ -43,8 +43,6 @@ use super::StreamCtx;
 use super::STREAM_CAPACITY;
 use crate::http3::settings::Http3Settings;
 use crate::http3::settings::Http3SettingsEnforcer;
-use crate::http3::settings::Http3TimeoutType;
-use crate::http3::settings::TimeoutKey;
 use crate::quic::HandshakeInfo;
 use crate::quic::QuicCommand;
 use crate::quic::QuicheConnection;
@@ -161,9 +159,6 @@ pub struct ServerHooks {
     /// Tracks the number of requests that have been handled by this driver.
     requests: u64,
 
-    /// Handle to the post-accept timeout entry. If present, the server must
-    /// receive a HEADERS frame before this timeout.
-    post_accept_timeout: Option<TimeoutKey>,
     /// Whether the extended CONNECT protocol is enabled. When disabled,
     /// skip DATAGRAM flow creation for `:protocol` requests.
     extended_connect_enabled: bool,
@@ -273,7 +268,6 @@ impl DriverHooks for ServerHooks {
         Self {
             settings_enforcer: settings.into(),
             requests: 0,
-            post_accept_timeout: None,
             extended_connect_enabled: settings.enable_extended_connect,
         }
     }
@@ -291,27 +285,20 @@ impl DriverHooks for ServerHooks {
             "ServerH3Driver requires a server-side QUIC connection"
         );
 
-        if let Some(post_accept_timeout) =
-            driver.hooks.settings_enforcer.post_accept_timeout()
-        {
-            let remaining = post_accept_timeout
-                .checked_sub(handshake_info.elapsed())
-                .ok_or(H3ConnectionError::PostAcceptTimeout)?;
-
-            let key = driver
-                .hooks
-                .settings_enforcer
-                .add_timeout(Http3TimeoutType::PostAccept, remaining);
-            driver.hooks.post_accept_timeout = Some(key);
-        }
-
-        Ok(())
+        driver
+            .hooks
+            .settings_enforcer
+            .arm_post_accept(handshake_info.start_time())?;
+        driver.hooks.check_deadlines(qconn)
     }
 
     fn headers_received(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         headers: InboundHeaders,
     ) -> H3ConnectionResult<()> {
+        // Never accept a late first request merely because its packet was
+        // processed before the timer future got scheduled.
+        driver.hooks.check_deadlines(qconn)?;
         if driver
             .hooks
             .settings_enforcer
@@ -322,11 +309,7 @@ impl DriverHooks for ServerHooks {
             return Ok(());
         }
 
-        if let Some(timeout) = driver.hooks.post_accept_timeout.take() {
-            // We've seen the first Headers event for the connection,
-            // so we can abort the post-accept timeout
-            driver.hooks.settings_enforcer.cancel_timeout(timeout);
-        }
+        driver.hooks.settings_enforcer.cancel_post_accept();
 
         Self::handle_request(driver, qconn, headers)
     }
@@ -347,14 +330,19 @@ impl DriverHooks for ServerHooks {
         driver.handle_core_command(qconn, cmd)
     }
 
+    fn check_deadlines(
+        &mut self, qconn: &mut QuicheConnection,
+    ) -> H3ConnectionResult<()> {
+        self.settings_enforcer.check_deadline(qconn)
+    }
+
     fn has_wait_action(driver: &mut H3Driver<Self>) -> bool {
-        driver.hooks.settings_enforcer.has_pending_timeouts()
+        driver.hooks.settings_enforcer.deadline().is_some()
     }
 
     async fn wait_for_action(
         &mut self, qconn: &mut QuicheConnection,
     ) -> H3ConnectionResult<()> {
-        self.settings_enforcer.enforce_timeouts(qconn).await?;
-        Err(H3ConnectionError::PostAcceptTimeout)
+        self.settings_enforcer.wait_for_timeout(qconn).await
     }
 }

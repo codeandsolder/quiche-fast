@@ -35,6 +35,51 @@ fn wrapped_http3_and_quic_errors_expose_their_sources() {
     }
 }
 
+/// The peer's first HEADERS are already queued when the deadline expires.
+/// Processing the network input directly must not bypass timeout enforcement.
+#[tokio::test(start_paused = true)]
+async fn late_first_headers_are_rejected_without_polling_idle_timer(
+) -> anyhow::Result<()> {
+    use crate::http3::settings::Http3Settings;
+    use std::time::Duration;
+
+    let settings = Http3Settings {
+        post_accept_timeout: Some(Duration::from_secs(5)),
+        ..Http3Settings::default()
+    };
+    let pipe = quiche::test_utils::Pipe::with_config_and_buf(
+        &mut default_quiche_config(),
+    )?;
+    let mut helper =
+        DriverTestHelper::<ServerHooks>::with_pipe_and_http3_settings(
+            pipe, settings,
+        )?;
+    helper.complete_handshake()?;
+    helper.advance_and_run_loop()?;
+    helper.peer_client_send_request(make_request_headers("GET"), true)?;
+    helper.pipe.advance()?;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let error = helper
+        .driver
+        .process_reads(&mut helper.pipe.server)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("late first request was accepted"))?;
+    assert_eq!(
+        error.downcast_ref::<H3ConnectionError>(),
+        Some(&H3ConnectionError::PostAcceptTimeout)
+    );
+    assert!(helper.driver.stream_map.is_empty());
+    assert_eq!(
+        helper
+            .pipe
+            .server
+            .local_error()
+            .map(|err| (err.is_app, err.error_code)),
+        Some((true, h3::WireErrorCode::NoError as u64))
+    );
+    Ok(())
+}
+
 /// Tests for the body receive buffer sizing helper.
 mod body_recv_buf_size {
     use super::*;

@@ -1361,6 +1361,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     ///
     /// If a DATAGRAM is found, it is sent to the receiver on its channel.
     fn process_reads(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         loop {
             match self.conn_mut()?.poll(qconn) {
                 Ok((stream_id, event)) =>
@@ -1384,6 +1385,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     /// all sources. This will attempt to write any queued frames into their
     /// respective streams, if writable.
     fn process_writes(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         while let Some(stream_id) = qconn.stream_writable_next() {
             self.process_writable_stream(qconn, stream_id)?;
         }
@@ -1449,12 +1451,13 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     async fn wait_for_data(
         &mut self, qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         select! {
             biased;
+            r = self.hooks.wait_for_action(qconn), if H::has_wait_action(self) => r,
             Some(ready) = self.waiting_streams.next() => self.upstream_ready(qconn, ready),
             Some(dgram) = self.dgram_recv.recv() => self.dgram_ready(qconn, dgram),
             Some(cmd) = self.cmd_recv.recv() => H::conn_command(self, qconn, cmd),
-            r = self.hooks.wait_for_action(qconn), if H::has_wait_action(self) => r,
             _ = self.h3_event_sender.closed(), if !self.h3_event_receiver_dropped => {
                 self.h3_event_receiver_dropped = true;
                 self.close_if_idle(qconn);

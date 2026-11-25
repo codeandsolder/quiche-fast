@@ -115,6 +115,14 @@ pub trait DriverHooks: Sized + Send + 'static {
         false
     }
 
+    /// Checks endpoint-specific deadlines even while application or network
+    /// events continuously make progress.
+    fn check_deadlines(
+        &mut self, _qconn: &mut QuicheConnection,
+    ) -> H3ConnectionResult<()> {
+        Ok(())
+    }
+
     /// Determines whether the hook's `wait_for_action` future will be polled
     /// as part of `ApplicationOverQuic::wait_for_data`. Defaults to `false` and
     /// must be overridden if `wait_for_action` is overridden.
