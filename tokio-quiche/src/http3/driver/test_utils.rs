@@ -329,7 +329,8 @@ impl DriverTestHelper<ClientHooks> {
     pub(super) fn driver_recv_core_event(&mut self) -> anyhow::Result<H3Event> {
         match self.controller.event_receiver_mut().try_recv()? {
             ClientH3Event::Core(h3_event) => Ok(h3_event),
-            ev @ ClientH3Event::NewOutboundRequest { .. } =>
+            ev @ (ClientH3Event::NewOutboundRequest { .. } |
+            ClientH3Event::RequestRejected { .. }) =>
                 Err(anyhow::anyhow!("Not a core event: {ev:?}")),
         }
     }
