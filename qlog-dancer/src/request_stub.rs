@@ -42,8 +42,8 @@ pub const SERVER_OBSERVED_DATA: &str = "Response Observed DATA (bytes)";
 pub const UPLOAD_TIME: &str = "Upload duration (ms)";
 pub const UPLOAD_RATE: &str = "Upload rate (Mbps)";
 pub const SERVER_RX_HDR_TX_HDR: &str = "Server Rx Hdr, Tx Hdr";
-pub const SERVER_TX_HDR_TX_FIRST_HDR: &str = "Server Tx Hdr, Tx First Hdr";
-pub const SERVER_TX_HDR_TX_LAST_HDR: &str = "Server Tx Hdr, Tx Last Hdr";
+pub const SERVER_RX_HDR_TX_FIRST_DATA: &str = "Server Rx Hdr, Tx First Data";
+pub const SERVER_RX_HDR_TX_LAST_DATA: &str = "Server Rx Hdr, Tx Last Data";
 pub const SERVER_TX_FIRST_DATA_TX_LAST_DATA: &str =
     "Server Tx First Data, Tx Last Data (Download time)";
 
@@ -221,8 +221,11 @@ pub struct HttpRequestStub {
     pub time_discovery: Option<f64>,
     pub time_first_headers_rx: Option<f64>,
     pub time_first_headers_tx: Option<f64>,
+    pub time_last_headers_rx: Option<f64>,
+    pub time_last_headers_tx: Option<f64>,
 
-    pub time_fin_rx: Option<f64>,
+    /// Earliest response-side FIN or reset observation, not confirmed delivery.
+    pub time_response_terminal: Option<f64>,
     pub sent_data: HttpDataHistory,
     pub received_data: HttpDataHistory,
 
@@ -309,8 +312,8 @@ const REQUEST_HEADERS: [&str; 31] = [
     UPLOAD_TIME,
     UPLOAD_RATE,
     SERVER_RX_HDR_TX_HDR,
-    SERVER_TX_HDR_TX_FIRST_HDR,
-    SERVER_TX_HDR_TX_LAST_HDR,
+    SERVER_RX_HDR_TX_FIRST_DATA,
+    SERVER_RX_HDR_TX_LAST_DATA,
     SERVER_TX_FIRST_DATA_TX_LAST_DATA,
     CLIENT_PRI,
     SERVER_PRI,
@@ -330,20 +333,8 @@ impl tabled::Tabled for HttpRequestStub {
             path.push_str("<snip>");
         }
 
-        let req_start = match self.request_actor {
-            RequestActor::Client => self.time_first_headers_tx,
-            RequestActor::Server => self.time_first_headers_rx,
-        };
-        let req_start = NaOption::new(req_start);
-
-        // The final observation is not evidence that delivery completed.
-        let req_end = NaOption::new(
-            [self.response_headers_time(), self.server_data().last_time()]
-                .into_iter()
-                .flatten()
-                .filter(|time| time.is_finite())
-                .max_by(f64::total_cmp),
-        );
+        let req_start = NaOption::new(self.request_headers_time());
+        let req_end = NaOption::new(self.last_response_activity());
         let download_from_headers =
             self.server_data().measurement(self.response_headers_time());
         let download_from_data = self
@@ -496,6 +487,62 @@ impl HttpRequestStub {
             RequestActor::Client => &self.received_data,
             RequestActor::Server => &self.sent_data,
         }
+    }
+
+    pub(crate) const fn request_headers_time(&self) -> Option<f64> {
+        match self.request_actor {
+            RequestActor::Client => self.time_first_headers_tx,
+            RequestActor::Server => self.time_first_headers_rx,
+        }
+    }
+
+    pub(crate) fn observe_headers(&mut self, time: f64, sent: bool) {
+        let (first, last) = if sent {
+            (
+                &mut self.time_first_headers_tx,
+                &mut self.time_last_headers_tx,
+            )
+        } else {
+            (
+                &mut self.time_first_headers_rx,
+                &mut self.time_last_headers_rx,
+            )
+        };
+        *first = Some(first.map_or(time, |old| old.min(time)));
+        *last = Some(last.map_or(time, |old| old.max(time)));
+    }
+
+    pub(crate) fn record_response_terminal(&mut self, time: f64) {
+        self.time_response_terminal = Some(
+            self.time_response_terminal
+                .map_or(time, |old| old.min(time)),
+        );
+    }
+
+    /// Latest HTTP response header or DATA observation, not a completion time.
+    pub(crate) fn last_response_activity(&self) -> Option<f64> {
+        let last_headers = match self.request_actor {
+            RequestActor::Client => self.time_last_headers_rx,
+            RequestActor::Server => self.time_last_headers_tx,
+        };
+        [
+            self.response_headers_time(),
+            last_headers,
+            self.server_data().last_time(),
+        ]
+        .into_iter()
+        .flatten()
+        .filter(|time| time.is_finite())
+        .max_by(f64::total_cmp)
+    }
+
+    /// A FIN may precede HTTP parsing (for example, blocked QPACK decoding).
+    /// Include later observed response activity without calling it delivery.
+    pub(crate) fn observed_response_end(&self) -> Option<f64> {
+        self.time_response_terminal.map(|terminal| {
+            self.last_response_activity()
+                .map_or(terminal, |last| terminal.max(last))
+        })
     }
 
     const fn response_headers_time(&self) -> Option<f64> {
@@ -702,6 +749,30 @@ mod report_tests {
             });
         }
         Ok(())
+    }
+
+    #[test]
+    fn reordered_headers_and_trailers_extend_observed_activity_not_delivery() {
+        for actor in [RequestActor::Client, RequestActor::Server] {
+            let response_sent = matches!(actor, RequestActor::Server);
+            let mut req = HttpRequestStub {
+                request_actor: actor,
+                ..HttpRequestStub::default()
+            };
+            req.observe_headers(4.0, !response_sent);
+            req.observe_headers(9.0, response_sent);
+            req.observe_headers(7.0, response_sent);
+            req.observe_headers(6.0, response_sent);
+            assert_eq!(req.request_headers_time(), Some(4.0));
+            assert_eq!(req.response_headers_time(), Some(6.0));
+            assert_eq!(req.last_response_activity(), Some(9.0));
+            assert_eq!(req.observed_response_end(), None);
+            req.record_response_terminal(8.0);
+            req.record_response_terminal(7.0);
+            assert_eq!(req.time_response_terminal, Some(7.0));
+            assert_eq!(req.observed_response_end(), Some(9.0));
+            assert_eq!(req.fields()[9], "9");
+        }
     }
 
     #[test]

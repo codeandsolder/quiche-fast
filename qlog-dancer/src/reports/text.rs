@@ -46,10 +46,10 @@ use crate::request_stub::CLIENT_CONTENT_LENGTH;
 use crate::request_stub::CLIENT_OBSERVED_DATA;
 use crate::request_stub::CLIENT_PRI;
 use crate::request_stub::SERVER_PRI;
+use crate::request_stub::SERVER_RX_HDR_TX_FIRST_DATA;
 use crate::request_stub::SERVER_RX_HDR_TX_HDR;
+use crate::request_stub::SERVER_RX_HDR_TX_LAST_DATA;
 use crate::request_stub::SERVER_TX_FIRST_DATA_TX_LAST_DATA;
-use crate::request_stub::SERVER_TX_HDR_TX_FIRST_HDR;
-use crate::request_stub::SERVER_TX_HDR_TX_LAST_HDR;
 use crate::request_stub::UPLOAD_RATE;
 use crate::request_stub::UPLOAD_TIME;
 use crate::stringify_last;
@@ -74,10 +74,10 @@ pub fn request_timing_table(
             table
                 .with(Remove::column(ByColumnName::new(SERVER_RX_HDR_TX_HDR)))
                 .with(Remove::column(ByColumnName::new(
-                    SERVER_TX_HDR_TX_FIRST_HDR,
+                    SERVER_RX_HDR_TX_FIRST_DATA,
                 )))
                 .with(Remove::column(ByColumnName::new(
-                    SERVER_TX_HDR_TX_LAST_HDR,
+                    SERVER_RX_HDR_TX_LAST_DATA,
                 )))
                 .with(Remove::column(ByColumnName::new(
                     SERVER_TX_FIRST_DATA_TX_LAST_DATA,

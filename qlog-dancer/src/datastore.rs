@@ -344,6 +344,7 @@ pub struct Datastore {
     pub h2_server_settings: Http2Settings,
 
     pub last_event_time: f64,
+    pub time_session_close: Option<f64>,
 
     // There are several packet spaces, so store a map of all packets sent
     // according to packet space. Each space then contains a map of packet
@@ -424,6 +425,8 @@ pub struct Datastore {
 
     // Local send credit changes: received grants minus transmitted DATA.
     pub h2_send_windows: H2SendWindows,
+    // Resets can precede the first observed HTTP header or DATA frame.
+    pub h2_reset_times: BTreeMap<u64, f64>,
 
     pub quic_peer_window_blocked: BTreeMap<i64, Vec<f64>>,
 
@@ -658,6 +661,9 @@ impl Datastore {
                 constants,
             )?,
         }
+        self.last_event_time = self
+            .last_event_time
+            .max(netlog_relative_time(ev_hdr.time_num, session_start_time));
         Ok(())
     }
 
@@ -677,21 +683,13 @@ impl Datastore {
         &mut self, direction: LocalDirection, stream_id: u64,
         observation: QuicStreamObservation, time: f64,
     ) -> Result<(), TrackerError> {
-        if matches!(direction, LocalDirection::Sent) {
-            return self.sent_quic_streams.observe(stream_id, observation, time);
+        match direction {
+            LocalDirection::Sent =>
+                self.sent_quic_streams.observe(stream_id, observation, time),
+            LocalDirection::Received =>
+                self.received_quic_streams
+                    .observe(stream_id, observation, time),
         }
-        self.received_quic_streams
-            .observe(stream_id, observation, time)?;
-        if matches!(observation, QuicStreamObservation::Frame {
-            fin: Some(true),
-            ..
-        }) {
-            if let Some(request) = self.http_requests.get_mut(&stream_id) {
-                request.time_fin_rx =
-                    Some(request.time_fin_rx.map_or(time, |old| old.min(time)));
-            }
-        }
-        Ok(())
     }
 
     fn record_netlog_received_packet_header(
@@ -816,10 +814,16 @@ impl Datastore {
         }
     }
 
+    fn record_session_close_time(&mut self, time: f64) {
+        self.time_session_close =
+            Some(self.time_session_close.map_or(time, |old| old.min(time)));
+    }
+
     fn record_netlog_quic_close(
         &mut self, params: &quic::QuicSessionClosedParams,
-        constants: &netlog::constants::Constants,
+        constants: &netlog::constants::Constants, time: f64,
     ) {
+        self.record_session_close_time(time);
         self.quic_session_close = Some(QuicSessionClose {
             session_id: self.session_id.unwrap_or(-1),
             sni: self
@@ -1002,8 +1006,11 @@ impl Datastore {
                     rel_event_time,
                 )?,
 
-            quic::Event::QuicSessionClosed(e) =>
-                self.record_netlog_quic_close(&e.params, constants),
+            quic::Event::QuicSessionClosed(e) => self.record_netlog_quic_close(
+                &e.params,
+                constants,
+                rel_event_time,
+            ),
 
             quic::Event::QuicSessionRstStreamFrameReceived(e) => self
                 .record_netlog_quic_reset(
@@ -1130,6 +1137,33 @@ impl Datastore {
         Ok(())
     }
 
+    fn record_netlog_http_headers(
+        &mut self, stream_id: u64, direction: LocalDirection, time: f64,
+        headers: &[String], end_stream: bool,
+    ) -> &mut HttpRequestStub {
+        let is_request = direction.is_client_data(self.vantage_point);
+        let req = self.get_or_insert_http_req(stream_id);
+        req.observe_headers(time, matches!(direction, LocalDirection::Sent));
+        if is_request {
+            req.set_request_info_from_netlog(headers);
+        } else {
+            req.set_response_info_from_netlog(headers);
+            if end_stream {
+                req.record_response_terminal(time);
+            }
+        }
+        req
+    }
+
+    fn record_h2_data_end(
+        &mut self, stream_id: u32, direction: LocalDirection, time: f64,
+    ) {
+        if !direction.is_client_data(self.vantage_point) {
+            self.get_or_insert_http_req(u64::from(stream_id))
+                .record_response_terminal(time);
+        }
+    }
+
     fn consume_netlog_h3(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &h3::Event, h3_session_requests: Option<&QuicRequestDiscovery>,
@@ -1146,11 +1180,18 @@ impl Datastore {
             },
 
             h3::Event::Http3HeadersSent(e) => {
-                let req = self.get_or_insert_http_req(e.params.stream_id);
-                req.time_first_headers_tx.get_or_insert(rel_event_time);
-                req.set_request_info_from_netlog(&e.params.headers);
+                let is_request =
+                    LocalDirection::Sent.is_client_data(self.vantage_point);
+                let req = self.record_netlog_http_headers(
+                    e.params.stream_id,
+                    LocalDirection::Sent,
+                    rel_event_time,
+                    &e.params.headers,
+                    false,
+                );
 
                 if let Some(time) = h3_session_requests
+                    .filter(|_| is_request)
                     .and_then(|requests| requests.get(&e.params.stream_id))
                 {
                     req.time_discovery =
@@ -1159,9 +1200,13 @@ impl Datastore {
             },
 
             h3::Event::Http3HeadersDecoded(e) => {
-                let req = self.get_or_insert_http_req(e.params.stream_id);
-                req.time_first_headers_rx.get_or_insert(rel_event_time);
-                req.set_response_info_from_netlog(&e.params.headers);
+                self.record_netlog_http_headers(
+                    e.params.stream_id,
+                    LocalDirection::Received,
+                    rel_event_time,
+                    &e.params.headers,
+                    false,
+                );
             },
 
             h3::Event::Http3DataFrameReceived(e) => self
@@ -1248,6 +1293,10 @@ impl Datastore {
         error_code: &str, description: Option<&str>, time: f64,
     ) {
         self.h2_send_windows.close(stream_id, time);
+        self.h2_reset_times
+            .entry(u64::from(stream_id))
+            .and_modify(|old| *old = old.min(time))
+            .or_insert(time);
         let Some(req) = self.http_requests.get_mut(&u64::from(stream_id)) else {
             return;
         };
@@ -1269,6 +1318,7 @@ impl Datastore {
         constants: &netlog::constants::Constants, time: f64,
     ) {
         self.h2_send_windows.close_session(time);
+        self.record_session_close_time(time);
         self.h2_session_close = Some(H2SessionClose {
             session_id: self.session_id.unwrap_or(-1),
             sni: self
@@ -1309,11 +1359,19 @@ impl Datastore {
         if params.fin {
             self.h2_send_windows.close(params.stream_id, time);
         }
-        let req = self.get_or_insert_http_req(u64::from(params.stream_id));
-        req.time_first_headers_tx.get_or_insert(time);
-        req.set_request_info_from_netlog(&params.headers);
+        let is_request = LocalDirection::Sent.is_client_data(self.vantage_point);
+        let req = self.record_netlog_http_headers(
+            u64::from(params.stream_id),
+            LocalDirection::Sent,
+            time,
+            &params.headers,
+            params.fin,
+        );
 
-        if let Some(sb) = stream_bind.get(&params.source_dependency.id) {
+        if let Some(sb) = stream_bind
+            .get(&params.source_dependency.id)
+            .filter(|_| is_request)
+        {
             // Discovery can precede the session's creation.
             req.time_discovery =
                 Some(netlog_relative_time(*sb, session_start_time));
@@ -1352,10 +1410,13 @@ impl Datastore {
                     e.params.stream_id,
                     rel_event_time,
                 );
-                let req =
-                    self.get_or_insert_http_req(u64::from(e.params.stream_id));
-                req.time_first_headers_rx.get_or_insert(rel_event_time);
-                req.set_response_info_from_netlog(&e.params.headers);
+                self.record_netlog_http_headers(
+                    u64::from(e.params.stream_id),
+                    LocalDirection::Received,
+                    rel_event_time,
+                    &e.params.headers,
+                    e.params.fin,
+                );
             },
 
             h2::Event::Http2SessionRecvData(e) => {
@@ -1369,6 +1430,13 @@ impl Datastore {
                     e.params.stream_id,
                     rel_event_time,
                 );
+                if e.params.fin {
+                    self.record_h2_data_end(
+                        e.params.stream_id,
+                        LocalDirection::Received,
+                        rel_event_time,
+                    );
+                }
             },
 
             h2::Event::Http2SessionSendData(e) => {
@@ -1380,6 +1448,11 @@ impl Datastore {
                 if e.params.fin {
                     self.h2_send_windows
                         .close(e.params.stream_id, rel_event_time);
+                    self.record_h2_data_end(
+                        e.params.stream_id,
+                        LocalDirection::Sent,
+                        rel_event_time,
+                    );
                 }
             },
 
@@ -1452,6 +1525,9 @@ impl Datastore {
         let ev_time = event.time;
 
         match &event.data {
+            EventData::QuicConnectionClosed(_) =>
+                self.record_session_close_time(ev_time),
+
             EventData::QuicParametersSet(v) =>
                 self.consume_qlog_transport_parameters_set(v),
 
@@ -1537,21 +1613,31 @@ impl Datastore {
 
     pub fn hydrate_http_requests(&mut self) {
         for (&stream_id, req) in &mut self.http_requests {
-            if let Some(history) =
-                self.received_quic_streams.streams().get(&stream_id)
-            {
-                req.time_fin_rx = history
+            let response_streams = match req.request_actor {
+                RequestActor::Client => &self.received_quic_streams,
+                RequestActor::Server => &self.sent_quic_streams,
+            };
+            if let Some(history) = response_streams.streams().get(&stream_id) {
+                if let Some(terminal) = history
                     .points()
                     .iter()
                     .filter_map(|(time, observation)| {
-                        matches!(observation, QuicStreamObservation::Frame {
-                            fin: Some(true),
-                            ..
-                        })
+                        matches!(
+                            observation,
+                            QuicStreamObservation::Frame {
+                                fin: Some(true),
+                                ..
+                            } | QuicStreamObservation::Reset { .. }
+                        )
                         .then_some(*time)
                     })
                     .min_by(f64::total_cmp)
-                    .or(req.time_fin_rx);
+                {
+                    req.record_response_terminal(terminal);
+                }
+            }
+            if let Some(&time) = self.h2_reset_times.get(&stream_id) {
+                req.record_response_terminal(time);
             }
             req.calculate_deltas();
         }
@@ -1897,14 +1983,10 @@ impl Datastore {
             Http3Frame::Headers { headers, .. } => {
                 let vantage = self.vantage_point;
                 let req = self.get_or_insert_http_req(stream_id);
-                match direction {
-                    LocalDirection::Sent => {
-                        req.time_first_headers_tx.get_or_insert(ev_time);
-                    },
-                    LocalDirection::Received => {
-                        req.time_first_headers_rx.get_or_insert(ev_time);
-                    },
-                }
+                req.observe_headers(
+                    ev_time,
+                    matches!(direction, LocalDirection::Sent),
+                );
                 if direction.is_client_data(vantage) {
                     req.set_request_info_from_qlog(headers);
                 } else {
@@ -2741,6 +2823,105 @@ mod netlog_tests {
     }
 
     #[test]
+    fn response_terminal_hydration_uses_the_response_direction_and_reset_evidence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for vantage in [VantagePoint::Client, VantagePoint::Server] {
+            let mut ds = Datastore {
+                vantage_point: vantage,
+                ..Datastore::default()
+            };
+            let (request, response) = match vantage {
+                VantagePoint::Client =>
+                    (LocalDirection::Sent, LocalDirection::Received),
+                VantagePoint::Server =>
+                    (LocalDirection::Received, LocalDirection::Sent),
+            };
+            let fin = QuicStreamObservation::Frame {
+                offset: Some(5),
+                length: Some(0),
+                fin: Some(true),
+            };
+            ds.record_quic_stream(request, 0, fin, 2.0)?;
+            ds.record_quic_stream(request, 4, fin, 3.0)?;
+            ds.record_quic_stream(response, 0, fin, 9.0)?;
+            ds.record_quic_stream(response, 0, fin, 8.0)?;
+            ds.record_quic_stream(
+                response,
+                8,
+                QuicStreamObservation::Reset { final_size: 0 },
+                6.0,
+            )?;
+            assert!(ds.http_requests.is_empty());
+            for stream in [0, 4, 8] {
+                ds.get_or_insert_http_req(stream);
+            }
+            ds.hydrate_http_requests();
+            assert_eq!(ds.http_requests[&0].time_response_terminal, Some(8.0));
+            assert_eq!(ds.http_requests[&4].time_response_terminal, None);
+            assert_eq!(ds.http_requests[&8].time_response_terminal, Some(6.0));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn h2_response_end_stream_and_resets_preserve_lifecycle_evidence(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
+        let send_headers = netlog::Event::H2(h2::Event::Http2SessionSendHeaders(
+            h2::Http2SessionSendHeadersEvent {
+                params: h2::Http2SessionSendHeadersParams {
+                    stream_id: 1,
+                    fin: true,
+                    ..Default::default()
+                },
+            },
+        ));
+        let recv_headers = netlog::Event::H2(h2::Event::Http2SessionRecvHeaders(
+            h2::Http2SessionRecvHeadersEvent {
+                params: h2::Http2SessionRecvHeadersParams {
+                    stream_id: 1,
+                    fin: true,
+                    ..Default::default()
+                },
+            },
+        ));
+        let reset = netlog::Event::H2(h2::Event::Http2SessionRecvRstStream(
+            h2::Http2SessionRecvRstStreamEvent {
+                params: h2::Http2SessionRecvRstStreamParams {
+                    stream_id: 3,
+                    error_code: "CANCEL".into(),
+                },
+            },
+        ));
+        consume(&constants, &mut ds, 101, &send_headers)?;
+        assert_eq!(ds.http_requests[&1].time_response_terminal, None);
+        consume(&constants, &mut ds, 103, &recv_headers)?;
+        consume(&constants, &mut ds, 107, &reset)?;
+        assert!(!ds.http_requests.contains_key(&3));
+        consume(&constants, &mut ds, 104, &h2_received(3, 2))?;
+        let recv_data_fin = netlog::Event::H2(h2::Event::Http2SessionRecvData(
+            h2::Http2SessionRecvDataEvent {
+                params: h2::Http2SessionRecvDataParams {
+                    stream_id: 5,
+                    size: 1,
+                    fin: true,
+                },
+            },
+        ));
+        consume(&constants, &mut ds, 108, &recv_data_fin)?;
+        ds.hydrate_http_requests();
+        assert_eq!(ds.http_requests[&1].time_response_terminal, Some(3.0));
+        assert_eq!(ds.http_requests[&3].time_response_terminal, Some(7.0));
+        assert_eq!(ds.http_requests[&5].time_response_terminal, Some(8.0));
+        assert_eq!(ds.last_event_time, 8.0);
+        Ok(())
+    }
+
+    #[test]
     fn netlog_quic_stream_fin_preserves_final_size_without_inventing_requests(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;
@@ -2761,7 +2942,10 @@ mod netlog_tests {
         datastore.get_or_insert_http_req(7);
         consume(&constants, &mut datastore, 115, &fin)?;
         datastore.hydrate_http_requests();
-        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(11.0));
+        assert_eq!(
+            datastore.http_requests[&7].time_response_terminal,
+            Some(11.0)
+        );
         assert_eq!(
             datastore.received_quic_streams.streams()[&7].points().len(),
             2

@@ -28,7 +28,6 @@
 //! A single image file containing a view of pending vs. in-flight requests
 
 use crate::datastore::Datastore;
-use crate::datastore::VantagePoint;
 use crate::plots::chart_label_style;
 use crate::plots::chart_title_style;
 use crate::plots::colors;
@@ -75,20 +74,18 @@ struct PendingInterval {
 fn request_times(request: &HttpRequestStub) -> impl Iterator<Item = f64> {
     [
         request.time_discovery,
-        request.time_first_headers_tx,
-        request.time_fin_rx,
+        request.request_headers_time(),
+        request.observed_response_end(),
     ]
     .into_iter()
     .flatten()
 }
 
 fn validate_request_time(time: f64) -> io::Result<()> {
-    if time.is_finite() && time >= 0.0 {
+    if time.is_finite() {
         Ok(())
     } else {
-        Err(invalid_chart(
-            "request timestamps must be finite and nonnegative",
-        ))
+        Err(invalid_chart("request timestamps must be finite"))
     }
 }
 
@@ -97,17 +94,18 @@ fn validate_request_time(time: f64) -> io::Result<()> {
 fn occupancy_intervals(
     ds: &Datastore, limit: f64,
 ) -> io::Result<Vec<PendingInterval>> {
-    if !limit.is_finite() || limit < 0.0 {
-        return Err(invalid_chart(
-            "pending plot end time must be finite and nonnegative",
-        ));
+    if !limit.is_finite() {
+        return Err(invalid_chart("pending plot end time must be finite"));
     }
     let mut events = Vec::<(f64, i64, i64)>::new();
     for request in ds.http_requests.values() {
         let discovery = request.time_discovery;
-        let headers = request.time_first_headers_tx;
-        let finish = request.time_fin_rx;
-        for time in request_times(request) {
+        let headers = request.request_headers_time();
+        let finish = [request.observed_response_end(), ds.time_session_close]
+            .into_iter()
+            .flatten()
+            .min_by(f64::total_cmp);
+        for time in request_times(request).chain(ds.time_session_close) {
             validate_request_time(time)?;
         }
         let Some(begin) = discovery.or(headers) else {
@@ -129,8 +127,9 @@ fn occupancy_intervals(
             continue;
         }
         let end = finish.unwrap_or(limit).min(limit);
-        // A completed request remains pending until headers are transmitted,
-        // then in-flight until FIN. A header-only trace begins in-flight.
+        // Pending until request headers are observed at this endpoint,
+        // then active until response-side terminal evidence or session close.
+        // A header-only trace begins active; this does not establish delivery.
         // Clip events at the requested time limit *after* validating the full
         // lifecycle, so even malformed future events cannot be hidden by it.
         if discovery.is_some() {
@@ -151,7 +150,7 @@ fn occupancy_intervals(
     let mut intervals = Vec::new();
     let mut pending = 0_i64;
     let mut inflight = 0_i64;
-    let mut previous = 0.0;
+    let mut previous = events.first().map_or(0.0, |event| event.0);
     let mut index = 0;
     while index < events.len() {
         let time = events[index].0;
@@ -208,25 +207,31 @@ pub fn plot_pending(
     params: &PendingPlotParams, filename: &str, ss: &SeriesStore, ds: &Datastore,
     ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
-    let observed_end = match ds.vantage_point {
-        VantagePoint::Client => ss.received_x_max,
-        VantagePoint::Server => ss.sent_x_max,
-    };
-    let mut end = observed_end;
+    let mut start = 0.0_f64.min(ss.sent_x_min).min(ss.received_x_min);
+    let mut end = ds.last_event_time.max(ss.sent_x_max).max(ss.received_x_max);
     if !end.is_finite() {
         return Err(invalid_chart("trace duration must be finite").into());
     }
-    for request in ds.http_requests.values() {
-        for time in request_times(request) {
-            validate_request_time(time)?;
-            end = end.max(time);
-        }
+    for time in ds
+        .http_requests
+        .values()
+        .flat_map(request_times)
+        .chain(ds.time_session_close)
+    {
+        validate_request_time(time)?;
+        start = start.min(time);
+        end = end.max(time);
     }
-    let range = checked_time_range(0.0, end, &params.clamp)?;
-    // The plotting clamp is also the occupancy horizon. Avoid accumulating
-    // future events that cannot appear in a truncated output chart.
+    let range = checked_time_range(start, end, &params.clamp)?;
+    // Clip both ends before deriving the count axis.
     let visible_end = params.clamp.end.map_or(end, |clamp| end.min(clamp));
-    let intervals = occupancy_intervals(ds, visible_end)?;
+    let intervals = occupancy_intervals(ds, visible_end)?
+        .into_iter()
+        .filter_map(|mut item| {
+            item.start = item.start.max(range.start);
+            (item.start < item.end).then_some(item)
+        })
+        .collect::<Vec<_>>();
     let y_max = intervals.iter().try_fold(1_u64, |maximum, item| {
         let count = item
             .pending
@@ -262,7 +267,9 @@ pub fn plot_pending(
         .set_label_area_size(LabelAreaPosition::Bottom, 40);
     if params.display_chart_title {
         builder.caption(
-            format!("{filename} Pending vs. In-flight requests (stacked)"),
+            format!(
+                "{filename} Pending vs. awaiting observed response end (stacked)"
+            ),
             chart_title_style(&params.colors.caption),
         );
     }
@@ -281,7 +288,7 @@ pub fn plot_pending(
                 colors::FOREST_GREEN.filled(),
             )
         }))?
-        .label("In-flight requests")
+        .label("Awaiting observed response end")
         .legend(|(x, y)| {
             PathElement::new([(x, y), (x + 20, y)], colors::FOREST_GREEN)
         });
@@ -321,7 +328,7 @@ mod tests {
         ds.http_requests.insert(1, HttpRequestStub {
             time_discovery: Some(1.0),
             time_first_headers_tx: Some(3.0),
-            time_fin_rx: Some(7.0),
+            time_response_terminal: Some(7.0),
             ..HttpRequestStub::default()
         });
         ds.http_requests.insert(3, HttpRequestStub {
@@ -373,12 +380,12 @@ mod tests {
         ds.http_requests.insert(1, HttpRequestStub {
             time_discovery: Some(-0.0),
             time_first_headers_tx: Some(1.0),
-            time_fin_rx: Some(2.0),
+            time_response_terminal: Some(2.0),
             ..HttpRequestStub::default()
         });
         ds.http_requests.insert(3, HttpRequestStub {
             time_first_headers_tx: Some(0.0),
-            time_fin_rx: Some(2.0),
+            time_response_terminal: Some(2.0),
             ..HttpRequestStub::default()
         });
         assert_eq!(occupancy_intervals(&ds, 3.0)?, vec![
@@ -405,13 +412,13 @@ mod tests {
         ds.http_requests.insert(1, HttpRequestStub {
             time_discovery: Some(1.0),
             time_first_headers_tx: Some(3.0),
-            time_fin_rx: Some(20.0),
+            time_response_terminal: Some(20.0),
             ..HttpRequestStub::default()
         });
         ds.http_requests.insert(3, HttpRequestStub {
             time_discovery: Some(7.0),
             time_first_headers_tx: Some(8.0),
-            time_fin_rx: Some(10.0),
+            time_response_terminal: Some(10.0),
             ..HttpRequestStub::default()
         });
         assert_eq!(occupancy_intervals(&ds, 5.0)?, vec![
@@ -443,7 +450,7 @@ mod tests {
         ds.http_requests.insert(5, HttpRequestStub {
             time_discovery: Some(6.0),
             time_first_headers_tx: Some(9.0),
-            time_fin_rx: Some(8.0),
+            time_response_terminal: Some(8.0),
             ..HttpRequestStub::default()
         });
         assert!(occupancy_intervals(&ds, 5.0).is_err());
@@ -469,12 +476,85 @@ mod tests {
     }
 
     #[test]
+    fn server_occupancy_uses_received_request_headers_and_response_terminal_time(
+    ) -> Result<(), Box<dyn Error>> {
+        use crate::datastore::RequestActor;
+        use crate::datastore::VantagePoint;
+        let mut ds = Datastore {
+            vantage_point: VantagePoint::Server,
+            time_session_close: Some(9.0),
+            ..Datastore::default()
+        };
+        ds.http_requests.insert(1, HttpRequestStub {
+            request_actor: RequestActor::Server,
+            time_first_headers_rx: Some(-4.0),
+            time_first_headers_tx: Some(3.0),
+            time_response_terminal: Some(5.0),
+            time_last_headers_tx: Some(6.0),
+            ..HttpRequestStub::default()
+        });
+        ds.http_requests.insert(3, HttpRequestStub {
+            request_actor: RequestActor::Server,
+            time_first_headers_rx: Some(7.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 12.0)?, [
+            PendingInterval {
+                start: -4.0,
+                end: 6.0,
+                pending: 0,
+                in_flight: 1
+            },
+            PendingInterval {
+                start: 7.0,
+                end: 9.0,
+                pending: 0,
+                in_flight: 1
+            },
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn client_discovery_can_precede_session_origin() -> Result<(), Box<dyn Error>>
+    {
+        let mut ds = Datastore::default();
+        ds.http_requests.insert(1, HttpRequestStub {
+            time_discovery: Some(-5.0),
+            time_first_headers_tx: Some(2.0),
+            time_response_terminal: Some(3.0),
+            ..HttpRequestStub::default()
+        });
+        assert_eq!(occupancy_intervals(&ds, 5.0)?, [
+            PendingInterval {
+                start: -5.0,
+                end: 2.0,
+                pending: 1,
+                in_flight: 0
+            },
+            PendingInterval {
+                start: 2.0,
+                end: 3.0,
+                pending: 0,
+                in_flight: 1
+            },
+        ]);
+        assert_eq!(occupancy_intervals(&ds, -1.0)?, [PendingInterval {
+            start: -5.0,
+            end: -1.0,
+            pending: 1,
+            in_flight: 0
+        },]);
+        Ok(())
+    }
+
+    #[test]
     fn pending_png_respects_early_end_clamp() -> Result<(), Box<dyn Error>> {
         let mut ds = Datastore::default();
         ds.http_requests.insert(1, HttpRequestStub {
             time_discovery: Some(1.0),
             time_first_headers_tx: Some(2.0),
-            time_fin_rx: Some(20.0),
+            time_response_terminal: Some(20.0),
             ..HttpRequestStub::default()
         });
         let ss = SeriesStore {
