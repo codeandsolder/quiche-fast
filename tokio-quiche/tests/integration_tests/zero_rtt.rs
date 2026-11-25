@@ -124,7 +124,7 @@ async fn handle_0_rtt_request() {
         let mut h3i_config = h3i_fixtures::h3i_config(&url);
         // Provide session to the client to enable resumption.
         h3i_config.session = Some(nst_data);
-        h3i_config.enable_early_data = true;
+        h3i_config.tls.early_data = true;
         let _summary = helper_connect_with_early_data(
             h3i_config,
             Some(early_frame_actions),

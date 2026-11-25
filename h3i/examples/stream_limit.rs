@@ -9,12 +9,9 @@ use h3i::QPACK_ENCODER_STREAM_TYPE_ID;
 /// Test that opening too many unidirectional streams correctly triggers a
 /// StreamLimit error. Most servers advertise a max_streams_uni of 3, so
 /// attempting to open a 4th stream should fail.
-fn main() {
-    let config = Config::new()
-        .with_host_port("cloudflare-quic.com".to_string())
-        .with_idle_timeout(2000)
-        .build()
-        .unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = Config::new("cloudflare-quic.com")?;
+    config.idle_timeout = 2000;
 
     // Client-initiated unidirectional stream IDs: 2, 6, 10, 14, ...
     // With max_streams_uni=3 from server, streams 2, 6, 10 should succeed,
@@ -58,11 +55,11 @@ fn main() {
 
     let close_trigger_frames = None;
 
-    let summary = sync_client::connect(config, actions, close_trigger_frames)
-        .expect("connection failed");
+    let summary = sync_client::connect(config, actions, close_trigger_frames)?;
 
     println!(
         "=== Stream limit test completed! ===\n\n{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_else(|e| e.to_string())
+        serde_json::to_string_pretty(&summary)?
     );
+    Ok(())
 }

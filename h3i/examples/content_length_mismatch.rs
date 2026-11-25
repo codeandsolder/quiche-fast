@@ -15,12 +15,9 @@ const STREAM_ID: u64 = 0;
 /// Send a request with a Content-Length header that specifies 5 bytes, but a
 /// body that is only 4 bytes long. This verifies https://datatracker.ietf.org/doc/html/rfc9114#section-4.1.2-3 for
 /// cloudflare-quic.com.
-fn main() {
-    let config = Config::new()
-        .with_host_port("cloudflare-quic.com".to_string())
-        .with_idle_timeout(2000)
-        .build()
-        .unwrap();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = Config::new("cloudflare-quic.com")?;
+    config.idle_timeout = 2000;
 
     let headers = vec![
         Header::new(b":method", b"POST"),
@@ -31,7 +28,7 @@ fn main() {
         Header::new(b"content-length", b"5"),
     ];
 
-    let header_block = encode_header_block(&headers).unwrap();
+    let header_block = encode_header_block(&headers)?;
 
     let actions = vec![
         Action::SendHeadersFrame {
@@ -72,13 +69,13 @@ fn main() {
     // connection after receiving HEADERS on stream 0.
     let close_trigger_frames = None;
 
-    let summary = sync_client::connect(config, actions, close_trigger_frames)
-        .expect("connection failed");
+    let summary = sync_client::connect(config, actions, close_trigger_frames)?;
 
     println!(
         "=== received connection summary! ===\n\n{}",
-        serde_json::to_string_pretty(&summary).unwrap_or_else(|e| e.to_string())
+        serde_json::to_string_pretty(&summary)?
     );
+    Ok(())
 }
 
 // SendHeadersFrame requires a QPACK-encoded header block. h3i provides a

@@ -86,21 +86,29 @@ pub async fn connect(
         connect_url,
         bind_addr,
         peer_addr,
-    } = parse_args(args);
+    } = parse_args(args)?;
 
-    let socket = tokio::net::UdpSocket::bind(bind_addr).await.unwrap();
-    socket.connect(peer_addr).await.unwrap();
+    let socket = tokio::net::UdpSocket::bind(bind_addr)
+        .await
+        .map_err(|error| ClientError::Other(error.to_string()))?;
+    socket
+        .connect(peer_addr)
+        .await
+        .map_err(|error| ClientError::Other(error.to_string()))?;
 
     log::info!(
         "connecting to {:} from {:}",
         peer_addr,
-        socket.local_addr().unwrap()
+        socket
+            .local_addr()
+            .map_err(|error| ClientError::Other(error.to_string()))?
     );
 
     let (h3i, conn_summary_fut) =
         H3iDriver::new(frame_actions, close_trigger_frames);
     match tokio_quiche::quic::connect_with_config(
-        Socket::try_from(socket).unwrap(),
+        Socket::try_from(socket)
+            .map_err(|error| ClientError::Other(error.to_string()))?,
         connect_url,
         &connection_params,
         h3i,
@@ -115,24 +123,24 @@ pub async fn connect(
 fn create_config(args: &H3iConfig) -> QuicSettings {
     let mut quic_settings = QuicSettings::default();
 
-    quic_settings.verify_peer = args.verify_peer;
+    quic_settings.verify_peer = args.tls.verify_peer;
     quic_settings.max_idle_timeout =
         Some(Duration::from_millis(args.idle_timeout));
     quic_settings.send_capacity_factor = args.send_capacity_factor;
     quic_settings.max_recv_udp_payload_size = MAX_DATAGRAM_SIZE;
     quic_settings.max_send_udp_payload_size = MAX_DATAGRAM_SIZE;
-    quic_settings.initial_max_data = 10_000_000;
+    quic_settings.initial_max_data = args.flow.max_data;
     quic_settings.initial_max_stream_data_bidi_local =
-        args.max_stream_data_bidi_local;
+        args.flow.max_stream_data_bidi_local;
     quic_settings.initial_max_stream_data_bidi_remote =
-        args.max_stream_data_bidi_remote;
-    quic_settings.initial_max_stream_data_uni = args.max_stream_data_uni;
-    quic_settings.initial_max_streams_bidi = args.max_streams_bidi;
-    quic_settings.initial_max_streams_uni = args.max_streams_uni;
+        args.flow.max_stream_data_bidi_remote;
+    quic_settings.initial_max_stream_data_uni = args.flow.max_stream_data_uni;
+    quic_settings.initial_max_streams_bidi = args.flow.max_streams_bidi;
+    quic_settings.initial_max_streams_uni = args.flow.max_streams_uni;
     quic_settings.disable_active_migration = true;
     quic_settings.active_connection_id_limit = 0;
-    quic_settings.max_connection_window = args.max_window;
-    quic_settings.max_stream_window = args.max_stream_window;
+    quic_settings.max_connection_window = args.flow.max_window;
+    quic_settings.max_stream_window = args.flow.max_stream_window;
     quic_settings.enable_send_streams_blocked = true;
     quic_settings.grease = false;
 
@@ -140,9 +148,12 @@ fn create_config(args: &H3iConfig) -> QuicSettings {
     quic_settings.keylog_file = std::env::var_os("SSLKEYLOGFILE")
         .and_then(|os_str| os_str.into_string().ok());
 
-    quic_settings.enable_dgram = args.enable_dgram;
-    quic_settings.dgram_recv_max_queue_len = args.dgram_recv_queue_len;
-    quic_settings.dgram_send_max_queue_len = args.dgram_send_queue_len;
+    quic_settings.enable_early_data = args.tls.early_data;
+    quic_settings.enable_dgram = args.datagrams.is_some();
+    if let Some(queues) = &args.datagrams {
+        quic_settings.dgram_recv_max_queue_len = queues.receive;
+        quic_settings.dgram_send_max_queue_len = queues.send;
+    }
 
     quic_settings
 }

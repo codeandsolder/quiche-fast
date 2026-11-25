@@ -133,7 +133,7 @@ impl Prompter {
         CONNECTION_IDLE_TIMEOUT.with(|v| *v.borrow_mut() = config.idle_timeout);
 
         Self {
-            host_port: config.host_port.clone(),
+            host_port: config.endpoint.authority().to_owned(),
             bidi_sid_alloc: StreamIdAllocator { id: 0 },
             uni_sid_alloc: StreamIdAllocator { id: 2 },
         }

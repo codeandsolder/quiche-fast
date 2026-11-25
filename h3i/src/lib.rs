@@ -61,11 +61,8 @@
 //!    /// https://datatracker.ietf.org/doc/html/rfc9114#request-streams for more.
 //!    const STREAM_ID: u64 = 0;
 //!
-//!    let config = Config::new()
-//!        .with_host_port("blog.cloudflare.com".to_string())
-//!        .with_idle_timeout(2000)
-//!        .build()
-//!        .unwrap();
+//!    let mut config = Config::new("blog.cloudflare.com").unwrap();
+//!    config.idle_timeout = 2000;
 //!
 //!    let headers = vec![
 //!        Header::new(b":method", b"POST"),

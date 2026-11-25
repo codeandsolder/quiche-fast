@@ -45,19 +45,14 @@ pub fn h3i_config(url: &str) -> h3i::config::Config {
     let url = url.strip_prefix("http://").unwrap_or(url);
     let final_url = url.split('/').next().unwrap_or(url);
 
-    h3i::config::Config::new()
-        .with_host_port("test.com".to_string())
-        .with_idle_timeout(2000)
-        .with_max_streams_bidi(100)
-        .with_max_streams_uni(100)
-        .with_max_data(1000000)
-        .with_max_stream_data_bidi_local(1000000)
-        .with_max_stream_data_bidi_remote(1000000)
-        .with_max_stream_data_uni(100000)
-        .with_connect_to(final_url.to_string())
-        .verify_peer(false)
-        .build()
-        .unwrap()
+    let mut config = h3i::config::Config::new("test.com").unwrap();
+    config.idle_timeout = 2000;
+    config.flow.max_data = 1_000_000;
+    config.flow.max_stream_data_uni = 100_000;
+    config.endpoint.connect_to = Some(final_url.parse().unwrap());
+    config.tls.verify_peer = false;
+    config.datagrams = Some(h3i::config::DatagramQueues::default());
+    config
 }
 
 pub fn default_headers() -> Vec<Header> {
