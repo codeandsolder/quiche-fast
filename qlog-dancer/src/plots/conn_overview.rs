@@ -203,6 +203,63 @@ fn draw_receive_panel_series<DB: DrawingBackend>(
     Ok(())
 }
 
+/// Draw outbound stream and peer-grant series in both overview layouts.
+fn draw_send_panel_series<DB: DrawingBackend>(
+    ss: &SeriesStore,
+    chart: &mut ChartContext<DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
+) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
+    draw_stream_group(
+        &ss.stream_buffer_writes,
+        "Stream buffer write",
+        MAGENTA,
+        chart,
+    )?;
+    draw_line(
+        &ss.sum_stream_buffer_writes,
+        Some("Cumulative stream buffer writes"),
+        RGBColor(255, 0, 0),
+        chart,
+    )?;
+    draw_stream_group(
+        &ss.stream_buffer_dropped,
+        "Stream buffer dropped",
+        ORANGE,
+        chart,
+    )?;
+    draw_line(
+        &ss.sum_stream_buffer_dropped,
+        Some("Cumulative stream buffer dropped"),
+        RGBColor(0, 0, 255),
+        chart,
+    )?;
+    draw_stream_group(
+        &ss.sent_stream_frames_series,
+        "Sent stream data",
+        PURPLE_500,
+        chart,
+    )?;
+    draw_line(
+        &ss.quic_send_credit_consumed,
+        Some("Sent credit used (lower bound)"),
+        crate::plots::colors::BROWN,
+        chart,
+    )?;
+    draw_line(
+        &ss.received_max_data,
+        Some("Received MAX_DATA"),
+        MID_GREY,
+        chart,
+    )?;
+    draw_line(
+        &ss.sum_received_stream_max_data,
+        Some("Cumulative received MAX_STREAM_DATA"),
+        MUSTARD,
+        chart,
+    )?;
+
+    Ok(())
+}
+
 /// Keep legend styling identical in native split views and the browser view.
 fn draw_legend<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters,
@@ -252,54 +309,7 @@ where
     )?;
 
     draw_receive_panel_series(ss, &mut chart)?;
-    draw_stream_group(
-        &ss.stream_buffer_writes,
-        "Stream buffer write",
-        MAGENTA,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.sum_stream_buffer_writes,
-        Some("Cumulative stream buffer writes"),
-        RGBColor(255, 0, 0),
-        &mut chart,
-    )?;
-    draw_stream_group(
-        &ss.stream_buffer_dropped,
-        "Stream buffer dropped",
-        ORANGE,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.sum_stream_buffer_dropped,
-        Some("Cumulative stream buffer dropped"),
-        RGBColor(0, 0, 255),
-        &mut chart,
-    )?;
-    draw_stream_group(
-        &ss.sent_stream_frames_series,
-        "Sent stream data",
-        PURPLE_500,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.quic_send_credit_consumed,
-        Some("Sent credit used (lower bound)"),
-        crate::plots::colors::BROWN,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.received_max_data,
-        Some("Received MAX_DATA"),
-        MID_GREY,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.sum_received_stream_max_data,
-        Some("Cumulative received MAX_STREAM_DATA"),
-        MUSTARD,
-        &mut chart,
-    )?;
+    draw_send_panel_series(ss, &mut chart)?;
 
     draw_legend(params, &mut chart)?;
     Ok(chart)
@@ -338,54 +348,7 @@ where
         &mut chart,
     )?;
 
-    draw_line(
-        &ss.sum_stream_buffer_writes,
-        Some("Cumulative stream buffer writes"),
-        RGBColor(255, 0, 0),
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.sum_stream_buffer_dropped,
-        Some("Cumulative stream buffer dropped"),
-        RGBColor(0, 0, 255),
-        &mut chart,
-    )?;
-    draw_stream_group(
-        &ss.stream_buffer_writes,
-        "Stream buffer write",
-        MAGENTA,
-        &mut chart,
-    )?;
-    draw_stream_group(
-        &ss.stream_buffer_dropped,
-        "Stream buffer dropped",
-        ORANGE,
-        &mut chart,
-    )?;
-    draw_stream_group(
-        &ss.sent_stream_frames_series,
-        "Sent stream data",
-        PURPLE_500,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.quic_send_credit_consumed,
-        Some("Sent credit used (lower bound)"),
-        crate::plots::colors::BROWN,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.received_max_data,
-        Some("Received MAX_DATA"),
-        MID_GREY,
-        &mut chart,
-    )?;
-    draw_line(
-        &ss.sum_received_stream_max_data,
-        Some("Cumulative received MAX_STREAM_DATA"),
-        MUSTARD,
-        &mut chart,
-    )?;
+    draw_send_panel_series(ss, &mut chart)?;
 
     draw_legend(params, &mut chart)?;
     Ok(chart)
