@@ -209,14 +209,14 @@ fn record_uni_stream(
     )
 }
 
-fn raw_info(payload: &[u8]) -> Box<RawInfo> {
-    Box::new(RawInfo {
+fn raw_info(payload: &[u8]) -> RawInfo {
+    RawInfo {
         length: None,
         payload_length: Some(payload.len() as u64),
         data: std::str::from_utf8(payload)
             .ok()
             .map(|text| Box::new(text.to_owned())),
-    })
+    }
 }
 
 fn payload_extension(payload: &[u8]) -> ExData {
@@ -285,13 +285,13 @@ impl TryFrom<&Action> for QlogEvent {
                     stream_id: *stream_id,
                     fin: Some(*fin_stream),
                     offset: None,
-                    raw: Some(raw_info(bytes)),
+                    raw: Some(Box::new(raw_info(bytes))),
                 },
                 payload_extension(bytes),
             ),
             Action::SendDatagram { payload } => Self::packet(
                 QuicFrame::Datagram {
-                    raw: Some(raw_info(payload)),
+                    raw: Some(Box::new(raw_info(payload))),
                 },
                 payload_extension(payload),
             ),
@@ -328,34 +328,40 @@ impl TryFrom<&Action> for QlogEvent {
             Action::ConnectionClose { error } => record_close(error),
             Action::FlushPackets => Self::custom("h3i:flush_packets", json!({})),
         };
-        let expected = match action {
-            Action::SendFrame {
-                expected_result, ..
-            } |
-            Action::SendHeadersFrame {
-                expected_result, ..
-            } |
-            Action::OpenUniStream {
-                expected_result, ..
-            } |
-            Action::StreamBytes {
-                expected_result, ..
-            } => Some(expected_result),
-            _ => None,
-        };
-        if let (Some(expected), Self::Event { ex_data, .. }) =
-            (expected, &mut event)
-        {
-            if !matches!(expected, ExpectedStreamSendResult::Ok) {
-                ex_data.insert(
-                    "h3i_expected_result".into(),
-                    serde_json::to_value(expected)
-                        .map_err(|error| ClientError::Other(error.to_string()))?,
-                );
-            }
-        }
+        record_expected_result(action, &mut event)?;
         Ok(event)
     }
+}
+
+fn record_expected_result(
+    action: &Action, event: &mut QlogEvent,
+) -> Result<(), ClientError> {
+    let expected = match action {
+        Action::SendFrame {
+            expected_result, ..
+        } |
+        Action::SendHeadersFrame {
+            expected_result, ..
+        } |
+        Action::OpenUniStream {
+            expected_result, ..
+        } |
+        Action::StreamBytes {
+            expected_result, ..
+        } => Some(expected_result),
+        _ => None,
+    };
+    if let (Some(expected), QlogEvent::Event { ex_data, .. }) = (expected, event)
+    {
+        if !matches!(expected, ExpectedStreamSendResult::Ok) {
+            ex_data.insert(
+                "h3i_expected_result".into(),
+                serde_json::to_value(expected)
+                    .map_err(|error| ClientError::Other(error.to_string()))?,
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Convert a recorded event into replay actions, rejecting malformed action
