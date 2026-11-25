@@ -134,13 +134,15 @@ multiplexed requests within the same connection.
 # Feature Flags
 
 tokio-quiche supports a number of feature flags to enable experimental features,
-performance enhancements, and additional telemetry. By default, no feature flags are
-enabled.
+performance enhancements, and additional telemetry. The `qlog-gzip` and
+`qlog-zstd` features are enabled by default; `QlogCompression::None` still
+writes uncompressed logs. Disable default features to omit both compression
+backends.
 
 - `rpk`: Support for raw public keys (RPK) in QUIC handshakes (via [btls]).
 - `gcongestion`: Replace quiche's original congestion control implementation with one
    adapted from google/quiche.
-- `zero-copy`: Use zero-copy sends with quiche (implies `gcongestion`).
+- `zero-copy`: Deprecated alias for `gcongestion`; zero-copy sends are always enabled.
 - `perf-quic-listener-metrics`: Extra telemetry for QUIC handshake durations,
   including protocol overhead and network delays.
 - `tokio-task-metrics`: Scheduling & poll duration histograms for tokio tasks.
@@ -149,6 +151,7 @@ Other parts of the crate are enabled by separate build flags instead, to be
 controlled by the final binary:
 
 - `--cfg capture_keylogs`: Optional `SSLKEYLOGFILE` capturing for QUIC connections.
+  The deprecated `capture_keylogs` Cargo feature also enables this path.
 
 
 # Server usage architecture

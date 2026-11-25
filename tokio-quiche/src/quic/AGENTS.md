@@ -52,8 +52,8 @@ router/
 - **Route ownership is independent of a connection's current CID.** `RouteLease` follows the unstarted connection and all worker stages, and closes every route on drop. Workers await router registration acknowledgement before advertising new CIDs. Retire and close commands are owner-scoped; never overwrite another owner's active route.
 - **Linux `SO_TXTIME` in `io/gso.rs`** -- the socket uses `CLOCK_MONOTONIC`; convert opaque `Instant` deadlines against a sampled monotonic clock, with checked nanosecond arithmetic. Never transmute an `Instant` or silently truncate UDP GSO segment sizes. The conversion's boundary tests must be deterministic even on loaded CI hosts.
 - **One client connection per socket** -- `connect()` docs explicitly warn. Sharing socket loses packets.
-- **`#[cfg(feature = "zero-copy")]` gates `QuicheConnection` type alias** -- `quiche::Connection<BufFactory>` vs `quiche::Connection`. Check both paths when modifying connection creation.
-- **`wait_for_quiche` returns `TlsFail` on gather error** -- misleading sentinel error, don't propagate this pattern.
+- **`QuicheConnection` always uses `quiche::Connection<BufFactory>`** -- zero-copy sends are not feature-gated. Check legacy recovery and `gcongestion` when changing pacing or GSO.
+- **`wait_for_quiche` propagates the actual gather error** and preserves cancellation safety. Do not replace transport errors with a TLS sentinel.
 
 ## NOTES
 
