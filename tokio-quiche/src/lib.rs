@@ -54,7 +54,7 @@
 //!
 //! while let Some(conn) = accept_stream.next().await {
 //!     let (driver, mut controller) =
-//!         ServerH3Driver::new(Http3Settings::default());
+//!         ServerH3Driver::new(&Http3Settings::default());
 //!     conn?.start(driver);
 //!
 //!     tokio::spawn(async move {

@@ -852,7 +852,7 @@ mod tests {
         // Wait for a new connection
         time::pause();
 
-        let (h3_driver, _) = ServerH3Driver::new(Http3Settings::default());
+        let (h3_driver, _) = ServerH3Driver::new(&Http3Settings::default());
         let conn = incoming.recv().await.ok_or("listener closed")??;
         let dscp_handle =
             conn.dscp_handle().ok_or("missing DSCP handle")?.clone();
@@ -951,7 +951,7 @@ mod tests {
             .expect("initial packet rejected");
         let dscp = conn.dscp_handle().unwrap().clone();
         dscp.set(Dscp::new(34));
-        let (driver, controller) = ServerH3Driver::new(Http3Settings::default());
+        let (driver, controller) = ServerH3Driver::new(&Http3Settings::default());
         let (_, mut worker) =
             time::timeout(Duration::from_secs(5), conn.handshake(driver))
                 .await

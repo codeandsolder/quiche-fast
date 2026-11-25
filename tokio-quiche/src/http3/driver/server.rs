@@ -271,10 +271,11 @@ impl DriverHooks for ServerHooks {
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {
-        assert!(
-            qconn.is_server(),
-            "ServerH3Driver requires a server-side QUIC connection"
-        );
+        if !qconn.is_server() {
+            return Err(H3ConnectionError::InvalidDriverRole {
+                expected_server: true,
+            });
+        }
 
         driver
             .hooks

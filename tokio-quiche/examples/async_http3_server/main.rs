@@ -88,7 +88,7 @@ async fn main() {
 
                 // Create an `H3Driver` to serve the connection.
                 let (driver, mut controller) =
-                    ServerH3Driver::new(Http3Settings::default());
+                    ServerH3Driver::new(&Http3Settings::default());
 
                 // Start the driver. This will execute the handshake under the
                 // hood, which lets us start receiving

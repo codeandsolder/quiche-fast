@@ -295,8 +295,7 @@ where
 
     tokio::spawn(async move {
         loop {
-            let (h3_driver, h3_controller) =
-                ServerH3Driver::new(http3_settings.clone());
+            let (h3_driver, h3_controller) = ServerH3Driver::new(&http3_settings);
             let conn = stream.next().await.unwrap().unwrap().start(h3_driver);
             let h3_over_quic = ServerH3Connection::new(conn, h3_controller);
 

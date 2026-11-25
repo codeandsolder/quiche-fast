@@ -156,7 +156,7 @@ where
     let socket: Socket<Tx, Rx> = socket.try_into()?;
 
     let (h3_driver, h3_controller) =
-        ClientH3Driver::new(Http3Settings::default());
+        ClientH3Driver::new(&Http3Settings::default());
     let mut params = ConnectionParams::default();
     params.settings.max_idle_timeout = Some(Duration::from_secs(30));
 

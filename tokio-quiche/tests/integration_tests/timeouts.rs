@@ -68,7 +68,7 @@ where
         tokio_quiche::settings::Hooks::default(),
     );
     let (app, _controller) =
-        tokio_quiche::ClientH3Driver::new(Http3Settings::default());
+        tokio_quiche::ClientH3Driver::new(&Http3Settings::default());
     let result = timeout(
         Duration::from_secs(3),
         tokio_quiche::quic::connect_with_config(

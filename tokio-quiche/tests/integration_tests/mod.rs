@@ -207,7 +207,7 @@ async fn test_ioworker_state_machine_pause() {
     tokio::spawn(async move {
         loop {
             let (h3_driver, h3_controller) =
-                ServerH3Driver::new(Http3Settings::default());
+                ServerH3Driver::new(&Http3Settings::default());
             let conn = stream.next().await.unwrap().unwrap();
 
             let (quic_connection, worker) =
@@ -322,7 +322,7 @@ async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
     tokio_socket.connect(addr).await?;
     let socket = Socket::try_from(tokio_socket)?;
     let (h3_driver, _h3_controller) =
-        ClientH3Driver::new(Http3Settings::default());
+        ClientH3Driver::new(&Http3Settings::default());
     let dcid =
         tokio_quiche::quic::SimpleConnectionIdGenerator.new_connection_id()?;
     let mut params = ConnectionParams::default();

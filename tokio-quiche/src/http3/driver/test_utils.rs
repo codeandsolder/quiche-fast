@@ -132,7 +132,7 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         mut pipe: Pipe, h3_settings: Http3Settings,
     ) -> anyhow::Result<Self> {
         pipe.handshake().context("Failed to handshake pipe")?;
-        let (driver, controller) = H3Driver::<H>::new(h3_settings);
+        let (driver, controller) = H3Driver::<H>::new(&h3_settings);
         let peer = h3::Connection::with_transport(
             H::peer_qconn(&mut pipe),
             &h3::Config::new(),

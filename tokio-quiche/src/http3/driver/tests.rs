@@ -30,9 +30,35 @@ fn wrapped_http3_and_quic_errors_expose_their_sources() {
         H3ConnectionError::ControllerWentAway,
         H3ConnectionError::NonexistentStream,
         H3ConnectionError::PostAcceptTimeout,
+        H3ConnectionError::InvalidDatagram,
+        H3ConnectionError::NotEstablished,
+        H3ConnectionError::InvalidDriverRole {
+            expected_server: true,
+        },
     ] {
         assert!(standalone.source().is_none());
     }
+}
+
+#[test]
+fn controller_can_transfer_receiver_without_losing_command_senders(
+) -> anyhow::Result<()> {
+    let (mut driver, controller) =
+        H3Driver::<ClientHooks>::new(&Http3Settings::default());
+    let commands = controller.h3_cmd_sender();
+    let _events = controller.into_event_receiver();
+    commands.send(H3Command::GoAway).map_err(|_| {
+        anyhow::anyhow!("controller transfer closed command channel")
+    })?;
+    assert!(matches!(
+        driver.cmd_recv.try_recv(),
+        Ok(ClientH3Command::Core(H3Command::GoAway))
+    ));
+    assert_eq!(
+        driver.conn_mut().err(),
+        Some(H3ConnectionError::NotEstablished)
+    );
+    Ok(())
 }
 
 /// The peer's first HEADERS are already queued when the deadline expires.
@@ -156,10 +182,11 @@ mod body_recv_buf_size {
 #[test]
 fn zero_configured_max_recv_body_buf_size_falls_back_to_default() {
     let settings_max = |max: Option<usize>| {
-        let (driver, _controller) = H3Driver::<ClientHooks>::new(Http3Settings {
-            max_recv_body_buf_size: max,
-            ..Default::default()
-        });
+        let (driver, _controller) =
+            H3Driver::<ClientHooks>::new(&Http3Settings {
+                max_recv_body_buf_size: max,
+                ..Default::default()
+            });
         driver.max_recv_body_buf_size
     };
 

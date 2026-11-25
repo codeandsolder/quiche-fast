@@ -256,7 +256,7 @@ impl ClientHooks {
     }
 
     fn reject_request(
-        driver: &H3Driver<Self>, request: NewClientRequest, goaway_id: u64,
+        driver: &H3Driver<Self>, request: &NewClientRequest, goaway_id: u64,
     ) -> H3ConnectionResult<()> {
         driver
             .h3_event_sender
@@ -275,7 +275,7 @@ impl ClientHooks {
             return Ok(());
         }
         if let Some(goaway_id) = driver.hooks.peer_goaway {
-            return Self::reject_request(driver, request, goaway_id);
+            return Self::reject_request(driver, &request, goaway_id);
         }
         // A newer request must not bypass an earlier blocked request.
         if !driver.hooks.queued_requests.is_empty() {
@@ -291,7 +291,7 @@ impl ClientHooks {
     /// Handles a response from the peer by sending a relevant [`H3Event`] to
     /// the [`ClientH3Controller`] for application-level processing.
     fn handle_response(
-        driver: &mut H3Driver<Self>, headers: InboundHeaders,
+        driver: &H3Driver<Self>, headers: InboundHeaders,
         pending_request: PendingClientRequest,
     ) -> H3ConnectionResult<()> {
         let InboundHeaders {
@@ -351,10 +351,11 @@ impl DriverHooks for ClientHooks {
         _driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         _handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {
-        assert!(
-            !qconn.is_server(),
-            "ClientH3Driver requires a client-side QUIC connection"
-        );
+        if qconn.is_server() {
+            return Err(H3ConnectionError::InvalidDriverRole {
+                expected_server: false,
+            });
+        }
         Ok(())
     }
 
@@ -417,7 +418,7 @@ impl DriverHooks for ClientHooks {
     ) -> H3ConnectionResult<()> {
         driver.hooks.peer_goaway = Some(goaway_id);
         while let Some(request) = driver.hooks.queued_requests.pop_front() {
-            Self::reject_request(driver, request, goaway_id)?;
+            Self::reject_request(driver, &request, goaway_id)?;
         }
         Ok(())
     }
@@ -425,10 +426,8 @@ impl DriverHooks for ClientHooks {
 
 impl ClientH3Controller {
     /// Creates a [`NewClientRequest`] sender for the paired [`ClientH3Driver`].
+    #[must_use = "the returned sender submits client HTTP requests"]
     pub fn request_sender(&self) -> ClientRequestSender {
-        RequestSender {
-            sender: self.cmd_sender.clone(),
-            _r: Default::default(),
-        }
+        RequestSender::new(self.cmd_sender.clone())
     }
 }
