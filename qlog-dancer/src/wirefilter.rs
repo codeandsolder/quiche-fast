@@ -312,11 +312,8 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn all_explicit_stream_references_are_filterable(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let id = 40;
-        let frames = vec![
+    fn stream_frames(id: u64) -> Vec<quic::QuicFrame> {
+        vec![
             quic::QuicFrame::Ping { raw: None },
             quic::QuicFrame::ResetStream {
                 stream_id: id,
@@ -342,14 +339,11 @@ mod tests {
                 limit: 100,
                 raw: None,
             },
-        ];
-        let priority = http3::Http3Frame::PriorityUpdate {
-            stream_id: Some(id),
-            push_id: None,
-            priority_field_value: "u=1".into(),
-            raw: None,
-        };
-        let events = vec![
+        ]
+    }
+
+    fn frame_events(frames: Vec<quic::QuicFrame>) -> Vec<Event> {
+        vec![
             native(EventData::QuicPacketSent(quic::PacketSent {
                 frames: Some(frames.clone()),
                 ..quic::PacketSent::default()
@@ -369,6 +363,35 @@ mod tests {
             native(EventData::QuicMarkedForRetransmit(
                 quic::MarkedForRetransmit { frames },
             )),
+        ]
+    }
+
+    #[test]
+    fn all_stream_frame_variants_and_event_containers_are_filterable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for frame in stream_frames(40) {
+            let is_stream = !matches!(frame, quic::QuicFrame::Ping { .. });
+            let events = frame_events(vec![frame]);
+            let expected = if is_stream { events.as_slice() } else { &[] };
+            compare_events(
+                &filter_sqlog_events(events.clone(), "any(stream_id[*] == 40)")?,
+                expected,
+            )?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn all_explicit_stream_references_are_filterable(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let id = 40;
+        let priority = http3::Http3Frame::PriorityUpdate {
+            stream_id: Some(id),
+            push_id: None,
+            priority_field_value: "u=1".into(),
+            raw: None,
+        };
+        let events = vec![
             native(EventData::QuicStreamStateUpdated(
                 quic::StreamStateUpdated {
                     stream_id: id,
