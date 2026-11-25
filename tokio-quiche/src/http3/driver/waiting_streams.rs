@@ -164,15 +164,9 @@ mod tests {
         (rx, wait)
     }
 
-    #[test]
-    fn successful_readiness_removes_handle() -> crate::QuicResult<()> {
-        let mut waiting = WaitingStreams::new();
-        let (tx, wait) = downstream_wait(4);
-
-        waiting.push(wait)?;
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 1);
-
+    fn assert_downstream_ready(
+        waiting: &mut WaitingStreams, tx: &mpsc::Sender<OutboundFrame>,
+    ) -> crate::QuicResult<()> {
         tx.try_send(OutboundFrame::Body(Default::default(), false))
             .map_err(|_| "outbound frame queue rejected test frame")?;
 
@@ -184,6 +178,18 @@ mod tests {
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 0);
         Ok(())
+    }
+
+    #[test]
+    fn successful_readiness_removes_handle() -> crate::QuicResult<()> {
+        let mut waiting = WaitingStreams::new();
+        let (tx, wait) = downstream_wait(4);
+
+        waiting.push(wait)?;
+        assert_eq!(waiting.upstream_len(), 0);
+        assert_eq!(waiting.downstream_len(), 1);
+
+        assert_downstream_ready(&mut waiting, &tx)
     }
 
     #[test]
@@ -214,17 +220,7 @@ mod tests {
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::Body(Default::default(), false))
-            .map_err(|_| "outbound frame queue rejected test frame")?;
-
-        let ready = waiting.next().now_or_never();
-        assert!(matches!(
-            ready,
-            Some(Some(StreamReady::Downstream(r))) if r.stream_id == 4
-        ));
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 0);
-        Ok(())
+        assert_downstream_ready(&mut waiting, &tx)
     }
 
     #[test]
@@ -242,17 +238,7 @@ mod tests {
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::Body(Default::default(), false))
-            .map_err(|_| "outbound frame queue rejected test frame")?;
-
-        let ready = waiting.next().now_or_never();
-        assert!(matches!(
-            ready,
-            Some(Some(StreamReady::Downstream(r))) if r.stream_id == 4
-        ));
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 0);
-        Ok(())
+        assert_downstream_ready(&mut waiting, &tx)
     }
 
     #[test]

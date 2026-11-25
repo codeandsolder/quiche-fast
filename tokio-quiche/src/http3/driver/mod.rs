@@ -509,6 +509,7 @@ impl<H: DriverHooks> H3Driver<H> {
         enum StreamStatus {
             Done { close: bool },
             Reset { wire_err_code: u64 },
+            FinDelivered,
             Blocked,
         }
 
@@ -568,10 +569,7 @@ impl<H: DriverHooks> H3Driver<H> {
             if ctx.read_state == ReadState::FinPending {
                 // FIN is delivered exactly once, even if the app was blocked.
                 permit.send(InboundFrame::Body(Default::default(), true));
-                ctx.close_read();
-                break StreamStatus::Done {
-                    close: ctx.both_directions_done(),
-                };
+                break StreamStatus::FinDelivered;
             }
 
             // Size the buffer for currently readable, in-order data, capped at
@@ -650,6 +648,12 @@ impl<H: DriverHooks> H3Driver<H> {
                     qconn.stream_finished(stream_id)
                 {
                     return self.process_h3_fin(qconn, stream_id);
+                }
+            },
+            StreamStatus::FinDelivered => {
+                ctx.close_read();
+                if ctx.both_directions_done() {
+                    return self.cleanup_stream(qconn, stream_id);
                 }
             },
             StreamStatus::Reset { wire_err_code } => {
