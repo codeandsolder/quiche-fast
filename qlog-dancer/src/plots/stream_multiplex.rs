@@ -63,6 +63,7 @@ use crate::plots::ClampParams;
 use crate::QlogPointu64;
 
 use crate::datastore::Datastore;
+use crate::request_stub::DataObservation;
 use crate::request_stub::HttpRequestStub;
 use crate::seriesstore::SeriesStore;
 
@@ -205,10 +206,10 @@ impl MultiplexLayout {
 /// second vector of per-request references.
 fn request_data_frames(
     request: &HttpRequestStub, vantage: VantagePoint,
-) -> &[(f64, u64)] {
+) -> &[DataObservation] {
     match vantage {
-        VantagePoint::Client => &request.time_data_rx_set,
-        VantagePoint::Server => &request.time_data_tx_set,
+        VantagePoint::Client => request.received_data.observations(),
+        VantagePoint::Server => request.sent_data.observations(),
     }
 }
 
@@ -238,7 +239,7 @@ fn colors_for_visible_streams(
 /// even if the capture omitted its request headers.
 struct MultiplexLane<'a> {
     color: RGBColor,
-    data: &'a [QlogPointu64],
+    data: &'a [DataObservation],
     frames: &'a [QlogPointu64],
     headers: [Option<f64>; 2],
 }
@@ -296,14 +297,14 @@ impl<'a> MultiplexModel<'a> {
         }
         let mut max_data = 1;
         for lane in lanes.values() {
-            for &(_, length) in lane.data {
+            for length in lane.data.iter().filter_map(|point| point.1) {
                 max_data = max_data.max(length);
             }
             for time in lane
                 .data
                 .iter()
-                .chain(lane.frames)
                 .map(|point| point.0)
+                .chain(lane.frames.iter().map(|point| point.0))
                 .chain(lane.headers.into_iter().flatten())
             {
                 if !time.is_finite() {
@@ -340,11 +341,16 @@ impl FrameKind {
         }
     }
 
-    const fn points<'a>(self, lane: &MultiplexLane<'a>) -> &'a [QlogPointu64] {
-        match self {
-            Self::Data => lane.data,
-            Self::Stream => lane.frames,
-        }
+    fn times<'a>(
+        self, lane: &MultiplexLane<'a>,
+    ) -> impl Iterator<Item = f64> + 'a {
+        let (data, frames) = match self {
+            Self::Data => (lane.data, &[][..]),
+            Self::Stream => (&[][..], lane.frames),
+        };
+        data.iter()
+            .map(|point| point.0)
+            .chain(frames.iter().map(|point| point.0))
     }
 }
 
@@ -367,9 +373,10 @@ where
         .label_style(chart_label_style(&params.colors.caption))
         .draw()?;
     for lane in model.lanes.values() {
-        chart.draw_series(kind.points(lane).iter().map(|(time, _)| {
-            PathElement::new([(*time, 2), (*time, 0)], lane.color)
-        }))?;
+        chart
+            .draw_series(kind.times(lane).map(|time| {
+                PathElement::new([(time, 2), (time, 0)], lane.color)
+            }))?;
     }
     Ok(())
 }
@@ -397,9 +404,10 @@ where
             .flatten()
             .map(|time| TriangleMarker::new((time, 2), 5, lane.color)),
     )?;
-    chart.draw_series(kind.points(lane).iter().map(|(time, _)| {
-        PathElement::new([(*time, 2), (*time, 0)], lane.color)
-    }))?;
+    chart.draw_series(
+        kind.times(lane)
+            .map(|time| PathElement::new([(time, 2), (time, 0)], lane.color)),
+    )?;
     Ok(())
 }
 
@@ -420,8 +428,10 @@ where
         .disable_y_axis()
         .axis_style(params.colors.axis)
         .draw()?;
-    chart.draw_series(lane.data.iter().map(|(time, length)| {
-        PathElement::new([(*time, 0), (*time, *length)], lane.color)
+    chart.draw_series(lane.data.iter().filter_map(|&(time, length)| {
+        length.map(|length| {
+            PathElement::new([(time, 0), (time, length)], lane.color)
+        })
     }))?;
     Ok(())
 }
@@ -555,7 +565,7 @@ mod tests {
     use super::*;
     use crate::datastore::ApplicationProto;
     use crate::plots::fallible::test_support::TempCharts;
-    use crate::request_stub::HttpRequestStub;
+    use crate::request_stub::HttpDataHistory;
 
     fn test_params() -> MultiplexPlotsParams {
         MultiplexPlotsParams {
@@ -616,8 +626,8 @@ mod tests {
     }
 
     #[test]
-    fn frame_only_streams_receive_lanes_and_extend_time_bounds() -> io::Result<()>
-    {
+    fn frame_only_streams_receive_lanes_and_extend_time_bounds(
+    ) -> Result<(), Box<dyn Error>> {
         let params = test_params();
         let mut ds = Datastore {
             application_proto: ApplicationProto::Http3,
@@ -625,7 +635,7 @@ mod tests {
             ..Datastore::default()
         };
         ds.http_requests.insert(5, HttpRequestStub {
-            time_data_rx_set: vec![(3.0, 30)],
+            received_data: HttpDataHistory::with_known_frames(&[(3.0, 30)])?,
             time_first_headers_rx: Some(2.0),
             ..HttpRequestStub::default()
         });
@@ -643,6 +653,31 @@ mod tests {
         assert_eq!(model.x_range, 0.0..9.0);
         assert_eq!(model.max_data, 30);
         assert_eq!(model.layout, MultiplexLayout::new(&params, 2)?);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_data_lengths_keep_event_markers_without_inflating_lengths(
+    ) -> Result<(), Box<dyn Error>> {
+        let params = test_params();
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http3,
+            vantage_point: VantagePoint::Client,
+            ..Datastore::default()
+        };
+        let mut request = HttpRequestStub::default();
+        request.received_data.record(2.0, Some(3))?;
+        request.received_data.record(7.0, None)?;
+        ds.http_requests.insert(1, request);
+        let series = SeriesStore::from_datastore(&ds)?;
+        let model = MultiplexModel::new(&params, &series, &ds)?;
+        let lane = &model.lanes[&1];
+        assert_eq!(FrameKind::Data.times(lane).collect::<Vec<_>>(), vec![
+            2.0, 7.0
+        ]);
+        assert_eq!(lane.data, &[(2.0, Some(3)), (7.0, None)]);
+        assert_eq!(model.max_data, 3);
+        assert_eq!(model.x_range.end, 7.0);
         Ok(())
     }
 
@@ -713,7 +748,11 @@ mod tests {
             ..Datastore::default()
         };
         let request = HttpRequestStub {
-            time_data_tx_set: vec![(1.0, 9), (4.0, 7), (7.0, 1)],
+            sent_data: HttpDataHistory::with_known_frames(&[
+                (1.0, 9),
+                (4.0, 7),
+                (7.0, 1),
+            ])?,
             time_first_headers_rx: Some(0.5),
             ..HttpRequestStub::default()
         };
@@ -789,13 +828,19 @@ mod tests {
         // Insert out of stream-ID order; each request must retain its own
         // distinct payload and grid row, whichever vantage is selected.
         datastore.http_requests.insert(7, HttpRequestStub {
-            time_data_rx_set: vec![(3.0, 8), (8.0, 12)],
-            time_data_tx_set: vec![(2.0, 3)],
+            received_data: HttpDataHistory::with_known_frames(&[
+                (3.0, 8),
+                (8.0, 12),
+            ])?,
+            sent_data: HttpDataHistory::with_known_frames(&[(2.0, 3)])?,
             ..HttpRequestStub::default()
         });
         datastore.http_requests.insert(3, HttpRequestStub {
-            time_data_rx_set: vec![(1.0, 30)],
-            time_data_tx_set: vec![(6.0, 5), (9.0, 11)],
+            received_data: HttpDataHistory::with_known_frames(&[(1.0, 30)])?,
+            sent_data: HttpDataHistory::with_known_frames(&[
+                (6.0, 5),
+                (9.0, 11),
+            ])?,
             ..HttpRequestStub::default()
         });
         let series = SeriesStore {
@@ -843,7 +888,7 @@ mod tests {
         let params = test_params();
         let mut ds = Datastore::default();
         ds.http_requests.insert(1, HttpRequestStub {
-            time_data_tx_set: vec![(f64::NAN, 3)],
+            sent_data: HttpDataHistory::with_known_frames(&[(f64::NAN, 3)])?,
             ..HttpRequestStub::default()
         });
         ds.vantage_point = VantagePoint::Server;
