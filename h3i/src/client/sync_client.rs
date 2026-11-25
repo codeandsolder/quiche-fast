@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Responsible for creating a [quiche::Connection] and managing I/O.
+//! Responsible for creating a [`quiche::Connection`] and managing I/O.
 
 use std::time::Instant;
 
@@ -32,49 +32,21 @@ use ring::rand::SecureRandom;
 use ring::rand::SystemRandom;
 
 use crate::actions::h3::Action;
-use crate::client::parse_streams;
-use crate::client::ClientError;
-use crate::client::MAX_DATAGRAM_SIZE;
-use crate::client::QUIC_VERSION;
 use crate::config::Config;
-use crate::frame::H3iFrame;
 use crate::quiche;
 
 use super::action_queue::ActionQueue;
 use super::parse_args;
+use super::parse_streams;
 use super::sync_io::SyncIo;
 use super::sync_io::TxStatus;
-use super::Client;
+use super::ClientError;
+use super::ClientState;
 use super::CloseTriggerFrames;
 use super::ConnectionSummary;
 use super::ParsedArgs;
-use super::StreamMap;
-use super::StreamParserMap;
-
-#[derive(Default)]
-struct SyncClient {
-    streams: StreamMap,
-    stream_parsers: StreamParserMap,
-}
-
-impl SyncClient {
-    fn new(close_trigger_frames: Option<CloseTriggerFrames>) -> Self {
-        Self {
-            streams: StreamMap::new(close_trigger_frames),
-            stream_parsers: StreamParserMap::default(),
-        }
-    }
-}
-
-impl Client for SyncClient {
-    fn stream_parsers_mut(&mut self) -> &mut StreamParserMap {
-        &mut self.stream_parsers
-    }
-
-    fn handle_response_frame(&mut self, stream_id: u64, frame: H3iFrame) {
-        self.streams.insert(stream_id, frame);
-    }
-}
+use super::MAX_DATAGRAM_SIZE;
+use super::QUIC_VERSION;
 
 fn create_config(
     args: &Config, should_log_keys: bool,
@@ -155,13 +127,13 @@ pub fn connect_with_early_data(
         None
     };
     let mut normal = ActionQueue::new(actions);
-    let mut client = SyncClient::new(close_trigger_frames);
+    let mut client = ClientState::new(close_trigger_frames);
     // Queue early data before the ClientHello reaches the peer. Once the
     // socket accepts the first datagram, flush can generate the 0-RTT packets
     // immediately, without processing a handshake response first.
     if let Some(queue) = early.as_mut() {
         queue
-            .advance(Instant::now, &mut conn, client.stream_parsers_mut())
+            .advance(Instant::now, &mut conn, &mut client.parsers)
             .map_err(ClientError::Other)?;
     }
     let mut tx_status = io.flush(&mut conn)?;
@@ -215,7 +187,7 @@ fn active_queue<'a>(
     early: &'a mut Option<ActionQueue>, normal: &'a mut ActionQueue,
     conn: &quiche::Connection,
 ) -> Option<&'a mut ActionQueue> {
-    if conn.is_draining() || conn.is_closed() {
+    if conn.is_draining() || conn.is_closed() || conn.local_error().is_some() {
         return None;
     }
     if conn.is_established() || conn.is_in_early_data() {
@@ -230,7 +202,7 @@ fn active_queue<'a>(
 }
 
 fn process_application(
-    queue: &mut ActionQueue, client: &mut SyncClient,
+    queue: &mut ActionQueue, client: &mut ClientState,
     conn: &mut quiche::Connection, tx_status: TxStatus,
 ) -> Result<(), ClientError> {
     queue
@@ -243,7 +215,7 @@ fn process_application(
         client.streams.close_due_to_trigger_frames(conn);
     } else if tx_status == TxStatus::Idle && !conn.is_draining() {
         queue
-            .advance(Instant::now, conn, client.stream_parsers_mut())
+            .advance(Instant::now, conn, &mut client.parsers)
             .map_err(ClientError::Other)?;
     }
     Ok(())

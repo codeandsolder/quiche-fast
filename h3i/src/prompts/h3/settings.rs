@@ -48,7 +48,7 @@ const SETTINGS: &[(&str, u64)] = &[
 
 type RawSettings = Vec<(u64, u64)>;
 
-pub fn prompt_settings() -> InquireResult<Action> {
+pub(super) fn prompt_settings() -> InquireResult<Action> {
     let stream_id = h3::prompt_control_stream_id()?;
     let settings = settings_read_loop()?;
 

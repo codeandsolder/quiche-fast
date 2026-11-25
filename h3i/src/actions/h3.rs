@@ -69,7 +69,7 @@ pub enum Action {
         expected_result: ExpectedStreamSendResult,
     },
 
-    /// Send a HEADERS frame over a stream.
+    /// Send a `HEADERS` frame over a stream.
     SendHeadersFrame {
         stream_id: u64,
         fin_stream: bool,
@@ -86,10 +86,8 @@ pub enum Action {
         expected_result: ExpectedStreamSendResult,
     },
 
-    /// Send a DATAGRAM frame.
-    SendDatagram {
-        payload: Vec<u8>,
-    },
+    /// Send a `DATAGRAM` frame.
+    SendDatagram { payload: Vec<u8> },
 
     /// Open a new unidirectional stream.
     OpenUniStream {
@@ -99,32 +97,27 @@ pub enum Action {
         expected_result: ExpectedStreamSendResult,
     },
 
-    /// Send a RESET_STREAM frame with the given error code.
-    ResetStream {
-        stream_id: u64,
-        error_code: u64,
-    },
+    /// Send a `RESET_STREAM` frame with the given error code.
+    ResetStream { stream_id: u64, error_code: u64 },
 
-    /// Send a STOP_SENDING frame with the given error code.
-    StopSending {
-        stream_id: u64,
-        error_code: u64,
-    },
+    /// Send a `STOP_SENDING` frame with the given error code.
+    StopSending { stream_id: u64, error_code: u64 },
 
-    /// Send a CONNECTION_CLOSE frame with the given [`ConnectionError`].
-    ConnectionClose {
-        error: ConnectionError,
-    },
+    /// Send a `CONNECTION_CLOSE` frame with the given [`ConnectionError`].
+    ConnectionClose { error: ConnectionError },
 
+    /// Yield to the transport to flush generated packets before the next
+    /// action.
     FlushPackets,
 
     /// Wait for an event. See [`WaitType`] for the events.
-    Wait {
-        wait_type: WaitType,
-    },
+    Wait { wait_type: WaitType },
 }
 
 /// Configure the wait behavior for a connection.
+///
+/// Adjacent waits form a barrier: all event and quota conditions must hold
+/// and the sum of duration waits must elapse before the next action.
 #[serde_as]
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WaitType {
@@ -140,11 +133,11 @@ pub enum WaitType {
     /// 2. The peer sends a `fin` over the specified stream
     StreamEvent(StreamEvent),
 
-    /// Wait until the peer has updated MAX_STREAMS to allow creation
+    /// Wait until the peer has updated `MAX_STREAMS` to allow creation
     /// of the required additional streams.
     ///
-    /// Typically requires processing of a MAX_STREAMS frame sent by
-    /// the peer.  The peer may decide to send MAX_STREAMS updates as
+    /// Typically requires processing of a `MAX_STREAMS` frame sent by
+    /// the peer.  The peer may decide to send `MAX_STREAMS` updates as
     /// the number of active streams changes due to stream termination
     /// or stream creation. Typical goals being:
     /// - Limit the number of active streams to the configured limit.
@@ -187,11 +180,11 @@ pub struct RequiredStreamsQuota {
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamEventType {
-    /// A HEADERS frame was received.
+    /// A `HEADERS` frame was received.
     Headers,
-    /// A DATA frame was received.
+    /// A `DATA` frame was received.
     Data,
-    /// The stream was somehow finished, either by a RESET_STREAM frame or via
+    /// The stream was somehow finished, either by a `RESET_STREAM` frame or via
     /// the `fin` bit being set.
     Finished,
 }

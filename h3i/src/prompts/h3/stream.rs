@@ -81,7 +81,7 @@ pub(super) fn autopick_stream_id(
     })
 }
 
-pub fn prompt_open_uni_stream(
+pub(super) fn prompt_open_uni_stream(
     sid_alloc: &StreamIdAllocator,
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
@@ -106,11 +106,11 @@ pub fn prompt_open_uni_stream(
     })
 }
 
-pub fn prompt_fin_stream() -> InquireResult<bool> {
+pub(super) fn prompt_fin_stream() -> InquireResult<bool> {
     prompt_yes_no("fin stream:")
 }
 
-pub fn prompt_reset_stream() -> InquireResult<Action> {
+pub(super) fn prompt_reset_stream() -> InquireResult<Action> {
     let (stream_id, error_code) = prompt_close_stream()?;
 
     Ok(Action::ResetStream {
@@ -119,7 +119,7 @@ pub fn prompt_reset_stream() -> InquireResult<Action> {
     })
 }
 
-pub fn prompt_stop_sending() -> InquireResult<Action> {
+pub(super) fn prompt_stop_sending() -> InquireResult<Action> {
     let (stream_id, error_code) = prompt_close_stream()?;
 
     Ok(Action::StopSending {

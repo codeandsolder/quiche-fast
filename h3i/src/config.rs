@@ -168,7 +168,7 @@ impl Default for FlowControl {
 }
 
 /// Queue limits for enabled QUIC DATAGRAM support.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DatagramQueues {
     pub receive: usize,
     pub send: usize,
@@ -284,7 +284,9 @@ mod tests {
         config.validate()?;
         config.session = Some(vec![1, 2, 3]);
         config.datagrams = Some(DatagramQueues::default());
-        assert_eq!(config.clone().session, Some(vec![1, 2, 3]));
+        let cloned = config.clone();
+        assert_eq!(cloned.session, config.session);
+        assert_eq!(cloned.datagrams, config.datagrams);
         Ok(())
     }
 }

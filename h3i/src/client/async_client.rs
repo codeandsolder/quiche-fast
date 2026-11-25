@@ -50,15 +50,12 @@ use crate::client::ClientError;
 use crate::client::CloseTriggerFrames;
 use crate::client::ConnectionSummary;
 use crate::client::ParsedArgs;
-use crate::client::StreamMap;
 use crate::client::MAX_DATAGRAM_SIZE;
 use crate::config::Config as H3iConfig;
-use crate::frame::H3iFrame;
 use crate::quiche;
 
 use super::action_queue::ActionQueue;
-use super::Client;
-use super::StreamParserMap;
+use super::ClientState;
 
 /// Connect to the socket.
 ///
@@ -163,8 +160,7 @@ fn create_config(args: &H3iConfig) -> QuicSettings {
 /// Close triggers are evaluated independently of summary polling.
 struct H3iDriver {
     queue: ActionQueue,
-    streams: StreamMap,
-    stream_parsers: StreamParserMap,
+    client: ClientState,
     summary_tx: Option<oneshot::Sender<Result<ConnectionSummary, ClientError>>>,
 }
 
@@ -179,8 +175,7 @@ impl H3iDriver {
         (
             Self {
                 queue: ActionQueue::new(actions),
-                streams: StreamMap::new(close_trigger_frames),
-                stream_parsers: StreamParserMap::default(),
+                client: ClientState::new(close_trigger_frames),
                 summary_tx: Some(summary_tx),
             },
             summary_rx,
@@ -189,18 +184,8 @@ impl H3iDriver {
 
     fn check_close_triggers(&self, qconn: &mut QuicheConnection) {
         if qconn.is_established() {
-            self.streams.close_due_to_trigger_frames(qconn);
+            self.client.streams.close_due_to_trigger_frames(qconn);
         }
-    }
-}
-
-impl Client for H3iDriver {
-    fn stream_parsers_mut(&mut self) -> &mut StreamParserMap {
-        &mut self.stream_parsers
-    }
-
-    fn handle_response_frame(&mut self, stream_id: u64, frame: H3iFrame) {
-        self.streams.insert(stream_id, frame);
     }
 }
 
@@ -224,7 +209,7 @@ impl ApplicationOverQuic for H3iDriver {
         self.queue
             .before_reads(Instant::now().into_std(), qconn)
             .map_err(ClientError::Other)?;
-        for event in parse_streams(qconn, self) {
+        for event in parse_streams(qconn, &mut self.client) {
             self.queue.on_stream_event(event);
         }
         self.check_close_triggers(qconn);
@@ -244,7 +229,7 @@ impl ApplicationOverQuic for H3iDriver {
             .advance(
                 || Instant::now().into_std(),
                 qconn,
-                &mut self.stream_parsers,
+                &mut self.client.parsers,
             )
             .map_err(|error| ClientError::Other(error).into())
     }
@@ -283,7 +268,7 @@ impl ApplicationOverQuic for H3iDriver {
             } else {
                 Ok(ConnectionSummary::from_connection(
                     qconn,
-                    std::mem::take(&mut self.streams),
+                    std::mem::take(&mut self.client.streams),
                 ))
             };
             let _ = tx.send(result);
