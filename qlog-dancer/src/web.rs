@@ -84,7 +84,7 @@ const CHART_MARGIN_TIGHT: ChartMargin = ChartMargin {
 };
 
 /// Shared browser plot defaults, with the caller selecting panel margins.
-fn plot_parameters(
+const fn plot_parameters(
     display_legend: bool, start: Option<f64>, end: Option<f64>,
     chart_margin: ChartMargin, area_margin: AreaMargin,
 ) -> PlotParameters {
@@ -174,6 +174,24 @@ where
     (info.chart_bounds, info.plot_ranges)
         .serialize(&serializer)
         .map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+type CanvasChart<X, Y> = ChartContext<'static, CanvasBackend, Cartesian2d<X, Y>>;
+type CanvasResult<X, Y> = Result<CanvasChart<X, Y>, Box<dyn std::error::Error>>;
+
+/// Invalidate chart metadata before drawing and publish it only after success.
+fn render_chart<X: Ranged, Y: Ranged>(
+    slot: &mut Option<ChartInfo<X::ValueType, Y::ValueType>>,
+    series: Option<&SeriesStore>, params: &PlotParameters,
+    render: impl FnOnce(&PlotParameters, &SeriesStore) -> CanvasResult<X, Y>,
+) -> Result<(), JsValue> {
+    *slot = None;
+    if let Some(series) = series {
+        let chart = render(params, series)
+            .map_err(|error| JsValue::from_str(&error.to_string()))?;
+        *slot = Some(ChartInfo::from_chart(&chart));
+    }
+    Ok(())
 }
 
 #[wasm_bindgen]
@@ -311,6 +329,9 @@ impl QlogDancerWeb {
     ///
     /// Some use cases don't need plots, so you can avoid calling this function
     /// if that's the case.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if series construction fails.
     pub fn populate_seriesstore(&mut self) -> Result<(), JsValue> {
         self.ss = None;
         self.charts = ChartInfos::default();
@@ -348,113 +369,120 @@ impl QlogDancerWeb {
     #[cfg(target_arch = "wasm32")]
     /// Draws the multi-panel connection overview plot into the provided
     /// canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_connection_overview(
         &mut self, mp_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN,
-                AREA_MARGIN,
-            );
-
-            self.charts.mp_chart_info = None;
-            let chart =
-                plot_main_plot(&params, &self.display_name, ss, mp_canvas_id)
-                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.mp_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN,
+            AREA_MARGIN,
+        );
+        render_chart(
+            &mut self.charts.mp_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_main_plot(params, &self.display_name, ss, mp_canvas_id)
+            },
+        )
     }
 
     #[wasm_bindgen]
     #[cfg(target_arch = "wasm32")]
     /// Draws the congestion plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_cc_plot(
         &mut self, cc_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN,
-                AREA_MARGIN,
-            );
-
-            self.charts.cc_chart_info = None;
-            let chart = plot_cc_plot(&params, ss, &self.ds, cc_canvas_id)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.cc_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN,
+            AREA_MARGIN,
+        );
+        render_chart(
+            &mut self.charts.cc_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| plot_cc_plot(params, ss, &self.ds, cc_canvas_id),
+        )
     }
 
     #[wasm_bindgen]
     #[cfg(target_arch = "wasm32")]
     /// Draws the rtt plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_rtt_plot(
         &mut self, rtt_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN,
-                AREA_MARGIN,
-            );
-
-            self.charts.rtt_chart_info = None;
-            let chart = plot_rtt_plot(&params, ss, rtt_canvas_id)
-                .map_err(|error| JsValue::from_str(&error.to_string()))?;
-            self.charts.rtt_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN,
+            AREA_MARGIN,
+        );
+        render_chart(
+            &mut self.charts.rtt_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| plot_rtt_plot(params, ss, rtt_canvas_id),
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the flow control plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_flow_control(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN,
-                AreaMargin { x: 40, y: 80 },
-            );
-
-            let chart_type = ChartOutputType::Canvas {
-                canvas_id: canvas_id.to_string(),
-            };
-
-            self.charts.fc_chart_info = None;
-            let chart = plot_conn_flow_control_canvas(
-                &params,
-                &self.display_name,
-                ss,
-                &self.ds,
-                &chart_type,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-            self.charts.fc_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN,
+            AreaMargin { x: 40, y: 80 },
+        );
+        let chart_type = ChartOutputType::Canvas {
+            canvas_id: canvas_id.to_string(),
+        };
+        render_chart(
+            &mut self.charts.fc_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_conn_flow_control_canvas(
+                    params,
+                    &self.display_name,
+                    ss,
+                    &self.ds,
+                    &chart_type,
+                )
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the stream sparks plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_sparks(
         &mut self, abs_dl_canvas_id: &str, abs_ul_canvas_id: &str,
         rel_dl_canvas_id: &str, rel_ul_canvas_id: &str,
@@ -506,34 +534,40 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     /// Draws the packet received plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_packet_received(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN,
-                AreaMargin { x: 40, y: 80 },
-            );
-
-            self.charts.pkt_rx_chart_info = None;
-            let chart = plot_packet_received_canvas(
-                &params,
-                &self.display_name,
-                ss,
-                canvas_id,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-            self.charts.pkt_rx_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN,
+            AreaMargin { x: 40, y: 80 },
+        );
+        render_chart(
+            &mut self.charts.pkt_rx_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_packet_received_canvas(
+                    params,
+                    &self.display_name,
+                    ss,
+                    canvas_id,
+                )
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the stream pending plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_pending(&mut self, canvas_id: &str) -> Result<(), JsValue> {
         if let Some(ss) = &self.ss {
             let pending_params = PendingPlotParams {
@@ -568,120 +602,127 @@ impl QlogDancerWeb {
 
     #[wasm_bindgen]
     /// Draws the packet sent plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_packet_sent_plot(
         &mut self, pkt_tx_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN_TIGHT,
-                AreaMargin { x: 40, y: 80 },
-            );
-
-            self.charts.pkt_tx_chart_info = None;
-            let chart = plot_packet_sent_plot_canvas(
-                &params,
-                &self.display_name,
-                ss,
-                pkt_tx_canvas_id,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.pkt_tx_chart_info = Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN_TIGHT,
+            AreaMargin { x: 40, y: 80 },
+        );
+        render_chart(
+            &mut self.charts.pkt_tx_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_packet_sent_plot_canvas(
+                    params,
+                    &self.display_name,
+                    ss,
+                    pkt_tx_canvas_id,
+                )
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the packet sent plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_packet_sent_ack_status_count_plot(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN_TIGHT,
-                AreaMargin { x: 40, y: 80 },
-            );
-
-            self.charts.pkt_tx_counts_chart_info = None;
-            let chart =
-                plot_packet_sent_ack_status_count_plot(&params, ss, canvas_id)
-                    .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.pkt_tx_counts_chart_info =
-                Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN_TIGHT,
+            AreaMargin { x: 40, y: 80 },
+        );
+        render_chart(
+            &mut self.charts.pkt_tx_counts_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_packet_sent_ack_status_count_plot(params, ss, canvas_id)
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the packet sent plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_packet_sent_delta_plot(
         &mut self, pkt_tx_delta_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN_TIGHT,
-                AreaMargin { x: 40, y: 5 },
-            );
-
-            self.charts.pkt_tx_delta_chart_info = None;
-            let chart = plot_packet_sent_delta_plot_canvas(
-                &params,
-                ss,
-                pkt_tx_delta_canvas_id,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.pkt_tx_delta_chart_info =
-                Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN_TIGHT,
+            AreaMargin { x: 40, y: 5 },
+        );
+        render_chart(
+            &mut self.charts.pkt_tx_delta_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_packet_sent_delta_plot_canvas(
+                    params,
+                    ss,
+                    pkt_tx_delta_canvas_id,
+                )
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the packet sent plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_packet_sent_pacing_plot(
         &mut self, pkt_tx_pacing_canvas_id: &str, display_legend: bool,
         x_start: Option<f64>, x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        if let Some(ss) = &self.ss {
-            let params = plot_parameters(
-                display_legend,
-                x_start,
-                x_end,
-                CHART_MARGIN_TIGHT,
-                AreaMargin { x: 40, y: 80 },
-            );
-
-            self.charts.pkt_tx_pacing_chart_info = None;
-            let chart = plot_packet_sent_pacing_rate_plot_canvas(
-                &params,
-                ss,
-                &self.ds,
-                pkt_tx_pacing_canvas_id,
-            )
-            .map_err(|error| JsValue::from_str(&error.to_string()))?;
-
-            self.charts.pkt_tx_pacing_chart_info =
-                Some(ChartInfo::from_chart(&chart));
-        }
-        Ok(())
+        let params = plot_parameters(
+            display_legend,
+            x_start,
+            x_end,
+            CHART_MARGIN_TIGHT,
+            AreaMargin { x: 40, y: 80 },
+        );
+        render_chart(
+            &mut self.charts.pkt_tx_pacing_chart_info,
+            self.ss.as_ref(),
+            &params,
+            |params, ss| {
+                plot_packet_sent_pacing_rate_plot_canvas(
+                    params,
+                    ss,
+                    &self.ds,
+                    pkt_tx_pacing_canvas_id,
+                )
+            },
+        )
     }
 
     #[wasm_bindgen]
     /// Draws the stream multiplexing plot into the provided canvas_id.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error if chart validation or rendering fails.
     pub fn draw_stream_multiplexing(
         &mut self, canvas_id: &str,
     ) -> Result<(), JsValue> {
@@ -713,6 +754,11 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
+    /// Render the decoded events into an existing document element.
+    ///
+    /// # Errors
+    /// Returns an error if the document, target element or event serialization
+    /// fails.
     pub fn populate_event_table(
         &self, event_div_id: &str,
     ) -> Result<(), JsValue> {
