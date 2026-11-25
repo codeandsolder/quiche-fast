@@ -3859,16 +3859,16 @@ mod qlog_packet_history_tests {
             ] {
                 assert_eq!(
                     data.sent_stream_max_data_tracker
-                        .per_stream
+                        .streams()
                         .get(&stream_id)
-                        .map(Vec::as_slice),
+                        .map(crate::trackers::StreamHistory::points),
                     Some([(0.0, local), (3.0, 100)].as_slice())
                 );
                 assert_eq!(
                     data.received_stream_max_data_tracker
-                        .per_stream
+                        .streams()
                         .get(&stream_id)
-                        .map(Vec::as_slice),
+                        .map(crate::trackers::StreamHistory::points),
                     Some([(0.0, peer), (2.0, 100)].as_slice())
                 );
             }
