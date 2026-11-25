@@ -37,7 +37,7 @@ use qlog::events::quic::QuicFrame;
 
 /// A log contains stream/window values whose sum cannot fit the chart's
 /// integer coordinate type. Never wrap and render a fabricated measurement.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SeriesBuildError {
     pub stream_id: u64,
     pub series: &'static str,
@@ -56,6 +56,33 @@ impl std::fmt::Display for SeriesBuildError {
 impl std::error::Error for SeriesBuildError {}
 
 type SeriesResult<T> = Result<T, SeriesBuildError>;
+
+#[derive(Clone, Copy)]
+enum SeriesShape {
+    Samples,
+    Steps,
+}
+
+/// Build a cumulative series in observation order. The first point establishes
+/// the initial value at the first observation; all additions are checked.
+fn cumulative_series<T: Copy>(
+    points: &[(f64, T)], initial: T, checked_add: fn(T, T) -> Option<T>,
+    shape: SeriesShape, error: SeriesBuildError,
+) -> SeriesResult<Vec<(f64, T)>> {
+    let Some(first) = points.first() else {
+        return Ok(Vec::new());
+    };
+    let mut series = vec![(first.0, initial)];
+    let mut value = initial;
+    for &(time, delta) in points {
+        value = checked_add(value, delta).ok_or(error)?;
+        match shape {
+            SeriesShape::Samples => series.push((time, value)),
+            SeriesShape::Steps => push_interp(&mut series, (time, value)),
+        }
+    }
+    Ok(series)
+}
 
 #[derive(Default)]
 pub struct SeriesStore {
@@ -106,15 +133,10 @@ pub struct SeriesStore {
     pub received_stream_frames_series: BTreeMap<u64, Vec<QlogPointu64>>,
 
     pub received_data_frames_series: BTreeMap<u64, Vec<QlogPointu64>>,
-    pub received_data_max: BTreeMap<u64, u64>,
     pub sent_data_frames_series: BTreeMap<u64, Vec<QlogPointu64>>,
-    pub sent_data_max: BTreeMap<u64, u64>,
 
     pub h2_send_window_series_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
-    pub h2_send_window_balanced_min: BTreeMap<u32, i64>,
-    pub h2_send_window_balanced_max: BTreeMap<u32, i64>,
     pub h2_send_window_series_absolute: BTreeMap<u32, Vec<(f64, u64)>>,
-    pub h2_send_window_absolute_max: BTreeMap<u32, u64>,
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
     pub netlog_quic_stream_received_connection_cumulative: Vec<QlogPointu64>,
@@ -154,16 +176,16 @@ impl SeriesStore {
     /// Returns a stream-specific error when a length, byte count or window
     /// update cannot be represented without integer overflow.
     pub fn from_datastore(data_store: &Datastore) -> SeriesResult<Self> {
-        let mut series_store = SeriesStore::default();
+        let mut series_store = Self::default();
         series_store.populate_series_values(data_store)?;
         Ok(series_store)
     }
 
-    fn update_sent_x_axis_max(&mut self, x: f64) {
+    const fn update_sent_x_axis_max(&mut self, x: f64) {
         self.sent_x_max = self.sent_x_max.max(x);
     }
 
-    fn update_received_x_axis_max(&mut self, x: f64) {
+    const fn update_received_x_axis_max(&mut self, x: f64) {
         self.received_x_max = self.received_x_max.max(x);
     }
 
@@ -179,7 +201,7 @@ impl SeriesStore {
         self.y_max_stream_recv_plot = self.y_max_stream_recv_plot.max(y);
     }
 
-    fn update_rtt_y_axis_max(&mut self, y: f32) {
+    const fn update_rtt_y_axis_max(&mut self, y: f32) {
         self.y_max_rtt_plot = self.y_max_rtt_plot.max(y);
     }
 
@@ -300,7 +322,7 @@ impl SeriesStore {
             let mut delivered_count = 0;
             let mut without_ack_count = 0;
 
-            for (pkt_num, pkt_info) in onertt_pkts.iter() {
+            for (pkt_num, pkt_info) in *onertt_pkts {
                 sent_count += 1;
                 push_interp(
                     &mut self.onertt_packet_created,
@@ -365,7 +387,7 @@ impl SeriesStore {
         if let Some(onertt_pkts) =
             &data_store.packet_received.get(&crate::PacketType::OneRtt)
         {
-            for (pkt_num, pkt_info) in onertt_pkts.iter() {
+            for (pkt_num, pkt_info) in *onertt_pkts {
                 self.update_received_x_axis_max(pkt_info.created_time);
                 self.y_max_onertt_pkt_received_plot =
                     self.y_max_onertt_pkt_received_plot.max(*pkt_num);
@@ -377,20 +399,16 @@ impl SeriesStore {
     }
 
     fn missing_packets(&mut self, data_store: &Datastore) {
-        // Simple way to try and determine if new missing packets were logged.
-        // TODO: netlog produces an array of missing_packets by packet number.
-        // The array can grow or shrink as QUIC connection evolves. We should
-        // only insert an event when a new unique value is observed.
-        // TODO: rewrite to avoid copies
-        let mut last: Vec<u64> = vec![];
-
-        for (event_time, missing_pkts) in
+        // A marker identifies a change in the recorded missing-packet list,
+        // not a proven new loss. Borrow the previous list rather than copying
+        // it.
+        let mut previous: &[u64] = &[];
+        for (event_time, missing) in
             &data_store.netlog_ack_sent_missing_packets_raw
         {
-            if &last != missing_pkts {
-                last = missing_pkts.clone();
-
+            if previous != missing {
                 self.netlog_missing_packets.push(*event_time);
+                previous = missing;
             }
         }
     }
@@ -553,73 +571,43 @@ impl SeriesStore {
         Ok(())
     }
 
-    fn received_data_frames(
-        &mut self, data_store: &Datastore,
-    ) -> SeriesResult<()> {
-        for (stream, points) in &data_store.received_data_frames {
-            let mut series_points = vec![];
-
-            // insert a dummy 0'th point at the first incidence time
-            if let Some(first) = points.first() {
-                series_points.push((first.0, 0));
-            } else {
-                continue;
+    fn data_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
+        for (source, output, x_max, y_max, name) in [
+            (
+                &data_store.received_data_frames,
+                &mut self.received_data_frames_series,
+                &mut self.received_x_max,
+                &mut self.y_max_stream_recv_plot,
+                "received_data_frames",
+            ),
+            (
+                &data_store.sent_data_frames,
+                &mut self.sent_data_frames_series,
+                &mut self.sent_x_max,
+                &mut self.y_max_stream_send_plot,
+                "sent_data_frames",
+            ),
+        ] {
+            for (&stream_id, points) in source {
+                let series = cumulative_series(
+                    points,
+                    0,
+                    u64::checked_add,
+                    SeriesShape::Samples,
+                    SeriesBuildError {
+                        stream_id,
+                        series: name,
+                    },
+                )?;
+                if series.is_empty() {
+                    continue;
+                }
+                for &(time, value) in &series {
+                    *x_max = x_max.max(time);
+                    *y_max = (*y_max).max(value);
+                }
+                output.insert(stream_id, series);
             }
-
-            let mut last_y = 0_u64;
-
-            for point in points {
-                let new_y =
-                    last_y.checked_add(point.1).ok_or(SeriesBuildError {
-                        stream_id: *stream,
-                        series: "received_data_frames",
-                    })?;
-
-                self.received_x_max = self.received_x_max.max(point.0);
-                self.update_stream_recv_y_axis_max(new_y);
-
-                series_points.push((point.0, new_y));
-
-                last_y = new_y;
-            }
-
-            self.received_data_max.insert(*stream, last_y);
-
-            self.received_data_frames_series
-                .insert(*stream, series_points);
-        }
-        Ok(())
-    }
-
-    fn sent_data_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
-        for (stream, points) in &data_store.sent_data_frames {
-            let mut series_points = vec![];
-
-            // insert a dummy 0'th point at the first incidence time
-            if let Some(first) = points.first() {
-                series_points.push((first.0, 0));
-            } else {
-                continue;
-            }
-
-            let mut last_y = 0_u64;
-
-            for point in points {
-                let new_y =
-                    last_y.checked_add(point.1).ok_or(SeriesBuildError {
-                        stream_id: *stream,
-                        series: "sent_data_frames",
-                    })?;
-
-                self.update_sent_x_axis_max(point.0);
-                series_points.push((point.0, new_y));
-
-                last_y = new_y;
-            }
-
-            self.sent_data_max.insert(*stream, last_y);
-
-            self.sent_data_frames_series.insert(*stream, series_points);
         }
         Ok(())
     }
@@ -641,81 +629,49 @@ impl SeriesStore {
         }
     }
 
-    // TODO: avoid copy-pasta with h2_fc_absolute
-    fn h2_fc_balanced(&mut self, data_store: &Datastore) -> SeriesResult<()> {
-        for (stream, points) in &data_store.h2_send_window_updates_balanced {
-            let mut series_points = vec![];
-            let initial_window =
-                i64::from(Self::initial_h2_fc_value(*stream, data_store));
-            let mut y_max = initial_window.max(0);
-            let mut y_min = 0_i64;
-
-            // insert a dummy 0'th point at the first incidence time
-            if let Some(first) = points.first() {
-                series_points.push((first.0, initial_window));
-            } else {
-                continue;
-            }
-
-            let mut last_y = initial_window;
-
-            for point in points {
-                let new_y =
-                    last_y.checked_add(point.1).ok_or(SeriesBuildError {
-                        stream_id: u64::from(*stream),
-                        series: "h2_fc_balanced",
-                    })?;
-                self.update_sent_x_axis_max(point.0);
-                y_max = y_max.max(new_y);
-                y_min = y_min.min(new_y);
-
-                push_interp(&mut series_points, (point.0, new_y));
-                last_y = new_y;
-            }
-
-            self.h2_send_window_series_balanced
-                .insert(*stream, series_points);
-            self.h2_send_window_balanced_min.insert(*stream, y_min);
-            self.h2_send_window_balanced_max.insert(*stream, y_max);
-        }
+    fn h2_window_series(&mut self, data_store: &Datastore) -> SeriesResult<()> {
+        self.h2_send_window_series_balanced = Self::build_h2_windows(
+            &data_store.h2_send_window_updates_balanced,
+            data_store,
+            i64::checked_add,
+            "h2_fc_balanced",
+            &mut self.sent_x_max,
+        )?;
+        self.h2_send_window_series_absolute = Self::build_h2_windows(
+            &data_store.h2_send_window_updates_absolute,
+            data_store,
+            u64::checked_add,
+            "h2_fc_absolute",
+            &mut self.sent_x_max,
+        )?;
         Ok(())
     }
 
-    fn h2_fc_absolute(&mut self, data_store: &Datastore) -> SeriesResult<()> {
-        for (stream, points) in &data_store.h2_send_window_updates_absolute {
-            let mut series_points = vec![];
-            let initial_window =
-                u64::from(Self::initial_h2_fc_value(*stream, data_store));
-            let mut y_max = initial_window;
-
-            // insert a dummy 0'th point at the first incidence time
-            if let Some(first) = points.first() {
-                series_points.push((first.0, initial_window));
-            } else {
+    fn build_h2_windows<T: Copy + From<u32>>(
+        source: &BTreeMap<u32, Vec<(f64, T)>>, data_store: &Datastore,
+        checked_add: fn(T, T) -> Option<T>, name: &'static str, x_max: &mut f64,
+    ) -> SeriesResult<BTreeMap<u32, Vec<(f64, T)>>> {
+        let mut output = BTreeMap::new();
+        for (&stream, points) in source {
+            let series = cumulative_series(
+                points,
+                T::from(Self::initial_h2_fc_value(stream, data_store)),
+                checked_add,
+                SeriesShape::Steps,
+                SeriesBuildError {
+                    stream_id: u64::from(stream),
+                    series: name,
+                },
+            )?;
+            if series.is_empty() {
                 continue;
             }
-
-            let mut last_y = initial_window;
-
-            for point in points {
-                let new_y =
-                    last_y.checked_add(point.1).ok_or(SeriesBuildError {
-                        stream_id: u64::from(*stream),
-                        series: "h2_fc_absolute",
-                    })?;
-                self.update_sent_x_axis_max(point.0);
-                y_max = y_max.max(new_y);
-
-                push_interp(&mut series_points, (point.0, new_y));
-
-                last_y = new_y;
+            for &(time, _) in points {
+                *x_max = x_max.max(time);
             }
-
-            self.h2_send_window_series_absolute
-                .insert(*stream, series_points);
-            self.h2_send_window_absolute_max.insert(*stream, y_max);
+            output.insert(stream, series);
         }
-        Ok(())
+        Ok(output)
     }
 
     fn netlog_quic_client_side_window_updates(&mut self, data_store: &Datastore) {
@@ -796,11 +752,8 @@ impl SeriesStore {
         self.sent_stream_frames(data_store)?;
         self.received_stream_frames(data_store)?;
 
-        self.sent_data_frames(data_store)?;
-        self.received_data_frames(data_store)?;
-
-        self.h2_fc_balanced(data_store)?;
-        self.h2_fc_absolute(data_store)?;
+        self.data_frames(data_store)?;
+        self.h2_window_series(data_store)?;
 
         self.netlog_h2_stream_received_connection_cumulative(data_store);
         self.netlog_quic_stream_received_connection_cumulative(data_store);
@@ -825,14 +778,18 @@ mod tests {
     #[test]
     fn packet_ack_counts_do_not_equate_unknown_status_with_loss_or_delivery() {
         let mut ds = Datastore::default();
-        for (number, acked) in [(10, None), (11, Some(false)), (12, Some(true))] {
+        for (number, time, acked) in [
+            (10, 1.0, None),
+            (11, 2.0, Some(false)),
+            (12, 3.0, Some(true)),
+        ] {
             ds.packet_sent
                 .entry(PacketType::OneRtt)
                 .or_default()
                 .insert(number, PacketInfoStub {
                     acked,
                     raw: None,
-                    created_time: (number - 9) as f64,
+                    created_time: time,
                     send_at_time: None,
                     ty: PacketType::OneRtt,
                     number,
@@ -907,8 +864,8 @@ mod tests {
                 series.received_data_frames_series.get(&3),
                 Some(&vec![(1.5, 0), (1.5, 2), (2.5, 9)])
             );
-            assert_eq!(series.sent_data_max.get(&3), Some(&9));
-            assert_eq!(series.received_data_max.get(&3), Some(&9));
+            assert_eq!(series.y_max_stream_send_plot, 9);
+            assert_eq!(series.y_max_stream_recv_plot, 9);
             assert!(!series.sent_data_frames_series.contains_key(&5));
             assert!(!series.received_data_frames_series.contains_key(&5));
         }
@@ -982,9 +939,20 @@ mod tests {
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_ok());
         if let Ok(series) = result {
-            assert_eq!(series.h2_send_window_balanced_max.get(&1), Some(&65535));
-            assert_eq!(series.h2_send_window_balanced_min.get(&1), Some(&0));
-            assert_eq!(series.h2_send_window_absolute_max.get(&0), Some(&65542));
+            assert_eq!(
+                series
+                    .h2_send_window_series_balanced
+                    .get(&1)
+                    .map(Vec::as_slice),
+                Some([(1.0, 65535), (1.0, 65535), (1.0, 65530)].as_slice())
+            );
+            assert_eq!(
+                series
+                    .h2_send_window_series_absolute
+                    .get(&0)
+                    .map(Vec::as_slice),
+                Some([(1.0, 65535), (1.0, 65535), (1.0, 65542)].as_slice())
+            );
         }
 
         let mut datastore = Datastore::default();
@@ -1014,8 +982,12 @@ mod tests {
         assert!(result.is_ok());
         if let Ok(series) = result {
             assert_eq!(
-                series.h2_send_window_balanced_max.get(&1),
-                Some(&i64::from(u32::MAX))
+                series
+                    .h2_send_window_series_balanced
+                    .get(&1)
+                    .and_then(|points| points.last())
+                    .map(|point| point.1),
+                Some(i64::from(u32::MAX))
             );
         }
 
@@ -1033,10 +1005,6 @@ mod tests {
                     .and_then(|v| v.last())
                     .map(|v| v.1),
                 Some(i64::from(65535_u32) - i64::from(u32::MAX))
-            );
-            assert_eq!(
-                series.h2_send_window_balanced_min.get(&1),
-                Some(&(i64::from(65535_u32) - i64::from(u32::MAX)))
             );
         }
     }

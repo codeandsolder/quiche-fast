@@ -43,7 +43,16 @@ use crate::config::StatsSelection;
 use crate::config::TimingTableConfig;
 use crate::datastore::Datastore;
 use crate::datastore::PacketInfoStub;
-use crate::request_stub::*;
+use crate::request_stub::CLIENT_CONTENT_LENGTH;
+use crate::request_stub::CLIENT_PRI;
+use crate::request_stub::CLIENT_TRANSFERRED;
+use crate::request_stub::SERVER_PRI;
+use crate::request_stub::SERVER_RX_HDR_TX_HDR;
+use crate::request_stub::SERVER_TX_FIRST_DATA_TX_LAST_DATA;
+use crate::request_stub::SERVER_TX_HDR_TX_FIRST_HDR;
+use crate::request_stub::SERVER_TX_HDR_TX_LAST_HDR;
+use crate::request_stub::UPLOAD_RATE;
+use crate::request_stub::UPLOAD_TIME;
 use crate::stringify_last;
 use crate::LogFileData;
 
@@ -189,76 +198,65 @@ fn print_tx_max_data_frames(data_store: &Datastore) {
     print_max_data_frames("sent", &data_store.sent_max_data);
 }
 
-fn print_rx_max_stream_data_frames(data_store: &Datastore) {
-    println!("### received MAX_STREAM_DATA frames ###");
-    if data_store
-        .received_stream_max_data_tracker
-        .streams()
-        .is_empty()
-    {
-        println!("    None")
-    } else {
-        for entry in data_store.received_stream_max_data_tracker.streams() {
-            println!(
-                "    stream={}, total_count={}, first={:?}, last={}",
-                entry.0,
-                entry.1.points().len(),
-                entry.1.points().first(),
-                stringify_last(entry.1.points())
-            );
-        }
+fn print_stream_histories<'a, T: std::fmt::Debug + 'a>(
+    label: &str, histories: impl Iterator<Item = (&'a u64, &'a [T])>,
+) {
+    println!("### {label} ###");
+    let mut histories = histories.peekable();
+    if histories.peek().is_none() {
+        println!("    None");
+        return;
     }
+    for (stream_id, points) in histories {
+        println!(
+            "    stream={stream_id}, total_count={}, first={:?}, last={}",
+            points.len(),
+            points.first(),
+            stringify_last(points)
+        );
+    }
+}
+
+fn print_rx_max_stream_data_frames(data_store: &Datastore) {
+    print_stream_histories(
+        "received MAX_STREAM_DATA frames",
+        data_store
+            .received_stream_max_data_tracker
+            .streams()
+            .iter()
+            .map(|(id, history)| (id, history.points())),
+    );
 }
 
 fn print_tx_max_stream_data_frames(data_store: &Datastore) {
-    println!("### sent MAX_STREAM_DATA frames ###");
-    if data_store.sent_stream_max_data_tracker.streams().is_empty() {
-        println!("    None")
-    } else {
-        for entry in data_store.sent_stream_max_data_tracker.streams() {
-            println!(
-                "    stream={}, total_count={}, first={:?}, last={:?}",
-                entry.0,
-                entry.1.points().len(),
-                entry.1.points().first(),
-                entry.1.points().last()
-            );
-        }
-    }
+    print_stream_histories(
+        "sent MAX_STREAM_DATA frames",
+        data_store
+            .sent_stream_max_data_tracker
+            .streams()
+            .iter()
+            .map(|(id, history)| (id, history.points())),
+    );
 }
 
 fn print_tx_reset_stream_frames(data_store: &Datastore) {
-    println!("### sent RESET_STREAM frames ###");
-    if data_store.sent_reset_stream.is_empty() {
-        println!("    None")
-    } else {
-        for entry in &data_store.sent_reset_stream {
-            println!(
-                "    stream={}, total_count={}, first={:?}, last={:?}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first(),
-                stringify_last(entry.1)
-            );
-        }
-    }
+    print_stream_histories(
+        "sent RESET_STREAM frames",
+        data_store
+            .sent_reset_stream
+            .iter()
+            .map(|(id, points)| (id, points.as_slice())),
+    );
 }
 
 fn print_rx_reset_stream_frames(data_store: &Datastore) {
-    println!("### received RESET_STREAM frames ###");
-    if data_store.received_reset_stream.is_empty() {
-        println!("    None")
-    } else {
-        for entry in &data_store.received_reset_stream {
-            println!(
-                "    stream={}, total_count={}, first={:?}, last={:?}",
-                entry.0,
-                entry.1.len(),
-                entry.1.first(),
-                stringify_last(entry.1)
-            );
-        }
-    }
+    print_stream_histories(
+        "received RESET_STREAM frames",
+        data_store
+            .received_reset_stream
+            .iter()
+            .map(|(id, points)| (id, points.as_slice())),
+    );
 }
 
 fn print_stream_buffer(
@@ -341,7 +339,7 @@ fn print_tx_stream_frames(data_store: &Datastore) {
                 Err(()) => "overflow".to_string(),
             };
             println!(
-                "    stream={stream_id}, total_count={}, first={:?}, last={:?}, max_end={max_end}",
+                "    stream={stream_id}, total_count={}, first={:?}, last={}, max_end={max_end}",
                 frames.len(), frames.first(), stringify_last(frames),
             );
         }
@@ -357,10 +355,7 @@ pub fn print_flow_control(data: &[LogFileData]) {
         println!(
             "Session={}, host={}",
             lf.datastore.session_id.unwrap_or(-1),
-            lf.datastore
-                .host
-                .clone()
-                .unwrap_or("ERROR UNKNOWN".to_string())
+            lf.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
         );
 
         println!("  Initial Client connection window, Initial Client Bidi Local Stream Window");
@@ -376,11 +371,11 @@ pub fn print_flow_control(data: &[LogFileData]) {
         for (stream_id, points) in
             &lf.datastore.netlog_quic_client_side_window_updates
         {
-            println!("  Stream {} flow control updates", stream_id);
+            println!("  Stream {stream_id} flow control updates");
             println!("    Time, Value");
 
             for (time, val) in points {
-                println!("    {},{}", time, val);
+                println!("    {time},{val}");
             }
         }
     }
