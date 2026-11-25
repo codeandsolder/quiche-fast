@@ -224,6 +224,117 @@ mod conn_close_metrics {
 mod client_side_driver {
     use super::*;
 
+    fn single_stream_client() -> anyhow::Result<DriverTestHelper<ClientHooks>> {
+        let mut config = default_quiche_config();
+        config.set_initial_max_streams_bidi(1);
+        let pipe = quiche::test_utils::Pipe::with_config_and_buf(&mut config)?;
+        let mut helper = DriverTestHelper::<ClientHooks>::with_pipe(pipe)?;
+        helper.complete_handshake()?;
+        helper.advance_and_run_loop()?;
+        Ok(helper)
+    }
+
+    #[test]
+    fn queued_requests_retry_in_order_after_stream_credit_returns(
+    ) -> anyhow::Result<()> {
+        let mut helper = single_stream_client()?;
+        for request_id in 1..=3 {
+            helper.driver_enqueue_request(
+                request_id,
+                make_request_headers("GET"),
+                None,
+            );
+        }
+        assert_eq!(helper.process_commands()?, 3);
+        assert_matches!(
+            helper.driver_recv_client_event()?,
+            ClientH3Event::NewOutboundRequest {
+                stream_id: 0,
+                request_id: 1
+            }
+        );
+        assert_eq!(helper.driver.hooks.queued_request_count(), 2);
+        assert_eq!(helper.pipe.client.peer_streams_left_bidi(), 0);
+
+        for (stream_id, next_id) in [(0, 2), (4, 3)] {
+            helper.advance_and_run_loop()?;
+            // The preceding bodyless request may still have its Finished
+            // event queued. Drain only those already-completed streams.
+            loop {
+                match helper.peer_server_poll()? {
+                    (id, h3::Event::Finished) if id < stream_id => (),
+                    (id, h3::Event::Headers { .. }) if id == stream_id => break,
+                    event => anyhow::bail!("unexpected peer event: {event:?}"),
+                }
+            }
+            helper.peer_server_send_response(stream_id, true)?;
+            helper.advance_and_run_loop()?;
+            let mut allocated = Vec::new();
+            while let Ok(event) = helper.driver_recv_client_event() {
+                if let ClientH3Event::NewOutboundRequest {
+                    stream_id,
+                    request_id,
+                } = event
+                {
+                    allocated.push((stream_id, request_id));
+                }
+            }
+            assert_eq!(allocated, [(stream_id + 4, next_id)]);
+        }
+        assert_eq!(helper.driver.hooks.queued_request_count(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn peer_goaway_rejects_unassigned_requests_and_keeps_open_stream(
+    ) -> anyhow::Result<()> {
+        let mut helper = single_stream_client()?;
+        helper.driver_enqueue_request(1, make_request_headers("GET"), None);
+        helper.driver_enqueue_request(2, make_request_headers("GET"), None);
+        assert_eq!(helper.process_commands()?, 2);
+        assert_matches!(
+            helper.driver_recv_client_event()?,
+            ClientH3Event::NewOutboundRequest {
+                stream_id: 0,
+                request_id: 1
+            }
+        );
+        assert_eq!(helper.driver.hooks.queued_request_count(), 1);
+        helper.advance_and_run_loop()?;
+        assert_matches!(
+            helper.peer_server_poll()?,
+            (0, h3::Event::Headers { .. })
+        );
+        helper.peer.send_goaway(&mut helper.pipe.server, 4)?;
+        helper.advance_and_run_loop()?;
+        assert_matches!(
+            helper.driver_recv_client_event()?,
+            ClientH3Event::Core(H3Event::GoAway { id: 4 })
+        );
+        assert_matches!(
+            helper.driver_recv_client_event()?,
+            ClientH3Event::RequestRejected {
+                request_id: 2,
+                goaway_id: 4
+            }
+        );
+        assert_eq!(helper.driver.hooks.queued_request_count(), 0);
+        helper.driver_enqueue_request(3, make_request_headers("GET"), None);
+        assert_eq!(helper.process_commands()?, 1);
+        assert_matches!(
+            helper.driver_recv_client_event()?,
+            ClientH3Event::RequestRejected {
+                request_id: 3,
+                goaway_id: 4
+            }
+        );
+        helper.peer_server_send_response(0, true)?;
+        helper.advance_and_run_loop()?;
+        assert_matches!(helper.driver_recv_core_event()?, H3Event::IncomingHeaders(headers) if headers.stream_id == 0);
+        assert!(!helper.pipe.client.is_closed());
+        Ok(())
+    }
+
     #[derive(Clone, Copy)]
     enum PeerTermination {
         Fin,
