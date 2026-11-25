@@ -295,10 +295,12 @@ where
     M: Metrics,
 {
     #[cfg(unix)]
-    assert!(
-        datagram_socket::is_nonblocking(&socket).unwrap_or_default(),
-        "O_NONBLOCK should be set for the listening socket"
-    );
+    if !datagram_socket::is_nonblocking(&socket)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "O_NONBLOCK must be set for the listening socket",
+        ));
+    }
 
     let config = Config::new(params, socket.capabilities).into_io()?;
 
@@ -324,10 +326,9 @@ where
             },
         },
         Arc::clone(&socket_tx),
-        Default::default(),
         socket.cid_generator,
         metrics.clone(),
-    );
+    )?;
 
     let (socket_driver, accept_stream) = InboundPacketRouter::new(
         config,

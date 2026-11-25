@@ -57,7 +57,7 @@ use super::InitialPacketHandler;
 pub(crate) struct ConnectionAcceptor<S, M> {
     config: ConnectionAcceptorConfig,
     socket: Arc<S>,
-    token_manager: AddrValidationTokenManager,
+    token_manager: Option<AddrValidationTokenManager>,
     cid_generator: SharedConnectionIdGenerator,
     metrics: M,
 }
@@ -79,20 +79,22 @@ where
 {
     pub(crate) fn new(
         config: ConnectionAcceptorConfig, socket: Arc<S>,
-        token_manager: AddrValidationTokenManager,
         cid_generator: SharedConnectionIdGenerator, metrics: M,
-    ) -> Self {
-        Self {
+    ) -> io::Result<Self> {
+        let token_manager = (!config.disable_client_ip_validation)
+            .then(AddrValidationTokenManager::new)
+            .transpose()?;
+        Ok(Self {
             config,
             socket,
             token_manager,
             cid_generator,
             metrics,
-        }
+        })
     }
 
     fn accept_conn(
-        &mut self, incoming: Incoming, retry_cids: Option<RetryConnectionIds>,
+        &self, incoming: Incoming, retry_cids: Option<RetryConnectionIds>,
         pending_cid: ConnectionId<'static>, quiche_config: &mut quiche::Config,
     ) -> io::Result<Option<NewConnection>> {
         let handshake_start_time = Instant::now();
@@ -118,7 +120,7 @@ where
         .into_io()?;
 
         if let Some(qlog_dir) = &self.config.qlog_dir {
-            let id = format!("{:?}", scid);
+            let id = format!("{scid:?}");
             let path = std::path::Path::new(qlog_dir)
                 .join(qlog_file_name(&id, self.config.qlog_compression));
             if let Ok(writer) =
@@ -154,6 +156,12 @@ where
     ) -> io::Result<Option<NewConnection>> {
         let mut send_buf = [0u8; MAX_DATAGRAM_SIZE];
         let written = writer(&mut send_buf)?;
+        if written > send_buf.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "handshake reply exceeds buffer",
+            ));
+        }
         let socket = Arc::clone(&self.socket);
         #[cfg(target_os = "linux")]
         let with_pktinfo = self.config.with_pktinfo;
@@ -202,11 +210,12 @@ where
     }
 
     fn stateless_retry(
-        &mut self, incoming: Incoming, hdr: Header,
+        &self, incoming: Incoming, hdr: &Header,
+        manager: &AddrValidationTokenManager,
     ) -> io::Result<Option<NewConnection>> {
         let scid = self.cid_generator.new_connection_id();
 
-        let token = self.token_manager.gen(&hdr.dcid, incoming.peer_addr);
+        let token = manager.gen(&hdr.dcid, incoming.peer_addr)?;
 
         self.handshake_reply(incoming, move |buf| {
             quiche::retry(&hdr.scid, &hdr.dcid, &scid, &token, hdr.version, buf)
@@ -238,7 +247,10 @@ where
         // 1200 bytes (RFC 9000 Section 14.1). Drop shorter datagrams before
         // any stateless reply so spoofed-source traffic cannot amplify.
         let dgram_len = match incoming.gro {
-            Some(gro) => incoming.buf.len().min(gro as usize),
+            Some(gro) =>
+                incoming.buf.len().min(usize::try_from(gro).map_err(|_| {
+                    labels::QuicInvalidInitialPacketError::FailedToParse
+                })?),
             None => incoming.buf.len(),
         };
 
@@ -252,18 +264,19 @@ where
             });
         }
 
-        if self.config.disable_client_ip_validation {
+        let Some(manager) = &self.token_manager else {
             return self.accept_conn(incoming, None, hdr.dcid, quiche_config);
-        }
+        };
 
-        // NOTE: token is always present in Initial packets
-        let token = hdr.token.as_ref().unwrap();
+        let token = hdr
+            .token
+            .as_deref()
+            .ok_or(labels::QuicInvalidInitialPacketError::FailedToParse)?;
         if token.is_empty() {
-            return self.stateless_retry(incoming, hdr);
+            return self.stateless_retry(incoming, &hdr, manager);
         }
 
-        let original_dcid = self
-            .token_manager
+        let original_dcid = manager
             .validate_and_extract_original_dcid(token, incoming.peer_addr)
             .or(Err(
                 labels::QuicInvalidInitialPacketError::TokenValidationFail,
@@ -291,15 +304,15 @@ mod tests {
 
     async fn check_stateless_reply_inherits_socket_dscp(
         bind_addr: &str, dscp: u8,
-    ) {
-        let sender = Arc::new(UdpSocket::bind(bind_addr).await.unwrap());
-        let receiver = UdpSocket::bind(bind_addr).await.unwrap();
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let sender = Arc::new(UdpSocket::bind(bind_addr).await?);
+        let receiver = UdpSocket::bind(bind_addr).await?;
         enable_tos(&receiver);
         let tos = i32::from(dscp) << 2;
-        if sender.local_addr().unwrap().is_ipv4() {
-            setsockopt(sender.as_ref(), sockopt::Ipv4Tos, &tos).unwrap();
+        if sender.local_addr()?.is_ipv4() {
+            setsockopt(sender.as_ref(), sockopt::Ipv4Tos, &tos)?;
         } else {
-            setsockopt(sender.as_ref(), sockopt::Ipv6TClass, &tos).unwrap();
+            setsockopt(sender.as_ref(), sockopt::Ipv6TClass, &tos)?;
         }
 
         let acceptor = ConnectionAcceptor::new(
@@ -312,43 +325,46 @@ mod tests {
                 with_pktinfo: true,
             },
             Arc::clone(&sender),
-            Default::default(),
             Arc::new(SimpleConnectionIdGenerator),
             DefaultMetrics,
-        );
+        )?;
 
         let incoming = Incoming {
-            peer_addr: receiver.local_addr().unwrap(),
-            local_addr: sender.local_addr().unwrap(),
+            peer_addr: receiver.local_addr()?,
+            local_addr: sender.local_addr()?,
             rx_time: None,
             buf: Vec::new(),
             gro: None,
             so_mark_data: None,
         };
-        acceptor
-            .handshake_reply(incoming, |buf| {
-                buf[..5].copy_from_slice(b"reply");
-                Ok(5)
-            })
-            .unwrap();
+        acceptor.handshake_reply(incoming, |buf| {
+            buf[..5].copy_from_slice(b"reply");
+            Ok(5)
+        })?;
 
         let (payload, tos) = recv_tos(&receiver).await;
         assert_eq!(payload, b"reply");
         assert_eq!(tos >> 2, dscp);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn stateless_reply_inherits_ipv4_socket_dscp() {
+    async fn stateless_reply_inherits_ipv4_socket_dscp(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for dscp in [34, 0] {
-            check_stateless_reply_inherits_socket_dscp("127.0.0.1:0", dscp).await;
+            check_stateless_reply_inherits_socket_dscp("127.0.0.1:0", dscp)
+                .await?;
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn stateless_reply_inherits_ipv6_socket_dscp() {
+    async fn stateless_reply_inherits_ipv6_socket_dscp(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         for dscp in [34, 0] {
-            check_stateless_reply_inherits_socket_dscp("[::1]:0", dscp).await;
+            check_stateless_reply_inherits_socket_dscp("[::1]:0", dscp).await?;
         }
+        Ok(())
     }
 }
 
@@ -381,9 +397,10 @@ mod initial_size_tests {
     }
 
     async fn acceptor(
-    ) -> (ConnectionAcceptor<UdpSocket, DefaultMetrics>, SocketAddr) {
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = socket.local_addr().unwrap();
+    ) -> io::Result<(ConnectionAcceptor<UdpSocket, DefaultMetrics>, SocketAddr)>
+    {
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let local_addr = socket.local_addr()?;
 
         let acceptor = ConnectionAcceptor::new(
             ConnectionAcceptorConfig {
@@ -396,18 +413,17 @@ mod initial_size_tests {
                 with_pktinfo: false,
             },
             Arc::new(socket),
-            AddrValidationTokenManager::default(),
             Arc::new(SimpleConnectionIdGenerator),
             DefaultMetrics,
-        );
+        )?;
 
-        (acceptor, local_addr)
+        Ok((acceptor, local_addr))
     }
 
     fn incoming(
         buf: Vec<u8>, peer_addr: SocketAddr, local_addr: SocketAddr,
-    ) -> (Incoming, Header<'static>) {
-        let hdr = Header::from_slice(&buf, MAX_CONN_ID_LEN).unwrap();
+    ) -> Result<(Incoming, Header<'static>), quiche::Error> {
+        let hdr = Header::from_slice(&buf, MAX_CONN_ID_LEN)?;
 
         let incoming = Incoming {
             peer_addr,
@@ -419,25 +435,26 @@ mod initial_size_tests {
             so_mark_data: None,
         };
 
-        (incoming, hdr)
+        Ok((incoming, hdr))
     }
 
     #[tokio::test]
-    async fn short_initial_dgram_is_dropped_without_reply() {
-        let (mut acceptor, local_addr) = acceptor().await;
-        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    async fn short_initial_dgram_is_dropped_without_reply(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut acceptor, local_addr) = acceptor().await?;
+        let peer = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
         let (incoming, hdr) = incoming(
             initial_dgram(MIN_CLIENT_INITIAL_LEN - 1),
-            peer.local_addr().unwrap(),
+            peer.local_addr()?,
             local_addr,
-        );
+        )?;
 
-        let err = match acceptor.handle_initials(incoming, hdr, &mut config) {
-            Err(e) => e,
-            Ok(_) => panic!("short Initial datagram was not rejected"),
-        };
+        let err = acceptor
+            .handle_initials(incoming, hdr, &mut config)
+            .err()
+            .ok_or("short Initial datagram was not rejected")?;
 
         assert_eq!(
             initial_packet_error_type(&err),
@@ -450,32 +467,79 @@ mod initial_size_tests {
                 .await
                 .is_err()
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn full_size_initial_dgram_gets_retry() {
-        let (mut acceptor, local_addr) = acceptor().await;
-        let peer = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+    async fn missing_initial_token_is_rejected_without_reply(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut acceptor, local_addr) = acceptor().await?;
+        let peer = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+        let (incoming, mut hdr) = incoming(
+            initial_dgram(MIN_CLIENT_INITIAL_LEN),
+            peer.local_addr()?,
+            local_addr,
+        )?;
+        hdr.token = None;
+        let error = acceptor
+            .handle_initials(incoming, hdr, &mut config)
+            .err()
+            .ok_or("missing token accepted")?;
+        assert_eq!(
+            initial_packet_error_type(&error),
+            QuicInvalidInitialPacketError::FailedToParse
+        );
+        let mut output = [0u8; MAX_DATAGRAM_SIZE];
+        assert!(
+            timeout(Duration::from_millis(200), peer.recv_from(&mut output))
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn invalid_reply_length_is_rejected_before_spawning(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (acceptor, local_addr) = acceptor().await?;
+        let peer = UdpSocket::bind("127.0.0.1:0").await?;
+        let (incoming, _) = incoming(
+            initial_dgram(MIN_CLIENT_INITIAL_LEN),
+            peer.local_addr()?,
+            local_addr,
+        )?;
+        let error = acceptor
+            .handshake_reply(incoming, |buf| Ok(buf.len() + 1))
+            .err()
+            .ok_or("oversize reply accepted")?;
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn full_size_initial_dgram_gets_retry(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (mut acceptor, local_addr) = acceptor().await?;
+        let peer = UdpSocket::bind("127.0.0.1:0").await?;
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
 
         let (incoming, hdr) = incoming(
             initial_dgram(MIN_CLIENT_INITIAL_LEN),
-            peer.local_addr().unwrap(),
+            peer.local_addr()?,
             local_addr,
-        );
+        )?;
 
         assert!(acceptor
-            .handle_initials(incoming, hdr, &mut config)
-            .unwrap()
+            .handle_initials(incoming, hdr, &mut config)?
             .is_none());
 
         let mut out = [0u8; MAX_DATAGRAM_SIZE];
-        let (len, _) = timeout(Duration::from_secs(1), peer.recv_from(&mut out))
-            .await
-            .unwrap()
-            .unwrap();
+        let (len, _) =
+            timeout(Duration::from_secs(1), peer.recv_from(&mut out)).await??;
 
-        let hdr = Header::from_slice(&out[..len], MAX_CONN_ID_LEN).unwrap();
+        let hdr = Header::from_slice(&out[..len], MAX_CONN_ID_LEN)?;
         assert_eq!(hdr.ty, PacketType::Retry);
+        Ok(())
     }
 }

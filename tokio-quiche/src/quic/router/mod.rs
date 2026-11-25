@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout() {
+    async fn test_timeout() -> Result<(), Box<dyn std::error::Error>> {
         // Configure a short idle timeout to speed up connection reclamation as
         // quiche doesn't support time mocking
         let quic_settings = QuicSettings {
@@ -979,10 +979,10 @@ mod tests {
             Hooks::default(),
         );
         params.enable_per_connection_dscp = true;
-        let config = Config::new(&params, SocketCapabilities::default()).unwrap();
+        let config = Config::new(&params, SocketCapabilities::default())?;
 
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = socket.local_addr().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let local_addr = socket.local_addr()?;
         let host_port = local_addr.to_string();
         let socket_tx = Arc::new(socket);
         let socket_rx = Arc::clone(&socket_tx);
@@ -1001,10 +1001,9 @@ mod tests {
                 with_pktinfo: false,
             },
             Arc::clone(&socket_tx),
-            Default::default(),
             Arc::new(SimpleConnectionIdGenerator),
             DefaultMetrics,
-        );
+        )?;
 
         let (socket_driver, mut incoming) = InboundPacketRouter::new(
             config,
@@ -1023,11 +1022,15 @@ mod tests {
         time::pause();
 
         let (h3_driver, _) = ServerH3Driver::new(Http3Settings::default());
-        let conn = incoming.recv().await.unwrap().unwrap();
-        let dscp_handle = conn.dscp_handle().unwrap().clone();
+        let conn = incoming.recv().await.ok_or("listener closed")??;
+        let dscp_handle =
+            conn.dscp_handle().ok_or("missing DSCP handle")?.clone();
         assert_eq!(dscp_handle.get(), None);
         dscp_handle.set(Dscp::new(0));
-        assert_eq!(conn.dscp_handle().unwrap().get(), Dscp::new(0));
+        assert_eq!(
+            conn.dscp_handle().ok_or("missing DSCP handle")?.get(),
+            Dscp::new(0)
+        );
         let drop_check = conn.incoming_ev_sender.clone();
         let _conn = conn.start(h3_driver);
 
@@ -1038,6 +1041,7 @@ mod tests {
         // This is a smoke test. A failure leaves `notified()` unresolved and
         // hangs the test.
         drop_check.closed().await;
+        Ok(())
     }
 
     #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
