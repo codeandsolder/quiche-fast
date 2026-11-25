@@ -654,7 +654,7 @@ impl<H: DriverHooks> H3Driver<H> {
                 }
             },
             StreamStatus::Blocked => {
-                self.waiting_streams.push(ctx.wait_for_send(stream_id))?;
+                self.waiting_streams.push(ctx.wait_for_send(stream_id)?)?;
             },
         }
 
@@ -1292,7 +1292,7 @@ impl<H: DriverHooks> H3Driver<H> {
                     break;
                 },
                 Err(TryRecvError::Empty) => {
-                    self.waiting_streams.push(ctx.wait_for_recv(stream_id))?;
+                    self.waiting_streams.push(ctx.wait_for_recv(stream_id)?)?;
                     break;
                 },
             }
