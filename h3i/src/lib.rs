@@ -157,21 +157,27 @@ pub const QPACK_ENCODER_STREAM_TYPE_ID: u64 = 0x2;
 /// See <https://datatracker.ietf.org/doc/html/rfc9204#section-4.2-2.2>.
 pub const QPACK_DECODER_STREAM_TYPE_ID: u64 = 0x3;
 
-#[derive(Default)]
+/// Tracks the next locally initiated stream of one direction. Explicit IDs
+/// advance the high water mark only for this direction, after a completed
+/// prompt.
+#[derive(Clone, Copy, Default)]
 struct StreamIdAllocator {
     id: u64,
 }
 
 impl StreamIdAllocator {
-    pub fn take_next_id(&mut self) -> u64 {
-        let old = self.id;
-        self.id += 4;
-
-        old
+    const fn next_id(&self) -> Option<u64> {
+        if self.id <= octets::MAX_VAR_INT {
+            Some(self.id)
+        } else {
+            None
+        }
     }
 
-    pub fn peek_next_id(&mut self) -> u64 {
-        self.id
+    fn observe(&mut self, id: u64) {
+        if id <= octets::MAX_VAR_INT && id >= self.id && id % 4 == self.id % 4 {
+            self.id = id + 4;
+        }
     }
 }
 

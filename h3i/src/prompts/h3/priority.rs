@@ -30,6 +30,7 @@ use inquire::Text;
 
 use super::stream::prompt_fin_stream;
 use crate::actions::h3::Action;
+use crate::actions::h3::ExpectedStreamSendResult;
 use crate::prompts::h3;
 
 use crate::quiche;
@@ -45,7 +46,7 @@ pub fn prompt_priority() -> InquireResult<Action> {
 
     let priority_field_value = Text::new("priority field value:").prompt()?;
 
-    let frame = if ty.as_str() == REQUEST {
+    let frame = if ty == REQUEST {
         quiche::h3::frame::Frame::PriorityUpdateRequest {
             prioritized_element_id,
             priority_field_value: priority_field_value.into(),
@@ -63,14 +64,12 @@ pub fn prompt_priority() -> InquireResult<Action> {
         stream_id,
         fin_stream,
         frame,
-        expected_result: Default::default(),
+        expected_result: ExpectedStreamSendResult::default(),
     };
 
     Ok(action)
 }
 
-fn prompt_request_or_push() -> InquireResult<String> {
-    Ok(Select::new("request or push:", vec![REQUEST, PUSH])
-        .prompt()?
-        .to_string())
+fn prompt_request_or_push() -> InquireResult<&'static str> {
+    Select::new("request or push:", vec![REQUEST, PUSH]).prompt()
 }

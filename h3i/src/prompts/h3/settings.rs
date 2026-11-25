@@ -28,25 +28,30 @@ use inquire::error::InquireResult;
 use inquire::validator::Validation;
 use inquire::Text;
 
-use super::squish_suggester;
+use super::parse_named_varint;
 use super::stream::prompt_fin_stream;
+use super::suggest_named_varint;
+use super::validate_named_varint;
 use super::SuggestionResult;
 use crate::actions::h3::Action;
+use crate::actions::h3::ExpectedStreamSendResult;
 use crate::prompts::h3;
 
 use crate::quiche;
 
-const QPACK_MAX_TABLE_CAPACITY: &str = "QPACK_MAX_TABLE_CAPACITY";
-const MAX_FIELD_SECTION_SIZE: &str = "MAX_FIELD_SECTION_SIZE";
-const QPACK_BLOCKED_STREAMS: &str = "QPACK_BLOCKED_STREAMS";
-const ENABLE_CONNECT_PROTOCOL: &str = "ENABLE_CONNECT_PROTOCOL";
-const H3_DATAGRAM: &str = "H3_DATAGRAM";
+const SETTINGS: &[(&str, u64)] = &[
+    ("QPACK_MAX_TABLE_CAPACITY", 0x1),
+    ("MAX_FIELD_SECTION_SIZE", 0x6),
+    ("QPACK_BLOCKED_STREAMS", 0x7),
+    ("ENABLE_CONNECT_PROTOCOL", 0x8),
+    ("H3_DATAGRAM", 0x33),
+];
 
 type RawSettings = Vec<(u64, u64)>;
 
 pub fn prompt_settings() -> InquireResult<Action> {
     let stream_id = h3::prompt_control_stream_id()?;
-    let settings = settings_read_loop();
+    let settings = settings_read_loop()?;
 
     let fin_stream = prompt_fin_stream()?;
 
@@ -63,81 +68,36 @@ pub fn prompt_settings() -> InquireResult<Action> {
             raw: None,
             additional_settings: Some(settings),
         },
-        expected_result: Default::default(),
+        expected_result: ExpectedStreamSendResult::default(),
     };
 
     Ok(action)
 }
 
-fn settings_read_loop() -> RawSettings {
-    let mut settings = vec![];
-
+fn settings_read_loop() -> InquireResult<RawSettings> {
+    let mut settings = Vec::new();
     loop {
-        let ty = match Text::new("setting type:")
+        let ty = Text::new("setting type:")
             .with_validator(validate_setting_type)
             .with_autocomplete(&settings_type_suggestor)
             .with_help_message("type 'q!' to stop adding settings")
-            .prompt()
-        {
-            Ok(h) => {
-                if h == "q!" {
-                    break;
-                }
-
-                h
-            },
-            Err(_) => {
-                println!("An error happened, stopping.");
-                break;
-            },
-        };
-
-        let ty = match ty.as_str() {
-            QPACK_MAX_TABLE_CAPACITY => 0x1,
-            MAX_FIELD_SECTION_SIZE => 0x6,
-            QPACK_BLOCKED_STREAMS => 0x7,
-            ENABLE_CONNECT_PROTOCOL => 0x8,
-            H3_DATAGRAM => 0x33,
-
-            v => v.parse::<u64>().unwrap(),
-        };
-
-        let value = Text::new("setting value:")
-            .with_validator(h3::validate_varint)
-            .prompt()
-            .expect("An error happened, stopping.")
-            .parse::<u64>()
-            .unwrap();
-
-        settings.push((ty, value));
+            .prompt()?;
+        if ty == "q!" {
+            return Ok(settings);
+        }
+        let id = parse_named_varint(&ty, SETTINGS)?;
+        let value = h3::prompt_varint("setting value:")?;
+        settings.push((id, value));
     }
-
-    settings
 }
 
 fn validate_setting_type(id: &str) -> SuggestionResult<Validation> {
-    if matches!(
-        id,
-        "q!" | QPACK_MAX_TABLE_CAPACITY |
-            MAX_FIELD_SECTION_SIZE |
-            QPACK_BLOCKED_STREAMS |
-            ENABLE_CONNECT_PROTOCOL |
-            H3_DATAGRAM
-    ) {
+    if id == "q!" {
         return Ok(Validation::Valid);
     }
-
-    h3::validate_varint(id)
+    validate_named_varint(id, SETTINGS)
 }
 
-fn settings_type_suggestor(val: &str) -> SuggestionResult<Vec<String>> {
-    let suggestions = [
-        QPACK_MAX_TABLE_CAPACITY,
-        MAX_FIELD_SECTION_SIZE,
-        QPACK_BLOCKED_STREAMS,
-        ENABLE_CONNECT_PROTOCOL,
-        H3_DATAGRAM,
-    ];
-
-    squish_suggester(&suggestions, val)
+fn settings_type_suggestor(input: &str) -> SuggestionResult<Vec<String>> {
+    suggest_named_varint(input, SETTINGS)
 }
