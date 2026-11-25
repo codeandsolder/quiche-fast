@@ -757,7 +757,8 @@ mod tests {
         // Configure a short idle timeout to speed up connection reclamation as
         // quiche doesn't support time mocking
         let quic_settings = QuicSettings {
-            max_idle_timeout: Some(Duration::from_millis(1)),
+            max_idle_timeout: Some(Duration::from_millis(100)),
+            handshake_timeout: Some(Duration::from_secs(2)),
             max_recv_udp_payload_size: MAX_DATAGRAM_SIZE,
             max_send_udp_payload_size: MAX_DATAGRAM_SIZE,
             ..Default::default()
@@ -814,13 +815,15 @@ mod tests {
         tokio::spawn(socket_driver);
 
         // Start a request and drop it after connection establishment
-        let client = std::thread::spawn(move || test_connect(&host_port, None));
+        let client =
+            tokio::task::spawn_blocking(move || test_connect(&host_port, None));
 
-        // Wait for a new connection
-        time::pause();
+        // Quiche's timers use std::time::Instant, not Tokio's virtual clock.
 
         let (h3_driver, _) = ServerH3Driver::new(&Http3Settings::default());
-        let conn = incoming.recv().await.ok_or("listener closed")??;
+        let conn = time::timeout(Duration::from_secs(5), incoming.recv())
+            .await?
+            .ok_or("listener closed")??;
         let dscp_handle =
             conn.dscp_handle().ok_or("missing DSCP handle")?.clone();
         assert_eq!(dscp_handle.get(), None);
@@ -832,15 +835,11 @@ mod tests {
         let drop_check = conn.incoming_ev_sender.clone();
         let _conn = conn.start(h3_driver);
 
-        // Poll incoming events until the connection is dropped.
-        time::advance(Duration::new(30, 0)).await;
-        time::resume();
-
         // Bound the smoke test so a leaked connection fails promptly.
         time::timeout(Duration::from_secs(5), drop_check.closed()).await?;
         // The deliberately tiny idle timeout can interrupt the client
         // handshake.
-        let _ = client.join().map_err(|_| "client thread panicked")?;
+        let _ = client.await?;
         Ok(())
     }
 
