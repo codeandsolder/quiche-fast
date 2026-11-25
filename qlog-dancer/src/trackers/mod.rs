@@ -218,10 +218,18 @@ impl<T: StreamExtent> StreamTracker<T> {
         {
             return Ok(Cow::Borrowed(&self.sum_series));
         }
+        Ok(Cow::Owned(
+            self.replay_series(|_, history| history.initial)?,
+        ))
+    }
+
+    fn replay_series(
+        &self, initial: impl Fn(u64, &StreamHistory<T>) -> Option<u64>,
+    ) -> Result<Vec<(f64, u64)>, TrackerError> {
         let mut events = Vec::with_capacity(self.sum_series.len());
         for (&id, history) in &self.streams {
             events.extend(history.points.iter().map(|(time, observation)| {
-                (*time, id, observation, history.initial)
+                (*time, id, observation, initial(id, history))
             }));
         }
         events.sort_by(|a, b| a.0.total_cmp(&b.0));
@@ -236,7 +244,7 @@ impl<T: StreamExtent> StreamTracker<T> {
             total = sum;
             series.push((time, total));
         }
-        Ok(Cow::Owned(series))
+        Ok(series)
     }
 }
 
@@ -271,7 +279,7 @@ impl<T> StreamTracker<T> {
         &self.streams
     }
 
-    #[must_use = "the series describes cumulative maxima in ingestion order"]
+    #[must_use = "the cached series reflects observations in their current replay order"]
     pub const fn sum_series(&self) -> &[(f64, u64)] {
         self.sum_series.as_slice()
     }
@@ -315,7 +323,50 @@ impl<T> StreamTracker<T> {
 }
 
 impl StreamMaxTracker {
-    /// Record a flow-control maximum and a synthetic initial plotting value.
+    /// Backfill previously unknown initial limits on already observed streams.
+    ///
+    /// Existing initial limits and raw frame history are unchanged. Rebuild
+    /// the cached chronological total only when metadata has been added.
+    ///
+    /// # Errors
+    /// Returns an aggregate overflow error without changing the tracker.
+    pub fn hydrate_initial_limits(
+        &mut self, limit_for_stream: impl Fn(u64) -> Option<u64>,
+    ) -> Result<(), TrackerError> {
+        let mut updates = BTreeMap::new();
+        let mut total = self.running_sum;
+        for (&id, history) in &self.streams {
+            if history.initial.is_none() {
+                if let Some(initial) = limit_for_stream(id) {
+                    let (maximum, sum) =
+                        checked_maximum(id, history.maximum, initial, total)?;
+                    updates.insert(id, (initial, maximum));
+                    total = sum;
+                }
+            }
+        }
+        if updates.is_empty() {
+            return Ok(());
+        }
+        let series = self.replay_series(|id, history| {
+            updates
+                .get(&id)
+                .map(|&(initial, _)| initial)
+                .or(history.initial)
+        })?;
+        for (id, (initial, maximum)) in updates {
+            if let Some(history) = self.streams.get_mut(&id) {
+                history.initial = Some(initial);
+                history.maximum = maximum;
+            }
+        }
+        self.running_sum = total;
+        self.sum_series = series;
+        Ok(())
+    }
+
+    /// Record a flow-control maximum and the known initial limit for a new
+    /// stream.
     ///
     /// # Errors
     /// Returns an error if the sum of observed stream maxima overflows.
@@ -618,6 +669,60 @@ mod tests {
         assert_eq!(tracker.streams()[&0].initial(), Some(100));
         assert_eq!(tracker.streams()[&0].points(), [(10.0, 20), (12.0, 30)]);
         assert_eq!(tracker.streams()[&4].points(), [(13.0, 40)]);
+        Ok(())
+    }
+
+    #[test]
+    fn late_initial_limits_replay_earlier_observations_and_preserve_raw_frames(
+    ) -> Result<(), TrackerError> {
+        let mut tracker = StreamMaxTracker::default();
+        tracker.update(0, 200, 10.0, None)?;
+        tracker.update(4, 20, 5.0, None)?;
+        tracker.update(0, 10, 2.0, None)?;
+        tracker.update(8, 10, 7.0, Some(15))?;
+        tracker.hydrate_initial_limits(|id| match id {
+            0 => Some(100),
+            4 => Some(50),
+            _ => Some(999),
+        })?;
+        assert_eq!(tracker.chronological_sum_series()?.as_ref(), [
+            (2.0, 100),
+            (5.0, 150),
+            (7.0, 165),
+            (10.0, 265),
+        ]);
+        assert_eq!(tracker.current_sum(), 265);
+        assert_eq!(tracker.streams()[&0].points(), [(10.0, 200), (2.0, 10)]);
+        assert_eq!(tracker.streams()[&4].initial(), Some(50));
+        assert_eq!(tracker.streams()[&8].initial(), Some(15));
+        tracker.update(4, 60, 3.0, Some(50))?;
+        assert_eq!(tracker.chronological_sum_series()?.as_ref(), [
+            (2.0, 100),
+            (3.0, 160),
+            (5.0, 160),
+            (7.0, 175),
+            (10.0, 275),
+        ]);
+        Ok(())
+    }
+
+    #[test]
+    fn initial_limit_hydration_overflow_is_transactional(
+    ) -> Result<(), TrackerError> {
+        let mut tracker = StreamMaxTracker::default();
+        tracker.update(0, 0, 1.0, None)?;
+        tracker.update(4, 1, 2.0, None)?;
+        assert!(matches!(
+            tracker.hydrate_initial_limits(|_| Some(u64::MAX)),
+            Err(TrackerError::RunningSumOverflow { .. })
+        ));
+        assert_eq!(tracker.current_sum(), 1);
+        assert_eq!(tracker.streams()[&0].initial(), None);
+        assert_eq!(tracker.streams()[&4].initial(), None);
+        assert_eq!(tracker.chronological_sum_series()?.as_ref(), [
+            (1.0, 0),
+            (2.0, 1)
+        ]);
         Ok(())
     }
 

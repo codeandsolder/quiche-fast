@@ -496,10 +496,10 @@ pub struct InitialStreamLimits {
 
 impl InitialStreamLimits {
     fn update(&mut self, observed: Self) {
-        self.connection = observed.connection.or(self.connection);
-        self.bidi_local = observed.bidi_local.or(self.bidi_local);
-        self.bidi_remote = observed.bidi_remote.or(self.bidi_remote);
-        self.uni = observed.uni.or(self.uni);
+        self.connection = self.connection.or(observed.connection);
+        self.bidi_local = self.bidi_local.or(observed.bidi_local);
+        self.bidi_remote = self.bidi_remote.or(observed.bidi_remote);
+        self.uni = self.uni.or(observed.uni);
     }
 
     const fn for_stream(
@@ -931,21 +931,35 @@ impl Datastore {
     fn record_quic_initial_limits(
         &mut self, direction: LocalDirection, time: f64,
         observed: InitialStreamLimits,
-    ) {
+    ) -> Result<(), TrackerError> {
+        let (limits, advertiser, tracker) = match direction {
+            LocalDirection::Sent => (
+                &mut self.local_initial_stream_limits,
+                self.vantage_point,
+                &mut self.sent_stream_max_data_tracker,
+            ),
+            LocalDirection::Received => (
+                &mut self.peer_initial_stream_limits,
+                self.vantage_point.peer(),
+                &mut self.received_stream_max_data_tracker,
+            ),
+        };
+        let mut merged = *limits;
+        merged.update(observed);
+        tracker.hydrate_initial_limits(|stream| {
+            merged.for_stream(stream, advertiser)
+        })?;
+        *limits = merged;
         if let Some(maximum) = observed.connection {
             self.record_quic_max_data(direction, time, maximum);
         }
-        match direction {
-            LocalDirection::Sent => &mut self.local_initial_stream_limits,
-            LocalDirection::Received => &mut self.peer_initial_stream_limits,
-        }
-        .update(observed);
+        Ok(())
     }
 
     fn record_netlog_quic_transport_parameters(
         &mut self, direction: LocalDirection, time: f64,
         params: &quic::QuicSessionTransportParametersParams,
-    ) {
+    ) -> Result<(), TrackerError> {
         let parsed = quic::TransportParameters::from(
             params.quic_transport_parameters.as_str(),
         );
@@ -954,7 +968,7 @@ impl Datastore {
             bidi_local: parsed.initial_max_stream_data_bidi_local,
             bidi_remote: parsed.initial_max_stream_data_bidi_remote,
             uni: parsed.initial_max_stream_data_uni,
-        });
+        })
     }
 
     fn consume_netlog_quic(
@@ -1057,13 +1071,13 @@ impl Datastore {
                     LocalDirection::Sent,
                     rel_event_time,
                     &e.params,
-                ),
+                )?,
             quic::Event::QuicSessionTransportParametersReceived(e) => self
                 .record_netlog_quic_transport_parameters(
                     LocalDirection::Received,
                     rel_event_time,
                     &e.params,
-                ),
+                )?,
 
             quic::Event::QuicSession(_) => (),
         }
@@ -1520,7 +1534,7 @@ impl Datastore {
                 self.record_session_close_time(ev_time),
 
             EventData::QuicParametersSet(v) =>
-                self.consume_qlog_transport_parameters_set(v),
+                self.consume_qlog_transport_parameters_set(v)?,
 
             EventData::QuicPacketReceived(v) =>
                 self.consume_qlog_packet_received(v, ev_time, process_acks)?,
@@ -1636,13 +1650,13 @@ impl Datastore {
 
     fn consume_qlog_transport_parameters_set(
         &mut self, tp: &qlog::events::quic::ParametersSet,
-    ) {
+    ) -> Result<(), TrackerError> {
         let direction = match tp.initiator {
             Some(TransportInitiator::Local) => LocalDirection::Sent,
             Some(TransportInitiator::Remote) => LocalDirection::Received,
             None => {
                 trace!("ignoring transport parameters with no initiator");
-                return;
+                return Ok(());
             },
         };
         self.record_quic_initial_limits(direction, 0.0, InitialStreamLimits {
@@ -1650,7 +1664,7 @@ impl Datastore {
             bidi_local: tp.initial_max_stream_data_bidi_local,
             bidi_remote: tp.initial_max_stream_data_bidi_remote,
             uni: tp.initial_max_stream_data_uni,
-        });
+        })
     }
 
     /// ACKs in a 1-RTT packet acknowledge the shared application-data
@@ -4418,6 +4432,75 @@ mod qlog_packet_history_tests {
         )?;
         assert!(data.packet_sent.is_empty());
         assert_eq!(data.sent_max_data, [(2.0, 100)]);
+        Ok(())
+    }
+
+    #[test]
+    fn late_transport_parameters_hydrate_only_the_advertisers_observed_streams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use super::InitialStreamLimits;
+        use super::LocalDirection;
+        for vantage in [VantagePoint::Client, VantagePoint::Server] {
+            let mut ds = Datastore {
+                vantage_point: vantage,
+                ..Datastore::default()
+            };
+            for direction in [LocalDirection::Sent, LocalDirection::Received] {
+                ds.record_quic_max_stream_data(direction, 0, 5.0, 10)?;
+                ds.record_quic_max_stream_data(direction, 1, 3.0, 20)?;
+            }
+            ds.record_quic_initial_limits(
+                LocalDirection::Sent,
+                1.0,
+                InitialStreamLimits {
+                    bidi_local: Some(100),
+                    ..InitialStreamLimits::default()
+                },
+            )?;
+            let client = matches!(vantage, VantagePoint::Client);
+            let local_id = u64::from(!client);
+            let peer_id = u64::from(client);
+            assert_eq!(
+                ds.sent_stream_max_data_tracker.streams()[&local_id].initial(),
+                Some(100)
+            );
+            assert_eq!(
+                ds.sent_stream_max_data_tracker.streams()[&peer_id].initial(),
+                None
+            );
+            assert_eq!(ds.received_stream_max_data_tracker.current_sum(), 30);
+            ds.record_quic_initial_limits(
+                LocalDirection::Sent,
+                2.0,
+                InitialStreamLimits {
+                    bidi_local: Some(999),
+                    bidi_remote: Some(50),
+                    ..InitialStreamLimits::default()
+                },
+            )?;
+            ds.record_quic_initial_limits(
+                LocalDirection::Received,
+                2.0,
+                InitialStreamLimits {
+                    bidi_local: Some(60),
+                    bidi_remote: Some(70),
+                    ..InitialStreamLimits::default()
+                },
+            )?;
+            assert_eq!(ds.local_initial_stream_limits.bidi_local, Some(100));
+            assert_eq!(ds.sent_stream_max_data_tracker.current_sum(), 150);
+            assert_eq!(ds.received_stream_max_data_tracker.current_sum(), 130);
+            assert_eq!(ds.sent_stream_max_data_tracker.streams().len(), 2);
+            assert_eq!(ds.sent_stream_max_data_tracker.streams()[&0].points(), [
+                (5.0, 10)
+            ]);
+            let series = crate::seriesstore::SeriesStore::from_datastore(&ds)?;
+            assert_eq!(series.sum_sent_stream_max_data.last(), Some(&(5.0, 150)));
+            assert_eq!(
+                series.sum_received_stream_max_data.last(),
+                Some(&(5.0, 130))
+            );
+        }
         Ok(())
     }
 
