@@ -933,13 +933,11 @@ mod tests {
     }
 
     fn test_connect(host_port: String, wait_before_close: Option<Duration>) {
-        let h3i_config = h3i::config::Config::new()
-            .with_host_port("test.com".to_string())
-            .with_idle_timeout(2000)
-            .with_connect_to(host_port)
-            .verify_peer(false)
-            .build()
-            .unwrap();
+        let mut h3i_config = h3i::config::Config::new("test.com").unwrap();
+        h3i_config.idle_timeout = 2000;
+        h3i_config.endpoint.connect_to = Some(host_port.parse().unwrap());
+        h3i_config.tls.verify_peer = false;
+        h3i_config.datagrams = Some(h3i::config::DatagramQueues::default());
 
         let conn_close = h3i::quiche::ConnectionError {
             is_app: true,
