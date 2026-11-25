@@ -84,16 +84,16 @@ pub trait Metrics: Send + Sync + Clone + Unpin + 'static {
         &self, reason: labels::QuicInvalidInitialPacketError, peer_ip: IpAddr,
     ) -> Counter;
 
-    /// Combined utilized bandwidth of all open connections (max over the past
-    /// two minutes)
+    /// Combined utilized bandwidth of all open connections (estimated maximum
+    /// over the past two minutes)
     fn utilized_bandwidth(&self) -> Gauge;
 
     /// The highest utilized bandwidh reported during the lifetime of the
     /// connection
     fn max_bandwidth_mbps(&self) -> Histogram;
 
-    /// The highest momentary loss reported during the lifetime of the
-    /// connection
+    /// The highest observed loss share (lost bytes / ACK and loss outcomes)
+    /// during the lifetime of the connection
     fn max_loss_pct(&self) -> Histogram;
 
     /// Number of UDP packets dropped when receiving
@@ -323,8 +323,8 @@ pub(crate) mod quic {
         reason: labels::QuicInvalidInitialPacketError, peer_ip: IpAddr,
     ) -> Counter;
 
-    /// Combined utilized bandwidth of all open connections (max over the past
-    /// two minutes)
+    /// Combined utilized bandwidth of all open connections (estimated maximum
+    /// over the past two minutes)
     pub fn utilized_bandwidth() -> Gauge;
 
     /// The highest utilized bandwidh reported during the lifetime of the
@@ -332,8 +332,8 @@ pub(crate) mod quic {
     #[ctor = HistogramBuilder { buckets: &[0., 1., 2., 5., 10., 20., 50., 100., 200., 300., 500., 750., 1000., 1500., 2000., 2500., 3000., 3500., 4000., 4500., 5000., 6000., 7000., 10000.], }]
     pub fn max_bandwidth_mbps() -> Histogram;
 
-    /// The highest momentary loss reported during the lifetime of the
-    /// connection
+    /// The highest observed loss share (lost bytes / ACK and loss outcomes)
+    /// during the lifetime of the connection
     #[ctor = HistogramBuilder { buckets: &[0.0, 0.1, 0.2, 0.5, 1., 2., 3., 4., 5., 10., 15., 20., 25., 50., 100.], }]
     pub fn max_loss_pct() -> Histogram;
 

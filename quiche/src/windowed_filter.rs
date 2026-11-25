@@ -28,8 +28,39 @@
 // turn is replaced by the third best. The newest sample replaces the third
 // best.
 
-use std::ops::Div;
 use std::ops::Sub;
+use std::time::Duration;
+
+/// Duration arithmetic for the three-sample window filter. The recovery
+/// algorithm uses packet rounds; telemetry uses monotonic elapsed time.
+pub trait WindowSpan: Ord + Copy {
+    /// One quarter of the window.
+    #[must_use = "the quarter span is used to partition the window"]
+    fn quarter(self) -> Self;
+    /// One half of the window.
+    #[must_use = "the half span is used to partition the window"]
+    fn half(self) -> Self;
+}
+
+impl WindowSpan for usize {
+    fn quarter(self) -> Self {
+        self / 4
+    }
+
+    fn half(self) -> Self {
+        self / 2
+    }
+}
+
+impl WindowSpan for Duration {
+    fn quarter(self) -> Self {
+        self / 4
+    }
+
+    fn half(self) -> Self {
+        self / 2
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Sample<T, I> {
@@ -37,6 +68,9 @@ struct Sample<T, I> {
     time: I,
 }
 
+/// Constant-space approximate maximum over a sliding window. Samples must
+/// arrive in nondecreasing time order. Reverse the sample ordering to track a
+/// minimum.
 #[derive(Debug)]
 pub struct WindowedFilter<T, I, D> {
     window_length: D,
@@ -47,8 +81,10 @@ impl<T, I, D> WindowedFilter<T, I, D>
 where
     T: Ord + Copy,
     I: Sub<I, Output = D> + Copy,
-    D: Ord + Div<usize, Output = D> + Copy,
+    D: WindowSpan,
 {
+    /// Creates an empty maximum filter.
+    #[must_use = "the filter stores the rolling maximum"]
     pub const fn new(window_length: D) -> Self {
         Self {
             window_length,
@@ -56,6 +92,8 @@ where
         }
     }
 
+    /// Returns the best sample, or None before the first update.
+    #[must_use = "the best sample is the filter output"]
     pub fn get_best(&self) -> Option<T> {
         self.estimates.map(|[best, _, _]| best.sample)
     }
@@ -72,6 +110,7 @@ where
         }
     }
 
+    /// Inserts a sample and advances the window to its timestamp.
     pub fn update(&mut self, new_sample: T, new_time: I) {
         let new = Sample {
             sample: new_sample,
@@ -111,7 +150,7 @@ where
 
         // Take a new second estimate in the second quarter of the window.
         if second.sample == best.sample &&
-            new_time - second.time > self.window_length / 4
+            new_time - second.time > self.window_length.quarter()
         {
             *second = new;
             *third = new;
@@ -120,7 +159,7 @@ where
 
         // Take a new third estimate in the second half of the window.
         if third.sample == second.sample &&
-            new_time - third.time > self.window_length / 2
+            new_time - third.time > self.window_length.half()
         {
             *third = new;
         }
