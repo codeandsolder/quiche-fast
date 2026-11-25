@@ -26,13 +26,15 @@
 
 use std::collections::BTreeMap;
 
+mod stream_credit;
+use stream_credit::StreamCreditPlot;
+
 use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
 use crate::push_interp;
 use crate::trackers::QuicStreamTracker;
 use crate::trackers::StreamBufferTracker;
 use crate::trackers::StreamExtent;
-use crate::trackers::StreamMaxTracker;
 use crate::trackers::StreamTracker;
 use crate::QlogPointRtt;
 use crate::QlogPointu64;
@@ -435,23 +437,6 @@ impl SeriesStore {
         }
     }
 
-    fn stream_max_data(
-        tracker: &StreamMaxTracker,
-        output: &mut BTreeMap<u64, Vec<QlogPointu64>>, x_min: &mut f64,
-        x_max: &mut f64, y_max: &mut u64,
-    ) {
-        for (&stream, history) in tracker.streams() {
-            Self::max_data_series(
-                history.points(),
-                history.initial(),
-                output.entry(stream).or_default(),
-                x_min,
-                x_max,
-                y_max,
-            );
-        }
-    }
-
     fn stream_buffers(&mut self, data_store: &Datastore) -> SeriesResult<()> {
         for (tracker, series, output, sum_output, is_receive) in [
             (
@@ -742,54 +727,61 @@ impl SeriesStore {
     fn stream_credit_series(
         &mut self, data_store: &Datastore,
     ) -> SeriesResult<()> {
-        Self::max_data_series(
-            &data_store.sent_max_data,
-            None,
-            &mut self.sent_max_data,
-            &mut self.sent_x_min,
-            &mut self.sent_x_max,
-            &mut self.y_max_stream_recv_plot,
-        );
-        Self::tracker_sum(
-            &data_store.sent_stream_max_data_tracker,
-            &mut self.sum_sent_stream_max_data,
-            &mut self.sent_x_min,
-            &mut self.sent_x_max,
-            &mut self.y_max_stream_recv_plot,
-            "sum_sent_stream_max_data",
-        )?;
-
-        Self::stream_max_data(
-            &data_store.sent_stream_max_data_tracker,
-            &mut self.sent_stream_max_data,
-            &mut self.sent_x_min,
-            &mut self.sent_x_max,
-            &mut self.y_max_stream_recv_plot,
-        );
-        Self::stream_max_data(
-            &data_store.received_stream_max_data_tracker,
-            &mut self.received_stream_max_data,
-            &mut self.received_x_min,
-            &mut self.received_x_max,
-            &mut self.y_max_stream_send_plot,
-        );
-
-        Self::max_data_series(
-            &data_store.received_max_data,
-            None,
-            &mut self.received_max_data,
-            &mut self.received_x_min,
-            &mut self.received_x_max,
-            &mut self.y_max_stream_send_plot,
-        );
-        Self::tracker_sum(
-            &data_store.received_stream_max_data_tracker,
-            &mut self.sum_received_stream_max_data,
-            &mut self.received_x_min,
-            &mut self.received_x_max,
-            &mut self.y_max_stream_send_plot,
-            "sum_received_stream_max_data",
-        )?;
+        for (
+            connection,
+            grants,
+            data,
+            limits,
+            advertiser,
+            connection_output,
+            stream_output,
+            total_output,
+            x_min,
+            x_max,
+            y_max,
+        ) in [
+            (
+                &data_store.sent_max_data,
+                &data_store.sent_stream_max_data_tracker,
+                &data_store.received_quic_streams,
+                &data_store.local_initial_stream_limits,
+                data_store.vantage_point,
+                &mut self.sent_max_data,
+                &mut self.sent_stream_max_data,
+                &mut self.sum_sent_stream_max_data,
+                &mut self.sent_x_min,
+                &mut self.sent_x_max,
+                &mut self.y_max_stream_recv_plot,
+            ),
+            (
+                &data_store.received_max_data,
+                &data_store.received_stream_max_data_tracker,
+                &data_store.sent_quic_streams,
+                &data_store.peer_initial_stream_limits,
+                data_store.vantage_point.peer(),
+                &mut self.received_max_data,
+                &mut self.received_stream_max_data,
+                &mut self.sum_received_stream_max_data,
+                &mut self.received_x_min,
+                &mut self.received_x_max,
+                &mut self.y_max_stream_send_plot,
+            ),
+        ] {
+            Self::max_data_series(
+                connection,
+                None,
+                connection_output,
+                x_min,
+                x_max,
+                y_max,
+            );
+            let credit = StreamCreditPlot::build(grants, data, |id| {
+                limits.for_stream(id, advertiser)
+            })?;
+            credit.update_bounds(x_min, x_max, y_max);
+            *stream_output = credit.streams;
+            *total_output = credit.total;
+        }
         Ok(())
     }
 
@@ -910,6 +902,110 @@ mod tests {
         assert_eq!(series.received_x_min, -1.0);
         assert_eq!(series.y_max_stream_recv_plot, 130);
         assert_eq!(series.y_max_stream_send_plot, 130);
+        Ok(())
+    }
+
+    #[test]
+    fn stream_credit_plots_include_initial_limits_without_window_update_frames(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::datastore::InitialStreamLimits;
+        use crate::datastore::VantagePoint;
+        use crate::trackers::QuicStreamObservation;
+        for vantage in [VantagePoint::Client, VantagePoint::Server] {
+            let mut ds = Datastore {
+                vantage_point: vantage,
+                local_initial_stream_limits: InitialStreamLimits {
+                    bidi_local: Some(100),
+                    bidi_remote: Some(200),
+                    uni: Some(300),
+                    ..InitialStreamLimits::default()
+                },
+                peer_initial_stream_limits: InitialStreamLimits {
+                    bidi_local: Some(400),
+                    bidi_remote: Some(500),
+                    ..InitialStreamLimits::default()
+                },
+                ..Datastore::default()
+            };
+            let client = matches!(vantage, VantagePoint::Client);
+            let local_id = u64::from(!client);
+            let peer_id = u64::from(client);
+            let local_uni = local_id + 2;
+            let peer_uni = peer_id + 2;
+            let data = QuicStreamObservation::Frame {
+                offset: Some(0),
+                length: Some(5),
+                fin: Some(false),
+            };
+            for (time, stream) in [
+                (8.0, local_id),
+                (2.0, local_id),
+                (3.0, peer_id),
+                (4.0, peer_uni),
+            ] {
+                ds.received_quic_streams.observe(stream, data, time)?;
+            }
+            for (time, stream) in [(5.0, local_id), (6.0, local_uni)] {
+                ds.sent_quic_streams.observe(stream, data, time)?;
+            }
+            ds.sent_stream_max_data_tracker.update(
+                local_id,
+                150,
+                7.0,
+                Some(100),
+            )?;
+            let series = SeriesStore::from_datastore(&ds)?;
+            assert_eq!(series.sent_stream_max_data[&local_id], [
+                (2.0, 100),
+                (7.0, 100),
+                (7.0, 150),
+                (8.0, 150),
+                (8.0, 150)
+            ]);
+            assert_eq!(series.sent_stream_max_data[&peer_id], [(3.0, 200)]);
+            assert_eq!(series.sent_stream_max_data[&peer_uni], [(4.0, 300)]);
+            assert_eq!(series.sum_sent_stream_max_data.last(), Some(&(8.0, 650)));
+            assert_eq!(series.received_stream_max_data[&local_id], [(5.0, 500)]);
+            assert!(!series.received_stream_max_data.contains_key(&local_uni));
+            assert_eq!(
+                series.sum_received_stream_max_data.last(),
+                Some(&(5.0, 500))
+            );
+            assert_eq!(ds.sent_stream_max_data_tracker.streams().len(), 1);
+            assert_eq!(
+                ds.sent_stream_max_data_tracker.streams()[&local_id].points(),
+                [(7.0, 150)]
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn initial_only_observed_stream_credit_detects_aggregate_overflow(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::datastore::InitialStreamLimits;
+        use crate::trackers::QuicStreamObservation;
+        let mut ds = Datastore {
+            local_initial_stream_limits: InitialStreamLimits {
+                bidi_local: Some(u64::MAX),
+                ..InitialStreamLimits::default()
+            },
+            ..Datastore::default()
+        };
+        for id in [0, 4] {
+            ds.received_quic_streams.observe(
+                id,
+                QuicStreamObservation::Reset { final_size: 0 },
+                1.0,
+            )?;
+        }
+        assert!(matches!(
+            SeriesStore::from_datastore(&ds),
+            Err(super::SeriesBuildError {
+                stream_id: 4,
+                series: "observed_stream_credit"
+            })
+        ));
         Ok(())
     }
 

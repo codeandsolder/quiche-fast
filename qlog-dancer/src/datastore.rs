@@ -502,7 +502,7 @@ impl InitialStreamLimits {
         self.uni = self.uni.or(observed.uni);
     }
 
-    const fn for_stream(
+    pub(crate) const fn for_stream(
         &self, stream_id: u64, advertiser: VantagePoint,
     ) -> Option<u64> {
         if stream_id & 2 != 0 {
@@ -519,7 +519,7 @@ impl InitialStreamLimits {
 }
 
 impl VantagePoint {
-    const fn peer(self) -> Self {
+    pub(crate) const fn peer(self) -> Self {
         match self {
             Self::Client => Self::Server,
             Self::Server => Self::Client,
@@ -1534,7 +1534,7 @@ impl Datastore {
                 self.record_session_close_time(ev_time),
 
             EventData::QuicParametersSet(v) =>
-                self.consume_qlog_transport_parameters_set(v)?,
+                self.consume_qlog_transport_parameters_set(v, ev_time)?,
 
             EventData::QuicPacketReceived(v) =>
                 self.consume_qlog_packet_received(v, ev_time, process_acks)?,
@@ -1649,7 +1649,7 @@ impl Datastore {
     }
 
     fn consume_qlog_transport_parameters_set(
-        &mut self, tp: &qlog::events::quic::ParametersSet,
+        &mut self, tp: &qlog::events::quic::ParametersSet, time: f64,
     ) -> Result<(), TrackerError> {
         let direction = match tp.initiator {
             Some(TransportInitiator::Local) => LocalDirection::Sent,
@@ -1659,7 +1659,7 @@ impl Datastore {
                 return Ok(());
             },
         };
-        self.record_quic_initial_limits(direction, 0.0, InitialStreamLimits {
+        self.record_quic_initial_limits(direction, time, InitialStreamLimits {
             connection: tp.initial_max_data,
             bidi_local: tp.initial_max_stream_data_bidi_local,
             bidi_remote: tp.initial_max_stream_data_bidi_remote,

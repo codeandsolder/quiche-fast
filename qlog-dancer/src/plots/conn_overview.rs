@@ -178,13 +178,13 @@ fn draw_receive_panel_series<DB: DrawingBackend>(
     )?;
     draw_line(
         &ss.sum_sent_stream_max_data,
-        Some("Cumulative sent MAX_STREAM_DATA"),
+        Some("Sum of locally granted stream limits"),
         CYAN,
         chart,
     )?;
     draw_stream_group(
         &ss.sent_stream_max_data,
-        "Sent MAX_STREAM_DATA",
+        "Local stream limits",
         BLUE,
         chart,
     )?;
@@ -252,7 +252,7 @@ fn draw_send_panel_series<DB: DrawingBackend>(
     )?;
     draw_line(
         &ss.sum_received_stream_max_data,
-        Some("Cumulative received MAX_STREAM_DATA"),
+        Some("Sum of peer-granted stream limits"),
         MUSTARD,
         chart,
     )?;
