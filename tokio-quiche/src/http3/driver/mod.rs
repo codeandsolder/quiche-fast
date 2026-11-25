@@ -34,7 +34,7 @@ mod hooks;
 mod server;
 mod streams;
 #[cfg(test)]
-pub mod test_utils;
+mod test_utils;
 #[cfg(test)]
 mod tests;
 mod waiting_streams;
