@@ -49,10 +49,11 @@ pub enum Event {
     QuicSessionPacketSent(QuicSessionPacketSent),
     QuicSessionAckFrameSent(QuicSessionAckFrameSent),
     QuicSessionAckFrameReceived(QuicSessionAckFrameReceived),
-    QuicSessionStreamFrameReceived(QuicSessionStreamFrameReceivedEvent),
+    QuicSessionStreamFrameReceived(QuicSessionStreamFrameEvent),
+    QuicSessionStreamFrameSent(QuicSessionStreamFrameEvent),
     QuicSessionStopSendingFrameSent(QuicSessionStopSendingFrameSentEvent),
-    QuicSessionRstStreamFrameSent(QuicSessionRstStreamFrameSentEvent),
-    QuicSessionRstStreamFrameReceived(QuicSessionRstStreamFrameReceivedEvent),
+    QuicSessionRstStreamFrameSent(QuicSessionRstStreamFrameEvent),
+    QuicSessionRstStreamFrameReceived(QuicSessionRstStreamFrameEvent),
     QuicSessionBlockedFrameReceived(QuicSessionBlockedFrameReceivedEvent),
     QuicSessionWindowUpdateFrameSent(QuicSessionWindowUpdateFrameSentEvent),
     QuicSessionClosed(QuicSessionClosedEvent),
@@ -256,7 +257,7 @@ pub struct QuicSessionAckFrameReceived {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionStreamFrameReceivedParams {
+pub struct QuicSessionStreamFrameParams {
     pub stream_id: u64,
     pub fin: bool,
     pub offset: u64,
@@ -264,8 +265,8 @@ pub struct QuicSessionStreamFrameReceivedParams {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionStreamFrameReceivedEvent {
-    pub params: QuicSessionStreamFrameReceivedParams,
+pub struct QuicSessionStreamFrameEvent {
+    pub params: QuicSessionStreamFrameParams,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -280,27 +281,15 @@ pub struct QuicSessionStopSendingFrameSentEvent {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionRstStreamFrameSentParams {
+pub struct QuicSessionRstStreamFrameParams {
     pub stream_id: u64,
     pub quic_rst_stream_error: u64,
     pub offset: u64,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionRstStreamFrameSentEvent {
-    pub params: QuicSessionRstStreamFrameSentParams,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionRstStreamFrameReceivedParams {
-    pub stream_id: u64,
-    pub quic_rst_stream_error: u64,
-    pub offset: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct QuicSessionRstStreamFrameReceivedEvent {
-    pub params: QuicSessionRstStreamFrameReceivedParams,
+pub struct QuicSessionRstStreamFrameEvent {
+    pub params: QuicSessionRstStreamFrameParams,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -369,11 +358,17 @@ pub fn parse_event(
         },
 
         "QUIC_SESSION_STREAM_FRAME_RECEIVED" => {
-            let ev: QuicSessionStreamFrameReceivedEvent =
-                super::decode_event(event)?;
+            let ev: QuicSessionStreamFrameEvent = super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionStreamFrameReceived(ev),
             ));
+        },
+
+        "QUIC_SESSION_STREAM_FRAME_SENT" => {
+            let ev: QuicSessionStreamFrameEvent = super::decode_event(event)?;
+            return Some(super::Event::Quic(Event::QuicSessionStreamFrameSent(
+                ev,
+            )));
         },
 
         "QUIC_SESSION_STOP_SENDING_FRAME_SENT" => {
@@ -385,16 +380,14 @@ pub fn parse_event(
         },
 
         "QUIC_SESSION_RST_STREAM_FRAME_SENT" => {
-            let ev: QuicSessionRstStreamFrameSentEvent =
-                super::decode_event(event)?;
+            let ev: QuicSessionRstStreamFrameEvent = super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionRstStreamFrameSent(ev),
             ));
         },
 
         "QUIC_SESSION_RST_STREAM_FRAME_RECEIVED" => {
-            let ev: QuicSessionRstStreamFrameReceivedEvent =
-                super::decode_event(event)?;
+            let ev: QuicSessionRstStreamFrameEvent = super::decode_event(event)?;
             return Some(super::Event::Quic(
                 Event::QuicSessionRstStreamFrameReceived(ev),
             ));
@@ -536,7 +529,6 @@ pub fn parse_event(
         "QUIC_SESSION_PADDING_FRAME_SENT" |
         "QUIC_SESSION_STREAMS_BLOCKED_FRAME_SENT" |
         "QUIC_SESSION_STREAM_FRAME_COALESCED" |
-        "QUIC_SESSION_STREAM_FRAME_SENT" |
         "QUIC_SESSION_VERSION_NEGOTIATED" |
         "QUIC_SESSION_VERSION_NEGOTIATION_PACKET_RECEIVED" |
         "QUIC_SESSION_PACKET_RECEIVED" |

@@ -216,7 +216,6 @@ fn canvas_pair(ids: Vec<String>) -> Result<SparkPair<ChartOutputType>, JsValue> 
 #[must_use = "the returned decoder and chart state are needed to analyze logs"]
 pub fn new_qlog_dancer(display_name: &str) -> QlogDancerWeb {
     let ds = Datastore {
-        total_sent_stream_frame_count: 0,
         vantage_point: VantagePoint::Server,
         ..Default::default()
     };

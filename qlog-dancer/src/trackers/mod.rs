@@ -94,10 +94,10 @@ impl<T> StreamHistory<T> {
 pub type StreamMaxTracker = StreamTracker<u64>;
 pub type StreamBufferTracker = StreamTracker<StreamAccess>;
 
-/// Receive-side QUIC STREAM or `RESET_STREAM` evidence. Optional fields in
+/// Observed QUIC STREAM or `RESET_STREAM` evidence. Optional fields in
 /// qlog are retained as unknown rather than replaced by zero-valued samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum QuicReceiveObservation {
+pub enum QuicStreamObservation {
     Frame {
         offset: Option<u64>,
         length: Option<u64>,
@@ -108,7 +108,7 @@ pub enum QuicReceiveObservation {
     },
 }
 
-impl QuicReceiveObservation {
+impl QuicStreamObservation {
     fn lower_bound_end(self, stream_id: u64) -> Result<u64, TrackerError> {
         match self {
             Self::Frame { offset, length, .. } => {
@@ -146,16 +146,16 @@ impl QuicReceiveObservation {
 /// Counts each stream's largest observed end offset, including holes and
 /// `RESET_STREAM` final sizes, not packet payload lengths. Incomplete trace
 /// metadata gives a lower bound.
-pub type QuicReceiveTracker = StreamTracker<QuicReceiveObservation>;
+pub type QuicStreamTracker = StreamTracker<QuicStreamObservation>;
 
-impl QuicReceiveTracker {
-    /// Record receive evidence and advance the aggregate high-water mark.
+impl QuicStreamTracker {
+    /// Record stream evidence and advance the aggregate high-water mark.
     ///
     /// # Errors
     /// Returns an error before changing state if the observed endpoint or
     /// aggregate cannot be represented.
     pub fn observe(
-        &mut self, stream_id: u64, observation: QuicReceiveObservation, time: f64,
+        &mut self, stream_id: u64, observation: QuicStreamObservation, time: f64,
     ) -> Result<(), TrackerError> {
         let end = observation.lower_bound_end(stream_id)?;
         self.record(stream_id, time, observation, end, None)?;
@@ -378,10 +378,10 @@ mod tests {
     #[test]
     fn quic_credit_counts_offsets_resets_and_not_retransmissions(
     ) -> Result<(), TrackerError> {
-        use super::QuicReceiveObservation;
-        use super::QuicReceiveTracker;
-        let mut tracker = QuicReceiveTracker::default();
-        let frame = |offset, length| QuicReceiveObservation::Frame {
+        use super::QuicStreamObservation;
+        use super::QuicStreamTracker;
+        let mut tracker = QuicStreamTracker::default();
+        let frame = |offset, length| QuicStreamObservation::Frame {
             offset,
             length,
             fin: None,
@@ -394,13 +394,13 @@ mod tests {
             (
                 4,
                 8.0,
-                QuicReceiveObservation::Reset { final_size: 100 },
+                QuicStreamObservation::Reset { final_size: 100 },
                 260,
             ),
             (
                 4,
                 9.0,
-                QuicReceiveObservation::Reset { final_size: 100 },
+                QuicStreamObservation::Reset { final_size: 100 },
                 260,
             ),
             (8, 10.0, frame(Some(30), None), 290),
@@ -424,6 +424,39 @@ mod tests {
         assert_eq!(frame(Some(0), Some(0)).frame_end(), Some(0));
         assert_eq!(frame(Some(0), None).frame_end(), None);
         assert_eq!(frame(None, Some(0)).frame_end(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn quic_observation_overflow_preserves_history() -> Result<(), TrackerError> {
+        use super::QuicStreamObservation;
+        use super::QuicStreamTracker;
+        let mut tracker = QuicStreamTracker::default();
+        let frame = |offset, length| QuicStreamObservation::Frame {
+            offset: Some(offset),
+            length: Some(length),
+            fin: None,
+        };
+        assert_eq!(
+            tracker.observe(1, frame(u64::MAX, 1), 1.0),
+            Err(TrackerError::StreamEndOverflow {
+                stream_id: 1,
+                offset: u64::MAX,
+                length: 1
+            })
+        );
+        assert!(tracker.streams().is_empty());
+        tracker.observe(1, frame(u64::MAX - 2, 2), 2.0)?;
+        assert_eq!(
+            tracker.observe(2, frame(0, 1), 3.0),
+            Err(TrackerError::RunningSumOverflow {
+                stream_id: 2,
+                total: u64::MAX,
+                increment: 1
+            })
+        );
+        assert_eq!(tracker.streams().len(), 1);
+        assert_eq!(tracker.sum_series(), [(2.0, u64::MAX)]);
         Ok(())
     }
 

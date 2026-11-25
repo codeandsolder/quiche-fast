@@ -171,6 +171,12 @@ fn draw_receive_panel_series<DB: DrawingBackend>(
 ) -> Result<(), DrawingAreaErrorKind<DB::ErrorType>> {
     draw_line(&ss.sent_max_data, Some("Sent MAX_DATA"), BLACK, chart)?;
     draw_line(
+        &ss.quic_receive_credit_consumed,
+        Some("Received credit used (lower bound)"),
+        crate::plots::colors::TEAL,
+        chart,
+    )?;
+    draw_line(
         &ss.sum_sent_stream_max_data,
         Some("Cumulative sent MAX_STREAM_DATA"),
         CYAN,
@@ -277,8 +283,14 @@ where
         &mut chart,
     )?;
     draw_line(
+        &ss.quic_send_credit_consumed,
+        Some("Sent credit used (lower bound)"),
+        crate::plots::colors::BROWN,
+        &mut chart,
+    )?;
+    draw_line(
         &ss.received_max_data,
-        Some("Cumulative received MAX_DATA"),
+        Some("Received MAX_DATA"),
         MID_GREY,
         &mut chart,
     )?;
@@ -357,8 +369,14 @@ where
         &mut chart,
     )?;
     draw_line(
+        &ss.quic_send_credit_consumed,
+        Some("Sent credit used (lower bound)"),
+        crate::plots::colors::BROWN,
+        &mut chart,
+    )?;
+    draw_line(
         &ss.received_max_data,
-        Some("Cumulative received MAX_DATA"),
+        Some("Received MAX_DATA"),
         MID_GREY,
         &mut chart,
     )?;
