@@ -828,8 +828,6 @@ mod tests {
     use crate::request_stub::HttpDataHistory;
     use crate::request_stub::HttpRequestStub;
     use crate::PacketType;
-    use qlog::events::quic::QuicFrame;
-    use qlog::events::RawInfo;
 
     #[test]
     fn packet_ack_counts_do_not_equate_unknown_status_with_loss_or_delivery() {

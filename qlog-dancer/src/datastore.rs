@@ -823,6 +823,28 @@ impl Datastore {
         }
     }
 
+    fn record_netlog_quic_close(
+        &mut self, params: &quic::QuicSessionClosedParams,
+        constants: &netlog::constants::Constants,
+    ) {
+        self.quic_session_close = Some(QuicSessionClose {
+            session_id: self.session_id.unwrap_or(-1),
+            sni: self
+                .host
+                .clone()
+                .unwrap_or_else(|| "ERROR UNKNOWN".to_owned()),
+            details: params.details.clone(),
+            from_peer: params.from_peer,
+            quic_error: params.quic_error,
+            quic_error_pretty: NaOption::new(
+                constants
+                    .quic_error_id_keyed
+                    .get(&params.quic_error)
+                    .cloned(),
+            ),
+        });
+    }
+
     fn consume_netlog_quic(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &quic::Event, constants: &netlog::constants::Constants,
@@ -860,24 +882,8 @@ impl Datastore {
                     rel_event_time,
                 )?,
 
-            quic::Event::QuicSessionClosed(e) => {
-                self.quic_session_close = Some(QuicSessionClose {
-                    session_id: self.session_id.unwrap_or(-1),
-                    sni: self
-                        .host
-                        .clone()
-                        .unwrap_or_else(|| "ERROR UNKNOWN".to_owned()),
-                    details: e.params.details.clone(),
-                    from_peer: e.params.from_peer,
-                    quic_error: e.params.quic_error,
-                    quic_error_pretty: NaOption::new(
-                        constants
-                            .quic_error_id_keyed
-                            .get(&e.params.quic_error)
-                            .cloned(),
-                    ),
-                });
-            },
+            quic::Event::QuicSessionClosed(e) =>
+                self.record_netlog_quic_close(&e.params, constants),
 
             quic::Event::QuicSessionRstStreamFrameReceived(e) => {
                 self.received_quic_streams.observe(
@@ -3674,9 +3680,7 @@ mod qlog_packet_history_tests {
         )
     }
 
-    #[test]
-    fn qlog_receive_credit_uses_frame_end_and_reset_final_size(
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    fn receive_credit_events() -> Vec<Event> {
         use qlog::events::ApplicationError;
         let frame = |stream_id, offset, length: Option<u64>| QuicFrame::Stream {
             stream_id,
@@ -3699,7 +3703,7 @@ mod qlog_packet_history_tests {
                 }),
             )
         };
-        let events = vec![
+        vec![
             grant(1.0, 500),
             received(2.0, WirePacketType::OneRtt, None, vec![frame(
                 7,
@@ -3743,7 +3747,13 @@ mod qlog_packet_history_tests {
                     raw: None,
                 },
             ]),
-        ];
+        ]
+    }
+
+    #[test]
+    fn qlog_receive_credit_uses_frame_end_and_reset_final_size(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let events = receive_credit_events();
         let sequential = events
             .iter()
             .cloned()

@@ -94,7 +94,7 @@ impl<T> StreamHistory<T> {
 pub type StreamMaxTracker = StreamTracker<u64>;
 pub type StreamBufferTracker = StreamTracker<StreamAccess>;
 
-/// Receive-side QUIC STREAM or RESET_STREAM evidence. Optional fields in
+/// Receive-side QUIC STREAM or `RESET_STREAM` evidence. Optional fields in
 /// qlog are retained as unknown rather than replaced by zero-valued samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuicReceiveObservation {
@@ -141,9 +141,11 @@ impl QuicReceiveObservation {
     }
 }
 
-/// QUIC connection credit counts each stream's largest observed end offset
-/// (including holes and RESET_STREAM final sizes), not the sum of packet
-/// payload lengths. Incomplete trace metadata gives a lower bound.
+/// Track QUIC connection credit consumed by observed stream offsets.
+///
+/// Counts each stream's largest observed end offset, including holes and
+/// `RESET_STREAM` final sizes, not packet payload lengths. Incomplete trace
+/// metadata gives a lower bound.
 pub type QuicReceiveTracker = StreamTracker<QuicReceiveObservation>;
 
 impl QuicReceiveTracker {
