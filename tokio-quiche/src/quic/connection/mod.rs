@@ -29,13 +29,13 @@ mod id;
 mod map;
 
 pub use self::error::HandshakeError;
-pub(crate) use self::id::generate_routable_cid;
+pub use self::id::generate_routable_cid;
 pub use self::id::ConnectionIdGenerator;
 pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
-pub(crate) use self::map::ConnectionMap;
-pub(crate) use self::map::ConnectionMapCommand;
-pub(crate) use self::map::RouteLease;
+pub use self::map::ConnectionMap;
+pub use self::map::ConnectionMapCommand;
+pub use self::map::RouteLease;
 
 use btls::ssl::SslRef;
 use datagram_socket::AsSocketStats;
@@ -91,7 +91,7 @@ pub struct QuicConnectionStats {
     /// Specific statistics about the connection's active path.
     pub path_stats: Option<quiche::PathStats>,
 }
-pub(crate) type QuicConnectionStatsShared = Arc<Mutex<QuicConnectionStats>>;
+pub type QuicConnectionStatsShared = Arc<Mutex<QuicConnectionStats>>;
 
 fn shared_socket_stats(stats: &QuicConnectionStatsShared) -> SocketStats {
     stats
@@ -100,7 +100,7 @@ fn shared_socket_stats(stats: &QuicConnectionStatsShared) -> SocketStats {
         .as_socket_stats()
 }
 
-pub(crate) fn replace_shared_stats(
+pub fn replace_shared_stats(
     stats: &QuicConnectionStatsShared, value: QuicConnectionStats,
 ) {
     *stats.lock().unwrap_or_else(PoisonError::into_inner) = value;
@@ -331,9 +331,9 @@ where
     /// A handle to the [`QuicConnectionStats`] for this connection.
     ///
     /// # Note
-    /// Initially, these stats represent the state when the [quiche::Connection]
-    /// was created. They are updated when the connection is closed, so this
-    /// getter exists primarily to grab a handle early on.
+    /// Initially, these stats represent the state when the
+    /// [`quiche::Connection`] was created. They are updated when the connection
+    /// is closed, so this getter exists primarily to grab a handle early on.
     #[inline]
     #[must_use = "the handle provides access to the connection statistics"]
     pub const fn stats(&self) -> &QuicConnectionStatsShared {
@@ -520,7 +520,7 @@ where
     }
 }
 
-pub(crate) struct QuicConnectionParams<Tx, M>
+pub struct QuicConnectionParams<Tx, M>
 where
     Tx: DatagramSocketSend + Send + 'static + ?Sized,
     M: Metrics,
@@ -555,7 +555,7 @@ where
 /// alone does not request shutdown.
 ///
 /// While this struct allows access to some facets of a QUIC connection, it
-/// notably does not represent the [quiche::Connection] itself. The crate
+/// notably does not represent the [`quiche::Connection`] itself. The crate
 /// handles most interactions with [quiche] internally in a worker task. Users
 /// can only access the connection directly via their [`ApplicationOverQuic`]
 /// implementation.
@@ -602,9 +602,9 @@ impl QuicConnection {
     /// A handle to the [`QuicConnectionStats`] for this connection.
     ///
     /// # Note
-    /// Initially, these stats represent the state when the [quiche::Connection]
-    /// was created. They are updated when the connection is closed, so this
-    /// getter exists primarily to grab a handle early on.
+    /// Initially, these stats represent the state when the
+    /// [`quiche::Connection`] was created. They are updated when the connection
+    /// is closed, so this getter exists primarily to grab a handle early on.
     #[inline]
     #[must_use = "the handle provides access to the connection statistics"]
     pub const fn stats(&self) -> &QuicConnectionStatsShared {
@@ -731,10 +731,10 @@ impl HandshakeInfo {
 ///
 /// The application is driven by an internal worker task, which also handles I/O
 /// for the connection. The worker feeds inbound packets into the
-/// [quiche::Connection], calls [`ApplicationOverQuic::process_reads`] followed
-/// by [`ApplicationOverQuic::process_writes`], and then flushes any pending
-/// outbound packets to the network. This repeats in a loop until either the
-/// connection is closed or the [`ApplicationOverQuic`] returns an error.
+/// [`quiche::Connection`], calls [`ApplicationOverQuic::process_reads`]
+/// followed by [`ApplicationOverQuic::process_writes`], and then flushes any
+/// pending outbound packets to the network. This repeats in a loop until either
+/// the connection is closed or the [`ApplicationOverQuic`] returns an error.
 ///
 /// In between loop iterations, the worker yields until a new packet arrives, a
 /// timer expires, or [`ApplicationOverQuic::wait_for_data`] resolves.
@@ -799,7 +799,7 @@ pub trait ApplicationOverQuic: Send + 'static {
     /// worker loop (provided `should_act()` returns true). It is called
     /// after `process_reads` and immediately before packets are pushed to
     /// the socket. The main use case is providing already-buffered data to
-    /// the [quiche::Connection].
+    /// the [`quiche::Connection`].
     ///
     /// # Errors
     /// Returning an error from this method immediately stops the worker loop
@@ -819,12 +819,12 @@ pub trait ApplicationOverQuic: Send + 'static {
     }
 }
 
-/// A command to execute on a [quiche::Connection] in the context of an
+/// A command to execute on a [`quiche::Connection`] in the context of an
 /// [`ApplicationOverQuic`].
 ///
 /// We expect most [`ApplicationOverQuic`] implementations (such as
-/// [H3Driver](crate::http3::driver::H3Driver)) will provide some way to submit
-/// actions for them to take, for example via a channel. This enum may be
+/// [`H3Driver`](crate::http3::driver::H3Driver)) will provide some way to
+/// submit actions for them to take, for example via a channel. This enum may be
 /// accepted as part of those actions to inspect or alter the state of the
 /// underlying connection.
 pub enum QuicCommand {
@@ -892,7 +892,7 @@ impl fmt::Debug for QuicCommand {
     }
 }
 
-/// Parameters to close a [quiche::Connection].
+/// Parameters to close a [`quiche::Connection`].
 ///
 /// The connection will use these parameters for the `CONNECTION_CLOSE` frame
 /// it sends to its peer.

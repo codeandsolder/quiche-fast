@@ -528,17 +528,11 @@ mod client_side_driver {
         });
         helper.work_loop_iter().unwrap();
 
-        // FIXME: This should not produce `Disconnected`. The test channel has
-        // capacity one. The driver reads the prior body, observes
-        // `Event::Finished`, then processes the pending client FIN. It drops
-        // the context and channel because both directions are finished.
-        // H3Body treats disconnection as FIN. This behavior may be incorrect.
-
-        // assert_matches!(from_server.try_recv(), Ok(InboundFrame::Body(buf,
-        // fin)) => {
-        //    assert_eq!(buf.into_inner().into_vec().len(), 0);
-        //    assert!(fin);
-        //});
+        // FIN must be delivered explicitly after the blocked body, before
+        // the channel disconnects.
+        assert_matches!(from_server.try_recv(), Ok(InboundFrame::Body(buf, true)) => {
+            assert!(buf.is_empty());
+        });
         assert_matches!(from_server.try_recv(), Err(TryRecvError::Disconnected));
         assert_eq!(helper.driver.stream_map.len(), 0);
     }
@@ -2841,6 +2835,13 @@ mod server_side_driver {
             .try_send(OutboundFrame::Body(Bytes::new(), true))
             .unwrap();
         helper.advance_and_run_loop().unwrap();
+        // An empty DATA frame carrying FIN still requires draining the
+        // H3 body parser before its Finished event is available.
+        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Data)));
+        assert_eq!(
+            helper.peer_client_recv_body_vec(0, 1024),
+            Err(h3::Error::Done)
+        );
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
         assert!(!helper.driver.stream_map.contains_key(&stream_id));
     }
