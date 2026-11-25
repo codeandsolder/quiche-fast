@@ -27,8 +27,6 @@
 use log::debug;
 use log::error;
 use log::info;
-use log::trace;
-use log::warn;
 use quiche::Connection;
 use quiche::ConnectionId;
 use quiche::Header;
@@ -754,6 +752,35 @@ fn append_ip(buffer: &mut Vec<u8>, ip: IpAddr) {
     }
 }
 
+/// Set `SO_TXTIME` socket option.
+///
+/// This socket option is set to send to kernel the outgoing UDP
+/// packet transmission time in the `sendmsg` syscall.
+///
+/// Note that this socket option is set only on linux platforms.
+#[cfg(target_os = "linux")]
+fn set_txtime_sockopt(sock: &mio::net::UdpSocket) -> io::Result<()> {
+    use nix::sys::socket::setsockopt;
+    use nix::sys::socket::sockopt::TxTime;
+    use std::os::unix::io::AsFd;
+
+    let config = nix::libc::sock_txtime {
+        clockid: libc::CLOCK_MONOTONIC,
+        flags: 0,
+    };
+
+    setsockopt(&sock.as_fd(), TxTime, &config)?;
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn set_txtime_sockopt(_: &mio::net::UdpSocket) -> io::Result<()> {
+    use std::io::Error;
+
+    Err(Error::other("Not supported on this platform"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::BurstLimit;
@@ -828,32 +855,4 @@ mod tests {
         limit.observe(usize::MAX / 2, usize::MAX, 1350);
         assert_eq!(limit.bytes, initial / 4 * 3 / 4 * 3);
     }
-}
-/// Set `SO_TXTIME` socket option.
-///
-/// This socket option is set to send to kernel the outgoing UDP
-/// packet transmission time in the `sendmsg` syscall.
-///
-/// Note that this socket option is set only on linux platforms.
-#[cfg(target_os = "linux")]
-fn set_txtime_sockopt(sock: &mio::net::UdpSocket) -> io::Result<()> {
-    use nix::sys::socket::setsockopt;
-    use nix::sys::socket::sockopt::TxTime;
-    use std::os::unix::io::AsFd;
-
-    let config = nix::libc::sock_txtime {
-        clockid: libc::CLOCK_MONOTONIC,
-        flags: 0,
-    };
-
-    setsockopt(&sock.as_fd(), TxTime, &config)?;
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn set_txtime_sockopt(_: &mio::net::UdpSocket) -> io::Result<()> {
-    use std::io::Error;
-
-    Err(Error::other("Not supported on this platform"))
 }
