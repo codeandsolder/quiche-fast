@@ -48,7 +48,7 @@ use h3i::actions::h3::WaitType;
 /// The client opens those 2 streams successfully, then attempts a third
 /// which is expected to return Err(StreamLimit). Verify that the server's
 /// `streams_blocked_bidi_recv_count` stat is incremented after processing
-/// the STREAMS_BLOCKED frame from the client.
+/// the `STREAMS_BLOCKED` frame from the client.
 #[tokio::test]
 async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     const MAX_STREAMS: u64 = 2;
@@ -116,7 +116,7 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     ));
     actions.push(Action::FlushPackets);
     // Wait for all streams to finish.
-    for i in 0..(MAX_STREAMS + 1) {
+    for i in 0..=MAX_STREAMS {
         let stream_id = i * 4;
         actions.push(Action::Wait {
             wait_type: WaitType::StreamEvent(StreamEvent {
@@ -138,7 +138,7 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     // All requests should have returned 200 responses, including the retried
     // blocked_stream_id (stream 8 succeeds on retry after the server sends a
     // MAX_STREAMS update once streams 0 and 4 complete).
-    for i in 0..(MAX_STREAMS + 1) {
+    for i in 0..=MAX_STREAMS {
         assert!(
             received_status_code_on_stream(&summary, i * 4, 200),
             "stream {} should have received a 200 response",

@@ -935,7 +935,7 @@ mod tests {
             }
         });
         let client = tokio::task::spawn_blocking(move || {
-            test_connect(host_port, Some(Duration::from_secs(1)))
+            test_connect(host_port, Some(Duration::from_secs(1)));
         });
 
         let conn = time::timeout(Duration::from_secs(5), incoming.next())
@@ -1155,7 +1155,7 @@ mod tests {
         let owner = ipr.conns.allocate_owner()?;
 
         let mut cx = Context::from_waker(std::task::Waker::noop());
-        for _ in 0..CONN_MAP_CMD_BATCH_SIZE + 1 {
+        for _ in 0..=CONN_MAP_CMD_BATCH_SIZE {
             conn_map_cmd_tx
                 .send(ConnectionMapCommand::Close(owner))
                 .map_err(|_| "router command channel closed")?;

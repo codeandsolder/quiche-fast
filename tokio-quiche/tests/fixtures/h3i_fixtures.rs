@@ -146,7 +146,7 @@ pub fn stream_body(summary: &ConnectionSummary, stream: u64) -> Option<String> {
     let body: String = summary
         .stream_map
         .stream(stream)
-        .into_iter()
+        .iter()
         .filter_map(|f| {
             if let H3iFrame::QuicheH3(h3::frame::Frame::Data { payload }) = f {
                 has_body = true;

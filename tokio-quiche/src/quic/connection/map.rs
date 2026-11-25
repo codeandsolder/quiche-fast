@@ -328,7 +328,7 @@ mod tests {
         let (b, _rx_b) = mpsc::channel(1);
         let original = ConnectionId::from_ref(b"original");
         let rotated = ConnectionId::from_ref(b"rotated");
-        map.insert(first, a.clone(), &original, None)?;
+        map.insert(first, a, &original, None)?;
         map.register(first, &rotated)?;
         assert!(map.register(first, &rotated).is_err());
         map.retire(first, &original);

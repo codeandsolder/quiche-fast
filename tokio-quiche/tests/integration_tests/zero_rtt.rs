@@ -453,7 +453,7 @@ async fn handshake_timeout_after_0_rtt(cx: TestTelemetryContext) {
 
             tokio::select! {
                 stats = server.audit_stats_rx.recv() => return stats.unwrap(),
-                _ = tokio::time::sleep(Duration::from_millis(50)) => (),
+                () = tokio::time::sleep(Duration::from_millis(50)) => (),
             }
         }
     })

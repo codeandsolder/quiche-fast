@@ -91,7 +91,7 @@ where
     ///
     /// [service function]: https://docs.rs/hyper/latest/hyper/service/index.html
     pub fn new(service_fn: S) -> Self {
-        Server {
+        Self {
             service_fn: Arc::new(service_fn),
         }
     }
@@ -176,7 +176,7 @@ where
         &mut self, headers: IncomingH3Headers,
         _priority: Option<RawPriorityValue>, commands: &StreamCommands,
     ) {
-        log::info!("received headers: {:?}", headers);
+        log::info!("received headers: {headers:?}");
 
         let IncomingH3Headers {
             headers: list,
@@ -274,7 +274,7 @@ fn convert_headers(
         let Some(first) = name
             .iter()
             .next()
-            .and_then(|f| std::char::from_u32(*f as u32))
+            .and_then(|f| std::char::from_u32(u32::from(*f)))
         else {
             log::warn!("received header with no or invalid first character");
             continue;
@@ -316,7 +316,7 @@ fn convert_response<B>(res: Response<B>) -> (Vec<Header>, B) {
     let mut h3_headers =
         vec![Header::new(b":status", res.status().as_str().as_bytes())];
 
-    for (name, value) in res.headers().iter() {
+    for (name, value) in res.headers() {
         h3_headers.push(Header::new(name.as_ref(), value.as_bytes()));
     }
 

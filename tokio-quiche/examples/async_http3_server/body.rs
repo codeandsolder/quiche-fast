@@ -63,7 +63,7 @@ impl ExampleBody {
         let req_path = req.uri().path();
         let size = if req_path.starts_with(STREAM_BYTES) {
             req_path
-                .split("/")
+                .split('/')
                 .last()
                 .and_then(|last| last.parse::<usize>().ok())
                 .unwrap_or(0)

@@ -431,7 +431,7 @@ async fn send_to<M: Metrics>(
 }
 
 #[cfg(all(target_os = "linux", test, not(feature = "fuzzing")))]
-pub(crate) mod test {
+pub mod test {
     use super::*;
     use crate::metrics::DefaultMetrics;
     use crate::quic::DscpHandle;
@@ -448,7 +448,7 @@ pub(crate) mod test {
 
     const TEST_DSCP: Dscp = Dscp::new(34).unwrap();
 
-    pub(crate) fn enable_tos(socket: &UdpSocket) {
+    pub fn enable_tos(socket: &UdpSocket) {
         if socket.local_addr().unwrap().is_ipv4() {
             setsockopt(socket, sockopt::IpRecvTos, &true).unwrap();
         } else {
@@ -456,7 +456,7 @@ pub(crate) mod test {
         }
     }
 
-    pub(crate) async fn recv_tos(socket: &UdpSocket) -> (Vec<u8>, u8) {
+    pub async fn recv_tos(socket: &UdpSocket) -> (Vec<u8>, u8) {
         let receive = async {
             let mut buf = [0u8; 2048];
             let mut cmsg_space = nix::cmsg_space!(libc::c_int);

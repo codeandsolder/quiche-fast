@@ -198,7 +198,7 @@ pub async fn serve_connection_details(
                     }
                 }
             }
-            Some(_) = request_futs.next() => {}
+            Some(()) = request_futs.next() => {}
             else => { break Ok(()); }
         }
     }

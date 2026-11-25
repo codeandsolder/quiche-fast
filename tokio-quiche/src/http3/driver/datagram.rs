@@ -220,7 +220,7 @@ mod tests {
         Ok(())
     }
 
-    /// When there is no headroom, splice_headroom is invoked automatically.
+    /// When there is no headroom, `splice_headroom` is invoked automatically.
     #[test]
     fn h3_dgram_add_quarter_stream_id_need_more_headroom() -> quiche::Result<()> {
         let dgram = DgramBuffer::from_slice(&[1, 2]);
@@ -323,8 +323,8 @@ mod tests {
         Ok(())
     }
 
-    /// remove_quarter_stream_id on an empty buffer returns an error (buffer too
-    /// short).
+    /// `remove_quarter_stream_id` on an empty buffer returns an error (buffer
+    /// too short).
     #[test]
     fn remove_quarter_stream_id_empty_buffer_errors() {
         let dgram = DgramBuffer::new();

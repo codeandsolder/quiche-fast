@@ -61,7 +61,7 @@ async fn echo() {
     for i in 1..=CONN_COUNT {
         let url = format!("{url}/{i}");
 
-        reqs.push(request(url, req_count(i) as u64))
+        reqs.push(request(url, req_count(i) as u64));
     }
 
     let res = try_join_all(reqs).await.unwrap();

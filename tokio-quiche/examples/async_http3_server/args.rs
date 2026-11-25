@@ -50,7 +50,7 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub initial_cwnd_packets: usize,
 
-    /// Disable HyStart++ slow-start algorithm (only affects cubic/reno).
+    /// Disable `HyStart`++ slow-start algorithm (only affects cubic/reno).
     #[arg(long, default_value_t = false)]
     pub disable_hystart: bool,
 

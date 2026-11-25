@@ -321,12 +321,12 @@ impl ClientHooks {
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_request_count(&self) -> usize {
+    pub(crate) const fn pending_request_count(&self) -> usize {
         self.pending_requests.len()
     }
 
     #[cfg(test)]
-    pub(crate) fn queued_request_count(&self) -> usize {
+    pub(crate) const fn queued_request_count(&self) -> usize {
         self.queued_requests.len()
     }
 }
