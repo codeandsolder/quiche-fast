@@ -40,7 +40,7 @@ use tabled::settings::Style;
 use tabled::Table;
 
 use crate::config::StatsSelection;
-use crate::config::TextReportConfig;
+use crate::config::TimingTableConfig;
 use crate::datastore::Datastore;
 use crate::datastore::PacketInfoStub;
 use crate::request_stub::*;
@@ -48,7 +48,7 @@ use crate::stringify_last;
 use crate::LogFileData;
 
 pub fn request_timing_table(
-    lf: &LogFileData, config: &TextReportConfig,
+    lf: &LogFileData, config: &TimingTableConfig,
 ) -> Table {
     let mut table = Table::new(lf.datastore.http_requests.values());
     table.with(Modify::new(Segment::all()).with(Alignment::right()));

@@ -210,17 +210,17 @@ impl StatsSelection {
 }
 
 #[derive(Debug)]
-pub struct TextReportConfig {
+pub struct TimingTableConfig {
     pub omit_upload: bool,
     pub omit_priorities: bool,
     pub csv: bool,
-    pub stats: StatsSelection,
 }
 
 #[derive(Debug)]
 pub struct ReportConfig {
-    pub text: Option<TextReportConfig>,
+    pub text: Option<StatsSelection>,
     pub html: bool,
+    pub table: TimingTableConfig,
 }
 
 impl ReportConfig {
@@ -229,13 +229,13 @@ impl ReportConfig {
             .remove_one::<StatsSelection>("print_stats")
             .ok_or("missing stats selection")?;
         Ok(Self {
-            text: matches.get_flag("report_text").then(|| TextReportConfig {
+            text: matches.get_flag("report_text").then_some(stats),
+            html: matches.get_flag("report_html"),
+            table: TimingTableConfig {
                 omit_upload: matches.get_flag("report_omit_upload"),
                 omit_priorities: matches.get_flag("report_omit_priorities"),
                 csv: matches.get_flag("report_text_csv"),
-                stats,
-            }),
-            html: matches.get_flag("report_html"),
+            },
         })
     }
 }
@@ -538,14 +538,14 @@ mod tests {
                 "--print-stats",
                 flag,
             ])?;
-            let text = config.reports.text.ok_or("expected text report")?;
-            assert_eq!(text.stats, selection);
-            assert_eq!(text.stats.stream(), stream);
-            assert_eq!(text.stats.packets(), packets);
+            let stats = config.reports.text.ok_or("expected text report")?;
+            assert_eq!(stats, selection);
+            assert_eq!(stats.stream(), stream);
+            assert_eq!(stats.packets(), packets);
             assert!(
-                text.omit_upload &&
-                    text.omit_priorities &&
-                    text.csv &&
+                config.reports.table.omit_upload &&
+                    config.reports.table.omit_priorities &&
+                    config.reports.table.csv &&
                     config.reports.html
             );
         }
@@ -554,6 +554,19 @@ mod tests {
                 .reports
                 .text
                 .is_none()
+        );
+        let html_only = parse(&[
+            "qlog-dancer",
+            "trace.qlog",
+            "--report-html",
+            "--report-omit-upload",
+            "--report-omit-priorities",
+        ])?;
+        assert!(html_only.reports.text.is_none());
+        assert!(
+            html_only.reports.html &&
+                html_only.reports.table.omit_upload &&
+                html_only.reports.table.omit_priorities
         );
         Ok(())
     }
