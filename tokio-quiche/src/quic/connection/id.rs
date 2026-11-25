@@ -41,6 +41,7 @@ use crate::QuicResult;
 /// the [`SimpleConnectionIdGenerator`].
 pub trait ConnectionIdGenerator<'a>: Send + Sync + 'static {
     /// Creates a new [`ConnectionId`] according to the generator's logic.
+    /// The packet router requires exactly [`MAX_CONN_ID_LEN`] bytes.
     ///
     /// # Errors
     /// Returns an error when the generator cannot obtain entropy or construct
@@ -56,10 +57,22 @@ pub trait ConnectionIdGenerator<'a>: Send + Sync + 'static {
 
 pub type SharedConnectionIdGenerator = Arc<dyn ConnectionIdGenerator<'static>>;
 
+/// The short-header router has a fixed local CID length; reject an
+/// incompatible custom generator before publishing or sending its ID.
+pub(crate) fn generate_routable_cid(
+    generator: &dyn ConnectionIdGenerator<'static>,
+) -> QuicResult<ConnectionId<'static>> {
+    let cid = generator.new_connection_id()?;
+    if cid.len() != MAX_CONN_ID_LEN {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput,
+            format!("CID generator returned {} bytes; router requires {MAX_CONN_ID_LEN}", cid.len())).into());
+    }
+    Ok(cid)
+}
+
 /// A [`ConnectionIdGenerator`] which creates random 20-byte connection IDs.
 ///
 /// Random bytes are pulled directly from the operating system to create an ID.
-/// Any `socket_cookie` value is ignored.
 #[derive(Debug, Clone, Default)]
 pub struct SimpleConnectionIdGenerator;
 

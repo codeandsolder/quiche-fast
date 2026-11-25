@@ -30,10 +30,12 @@ pub(crate) mod connector;
 mod linux_recv;
 
 use super::connection::ConnectionMap;
+use super::connection::ConnectionMapCommand;
 use super::connection::HandshakeInfo;
 use super::connection::Incoming;
 use super::connection::InitialQuicConnection;
 use super::connection::QuicConnectionParams;
+use super::connection::RouteLease;
 use super::io::worker::WriterConfig;
 use super::QuicheConnection;
 use crate::metrics::labels;
@@ -57,6 +59,7 @@ use std::sync::Arc;
 use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
+use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use task_killswitch::spawn_with_killswitch;
@@ -70,6 +73,8 @@ type ConnStream<Tx, M> = mpsc::Receiver<io::Result<InitialQuicConnection<Tx, M>>
 const PACKET_RX_YIELD_AFTER: usize = 30;
 /// `ConnectionMapCommand` processing batch size to amortize receive operations.
 const CONN_MAP_CMD_BATCH_SIZE: usize = 128;
+const RECEIVE_RETRY_MIN: Duration = Duration::from_millis(1);
+const RECEIVE_RETRY_MAX: Duration = Duration::from_millis(100);
 
 #[cfg(feature = "perf-quic-listener-metrics")]
 mod listener_stage_timer {
@@ -97,16 +102,6 @@ mod listener_stage_timer {
             );
         }
     }
-}
-
-/// A message to the listener notifiying a mapping for a connection should be
-/// removed.
-pub enum ConnectionMapCommand {
-    MapCid {
-        existing_cid: ConnectionId<'static>,
-        new_cid: ConnectionId<'static>,
-    },
-    UnmapCid(ConnectionId<'static>),
 }
 
 /// An `InboundPacketRouter` maintains a map of quic connections and routes
@@ -146,6 +141,8 @@ where
     accept_sink: mpsc::Sender<io::Result<InitialQuicConnection<Tx, M>>>,
     accept_sink_closed: Pin<Box<dyn Future<Output = ()> + Send>>,
     metrics: M,
+    receive_retry: Option<Pin<Box<tokio::time::Sleep>>>,
+    retry_delay: Duration,
     #[cfg(target_os = "linux")]
     receiver: linux_recv::LinuxReceiver,
 }
@@ -187,6 +184,8 @@ where
                 #[cfg(target_os = "linux")]
                 receiver: linux_recv::LinuxReceiver::new(&metrics),
                 metrics,
+                receive_retry: None,
+                retry_delay: RECEIVE_RETRY_MIN,
             },
             accept_stream,
         )
@@ -285,6 +284,8 @@ where
         };
 
         let scid = conn.source_id().clone();
+        let pending_cid = pending_cid.filter(|cid| cid != &scid);
+        let owner = self.conns.allocate_owner()?;
         let writer_cfg = WriterConfig {
             peer_addr,
             local_addr,
@@ -309,7 +310,7 @@ where
             initial_pkt,
             dscp_handle: enable_per_connection_dscp.then(DscpHandle::new),
             shutdown_tx: shutdown_tx.clone(),
-            conn_map_cmd_tx: self.conn_map_cmd_tx.clone(),
+            route_lease: RouteLease::new(owner, self.conn_map_cmd_tx.clone()),
             scid: scid.clone(),
             cid_generator,
             metrics: self.metrics.clone(),
@@ -327,14 +328,12 @@ where
             conn.audit_log_stats.set_transport_handshake_start(start);
         }
 
-        self.conns.insert(&scid, &conn);
-
-        // Add the client-generated "pending" connection ID to the map as well.
-        // This is only required for QUIC servers, because clients can send
-        // Initial packets with arbitrary DCIDs to servers.
-        if let Some(pending_cid) = pending_cid {
-            self.conns.map_cid(&scid, &pending_cid);
-        }
+        self.conns.insert(
+            owner,
+            conn.incoming_ev_sender.clone(),
+            &scid,
+            pending_cid.as_ref(),
+        )?;
 
         self.metrics.accepted_initial_packet_count().inc();
         if self.config.enable_expensive_packet_count_metrics {
@@ -397,12 +396,42 @@ where
         self.poll_recv_from(cx)
     }
 
-    fn poll_process_packet(&mut self, cx: &mut Context) -> Poll<()> {
+    fn poll_process_packet(
+        &mut self, cx: &mut Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        if let Some(retry) = self.receive_retry.as_mut() {
+            ready!(retry.as_mut().poll(cx));
+            self.receive_retry = None;
+        }
         let pkt_data = match ready!(self.poll_recv_and_rx_time(cx)) {
-            Ok(v) => v,
-            Err(e) => {
-                log::error!("Incoming packet router encountered recvmsg error"; "error" => e);
-                return Poll::Ready(());
+            Ok(packet) => {
+                self.retry_delay = RECEIVE_RETRY_MIN;
+                packet
+            },
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                // A malformed, already-consumed datagram does not imply the
+                // receiving socket is broken.
+                return Poll::Ready(Ok(()));
+            },
+            Err(error) if retryable_receive_error(error.kind()) => {
+                let mut timer = Box::pin(tokio::time::sleep(self.retry_delay));
+                self.retry_delay =
+                    self.retry_delay.saturating_mul(2).min(RECEIVE_RETRY_MAX);
+                // Register the wakeup before returning Pending.
+                if timer.as_mut().poll(cx).is_ready() {
+                    cx.waker().wake_by_ref();
+                }
+                self.receive_retry = Some(timer);
+                return Poll::Pending;
+            },
+            Err(error) => {
+                // Fatal socket failures cannot make progress by immediately
+                // repeating recvmsg. Notify the accept stream and terminate.
+                let _ = self.accept_sink.try_send(Err(io::Error::new(
+                    error.kind(),
+                    error.to_string(),
+                )));
+                return Poll::Ready(Err(error));
             },
         };
 
@@ -415,7 +444,7 @@ where
         // Only error handling below - if `on_incoming` was successful,
         // we return here
         let Err(e) = res else {
-            return Poll::Ready(());
+            return Poll::Ready(Ok(()));
         };
 
         let err_type = initial_packet_error_type(&e);
@@ -441,30 +470,40 @@ where
             let _ = self.accept_sink.try_send(Err(e));
         }
 
-        Poll::Ready(())
+        Poll::Ready(Ok(()))
     }
 
-    fn poll_conn_map_commands(&mut self, cx: &mut Context) -> Poll<()> {
-        let cmd_rx = &mut self.conn_map_cmd_rx;
+    fn poll_conn_map_commands(&mut self, cx: &mut Context<'_>) {
         let buf = &mut self.conn_map_cmd_buf;
         debug_assert!(buf.is_empty());
-
-        while ready!(cmd_rx.poll_recv_many(cx, buf, CONN_MAP_CMD_BATCH_SIZE)) > 0
+        if let Poll::Ready(count) =
+            self.conn_map_cmd_rx
+                .poll_recv_many(cx, buf, CONN_MAP_CMD_BATCH_SIZE)
         {
             for cmd in buf.drain(..) {
-                match cmd {
-                    ConnectionMapCommand::MapCid {
-                        existing_cid,
-                        new_cid,
-                    } => self.conns.map_cid(&existing_cid, &new_cid),
-                    ConnectionMapCommand::UnmapCid(cid) =>
-                        self.conns.unmap_cid(&cid),
-                }
+                self.conns.apply(cmd);
+            }
+            if count > 0 {
+                // A successful read does not necessarily register a waker
+                // for more queued commands, even when the batch is short.
+                cx.waker().wake_by_ref();
             }
         }
-
-        Poll::Ready(())
     }
+}
+
+/// ICMP and temporary OS errors can occur on an otherwise healthy UDP socket.
+const fn retryable_receive_error(kind: io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        io::ErrorKind::Interrupted |
+            io::ErrorKind::ConnectionRefused |
+            io::ErrorKind::ConnectionReset |
+            io::ErrorKind::HostUnreachable |
+            io::ErrorKind::NetworkUnreachable |
+            io::ErrorKind::NetworkDown |
+            io::ErrorKind::TimedOut
+    )
 }
 
 // Quickly extract the connection id of a short quic packet without allocating
@@ -500,42 +539,40 @@ where
     type Output = io::Result<()>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        loop {
-            // First, check whether the app stopped accepting connections.
-            if self.shutdown_tx.is_some() &&
-                self.accept_sink_closed.as_mut().poll(cx).is_ready()
-            {
-                self.shutdown_tx = None;
-            }
-
-            // Second, check if all connections have shut down and we can exit.
-            if self.shutdown_tx.is_none() &&
-                self.shutdown_rx.poll_recv(cx).is_ready()
-            {
-                return Poll::Ready(Ok(()));
-            }
-
-            // Third, run the generic `InitialPacketHandler` update.
-            if let Err(error) = self.incoming_packet_handler.update(cx) {
-                // An error here is so rare that it's easier to spawn a separate
-                // task
-                let sender = self.accept_sink.clone();
-                spawn_with_killswitch(async move {
-                    let _ = sender.send(Err(error)).await;
-                });
-            }
-
-            // Fourth, update ConnectionMap before receiving packets so SCID
-            // destinations are current. A pending result means all available
-            // commands were processed and the next command will wake us.
-            let _ = self.poll_conn_map_commands(cx);
-
-            // Finally, process up to `PACKET_RX_YIELD_AFTER` packet batches. If
-            // no more packets are available, wait to be woken again.
-            for _ in 0..PACKET_RX_YIELD_AFTER {
-                ready!(self.poll_process_packet(cx));
-            }
+        // First, check whether the app stopped accepting connections.
+        if self.shutdown_tx.is_some() &&
+            self.accept_sink_closed.as_mut().poll(cx).is_ready()
+        {
+            self.shutdown_tx = None;
         }
+
+        // Second, check if all connections have shut down and we can exit.
+        if self.shutdown_tx.is_none() && self.shutdown_rx.poll_recv(cx).is_ready()
+        {
+            return Poll::Ready(Ok(()));
+        }
+
+        // Third, run the generic `InitialPacketHandler` update.
+        if let Err(error) = self.incoming_packet_handler.update(cx) {
+            // An error here is so rare that it's easier to spawn a separate
+            // task
+            let sender = self.accept_sink.clone();
+            spawn_with_killswitch(async move {
+                let _ = sender.send(Err(error)).await;
+            });
+        }
+
+        // Fourth, update ConnectionMap before receiving packets so SCID
+        // destinations are current. Process one bounded batch per poll.
+        self.poll_conn_map_commands(cx);
+
+        // Finally, process up to `PACKET_RX_YIELD_AFTER` packet batches. If
+        // no more packets are available, wait to be woken again.
+        for _ in 0..PACKET_RX_YIELD_AFTER {
+            ready!(self.poll_process_packet(cx))?;
+        }
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 }
 
@@ -606,7 +643,6 @@ mod tests {
     use crate::settings::QuicSettings;
     use crate::settings::TlsCertificatePaths;
     use crate::socket::SocketCapabilities;
-    use crate::ConnectionIdGenerator as _;
     use crate::ConnectionParams;
     use crate::ServerH3Driver;
 
@@ -945,8 +981,17 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_poll_packet_always_ready() -> crate::QuicResult<()> {
+    fn test_router<R: DatagramSocketRecv>(
+        receiver: R,
+    ) -> crate::QuicResult<(
+        InboundPacketRouter<
+            NoopDatagramSender,
+            R,
+            DefaultMetrics,
+            NoopInitialHandler,
+        >,
+        ConnStream<NoopDatagramSender, DefaultMetrics>,
+    )> {
         let (cert, private_key) = test_credentials();
         let tls_cert_settings = TlsCertificatePaths {
             cert,
@@ -960,53 +1005,96 @@ mod tests {
         );
 
         let config = Config::new(&params, SocketCapabilities::default())?;
-        let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-
-        let (mut ipr, accept_stream) = InboundPacketRouter::new(
+        Ok(InboundPacketRouter::new(
             config,
             Arc::new(NoopDatagramSender),
-            AlwaysReadyReceiver,
-            local_addr,
+            receiver,
+            SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
             NoopInitialHandler,
             DefaultMetrics,
-        );
+        ))
+    }
+
+    struct ErrorReceiver {
+        kind: io::ErrorKind,
+        calls: usize,
+    }
+    impl DatagramSocketRecv for ErrorReceiver {
+        fn poll_recv(
+            &mut self, _cx: &mut Context<'_>, _buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.calls += 1;
+            Poll::Ready(Err(self.kind.into()))
+        }
+    }
+
+    #[test]
+    fn fatal_receive_error_terminates_router_and_reaches_accept_stream(
+    ) -> crate::QuicResult<()> {
+        let (mut router, mut accepts) = test_router(ErrorReceiver {
+            kind: io::ErrorKind::PermissionDenied,
+            calls: 0,
+        })?;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let Poll::Ready(Err(error)) = router.poll_unpin(&mut cx) else {
+            return Err("router did not terminate".into());
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(router.socket_rx.calls, 1);
+        let Err(error) = accepts.try_recv()? else {
+            return Err("expected accept error".into());
+        };
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn transient_receive_errors_back_off_and_shutdown_still_progresses(
+    ) -> crate::QuicResult<()> {
+        tokio::time::pause();
+        let (mut router, accepts) = test_router(ErrorReceiver {
+            kind: io::ErrorKind::ConnectionRefused,
+            calls: 0,
+        })?;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(router.poll_unpin(&mut cx).is_pending());
+        assert_eq!(router.socket_rx.calls, 1);
+        assert!(router.poll_unpin(&mut cx).is_pending());
+        assert_eq!(router.socket_rx.calls, 1);
+        // Wait on the actual registered deadline, including the runtime's
+        // timer-wheel rounding, rather than assuming a one-tick advance.
+        router
+            .receive_retry
+            .as_mut()
+            .ok_or("missing retry timer")?
+            .as_mut()
+            .await;
+        assert!(router.poll_unpin(&mut cx).is_pending());
+        assert_eq!(router.socket_rx.calls, 2);
+        assert_eq!(router.retry_delay, RECEIVE_RETRY_MIN * 4);
+        drop(accepts);
+        assert!(matches!(router.poll_unpin(&mut cx), Poll::Ready(Ok(()))));
+        Ok(())
+    }
+
+    #[test]
+    fn test_poll_packet_always_ready() -> crate::QuicResult<()> {
+        let (mut ipr, accept_stream) = test_router(AlwaysReadyReceiver)?;
         let conn_map_cmd_tx = ipr.conn_map_cmd_tx.clone();
+        let owner = ipr.conns.allocate_owner()?;
 
-        // Keep polling the IPR in a busy loop until it resolves
-        let (ipr_notifier, ipr_done) = std::sync::mpsc::sync_channel::<()>(0);
-        let ipr = std::thread::spawn(move || {
-            let mut cx = Context::from_waker(std::task::Waker::noop());
-            while ipr.poll_unpin(&mut cx).is_pending() {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            drop(ipr_notifier);
-            ipr
-        });
-
-        // Fill the `conn_map_cmd` channel with some messages to process
-        for _ in 0..20 {
-            let random_cid = SimpleConnectionIdGenerator.new_connection_id()?;
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        for _ in 0..CONN_MAP_CMD_BATCH_SIZE + 1 {
             conn_map_cmd_tx
-                .send(ConnectionMapCommand::UnmapCid(random_cid))
+                .send(ConnectionMapCommand::Close(owner))
                 .map_err(|_| "router command channel closed")?;
         }
-        // Give the IPR some time to process the ConnectionMapCommands
-        std::thread::sleep(Duration::from_secs(1));
-
-        // Shut the IPR down by dropping the accept_stream receiver. We wait for
-        // up to 10 seconds for IPR::poll to resolve. If it doesn't, it's not
-        // checking the shutdown condition regularly.
-        drop(accept_stream);
-        let ipr_done_res = ipr_done.recv_timeout(Duration::from_secs(10));
-        assert_eq!(
-            ipr_done_res,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected)
-        );
-
-        // Check that the ConnectionMapCommands we added above were actually
-        // processed
-        let ipr = ipr.join().map_err(|_| "router thread panicked")?;
+        assert!(ipr.poll_unpin(&mut cx).is_pending());
+        assert_eq!(ipr.conn_map_cmd_rx.len(), 1);
+        assert!(ipr.poll_unpin(&mut cx).is_pending());
         assert!(ipr.conn_map_cmd_rx.is_empty());
+        drop(accept_stream);
+        assert!(matches!(ipr.poll_unpin(&mut cx), Poll::Ready(Ok(()))));
         Ok(())
     }
 }

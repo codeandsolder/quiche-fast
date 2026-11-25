@@ -98,7 +98,10 @@ where
         pending_cid: ConnectionId<'static>, quiche_config: &mut quiche::Config,
     ) -> io::Result<Option<NewConnection>> {
         let handshake_start_time = Instant::now();
-        let scid = self.cid_generator.new_connection_id().into_io()?;
+        let scid = crate::quic::connection::generate_routable_cid(
+            self.cid_generator.as_ref(),
+        )
+        .into_io()?;
 
         let mut conn = if let Some(retry_cids) = retry_cids {
             quiche::accept_with_retry(
@@ -213,7 +216,10 @@ where
         &self, incoming: Incoming, hdr: &Header,
         manager: &AddrValidationTokenManager,
     ) -> io::Result<Option<NewConnection>> {
-        let scid = self.cid_generator.new_connection_id().into_io()?;
+        let scid = crate::quic::connection::generate_routable_cid(
+            self.cid_generator.as_ref(),
+        )
+        .into_io()?;
 
         let token = manager.gen(&hdr.dcid, incoming.peer_addr)?;
 
@@ -485,11 +491,14 @@ mod initial_size_tests {
         Ok(())
     }
 
-    struct FailingGenerator;
+    struct InvalidGenerator(Option<usize>);
 
-    impl crate::ConnectionIdGenerator<'static> for FailingGenerator {
+    impl crate::ConnectionIdGenerator<'static> for InvalidGenerator {
         fn new_connection_id(&self) -> crate::QuicResult<ConnectionId<'static>> {
-            Err("injected CID generator failure".into())
+            self.0.map_or_else(
+                || Err("injected CID generator failure".into()),
+                |length| Ok(ConnectionId::copy_from_slice(&vec![42; length])),
+            )
         }
 
         fn verify_connection_id(
@@ -503,30 +512,46 @@ mod initial_size_tests {
     async fn cid_failure_is_returned_for_retry_and_direct_accept(
     ) -> crate::QuicResult<()> {
         for disable_validation in [false, true] {
-            let (mut acceptor, local_addr) = acceptor_with_generator(
-                Arc::new(FailingGenerator),
-                disable_validation,
-            )
-            .await?;
-            let peer = UdpSocket::bind("127.0.0.1:0").await?;
-            let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
-            let (incoming, hdr) = incoming(
-                initial_dgram(MIN_CLIENT_INITIAL_LEN),
-                peer.local_addr()?,
-                local_addr,
-            )?;
-            let error = acceptor
-                .handle_initials(incoming, hdr, &mut config)
-                .err()
-                .ok_or("CID generator failure was ignored")?;
-            assert_eq!(error.to_string(), "injected CID generator failure");
-            let mut output = [0u8; MAX_DATAGRAM_SIZE];
-            assert!(timeout(
-                Duration::from_millis(100),
-                peer.recv_from(&mut output)
-            )
-            .await
-            .is_err());
+            for length in [
+                None,
+                Some(0),
+                Some(MAX_CONN_ID_LEN - 1),
+                Some(MAX_CONN_ID_LEN + 1),
+            ] {
+                let (mut acceptor, local_addr) = acceptor_with_generator(
+                    Arc::new(InvalidGenerator(length)),
+                    disable_validation,
+                )
+                .await?;
+                let peer = UdpSocket::bind("127.0.0.1:0").await?;
+                let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+                let (incoming, hdr) = incoming(
+                    initial_dgram(MIN_CLIENT_INITIAL_LEN),
+                    peer.local_addr()?,
+                    local_addr,
+                )?;
+                let error = acceptor
+                    .handle_initials(incoming, hdr, &mut config)
+                    .err()
+                    .ok_or("CID generator failure was ignored")?;
+                if let Some(length) = length {
+                    assert!(error.to_string().contains(&format!(
+                        "CID generator returned {length} bytes"
+                    )));
+                } else {
+                    assert_eq!(
+                        error.to_string(),
+                        "injected CID generator failure"
+                    );
+                }
+                let mut output = [0u8; MAX_DATAGRAM_SIZE];
+                assert!(timeout(
+                    Duration::from_millis(100),
+                    peer.recv_from(&mut output)
+                )
+                .await
+                .is_err());
+            }
         }
         Ok(())
     }

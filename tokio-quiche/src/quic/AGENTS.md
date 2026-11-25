@@ -50,7 +50,7 @@ router/
 
 - **`InitialQuicConnection` is `#[must_use]`** -- dropping silently discards connection. Always call `.start()`, `.handshake()`, or `.handshake_fut()`.
 - **`handshake()` spawns with `AbortOnDropHandle`** -- dropping the future kills the handshake task. Hold the handle.
-- **`fill_available_scids` registers IDs with the QUIC core before enqueueing `ConnectionMapCommand::MapCid`**; errors from CID generation, reset-token entropy, core registration or a closed router channel propagate to the worker. A queued command is not an acknowledgement that the router has installed the mapping.
+- **Route ownership is independent of a connection's current CID.** `RouteLease` follows the unstarted connection and all worker stages, and closes every route on drop. Workers await router registration acknowledgement before advertising new CIDs. Retire and close commands are owner-scoped; never overwrite another owner's active route.
 - **Linux `SO_TXTIME` in `io/gso.rs`** -- the socket uses `CLOCK_MONOTONIC`; convert opaque `Instant` deadlines against a sampled monotonic clock, with checked nanosecond arithmetic. Never transmute an `Instant` or silently truncate UDP GSO segment sizes. The conversion's boundary tests must be deterministic even on loaded CI hosts.
 - **One client connection per socket** -- `connect()` docs explicitly warn. Sharing socket loses packets.
 - **`#[cfg(feature = "zero-copy")]` gates `QuicheConnection` type alias** -- `quiche::Connection<BufFactory>` vs `quiche::Connection`. Check both paths when modifying connection creation.

@@ -43,10 +43,11 @@ use std::task::Poll;
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+use super::connection::ConnectionMapCommand;
 use super::connection::InitialQuicConnection;
 use super::connection::QuicConnectionParams;
+use super::connection::RouteLease;
 use super::io::worker::WriterConfig;
-use super::router::ConnectionMapCommand;
 use crate::metrics::Metrics;
 use crate::quic::HandshakeInfo;
 use crate::quic::Incoming;
@@ -122,7 +123,7 @@ where
         initial_pkt: None,
         dscp_handle: None,
         shutdown_tx,
-        conn_map_cmd_tx,
+        route_lease: RouteLease::raw(conn_map_cmd_tx),
         scid,
         cid_generator: None,
         metrics,
@@ -159,10 +160,8 @@ impl ConnCloseReceiver {
     pub fn poll_recv(&mut self, cx: &mut Context) -> Poll<()> {
         loop {
             let cmd = ready!(self.0.poll_recv(cx));
-            if matches!(cmd, None | Some(ConnectionMapCommand::UnmapCid(_))) {
-                // Raw connections have neither a `pending_cid` nor a
-                // `cid_generator`. The only time they unmap a CID is when the
-                // connection is closed.
+            if matches!(cmd, None | Some(ConnectionMapCommand::Close(_))) {
+                // Retirement is distinct from connection closure.
                 return Poll::Ready(());
             }
         }
