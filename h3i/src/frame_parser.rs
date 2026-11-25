@@ -93,7 +93,7 @@ impl Varint {
                 return Ok(ReadProgress::Ended);
             }
             if count == 0 {
-                return Err(H3Error::Transport(quiche::Error::Done));
+                return Err(H3Error::Done);
             }
         }
     }
@@ -230,7 +230,7 @@ impl FrameParser {
                         ));
                     }
                     if count == 0 {
-                        return Err(H3Error::Transport(quiche::Error::Done));
+                        return Err(H3Error::Done);
                     }
                 },
             }
@@ -259,7 +259,7 @@ mod tests {
     use quiche::h3::testing::Session;
     use quiche::h3::Result;
 
-    const DONE: H3Error = H3Error::Transport(quiche::Error::Done);
+    const DONE: H3Error = H3Error::Done;
 
     // One I/O cycle: expose an arbitrary prefix, and either terminate the
     // stream at its end or report transport backpressure.
@@ -320,13 +320,13 @@ mod tests {
                 let mut parser = FrameParser::new(0);
                 let mut first = &bytes[..split];
                 assert_eq!(read_chunk(&mut parser, &mut first, false), Err(DONE));
-                assert!(first.is_empty());
+                assert_eq!(first, []);
                 let mut second = &bytes[split..];
                 assert_eq!(
                     read_chunk(&mut parser, &mut second, true)?,
                     parsed(frame.clone(), true)
                 );
-                assert!(second.is_empty());
+                assert_eq!(second, []);
             }
             // Every byte is delivered in its own I/O cycle.
             let mut parser = FrameParser::new(0);
@@ -407,7 +407,7 @@ mod tests {
                 parsed(frame, index == 2)
             );
         }
-        assert!(input.is_empty());
+        assert_eq!(input, []);
         Ok(())
     }
 

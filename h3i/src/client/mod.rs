@@ -433,7 +433,7 @@ pub(crate) fn parse_streams<F: quiche::BufFactory, C: Client>(
                 },
                 Err(e) => {
                     match e {
-                        Error::Transport(quiche::Error::Done) => {
+                        Error::Done => {
                             log::debug!("stream {stream} exhausted");
                         },
                         _ => {
