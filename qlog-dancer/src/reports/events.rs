@@ -183,7 +183,9 @@ mod tests {
     use serde_json::Value;
 
     fn native(name: &str, data: Value) -> Result<Event, serde_json::Error> {
-        serde_json::from_value(json!({"time": 1.0, "name": name, "data": data}))
+        let mut event = json!({"time": 1.0, "name": name});
+        event["data"] = data;
+        serde_json::from_value(event)
     }
 
     #[test]
@@ -197,7 +199,7 @@ mod tests {
             {"frame_type": "retire_connection_id", "sequence_number": 9},
             {"frame_type": "path_challenge", "data": "aabb"},
             {"frame_type": "path_response", "data": "ccdd"},
-            {"frame_type": "stream", "stream_id": 18014398509481985_u64, "offset": 12,
+            {"frame_type": "stream", "stream_id": 18_014_398_509_481_985_u64, "offset": 12,
                 "fin": true, "raw": {"length": 9, "data": "aabb"}},
         ]);
         let event = native(
