@@ -158,7 +158,7 @@ where
         };
 
         if let Some(gro) = incoming.gro {
-            for dgram in incoming.buf.chunks_mut(gro as usize) {
+            for dgram in incoming.buf.chunks_mut(gro.get()) {
                 // Log error here if recv fails
                 let _ = conn.recv(dgram, recv_info);
             }

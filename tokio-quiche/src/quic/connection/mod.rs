@@ -47,6 +47,7 @@ use quiche::ConnectionId;
 use std::fmt;
 use std::io;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -212,8 +213,8 @@ pub struct Incoming {
     /// The packet's contents.
     pub buf: Vec<u8>,
     /// If set, then `buf` is a GRO buffer containing multiple packets.
-    /// Each individual packet has a size of `gso` (except for the last one).
-    pub gro: Option<i32>,
+    /// Each individual packet has this nonzero size (except for the last one).
+    pub gro: Option<NonZeroUsize>,
     /// [SO_MARK] control message value received from the socket.
     ///
     /// This will always be `None` after the connection has been spawned as
