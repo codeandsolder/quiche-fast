@@ -4205,18 +4205,24 @@ mod qlog_packet_history_tests {
                 (3, 30, 60),
             ] {
                 assert_eq!(
-                    data.sent_stream_max_data_tracker
-                        .streams()
-                        .get(&stream_id)
-                        .map(crate::trackers::StreamHistory::points),
-                    Some([(0.0, local), (3.0, 100)].as_slice())
+                    data.sent_stream_max_data_tracker.streams()[&stream_id]
+                        .initial(),
+                    Some(local)
                 );
                 assert_eq!(
-                    data.received_stream_max_data_tracker
-                        .streams()
-                        .get(&stream_id)
-                        .map(crate::trackers::StreamHistory::points),
-                    Some([(0.0, peer), (2.0, 100)].as_slice())
+                    data.received_stream_max_data_tracker.streams()[&stream_id]
+                        .initial(),
+                    Some(peer)
+                );
+                assert_eq!(
+                    data.sent_stream_max_data_tracker.streams()[&stream_id]
+                        .points(),
+                    [(3.0, 100)]
+                );
+                assert_eq!(
+                    data.received_stream_max_data_tracker.streams()[&stream_id]
+                        .points(),
+                    [(2.0, 100)]
                 );
             }
         }

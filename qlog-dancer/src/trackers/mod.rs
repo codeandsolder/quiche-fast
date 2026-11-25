@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::borrow::Cow;
 use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 
@@ -63,8 +64,8 @@ impl std::error::Error for TrackerError {}
 /// Per-stream histories with monotonic observed maxima and a checked aggregate.
 ///
 /// A zero-valued observation is recorded even though it does not increase the
-/// aggregate. The optional synthetic starting point is only a plotting
-/// baseline.
+/// aggregate. A known initial limit is stored separately from observations
+/// and contributes only once a stream is observed.
 #[derive(Debug)]
 pub struct StreamTracker<T> {
     streams: BTreeMap<u64, StreamHistory<T>>,
@@ -76,6 +77,7 @@ pub struct StreamTracker<T> {
 #[derive(Debug)]
 pub struct StreamHistory<T> {
     points: Vec<(f64, T)>,
+    initial: Option<u64>,
     maximum: u64,
 }
 
@@ -83,6 +85,12 @@ impl<T> StreamHistory<T> {
     #[must_use = "the points are the recorded observations"]
     pub const fn points(&self) -> &[(f64, T)] {
         self.points.as_slice()
+    }
+
+    /// The advertised initial limit, if known. Not a recorded frame.
+    #[must_use = "the result distinguishes a known initial limit from an unknown one"]
+    pub const fn initial(&self) -> Option<u64> {
+        self.initial
     }
 
     #[must_use = "the maximum is the greatest observed position"]
@@ -109,8 +117,51 @@ pub enum QuicStreamObservation {
 }
 
 impl QuicStreamObservation {
-    fn lower_bound_end(self, stream_id: u64) -> Result<u64, TrackerError> {
+    /// An exact STREAM endpoint can be plotted only when both fields are
+    /// available. RESETs and incomplete records are not STREAM samples.
+    #[must_use = "the result is a known STREAM endpoint, not an inferred value"]
+    pub const fn frame_end(self) -> Option<u64> {
         match self {
+            Self::Frame {
+                offset: Some(offset),
+                length: Some(length),
+                ..
+            } => offset.checked_add(length),
+            _ => None,
+        }
+    }
+}
+
+/// An observation that provides a checked lower bound on a stream position.
+pub trait StreamExtent {
+    /// Return the stream position represented by the observation.
+    ///
+    /// # Errors
+    /// Returns an error if the position cannot be represented.
+    fn extent(&self, stream_id: u64) -> Result<u64, TrackerError>;
+}
+
+impl StreamExtent for u64 {
+    fn extent(&self, _stream_id: u64) -> Result<u64, TrackerError> {
+        Ok(*self)
+    }
+}
+
+impl StreamExtent for StreamAccess {
+    fn extent(&self, stream_id: u64) -> Result<u64, TrackerError> {
+        self.offset.checked_add(self.length).ok_or(
+            TrackerError::StreamEndOverflow {
+                stream_id,
+                offset: self.offset,
+                length: self.length,
+            },
+        )
+    }
+}
+
+impl StreamExtent for QuicStreamObservation {
+    fn extent(&self, stream_id: u64) -> Result<u64, TrackerError> {
+        match *self {
             Self::Frame { offset, length, .. } => {
                 let offset = offset.unwrap_or_default();
                 let length = length.unwrap_or_default();
@@ -123,20 +174,6 @@ impl QuicStreamObservation {
                 )
             },
             Self::Reset { final_size } => Ok(final_size),
-        }
-    }
-
-    /// An exact STREAM endpoint can be plotted only when both fields are
-    /// available. RESETs and incomplete records are not STREAM samples.
-    #[must_use = "the result is a known STREAM endpoint, not an inferred value"]
-    pub const fn frame_end(self) -> Option<u64> {
-        match self {
-            Self::Frame {
-                offset: Some(offset),
-                length: Some(length),
-                ..
-            } => offset.checked_add(length),
-            _ => None,
         }
     }
 }
@@ -157,51 +194,49 @@ impl QuicStreamTracker {
     pub fn observe(
         &mut self, stream_id: u64, observation: QuicStreamObservation, time: f64,
     ) -> Result<(), TrackerError> {
-        let end = observation.lower_bound_end(stream_id)?;
+        let end = observation.extent(stream_id)?;
         self.record(stream_id, time, observation, end, None)?;
         Ok(())
     }
+}
 
-    /// The input log usually arrives in timestamp order. If it does not,
-    /// reconstruct the running maximum per stream in chronological order.
-    /// Merely sorting the precomputed totals would assign bytes to the
-    /// wrong observation time.
+impl<T: StreamExtent> StreamTracker<T> {
+    /// Reconstruct the aggregate in timestamp order when the input log is
+    /// out of order. Sorting the ingestion-order totals is incorrect.
+    /// Known initial limits are applied at the earliest actual observation
+    /// of that stream, not counted for streams that have not been seen.
     ///
     /// # Errors
-    /// Returns an error if an endpoint or aggregate exceeds u64.
+    /// Returns an error if an endpoint or aggregate cannot be represented.
     pub fn chronological_sum_series(
         &self,
-    ) -> Result<std::borrow::Cow<'_, [(f64, u64)]>, TrackerError> {
+    ) -> Result<Cow<'_, [(f64, u64)]>, TrackerError> {
         if self
             .sum_series
             .windows(2)
             .all(|pair| pair[0].0.total_cmp(&pair[1].0).is_le())
         {
-            return Ok(std::borrow::Cow::Borrowed(&self.sum_series));
+            return Ok(Cow::Borrowed(&self.sum_series));
         }
-        let mut events = self
-            .streams
-            .iter()
-            .flat_map(|(&id, history)| {
-                history
-                    .points
-                    .iter()
-                    .map(move |&(time, observation)| (time, id, observation))
-            })
-            .collect::<Vec<_>>();
+        let mut events = Vec::with_capacity(self.sum_series.len());
+        for (&id, history) in &self.streams {
+            events.extend(history.points.iter().map(|(time, observation)| {
+                (*time, id, observation, history.initial)
+            }));
+        }
         events.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut maxima = BTreeMap::<u64, u64>::new();
         let mut total = 0_u64;
         let mut series = Vec::with_capacity(events.len());
-        for (time, id, observation) in events {
-            let end = observation.lower_bound_end(id)?;
+        for (time, id, observation, initial) in events {
+            let end = observation.extent(id)?.max(initial.unwrap_or_default());
             let previous = maxima.entry(id).or_default();
             let (maximum, sum) = checked_maximum(id, *previous, end, total)?;
             *previous = maximum;
             total = sum;
             series.push((time, total));
         }
-        Ok(std::borrow::Cow::Owned(series))
+        Ok(Cow::Owned(series))
     }
 }
 
@@ -236,7 +271,7 @@ impl<T> StreamTracker<T> {
         &self.streams
     }
 
-    #[must_use = "the series describes the cumulative observed maximum"]
+    #[must_use = "the series describes cumulative maxima in ingestion order"]
     pub const fn sum_series(&self) -> &[(f64, u64)] {
         self.sum_series.as_slice()
     }
@@ -254,7 +289,7 @@ impl<T> StreamTracker<T> {
     /// Validate all arithmetic before changing either history or aggregate.
     fn record(
         &mut self, stream_id: u64, time: f64, value: T, observed_max: u64,
-        initial: Option<T>,
+        initial: Option<u64>,
     ) -> Result<Option<(u64, u64)>, TrackerError> {
         let entry = self.streams.entry(stream_id);
         let old_max = match &entry {
@@ -266,7 +301,8 @@ impl<T> StreamTracker<T> {
         let increment = new_max - old_max;
 
         let history = entry.or_insert_with(|| StreamHistory {
-            points: initial.into_iter().map(|point| (0.0, point)).collect(),
+            points: Vec::new(),
+            initial,
             maximum: 0,
         });
         history.points.push((time, value));
@@ -310,13 +346,7 @@ impl StreamBufferTracker {
     pub fn update(
         &mut self, stream_id: u64, access: StreamAccess, time: f64,
     ) -> Result<Option<(u64, u64)>, TrackerError> {
-        let end = access.offset.checked_add(access.length).ok_or(
-            TrackerError::StreamEndOverflow {
-                stream_id,
-                offset: access.offset,
-                length: access.length,
-            },
-        )?;
+        let end = access.extent(stream_id)?;
         self.record(stream_id, time, access, end, None)
     }
 }
@@ -495,6 +525,38 @@ mod tests {
     }
 
     #[test]
+    fn chronological_totals_apply_initial_credit_only_to_observed_streams(
+    ) -> Result<(), TrackerError> {
+        let mut maxima = StreamMaxTracker::default();
+        let mut buffers = StreamBufferTracker::default();
+        for (id, time, extent, initial) in [
+            (4, 10.0, 150, Some(100)),
+            (8, 5.0, 20, Some(50)),
+            (4, 2.0, 10, Some(100)),
+            (8, 15.0, 80, Some(50)),
+            (12, -2.0, 3, None),
+        ] {
+            maxima.update(id, extent, time, initial)?;
+            let value = extent.max(initial.unwrap_or_default());
+            buffers.update(
+                id,
+                StreamAccess {
+                    offset: value / 2,
+                    length: value - value / 2,
+                },
+                time,
+            )?;
+        }
+        let expected =
+            [(-2.0, 3), (2.0, 103), (5.0, 153), (10.0, 203), (15.0, 233)];
+        assert_eq!(maxima.chronological_sum_series()?.as_ref(), expected);
+        assert_eq!(buffers.chronological_sum_series()?.as_ref(), expected);
+        assert_eq!(maxima.current_sum(), 233);
+        assert_eq!(maxima.streams()[&4].points(), [(10.0, 150), (2.0, 10)]);
+        Ok(())
+    }
+
+    #[test]
     fn exact_aggregate_boundary() -> Result<(), TrackerError> {
         check_updates(&[
             (1, u64::MAX - 2, 1.0, Some((0, u64::MAX - 2)), u64::MAX - 2),
@@ -530,14 +592,15 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_initial_point_is_recorded_once() -> Result<(), TrackerError> {
+    fn initial_limit_is_metadata_not_a_frame() -> Result<(), TrackerError> {
         let mut tracker = StreamMaxTracker::default();
         tracker.update(0, 1000, 10.0, Some(500))?;
         tracker.update(0, 1500, 20.0, Some(700))?;
         assert_eq!(
             tracker.streams().get(&0).map(super::StreamHistory::points),
-            Some([(0.0, 500), (10.0, 1000), (20.0, 1500)].as_slice())
+            Some([(10.0, 1000), (20.0, 1500)].as_slice())
         );
+        assert_eq!(tracker.streams()[&0].initial(), Some(500));
         assert_eq!(tracker.current_sum(), 1500);
         Ok(())
     }
@@ -552,11 +615,8 @@ mod tests {
         assert_eq!(tracker.get_stream_max(0), Some(100));
         assert_eq!(tracker.get_stream_max(4), Some(40));
         assert_eq!(tracker.current_sum(), 140);
-        assert_eq!(tracker.streams()[&0].points(), [
-            (0.0, 100),
-            (10.0, 20),
-            (12.0, 30)
-        ]);
+        assert_eq!(tracker.streams()[&0].initial(), Some(100));
+        assert_eq!(tracker.streams()[&0].points(), [(10.0, 20), (12.0, 30)]);
         assert_eq!(tracker.streams()[&4].points(), [(13.0, 40)]);
         Ok(())
     }

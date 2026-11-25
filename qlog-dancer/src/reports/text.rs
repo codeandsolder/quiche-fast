@@ -365,7 +365,7 @@ pub fn print_flow_control(data: &[LogFileData]) {
                 println!("    {time},{value}");
             }
             for (stream_id, history) in streams.streams() {
-                println!("  {direction} stream {stream_id} flow control updates");
+                println!("  {direction} stream {stream_id} flow control updates (initial limit: {})", crate::request_stub::NaOption::new(history.initial()));
                 println!("    Time, Value");
                 for (time, value) in history.points() {
                     println!("    {time},{value}");
