@@ -27,7 +27,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Duration;
 
 use datagram_socket::StreamClosureKind;
 use foundations::telemetry::log;
@@ -93,6 +92,12 @@ pub enum ClientH3Event {
         stream_id: u64,
         request_id: u64,
     },
+    /// The request was not assigned a stream because the peer sent GOAWAY.
+    /// The caller can retry it on a different connection.
+    RequestRejected {
+        request_id: u64,
+        goaway_id: u64,
+    },
 }
 
 impl From<H3Event> for ClientH3Event {
@@ -139,28 +144,23 @@ struct PendingClientRequest {
     recv: InboundFrameStream,
 }
 
-/// Retry delay when `StreamBlocked` or `StreamLimit` is returned by
-/// `send_request`. Both errors are transient: the peer will open more
-/// stream credit or flow-control window within a few milliseconds.
-const BLOCKED_RETRY_DELAY: Duration = Duration::from_millis(5);
-
 pub struct ClientHooks {
-    /// Mapping from stream IDs to the associated [`PendingClientRequest`].
+    /// Requests whose stream has been allocated but no response received.
     pending_requests: BTreeMap<u64, PendingClientRequest>,
-    /// Requests that could not be sent yet due to `StreamBlocked` or
-    /// `StreamLimit`. They will be retried after [`BLOCKED_RETRY_DELAY`].
+    /// Requests blocked on transport credit, in submission order.
     queued_requests: VecDeque<NewClientRequest>,
-    /// A sender back into the driver's own command channel, used to
-    /// re-enqueue blocked requests after the retry delay.
-    ///
-    /// Initialised in `conn_established`; `None` before the connection
-    /// is established.
-    self_cmd_sender: Option<mpsc::UnboundedSender<ClientH3Command>>,
+    /// The latest peer GOAWAY ID; no new requests are opened after GOAWAY.
+    peer_goaway: Option<u64>,
+}
+
+enum RequestAttempt {
+    Sent,
+    Blocked(NewClientRequest),
 }
 
 impl ClientHooks {
     /// Returns `true` when `err` from `h3::Connection::send_request` means the
-    /// request should be retried after a short delay rather than treated as a
+    /// request should be retried on transport progress rather than treated as a
     /// fatal connection error.
     ///
     /// `send_request` rolls back any partial stream state before returning
@@ -185,11 +185,11 @@ impl ClientHooks {
     ///
     /// If the connection temporarily cannot open a new stream (`StreamBlocked`
     /// or `StreamLimit`), the request is pushed onto `queued_requests` and
-    /// will be retried after [`BLOCKED_RETRY_DELAY`].
+    /// will be retried on subsequent transport progress.
     fn initiate_request(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         request: NewClientRequest,
-    ) -> H3ConnectionResult<()> {
+    ) -> H3ConnectionResult<RequestAttempt> {
         let body_finished = request.body_writer.is_none();
 
         let stream_id = match driver.conn_mut()?.send_request(
@@ -204,8 +204,7 @@ impl ClientHooks {
                     "request_id" => request.request_id,
                     "error" => %err,
                 );
-                driver.hooks.queued_requests.push_back(request);
-                return Ok(());
+                return Ok(RequestAttempt::Blocked(request));
             },
             Err(err) => return Err(H3ConnectionError::from(err)),
         };
@@ -252,13 +251,47 @@ impl ClientHooks {
 
         // Notify the H3Controller that we've allocated a stream_id for a
         // given request_id.
-        let _ = driver
+        driver
             .h3_event_sender
             .send(ClientH3Event::NewOutboundRequest {
                 stream_id,
                 request_id: request.request_id,
-            });
+            })
+            .map_err(|_| H3ConnectionError::ControllerWentAway)?;
 
+        Ok(RequestAttempt::Sent)
+    }
+
+    fn reject_request(
+        driver: &H3Driver<Self>, request: NewClientRequest, goaway_id: u64,
+    ) -> H3ConnectionResult<()> {
+        driver
+            .h3_event_sender
+            .send(ClientH3Event::RequestRejected {
+                request_id: request.request_id,
+                goaway_id,
+            })
+            .map_err(|_| H3ConnectionError::ControllerWentAway)
+    }
+
+    fn submit_request(
+        driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
+        request: NewClientRequest,
+    ) -> H3ConnectionResult<()> {
+        if driver.h3_event_sender.is_closed() {
+            return Ok(());
+        }
+        if let Some(goaway_id) = driver.hooks.peer_goaway {
+            return Self::reject_request(driver, request, goaway_id);
+        }
+        // A newer request must not bypass an earlier blocked request.
+        if !driver.hooks.queued_requests.is_empty() {
+            driver.hooks.queued_requests.push_back(request);
+        } else if let RequestAttempt::Blocked(request) =
+            Self::initiate_request(driver, qconn, request)?
+        {
+            driver.hooks.queued_requests.push_back(request);
+        }
         Ok(())
     }
 
@@ -298,6 +331,11 @@ impl ClientHooks {
     pub(crate) fn pending_request_count(&self) -> usize {
         self.pending_requests.len()
     }
+
+    #[cfg(test)]
+    pub(crate) fn queued_request_count(&self) -> usize {
+        self.queued_requests.len()
+    }
 }
 
 #[expect(
@@ -312,19 +350,18 @@ impl DriverHooks for ClientHooks {
         Self {
             pending_requests: BTreeMap::new(),
             queued_requests: VecDeque::new(),
-            self_cmd_sender: None,
+            peer_goaway: None,
         }
     }
 
     fn conn_established(
-        driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
+        _driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         _handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {
         assert!(
             !qconn.is_server(),
             "ClientH3Driver requires a client-side QUIC connection"
         );
-        driver.hooks.self_cmd_sender = Some(driver.self_cmd_sender().clone());
         Ok(())
     }
 
@@ -357,42 +394,38 @@ impl DriverHooks for ClientHooks {
         match cmd {
             ClientH3Command::Core(c) => driver.handle_core_command(qconn, c),
             ClientH3Command::ClientRequest(req) =>
-                Self::initiate_request(driver, qconn, req),
+                Self::submit_request(driver, qconn, req),
         }
     }
 
-    fn has_wait_action(driver: &mut H3Driver<Self>) -> bool {
-        !driver.hooks.queued_requests.is_empty()
-    }
-
-    async fn wait_for_action(
-        &mut self, qconn: &mut QuicheConnection,
+    fn process_pending_writes(
+        driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
     ) -> H3ConnectionResult<()> {
-        // Sleep briefly to let the peer open stream credit or raise the
-        // MAX_STREAMS limit, then re-enqueue waiting requests back into
-        // the driver's command channel so that `conn_command` can retry them
-        // with a full `&mut H3Driver` on the next loop iteration.
-        //
-        // Only drain up to the number of available bidi streams to avoid
-        // re-queueing requests that would immediately fail.
-        tokio::time::sleep(BLOCKED_RETRY_DELAY).await;
-
-        let Some(sender) = &self.self_cmd_sender else {
-            // Should not happen: `conn_established` always sets this.
+        if driver.h3_event_sender.is_closed() {
+            driver.hooks.queued_requests.clear();
             return Ok(());
-        };
-
-        let streams_left = qconn.peer_streams_left_bidi() as usize;
-        let to_drain = streams_left.min(self.queued_requests.len());
-
-        for request in self.queued_requests.drain(..to_drain) {
-            log::debug!(
-                "retrying queued request after stream-blocked delay";
-                "request_id" => request.request_id,
-            );
-            let _ = sender.send(ClientH3Command::ClientRequest(request));
         }
+        while let Some(request) = driver.hooks.queued_requests.pop_front() {
+            if let RequestAttempt::Blocked(request) =
+                Self::initiate_request(driver, qconn, request)?
+            {
+                // StreamBlocked can refer to an already-created QUIC stream
+                // even when peer_streams_left_bidi() is zero. Retry the
+                // original call directly after the next transport progress.
+                driver.hooks.queued_requests.push_front(request);
+                break;
+            }
+        }
+        Ok(())
+    }
 
+    fn peer_goaway(
+        driver: &mut H3Driver<Self>, goaway_id: u64,
+    ) -> H3ConnectionResult<()> {
+        driver.hooks.peer_goaway = Some(goaway_id);
+        while let Some(request) = driver.hooks.queued_requests.pop_front() {
+            Self::reject_request(driver, request, goaway_id)?;
+        }
         Ok(())
     }
 }

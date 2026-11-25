@@ -190,7 +190,7 @@ pub struct Http2SessionRecvDataParams {
 
 #[derive(Deserialize, Debug, Default)]
 pub struct Http2SessionRecvDataEvent {
-    pub params: Http2SessionSendDataParams,
+    pub params: Http2SessionRecvDataParams,
 }
 
 #[derive(Deserialize, Debug, Default)]
@@ -361,7 +361,7 @@ pub struct Htt2SessionStalledMaxStreamsEvent {
 const H2_HEADER_TABLE_SIZE: u16 = 0x01;
 const H2_ENABLE_PUSH: u16 = 0x02;
 const H2_MAX_CONCURRENT_STREAMS: u16 = 0x03;
-const H2_INITIAL_WINDOW_SIZE: u16 = 0x04;
+pub const H2_INITIAL_WINDOW_SIZE: u16 = 0x04;
 const H2_MAX_FRAME_SIZE: u16 = 0x05;
 const H2_MAX_HEADER_LIST_SIZE: u16 = 0x06;
 const H2_ENABLE_CONNECT_PROTOCOL: u16 = 0x08;
@@ -370,6 +370,7 @@ const H2_TLS_RENEG_PERMITTED: u16 = 0x10;
 const H2_ENABLE_METADATA: u16 = 0x4d44;
 
 pub const H2_DEFAULT_WINDOW_SIZE: u32 = 65535;
+pub const H2_MAX_WINDOW_SIZE: u32 = 0x7fff_ffff;
 
 #[derive(Debug, Default)]
 pub struct Http2Settings {

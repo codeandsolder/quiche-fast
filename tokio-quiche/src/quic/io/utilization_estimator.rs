@@ -25,104 +25,142 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use foundations::telemetry::metrics::Gauge;
-
+use quiche::windowed_filter::WindowedFilter;
 use std::collections::VecDeque;
-use std::ops::Div;
-use std::ops::Sub;
 use std::time::Duration;
 use std::time::Instant;
 
 use crate::quic::QuicheConnection;
 
 const EST_WIN: usize = 10;
+const MIN_PAIRED_ROUNDS: usize = 4;
+const FILTER_WINDOW: Duration = Duration::from_secs(120);
+const INITIAL_UPDATE_PERIOD: Duration = Duration::from_millis(50);
+const MIN_UPDATE_PERIOD: Duration = Duration::from_millis(1);
 
-/// [`BandwidthReporter`] is responsible to track the bandwidth estimate for the
-/// connection
-pub(super) struct BandwidthReporter {
-    /// Time of last update
+/// Connection byte counters at a sampling boundary. Counter resets invalidate
+/// the pending interval rather than inventing a huge wrapped delta.
+#[derive(Clone, Copy, Default)]
+struct ByteCounts {
+    sent: u64,
+    acked: u64,
+    lost: u64,
+}
+
+impl ByteCounts {
+    fn delta(self, previous: Self) -> Option<Self> {
+        Some(Self {
+            sent: self.sent.checked_sub(previous.sent)?,
+            acked: self.acked.checked_sub(previous.acked)?,
+            lost: self.lost.checked_sub(previous.lost)?,
+        })
+    }
+}
+
+/// Loss as a fraction of observed ACK/loss outcomes, in basis points.
+/// Bounded integer representation avoids NaN, infinity and lossy float casts.
+#[derive(Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct LossRatio(u16);
+
+impl LossRatio {
+    fn from_outcomes(acked: u64, lost: u64) -> Self {
+        let lost = u128::from(lost);
+        let total = u128::from(acked) + lost;
+        if total == 0 {
+            return Self::default();
+        }
+        let basis_points = (lost * 10_000 + total / 2) / total;
+        Self(u16::try_from(basis_points).unwrap_or(10_000))
+    }
+
+    pub(super) fn percent(self) -> f64 {
+        f64::from(self.0) / 100.0
+    }
+
+    pub(super) fn rounded_percent(self) -> u8 {
+        u8::try_from((self.0 + 50) / 100).unwrap_or(100)
+    }
+}
+
+/// Tracks rolling utilized bandwidth and lifetime peaks across all connection
+/// worker stages. Its current contribution is removed when the worker drops.
+pub(in crate::quic) struct BandwidthReporter {
     last_update: Instant,
-    /// Period between update (set using rtt)
     update_period: Duration,
-    /// Estimate at last update
     last_bandwidth: u64,
-    /// Bytes sent at last update
-    last_sent: u64,
-    /// Bytes lost at last update
-    last_lost: u64,
-    /// Bytes acked at last update
-    last_acked: u64,
-    /// Max recorded bandwidth
+    counters: ByteCounts,
     pub(super) max_bandwidth: u64,
-    /// Loss at max recorded bandwidth
-    pub(super) max_loss_pct: f32,
-
+    pub(super) max_loss: LossRatio,
     estimator: MaxUtilizedBandwidthEstimator,
-
     gauge: Gauge,
 }
 
 impl BandwidthReporter {
-    pub(super) fn new(gauge: Gauge) -> Self {
-        BandwidthReporter {
+    pub(in crate::quic) fn new(gauge: Gauge) -> Self {
+        Self {
             last_update: Instant::now(),
-            update_period: Duration::from_millis(50),
-
+            update_period: INITIAL_UPDATE_PERIOD,
             last_bandwidth: 0,
-
-            last_sent: 0,
-            last_lost: 0,
-            last_acked: 0,
-
+            counters: ByteCounts::default(),
             max_bandwidth: 0,
-            max_loss_pct: 0.,
-
+            max_loss: LossRatio::default(),
             estimator: MaxUtilizedBandwidthEstimator::new(),
-
             gauge,
         }
     }
 
-    #[inline]
     pub(super) fn update(&mut self, quiche: &QuicheConnection, now: Instant) {
-        if now.duration_since(self.last_update) < self.update_period {
+        if now.saturating_duration_since(self.last_update) < self.update_period {
             return;
         }
-
         let stats = quiche.stats();
+        let counters = ByteCounts {
+            sent: stats.sent_bytes,
+            acked: stats.acked_bytes,
+            lost: stats.lost_bytes,
+        };
+        let rtt = quiche
+            .path_stats()
+            .find(|path| path.active)
+            .map(|path| path.rtt);
+        self.update_counters(counters, now, rtt);
+    }
 
-        let bytes_sent = stats.sent_bytes - self.last_sent;
-        let bytes_lost = stats.lost_bytes - self.last_lost;
-        let bytes_acked = stats.acked_bytes - self.last_acked;
-
-        self.estimator.new_round(
-            self.last_update,
-            bytes_sent,
-            bytes_lost,
-            bytes_acked,
-        );
-
-        self.last_sent = stats.sent_bytes;
-        self.last_lost = stats.lost_bytes;
-        self.last_acked = stats.acked_bytes;
-
+    fn update_counters(
+        &mut self, counters: ByteCounts, now: Instant, rtt: Option<Duration>,
+    ) {
+        let Some(elapsed) = now.checked_duration_since(self.last_update) else {
+            return;
+        };
+        if elapsed < self.update_period {
+            return;
+        }
+        let delta = counters.delta(self.counters);
+        self.counters = counters;
         self.last_update = now;
-
-        let bw_estimate = self.estimator.get();
-
-        if self.last_bandwidth != bw_estimate.bandwidth {
-            self.gauge.dec_by(self.last_bandwidth);
-
-            self.last_bandwidth = bw_estimate.bandwidth;
-
-            self.gauge.inc_by(self.last_bandwidth);
-
-            self.max_bandwidth = self.max_bandwidth.max(self.last_bandwidth);
-            self.max_loss_pct = self.max_loss_pct.max(bw_estimate.loss);
+        if let Some(rtt) = rtt {
+            self.update_period = rtt.max(MIN_UPDATE_PERIOD);
         }
+        let Some(delta) = delta else {
+            self.estimator = MaxUtilizedBandwidthEstimator::new();
+            self.set_bandwidth(0);
+            return;
+        };
+        let bandwidth = self.estimator.new_round(now, elapsed, delta);
+        self.set_bandwidth(bandwidth);
+        self.max_bandwidth = self.max_bandwidth.max(bandwidth);
+        self.max_loss = self
+            .max_loss
+            .max(LossRatio::from_outcomes(delta.acked, delta.lost));
+    }
 
-        if let Some(p) = quiche.path_stats().find(|s| s.active) {
-            self.update_period = p.rtt;
+    fn set_bandwidth(&mut self, bandwidth: u64) {
+        if bandwidth > self.last_bandwidth {
+            self.gauge.inc_by(bandwidth - self.last_bandwidth);
+        } else if bandwidth < self.last_bandwidth {
+            self.gauge.dec_by(self.last_bandwidth - bandwidth);
         }
+        self.last_bandwidth = bandwidth;
     }
 }
 
@@ -132,310 +170,233 @@ impl Drop for BandwidthReporter {
     }
 }
 
-#[derive(Clone, Copy, Default)]
-pub struct Estimate {
-    pub bandwidth: u64,
-    pub loss: f32,
-}
-
-impl PartialEq for Estimate {
-    fn eq(&self, other: &Self) -> bool {
-        self.bandwidth == other.bandwidth
-    }
-}
-
-impl Eq for Estimate {}
-
-impl PartialOrd for Estimate {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for Estimate {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.bandwidth.cmp(&other.bandwidth)
-    }
+#[derive(Clone, Copy)]
+struct SendInterval {
+    bytes: u64,
+    duration: Duration,
 }
 
 struct Round {
-    bytes_sent: u64,
-    bytes_acked: u64,
-    bytes_lost: u64,
-    start: Instant,
+    sent: SendInterval,
+    acked: u64,
+    feedback_duration: Duration,
+    end: Instant,
 }
 
-pub(super) struct MaxUtilizedBandwidthEstimator {
+/// Pairs a send interval with feedback from the following interval (roughly
+/// one RTT later). The actual elapsed time of each interval is retained;
+/// variable RTTs and delayed polling do not bias either rate denominator.
+struct MaxUtilizedBandwidthEstimator {
     rounds: VecDeque<Round>,
-    estimate: WindowedFilter<Estimate, Instant, Duration>,
-    bytes_sent_prev_round: u64,
+    maximum: WindowedFilter<u64, Instant, Duration>,
+    previous_send: Option<SendInterval>,
 }
 
 impl MaxUtilizedBandwidthEstimator {
     fn new() -> Self {
-        let rounds = VecDeque::with_capacity(EST_WIN);
-
-        MaxUtilizedBandwidthEstimator {
-            rounds,
-            estimate: WindowedFilter::new(Duration::from_secs(120)),
-            bytes_sent_prev_round: 0,
+        Self {
+            rounds: VecDeque::with_capacity(EST_WIN),
+            maximum: WindowedFilter::new(FILTER_WINDOW),
+            previous_send: None,
         }
     }
 
     fn new_round(
-        &mut self, time: Instant, bytes_sent: u64, bytes_lost: u64,
-        bytes_acked: u64,
-    ) {
-        if self.rounds.len() == EST_WIN {
-            let _ = self.rounds.pop_front();
+        &mut self, now: Instant, elapsed: Duration, delta: ByteCounts,
+    ) -> u64 {
+        if elapsed.is_zero() {
+            return 0;
         }
-
-        self.rounds.push_back(Round {
-            bytes_sent: self.bytes_sent_prev_round,
-            bytes_acked,
-            bytes_lost,
-            start: time,
-        });
-
-        // Unlike acknowledged and lost byte counts, the sent byte count uses a
-        // window one RTT in the past.
-        self.bytes_sent_prev_round = bytes_sent;
-
-        let bytes_acked = self.rounds.iter().map(|v| v.bytes_acked).sum::<u64>();
-        let bytes_lost = self.rounds.iter().map(|v| v.bytes_lost).sum::<u64>();
-        let bytes_sent = self.rounds.iter().map(|v| v.bytes_sent).sum::<u64>();
-
-        let loss = if bytes_lost == 0 {
-            0.
-        } else {
-            bytes_lost as f32 / bytes_sent as f32
+        // Do not reuse ancient send or feedback history after a long idle gap.
+        if elapsed >= FILTER_WINDOW {
+            self.rounds.clear();
+            self.previous_send = None;
+            self.maximum = WindowedFilter::new(FILTER_WINDOW);
+        }
+        let sent = SendInterval {
+            bytes: delta.sent,
+            duration: elapsed,
         };
-
-        let time_delta = time.duration_since(self.rounds.front().unwrap().start);
-
-        if bytes_acked > 0 {
-            let ack_rate =
-                bandwidth_from_bytes_and_time_delta(bytes_acked, time_delta);
-            let send_rate =
-                bandwidth_from_bytes_and_time_delta(bytes_sent, time_delta);
-            let estimate = Estimate {
-                bandwidth: ack_rate.min(send_rate),
-                loss,
-            };
-
-            if self.rounds.len() < EST_WIN / 2 {
-                self.estimate.reset(estimate, time)
-            } else {
-                self.estimate.update(estimate, time)
+        let previous = self.previous_send.replace(sent);
+        if let Some(previous) = previous {
+            while self.rounds.front().is_some_and(|round| {
+                now.saturating_duration_since(round.end) > FILTER_WINDOW
+            }) {
+                self.rounds.pop_front();
             }
+            if self.rounds.len() == EST_WIN {
+                self.rounds.pop_front();
+            }
+            self.rounds.push_back(Round {
+                sent: previous,
+                acked: delta.acked,
+                feedback_duration: elapsed,
+                end: now,
+            });
         }
-    }
 
-    pub(super) fn get(&self) -> Estimate {
-        // Too few rounds
-        if self.rounds.len() < EST_WIN / 2 {
-            return Default::default();
-        }
-
-        self.estimate.get_best().unwrap_or_default()
+        let (sent_bytes, acked_bytes, sent_nanos, feedback_nanos) =
+            self.rounds.iter().fold(
+                (0_u128, 0_u128, 0_u128, 0_u128),
+                |(sent, acked, send_time, feedback_time), round| {
+                    (
+                        sent + u128::from(round.sent.bytes),
+                        acked + u128::from(round.acked),
+                        send_time + round.sent.duration.as_nanos(),
+                        feedback_time + round.feedback_duration.as_nanos(),
+                    )
+                },
+            );
+        let sample = if self.rounds.len() >= MIN_PAIRED_ROUNDS && delta.acked > 0
+        {
+            bandwidth(sent_bytes, sent_nanos)
+                .min(bandwidth(acked_bytes, feedback_nanos))
+        } else {
+            0
+        };
+        // Always advance the filter, including samples with no ACKs. Otherwise
+        // a previously busy but now idle connection contributes forever.
+        self.maximum.update(sample, now);
+        self.maximum.get_best().unwrap_or_default()
     }
 }
 
-/// Bandwidth in bits per second from bytes and time period
-fn bandwidth_from_bytes_and_time_delta(bytes: u64, time_delta: Duration) -> u64 {
-    if bytes == 0 {
+/// Rate in bits per second, with saturating conversion for extreme counters.
+fn bandwidth(bytes: u128, nanos: u128) -> u64 {
+    if nanos == 0 {
         return 0;
     }
-
-    let mut nanos = time_delta.as_nanos();
-    if nanos == 0 {
-        nanos = 1;
-    }
-
-    let num_nano_bits = 8 * bytes as u128 * 1_000_000_000;
-    if num_nano_bits < nanos {
-        return 1;
-    }
-
-    (num_nano_bits / nanos) as u64
-}
-
-/// Below is windowed filter implementation from quiche
-#[derive(Clone, Copy)]
-struct Sample<T, I> {
-    sample: T,
-    time: I,
-}
-
-pub struct WindowedFilter<T, I, D> {
-    window_length: D,
-    estimates: [Option<Sample<T, I>>; 3],
-}
-
-impl<T, I, D> WindowedFilter<T, I, D>
-where
-    T: Ord + Copy,
-    I: Sub<I, Output = D> + Copy,
-    D: Ord + Div<u32, Output = D> + Copy,
-{
-    pub fn new(window_length: D) -> Self {
-        WindowedFilter {
-            window_length,
-            estimates: [None, None, None],
-        }
-    }
-
-    pub fn reset(&mut self, new_sample: T, new_time: I) {
-        let sample = Some(Sample {
-            sample: new_sample,
-            time: new_time,
-        });
-
-        self.estimates = [sample, sample, sample];
-    }
-
-    pub fn get_best(&self) -> Option<T> {
-        self.estimates[0].as_ref().map(|e| e.sample)
-    }
-
-    pub fn update(&mut self, new_sample: T, new_time: I) {
-        // Reset all estimates if they have not yet been initialized, if new
-        // sample is a new best, or if the newest recorded estimate is too
-        // old.
-        if match &self.estimates[0] {
-            None => true,
-            Some(best) if new_sample > best.sample => true,
-            _ =>
-                new_time - self.estimates[2].as_ref().unwrap().time >
-                    self.window_length,
-        } {
-            return self.reset(new_sample, new_time);
-        }
-
-        if new_sample > self.estimates[1].unwrap().sample {
-            self.estimates[1] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            self.estimates[2] = self.estimates[1];
-        } else if new_sample > self.estimates[2].unwrap().sample {
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-        }
-
-        // Expire and update estimates as necessary.
-        if new_time - self.estimates[0].unwrap().time > self.window_length {
-            // The best estimate hasn't been updated for an entire window, so
-            // promote second and third best estimates.
-            self.estimates[0] = self.estimates[1];
-            self.estimates[1] = self.estimates[2];
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            // The new best estimate may also be stale. Check it once more. The
-            // check at the start of the method handles further stale samples.
-            if new_time - self.estimates[0].unwrap().time > self.window_length {
-                self.estimates[0] = self.estimates[1];
-                self.estimates[1] = self.estimates[2];
-            }
-            return;
-        }
-
-        if self.estimates[1].unwrap().sample == self.estimates[0].unwrap().sample &&
-            new_time - self.estimates[1].unwrap().time > self.window_length / 4
-        {
-            // No better sample arrived for a quarter of the window, so take the
-            // second-best estimate from the second quarter.
-            self.estimates[1] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-            self.estimates[2] = self.estimates[1];
-            return;
-        }
-
-        if self.estimates[2].unwrap().sample == self.estimates[1].unwrap().sample &&
-            new_time - self.estimates[2].unwrap().time > self.window_length / 2
-        {
-            // We've passed a half of the window without a better estimate, so
-            // take a third-best estimate from the second half of the
-            // window.
-            self.estimates[2] = Some(Sample {
-                sample: new_sample,
-                time: new_time,
-            });
-        }
-    }
+    let bits_per_second = bytes.saturating_mul(8_000_000_000) / nanos;
+    u64::try_from(bits_per_second).unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn round(
+        estimator: &mut MaxUtilizedBandwidthEstimator, now: &mut Instant,
+        elapsed: Duration, sent: u64, acked: u64, lost: u64,
+    ) -> u64 {
+        *now += elapsed;
+        estimator.new_round(*now, elapsed, ByteCounts { sent, acked, lost })
+    }
+
     #[test]
-    fn estimate() {
-        let mut now = Instant::now();
-
+    fn unequal_intervals_use_independent_send_and_feedback_durations() {
         let mut estimator = MaxUtilizedBandwidthEstimator::new();
-
-        assert_eq!(estimator.get().bandwidth, 0);
-        assert!(estimator.estimate.get_best().is_none());
-
-        // First round send 30M, nothing gets acked
-        estimator.new_round(now, 30_000_000, 0, 0);
-
-        // There are not enough rounds for an estimate yet.
-        assert_eq!(estimator.get().bandwidth, 0);
-        assert!(estimator.estimate.get_best().is_none());
-
-        now += Duration::from_secs(30);
-
-        // Send 60M, previous 30M gets acked
-        estimator.new_round(now, 60_000_000, 0, 30_000_000);
-
-        // 30 MB over 30 seconds is 1 MBps, or 8 Mbps.
-        // There are not enough rounds for an estimate yet.
-        assert_eq!(estimator.get().bandwidth, 0);
-        assert_eq!(estimator.estimate.get_best().unwrap().bandwidth, 8_000_000);
-
-        now += Duration::from_secs(30);
-
-        // Send 90M, previous 60M gets acked
-        estimator.new_round(now, 90_000_000, 0, 60_000_000);
-
-        // 90 MB over 60 seconds is 1.5 MBps, or 12 Mbps.
-        // There are not enough rounds for an estimate yet.
-        assert_eq!(estimator.get().bandwidth, 0);
-        assert_eq!(estimator.estimate.get_best().unwrap().bandwidth, 12_000_000);
-
-        now += Duration::from_secs(30);
-
-        // Send 10M, previous 90M gets acked
-        estimator.new_round(now, 30_000_000, 0, 90_000_000);
-
-        // 180 MB over 90 seconds is 2 MBps, or 16 Mbps.
-        // There are not enough rounds for an estimate yet.
-        assert_eq!(estimator.get().bandwidth, 0);
-        assert_eq!(estimator.estimate.get_best().unwrap().bandwidth, 16_000_000);
-
-        for _ in 0..4 {
-            now += Duration::from_secs(30);
-            // Send another 10M, previous 10M gets acked
-            estimator.new_round(now, 30_000_000, 0, 30_000_000);
-            // The bandwidth is lower but it doesn't matter, we record highest
-            // bandwidth, so it remains as before for two minutes
-            assert_eq!(estimator.get().bandwidth, 16_000_000);
+        let mut now = Instant::now();
+        // Constant 8 Mbps over alternating 1/2-second intervals. Feedback
+        // arrives one sample late, but is capped by its actual delivery rate.
+        let periods = [1, 2, 1, 2, 1];
+        let mut previous_sent = 0;
+        let mut estimate = 0;
+        for seconds in periods {
+            let sent = seconds * 1_000_000;
+            estimate = round(
+                &mut estimator,
+                &mut now,
+                Duration::from_secs(seconds),
+                sent,
+                previous_sent,
+                0,
+            );
+            previous_sent = sent;
         }
+        assert_eq!(estimate, 8_000_000);
+    }
 
-        // After two minutes the filter is updated, and the max bandwidth is
-        // reduced
-        now += Duration::from_secs(30);
-        // Send another 10M, previous 10M gets acked
-        estimator.new_round(now, 30_000_000, 0, 30_000_000);
+    #[test]
+    fn idle_period_expires_previous_peak_even_without_acks() {
+        let mut estimator = MaxUtilizedBandwidthEstimator::new();
+        let mut now = Instant::now();
+        let mut estimate = 0;
+        for _ in 0..5 {
+            estimate = round(
+                &mut estimator,
+                &mut now,
+                Duration::from_secs(1),
+                1_000_000,
+                1_000_000,
+                0,
+            );
+        }
+        assert_eq!(estimate, 8_000_000);
+        for _ in 0..3 {
+            estimate =
+                round(&mut estimator, &mut now, Duration::from_secs(41), 0, 0, 0);
+        }
+        assert_eq!(estimate, 0);
+    }
 
-        assert!(estimator.get().bandwidth < 8 * 2_000_000);
+    #[test]
+    fn loss_is_bounded_when_feedback_is_delayed_or_only_losses_arrive() {
+        assert_eq!(LossRatio::from_outcomes(0, 0).0, 0);
+        assert_eq!(LossRatio::from_outcomes(0, 100).0, 10_000);
+        assert_eq!(LossRatio::from_outcomes(75, 25).0, 2_500);
+        assert_eq!(LossRatio::from_outcomes(2, 1).0, 3_333);
+        assert_eq!(LossRatio::from_outcomes(0, 1).rounded_percent(), 100);
+    }
+
+    #[test]
+    fn bandwidth_saturates_extreme_values_and_has_no_zero_time_spike() {
+        assert_eq!(bandwidth(u128::from(u64::MAX), 1), u64::MAX);
+        assert_eq!(bandwidth(10, 0), 0);
+        assert_eq!(bandwidth(1, 8_000_000_001), 0);
+    }
+
+    #[test]
+    fn first_interval_loss_is_reported_without_bandwidth_warmup() {
+        let mut reporter = BandwidthReporter::new(Gauge::default());
+        let now = reporter.last_update + Duration::from_secs(1);
+        reporter.update_counters(
+            ByteCounts {
+                sent: 100,
+                acked: 0,
+                lost: 100,
+            },
+            now,
+            None,
+        );
+        assert_eq!(reporter.max_bandwidth, 0);
+        assert_eq!(reporter.max_loss.rounded_percent(), 100);
+    }
+
+    #[test]
+    fn gauge_tracks_delta_and_is_released_on_drop() {
+        let gauge = Gauge::default();
+        let mut reporter = BandwidthReporter::new(gauge.clone());
+        let mut now = reporter.last_update;
+        for count in 1..=5 {
+            now += Duration::from_secs(1);
+            reporter.update_counters(
+                ByteCounts {
+                    sent: count * 1_000_000,
+                    acked: count * 1_000_000,
+                    lost: 0,
+                },
+                now,
+                Some(Duration::from_secs(1)),
+            );
+        }
+        assert_eq!(reporter.max_bandwidth, 8_000_000);
+        assert_eq!(gauge.get(), 8_000_000);
+        now += Duration::from_secs(1);
+        reporter.update_counters(
+            ByteCounts {
+                sent: 5_000_000,
+                acked: 5_000_000,
+                lost: 2_000_000,
+            },
+            now,
+            None,
+        );
+        assert!(reporter.max_loss.0 > 0);
+        now += Duration::from_secs(1);
+        reporter.update_counters(ByteCounts::default(), now, None);
+        assert_eq!(gauge.get(), 0);
+        reporter.set_bandwidth(100);
+        drop(reporter);
+        assert_eq!(gauge.get(), 0);
     }
 }

@@ -10504,3 +10504,6 @@ pub(crate) mod scale;
 mod stream;
 mod tls;
 pub(crate) mod transport_params;
+/// Shared bounded rolling maximum used by recovery and runtime telemetry.
+#[doc(hidden)]
+pub mod windowed_filter;

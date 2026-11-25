@@ -9,7 +9,7 @@ Async HTTP/3 driver bridging `quiche::h3::Connection` to Tokio tasks via channel
 | File | Role |
 |------|------|
 | `mod.rs` | `H3Driver`, `H3Controller`, `H3Event`, `H3Command`, `OutboundFrame`/`InboundFrame`, channel types, `ApplicationOverQuic` impl |
-| `hooks.rs` | `DriverHooks` trait (sealed). Defines `headers_received`, `stream_recv_closed`, `stream_closed`, `conn_established`, `conn_command`, `wait_for_action` |
+| `hooks.rs` | `DriverHooks` trait (sealed). Defines `headers_received`, `stream_recv_closed`, `stream_closed`, `conn_established`, `conn_command`, `process_pending_writes`, `peer_goaway`, `wait_for_action` |
 | `client.rs` | `ClientHooks` impl, `ClientH3Driver`/`ClientH3Controller` aliases, `ClientH3Event`/`ClientH3Command` |
 | `server.rs` | `ServerHooks` impl, `ServerH3Driver`/`ServerH3Controller` aliases, `ServerH3Event`/`ServerH3Command` |
 | `streams.rs` | `StreamCtx`, `FlowCtx`, `WaitForStream` future, capacity/readiness signals |
@@ -47,3 +47,5 @@ Async HTTP/3 driver bridging `quiche::h3::Connection` to Tokio tasks via channel
 - `H3Event` variants: `IncomingSettings`, `IncomingHeaders`, `NewFlow`, `ResetStream`, `ConnectionError`, `ConnectionShutdown`, `BodyBytesReceived`, `StreamClosed`.
 - `H3Command` variants: `QuicCmd`, `GoAway`, `ShutdownStream`.
 - Type aliases (`ClientH3Driver`, `ServerH3Driver`, etc.) are the public API; `H3Driver<H>` and `DriverHooks` are internal.
+
+- Client request retries are FIFO and transport-driven via `process_pending_writes`; do not re-enqueue commands through an internal sender or poll stream credit on a timer. Peer GOAWAY rejects unassigned requests explicitly without closing the established streams.
