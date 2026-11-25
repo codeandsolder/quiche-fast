@@ -35,6 +35,51 @@ fn wrapped_http3_and_quic_errors_expose_their_sources() {
     }
 }
 
+/// The peer's first HEADERS are already queued when the deadline expires.
+/// Processing the network input directly must not bypass timeout enforcement.
+#[tokio::test(start_paused = true)]
+async fn late_first_headers_are_rejected_without_polling_idle_timer(
+) -> anyhow::Result<()> {
+    use crate::http3::settings::Http3Settings;
+    use std::time::Duration;
+
+    let settings = Http3Settings {
+        post_accept_timeout: Some(Duration::from_secs(5)),
+        ..Http3Settings::default()
+    };
+    let pipe = quiche::test_utils::Pipe::with_config_and_buf(
+        &mut default_quiche_config(),
+    )?;
+    let mut helper =
+        DriverTestHelper::<ServerHooks>::with_pipe_and_http3_settings(
+            pipe, settings,
+        )?;
+    helper.complete_handshake()?;
+    helper.advance_and_run_loop()?;
+    helper.peer_client_send_request(make_request_headers("GET"), true)?;
+    helper.pipe.advance()?;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let error = helper
+        .driver
+        .process_reads(&mut helper.pipe.server)
+        .err()
+        .ok_or_else(|| anyhow::anyhow!("late first request was accepted"))?;
+    assert_eq!(
+        error.downcast_ref::<H3ConnectionError>(),
+        Some(&H3ConnectionError::PostAcceptTimeout)
+    );
+    assert!(helper.driver.stream_map.is_empty());
+    assert_eq!(
+        helper
+            .pipe
+            .server
+            .local_error()
+            .map(|err| (err.is_app, err.error_code)),
+        Some((true, h3::WireErrorCode::NoError as u64))
+    );
+    Ok(())
+}
+
 /// Tests for the body receive buffer sizing helper.
 mod body_recv_buf_size {
     use super::*;
@@ -1470,82 +1515,58 @@ mod server_side_driver {
         assert_eq!(audit_stats.downstream_bytes_sent(), 0);
     }
 
-    /// FIXME: this test is currently broken.
-    ///
-    /// Two issues: WaitingStreams::cancel_downstream() drops the channel and
-    /// there could be regular frames queued before the `PeerStreamError`.
-    ///
-    /// A buffered peer stream error must still shut down both directions after
-    /// a stop closes its parked receiver.
+    /// Control-plane shutdown must still reach the read half after the
+    /// peer has stopped the write half and its data channel was cancelled.
     #[test]
-    #[ignore]
-    fn peer_stream_error_after_stop_closes_both_directions() {
-        let mut helper = DriverTestHelper::<ServerHooks>::new().unwrap();
-        helper.complete_handshake().unwrap();
-        helper.advance_and_run_loop().unwrap();
-
+    fn control_shutdown_after_stop_closes_remaining_direction(
+    ) -> anyhow::Result<()> {
+        let mut helper = DriverTestHelper::<ServerHooks>::new()?;
+        helper.complete_handshake()?;
+        helper.advance_and_run_loop()?;
         let stream_id = helper
-            .peer_client_send_request(make_request_headers("POST"), false)
-            .unwrap();
-
-        helper.advance_and_run_loop().unwrap();
-
+            .peer_client_send_request(make_request_headers("POST"), false)?;
+        helper.advance_and_run_loop()?;
         let req = assert_matches!(
-            helper.driver_recv_server_event().unwrap(),
+            helper.driver_recv_server_event()?,
             ServerH3Event::Headers { incoming_headers, .. } => incoming_headers
         );
-
-        // Keep the error buffered until STOP_SENDING closes the parked
-        // receiver.
-        let to_client = req.send.get_ref().unwrap();
-        // FIXME: A regular queued frame exposes the case where the buffered
-        // error is lost while the parked receiver is being closed.
-        helper
-            .driver
-            .stream_map
-            .get_mut(&stream_id)
-            .unwrap()
-            .queued_frame =
-            Some(OutboundFrame::Body(Bytes::from_static(b"body"), false));
-        to_client.try_send(OutboundFrame::PeerStreamError).unwrap();
-
-        helper
-            .pipe
-            .client
-            .stream_shutdown(stream_id, quiche::Shutdown::Read, 4242)
-            .unwrap();
-
-        let flight =
-            quiche::test_utils::emit_flight(&mut helper.pipe.client).unwrap();
-        quiche::test_utils::process_flight(&mut helper.pipe.server, flight)
-            .unwrap();
-
-        // Process STOP_SENDING before reading the buffered peer stream error.
-        helper
-            .driver
-            .process_writes(&mut helper.pipe.server)
-            .unwrap();
-
-        assert!(!helper.driver.stream_map.contains_key(&stream_id));
+        let to_client = req
+            .send
+            .get_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing sender"))?;
+        to_client
+            .try_send(OutboundFrame::Body(Bytes::from_static(b"body"), false))
+            .map_err(|_| anyhow::anyhow!("queueing body"))?;
+        helper.pipe.client.stream_shutdown(
+            stream_id,
+            quiche::Shutdown::Read,
+            4242,
+        )?;
+        let flight = quiche::test_utils::emit_flight(&mut helper.pipe.client)?;
+        quiche::test_utils::process_flight(&mut helper.pipe.server, flight)?;
+        helper.driver.process_writes(&mut helper.pipe.server)?;
+        assert!(helper.driver.stream_map.contains_key(&stream_id));
         assert!(to_client.is_closed());
+        let code = h3::WireErrorCode::MessageError as u64;
+        helper
+            .controller
+            .shutdown_stream(stream_id, StreamShutdown::Both {
+                read_error_code: code,
+                write_error_code: code,
+            });
+        helper.advance_and_run_loop()?;
+        assert!(!helper.driver.stream_map.contains_key(&stream_id));
         assert_eq!(req.h3_audit_stats.recvd_stop_sending_error_code(), 4242);
         assert_eq!(
             req.h3_audit_stats.sent_stop_sending_error_code(),
-            h3::WireErrorCode::MessageError as i64,
+            code as i64
         );
-        assert_eq!(
-            req.h3_audit_stats.sent_reset_stream_error_code(),
-            h3::WireErrorCode::MessageError as i64,
-        );
-
-        helper.pipe.advance().unwrap();
-
+        assert_eq!(req.h3_audit_stats.sent_reset_stream_error_code(), -1);
         assert_eq!(
             helper.peer_client_send_body(stream_id, b"body", false),
-            Err(h3::Error::Transport(quiche::Error::StreamStopped(
-                h3::WireErrorCode::MessageError as u64,
-            )))
+            Err(h3::Error::Transport(quiche::Error::StreamStopped(code)))
         );
+        Ok(())
     }
 
     #[test]
@@ -1603,7 +1624,7 @@ mod server_side_driver {
 
             let ctx = helper.driver.stream_map.get(&stream_id).unwrap();
             assert_eq!(
-                ctx.fin_or_reset_recv,
+                ctx.read_state != ReadState::Open,
                 !matches!(request_state, RequestState::Open)
             );
 
@@ -2645,6 +2666,50 @@ mod server_side_driver {
         assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
     }
 
+    #[test]
+    fn response_fin_does_not_discard_blocked_request_fin() -> anyhow::Result<()> {
+        let mut helper = DriverTestHelper::<ServerHooks>::new()?;
+        helper.complete_handshake()?;
+        helper.advance_and_run_loop()?;
+        let stream_id = helper
+            .peer_client_send_request(make_request_headers("POST"), false)?;
+        helper.advance_and_run_loop()?;
+        let mut req = assert_matches!(
+            helper.driver_recv_server_event()?,
+            ServerH3Event::Headers { incoming_headers, .. } => incoming_headers
+        );
+        let sender = req
+            .send
+            .get_ref()
+            .ok_or_else(|| anyhow::anyhow!("missing sender"))?
+            .clone();
+        sender
+            .try_send(OutboundFrame::Headers(make_response_headers(), None))
+            .map_err(|_| anyhow::anyhow!("queueing response headers"))?;
+        helper.advance_and_run_loop()?;
+        helper.peer_client_send_body(stream_id, b"body", true)?;
+        helper.advance_and_run_loop()?;
+        assert_eq!(
+            helper
+                .driver
+                .stream_map
+                .get(&stream_id)
+                .map(|ctx| ctx.read_state),
+            Some(ReadState::FinPending)
+        );
+        sender
+            .try_send(OutboundFrame::Body(Bytes::new(), true))
+            .map_err(|_| anyhow::anyhow!("queueing response FIN"))?;
+        helper.advance_and_run_loop()?;
+        assert!(helper.driver.stream_map.contains_key(&stream_id));
+        let (body, fin, status) = helper.driver_try_recv_body(&mut req.recv);
+        assert_eq!(body, b"body");
+        assert!(fin);
+        assert_eq!(status, TryRecvError::Disconnected);
+        assert!(!helper.driver.stream_map.contains_key(&stream_id));
+        Ok(())
+    }
+
     /// Test that calling `H3Controller::shutdown_stream` with
     /// `StreamShutdown::Write` sends a RESET_STREAM frame to the peer.
     #[test]
@@ -2663,7 +2728,7 @@ mod server_side_driver {
 
         // server reads request
         helper.advance_and_run_loop().unwrap();
-        let req = assert_matches!(
+        let mut req = assert_matches!(
             helper.driver_recv_server_event().unwrap(),
             ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
         );
@@ -2693,6 +2758,16 @@ mod server_side_driver {
             CUSTOM_ERROR_CODE as i64
         );
         assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert!(helper.driver.stream_map.contains_key(&stream_id));
+        helper
+            .peer_client_send_body(stream_id, b"still readable", true)
+            .unwrap();
+        helper.advance_and_run_loop().unwrap();
+        let (body, fin, status) = helper.driver_try_recv_body(&mut req.recv);
+        assert_eq!(body, b"still readable");
+        assert!(fin);
+        assert_eq!(status, TryRecvError::Disconnected);
+        assert!(!helper.driver.stream_map.contains_key(&stream_id));
     }
 
     /// Test that calling `H3Controller::shutdown_stream` with
@@ -2743,6 +2818,22 @@ mod server_side_driver {
             audit_stats.sent_stop_sending_error_code(),
             CUSTOM_ERROR_CODE as i64
         );
+        assert!(helper.driver.stream_map.contains_key(&stream_id));
+        let to_client = req.send.get_ref().unwrap();
+        to_client
+            .try_send(OutboundFrame::Headers(make_response_headers(), None))
+            .unwrap();
+        helper.advance_and_run_loop().unwrap();
+        assert_matches!(
+            helper.peer_client_poll(),
+            Ok((0, h3::Event::Headers { .. }))
+        );
+        to_client
+            .try_send(OutboundFrame::Body(Bytes::new(), true))
+            .unwrap();
+        helper.advance_and_run_loop().unwrap();
+        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
+        assert!(!helper.driver.stream_map.contains_key(&stream_id));
     }
 
     /// Test that calling `H3Controller::shutdown_stream` with

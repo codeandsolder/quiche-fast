@@ -99,9 +99,6 @@ impl ExampleBody {
                 Err(error) => {
                     log::error!("Received error when sending or receiving HTTP body: {error:?}");
 
-                    let fin_chunk = OutboundFrame::PeerStreamError;
-                    frame_sender.send(fin_chunk).await.ok()?;
-
                     return None;
                 },
             }

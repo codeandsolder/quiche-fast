@@ -308,6 +308,7 @@ where
     let acceptor = ConnectionAcceptor::new(
         ConnectionAcceptorConfig {
             disable_client_ip_validation: config.disable_client_ip_validation,
+            reply_backlog: config.listen_backlog,
             enable_per_connection_dscp: params.enable_per_connection_dscp,
             qlog_dir: config.qlog_dir.clone(),
             qlog_compression: config.qlog_compression,
@@ -316,11 +317,7 @@ where
                 .as_ref()
                 .and_then(|f| f.try_clone().ok()),
             #[cfg(target_os = "linux")]
-            with_pktinfo: if local_addr.is_ipv4() {
-                config.has_ippktinfo
-            } else {
-                config.has_ipv6pktinfo
-            },
+            with_pktinfo: config.supports_pktinfo(local_addr),
         },
         Arc::clone(&socket_tx),
         socket.cid_generator,

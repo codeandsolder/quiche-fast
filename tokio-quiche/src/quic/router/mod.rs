@@ -328,13 +328,11 @@ where
             peer_addr,
             local_addr,
             pending_cid: pending_cid.clone(),
-            with_gso: self.config.has_gso,
-            pacing_offload: self.config.pacing_offload,
-            with_pktinfo: if self.local_addr.is_ipv4() {
-                self.config.has_ippktinfo
-            } else {
-                self.config.has_ipv6pktinfo
-            },
+            with_gso: self.config.supports(crate::socket::SocketCapability::Gso),
+            pacing_offload: self
+                .config
+                .supports(crate::socket::SocketCapability::TransmitTime),
+            with_pktinfo: self.config.supports_pktinfo(self.local_addr),
             pool_send_buffer: self.config.pool_send_buffer,
         };
 
@@ -822,6 +820,7 @@ mod tests {
         let acceptor = ConnectionAcceptor::new(
             ConnectionAcceptorConfig {
                 disable_client_ip_validation: config.disable_client_ip_validation,
+                reply_backlog: config.listen_backlog,
                 enable_per_connection_dscp: params.enable_per_connection_dscp,
                 qlog_dir: config.qlog_dir.clone(),
                 qlog_compression: config.qlog_compression,

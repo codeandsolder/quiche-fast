@@ -46,26 +46,23 @@ const KEYLOGFILE_ENABLED: bool =
     cfg!(capture_keylogs) || cfg!(feature = "capture_keylogs");
 
 /// Internal representation of the combined configuration for a QUIC connection.
-pub(crate) struct Config {
-    pub quiche_config: quiche::Config,
+pub struct Config {
+    core: quiche::Config,
     pub disable_client_ip_validation: bool,
     pub qlog_dir: Option<String>,
     pub qlog_compression: QlogCompression,
-    pub has_gso: bool,
-    pub pacing_offload: bool,
     pub enable_expensive_packet_count_metrics: bool,
     pub keylog_file: Option<File>,
     pub listen_backlog: usize,
     pub handshake_timeout: Option<Duration>,
-    pub has_ippktinfo: bool,
-    pub has_ipv6pktinfo: bool,
     pub pool_send_buffer: bool,
+    socket_capabilities: SocketCapabilities,
     pub connection_hook: Option<Arc<dyn ConnectionHook + Send + Sync + 'static>>,
 }
 
 impl AsMut<quiche::Config> for Config {
     fn as_mut(&mut self) -> &mut quiche::Config {
-        &mut self.quiche_config
+        &mut self.core
     }
 }
 
@@ -75,10 +72,10 @@ impl Config {
     ) -> QuicResult<Self> {
         let quic_settings = &params.settings;
         validate_runtime_settings(quic_settings)?;
-        let keylog_path = match &quic_settings.keylog_file {
-            Some(f) => Some(Cow::Borrowed(f.as_ref())),
-            None => std::env::var_os("SSLKEYLOGFILE").map(Cow::from),
-        };
+        let keylog_path = quic_settings.keylog_file.as_ref().map_or_else(
+            || std::env::var_os("SSLKEYLOGFILE").map(Cow::from),
+            |path| Some(Cow::Borrowed(path.as_ref())),
+        );
         let keylog_file = keylog_path.and_then(|path| if KEYLOGFILE_ENABLED {
                 File::options().create(true).append(true).open(path)
                     .inspect_err(|e| {
@@ -90,34 +87,44 @@ impl Config {
                 None
             });
 
-        let has_gso = socket_capabilities.contains(SocketCapability::Gso);
-        let pacing_offload =
-            socket_capabilities.contains(SocketCapability::TransmitTime);
-        let has_ippktinfo =
-            socket_capabilities.contains(SocketCapability::Ipv4PacketInfo);
-        let has_ipv6pktinfo =
-            socket_capabilities.contains(SocketCapability::Ipv6PacketInfo);
+        // Preserve the typed capability set instead of duplicating individual
+        // flags. The effective set also respects transport pacing policy.
+        let socket_capabilities =
+            if cfg!(feature = "gcongestion") && !quic_settings.enable_pacing {
+                socket_capabilities.without(SocketCapability::TransmitTime)
+            } else {
+                socket_capabilities
+            };
 
-        #[cfg(feature = "gcongestion")]
-        let pacing_offload = quic_settings.enable_pacing && pacing_offload;
-
-        Ok(Config {
-            quiche_config: make_quiche_config(params, keylog_file.is_some())?,
+        Ok(Self {
+            core: make_quiche_config(params, keylog_file.is_some())?,
             disable_client_ip_validation: quic_settings
                 .disable_client_ip_validation,
             qlog_dir: quic_settings.qlog_dir.clone(),
             qlog_compression: quic_settings.qlog_compression,
-            has_gso,
-            pacing_offload,
             enable_expensive_packet_count_metrics: quic_settings
                 .enable_expensive_packet_count_metrics,
             keylog_file,
             listen_backlog: quic_settings.listen_backlog,
             handshake_timeout: quic_settings.handshake_timeout,
-            has_ippktinfo,
-            has_ipv6pktinfo,
             pool_send_buffer: quic_settings.pool_send_buffer,
+            socket_capabilities,
             connection_hook: params.hooks.connection_hook.clone(),
+        })
+    }
+
+    pub(crate) const fn supports(&self, capability: SocketCapability) -> bool {
+        self.socket_capabilities.contains(capability)
+    }
+
+    /// Select packet information for the socket's address family.
+    pub(crate) const fn supports_pktinfo(
+        &self, addr: std::net::SocketAddr,
+    ) -> bool {
+        self.supports(if addr.is_ipv4() {
+            SocketCapability::Ipv4PacketInfo
+        } else {
+            SocketCapability::Ipv6PacketInfo
         })
     }
 }

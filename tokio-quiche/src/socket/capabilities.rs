@@ -332,6 +332,12 @@ impl SocketCapabilities {
         self.0 & capability.mask() != 0
     }
 
+    /// Derives a capability set with a particular option disabled by policy.
+    #[must_use = "the returned capability set contains the policy change"]
+    pub const fn without(self, capability: SocketCapability) -> Self {
+        Self(self.0 & !capability.mask())
+    }
+
     /// Lists the enabled capabilities.
     pub fn iter(self) -> impl Iterator<Item = SocketCapability> {
         SocketCapability::ALL
@@ -393,6 +399,25 @@ mod tests {
             capabilities.iter().collect::<Vec<_>>(),
             SocketCapability::ALL
         );
+    }
+
+    #[test]
+    fn disabling_one_capability_preserves_every_other_flag() {
+        let mut enabled = SocketCapabilities::default();
+        for capability in SocketCapability::ALL {
+            enabled.insert(capability);
+        }
+        for disabled in SocketCapability::ALL {
+            let effective = enabled.without(disabled);
+            for capability in SocketCapability::ALL {
+                assert_eq!(
+                    effective.contains(capability),
+                    capability != disabled
+                );
+                assert!(enabled.contains(capability));
+            }
+            assert_eq!(effective.without(disabled), effective);
+        }
     }
 
     #[cfg(target_os = "linux")]

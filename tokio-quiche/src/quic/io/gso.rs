@@ -113,6 +113,40 @@ pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
     }
 }
 
+/// Result of a deadline-bounded send. Expired batches are treated as packet
+/// loss by the QUIC worker, not retried with the same packet numbers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SendOutcome {
+    Sent,
+    DeadlineExpired,
+}
+
+/// Cancel a pending datagram send when its owner needs to service a timer.
+/// Software segmentation may have already sent a prefix of the batch; the
+/// transport recovery machinery, rather than this layer, recovers its suffix.
+pub(crate) async fn send_packets_before<
+    S: DatagramSocketSend + ?Sized,
+    M: Metrics,
+>(
+    socket: &S, buffer: &[u8], packet: PacketSend, metrics: &M, deadline: Instant,
+) -> io::Result<SendOutcome> {
+    let deadline = tokio::time::Instant::from_std(deadline);
+    if deadline > tokio::time::Instant::now() {
+        // A successful ready send needs no registered timer. Pending sends
+        // remain cancellable through the socket's poll-based API.
+        if let Ok(result) = tokio::time::timeout_at(
+            deadline,
+            send_packets(socket, buffer, packet, metrics),
+        )
+        .await
+        {
+            return result.map(|()| SendOutcome::Sent);
+        }
+    }
+    metrics.write_errors(QuicWriteError::DeadlineExpired).inc();
+    Ok(SendOutcome::DeadlineExpired)
+}
+
 fn checked_segment_size(size: Option<usize>) -> io::Result<Option<u16>> {
     size.map(|size| {
         u16::try_from(size)
@@ -812,6 +846,80 @@ mod send_tests {
             .ok_or("partial send was accepted")?;
         assert_eq!(error.kind(), io::ErrorKind::WriteZero);
         assert!(!recoverable_send_error(&error));
+        Ok(())
+    }
+
+    struct BlockedSocket;
+
+    impl DatagramSocketSend for BlockedSocket {
+        fn poll_send(
+            &self, _cx: &mut Context<'_>, _buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Poll::Pending
+        }
+
+        fn poll_send_to(
+            &self, cx: &mut Context<'_>, buffer: &[u8], _addr: SocketAddr,
+        ) -> Poll<io::Result<usize>> {
+            self.poll_send(cx, buffer)
+        }
+    }
+
+    #[tokio::test]
+    async fn blocked_send_releases_at_deadline_and_expired_send_is_not_started(
+    ) -> crate::QuicResult<()> {
+        tokio::time::pause();
+        let packet = PacketSend {
+            to: "127.0.0.1:1234".parse()?,
+            from: None,
+            segment_size: None,
+            tx_time: None,
+            dscp: None,
+        };
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        assert_eq!(
+            super::send_packets_before(
+                &BlockedSocket,
+                b"packet",
+                packet,
+                &DefaultMetrics,
+                deadline.into_std()
+            )
+            .await?,
+            super::SendOutcome::DeadlineExpired,
+        );
+        assert!(tokio::time::Instant::now() >= deadline);
+        let socket = RecordingSocket::default();
+        assert_eq!(
+            super::send_packets_before(
+                &socket,
+                b"expired",
+                packet,
+                &DefaultMetrics,
+                deadline.into_std()
+            )
+            .await?,
+            super::SendOutcome::DeadlineExpired,
+        );
+        assert!(socket
+            .datagrams
+            .lock()
+            .map_err(|_| "recording socket poisoned")?
+            .is_empty());
+        let next_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        assert_eq!(
+            super::send_packets_before(
+                &socket,
+                b"ready",
+                packet,
+                &DefaultMetrics,
+                next_deadline.into_std()
+            )
+            .await?,
+            super::SendOutcome::Sent,
+        );
         Ok(())
     }
 
