@@ -336,6 +336,12 @@ pub fn parse_event(event_hdr: &EventHeader, event: &[u8]) -> Option<Event> {
 
 pub mod constants;
 pub mod h2;
+/// The common parameter envelope of a Chrome netlog event.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Default)]
+pub struct EventPayload<T> {
+    pub params: T,
+}
+
 pub mod h3;
 pub mod http;
 pub mod quic;

@@ -28,6 +28,7 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use super::EventHeader;
+use super::EventPayload;
 
 #[cfg_attr(
     feature = "nightly-clippy-expects",
@@ -38,12 +39,12 @@ use super::EventHeader;
 )]
 #[derive(Debug)]
 pub enum Event {
-    Http3PriorityUpdateSent(Http3PriorityUpdateSentEvent),
-    Http3HeadersSent(Http3HeadersSentEvent),
-    Http3DataSent(Http3DataSentEvent),
-    Http3HeadersReceived(Http3HeadersReceivedEvent),
-    Http3HeadersDecoded(Http3HeadersDecodedEvent),
-    Http3DataFrameReceived(Http3DataFrameReceivedEvent),
+    Http3PriorityUpdateSent(EventPayload<Http3PriorityUpdateSentParams>),
+    Http3HeadersSent(EventPayload<Http3HeadersParams>),
+    Http3DataSent(EventPayload<Http3DataParams>),
+    Http3HeadersReceived(EventPayload<Http3HeadersReceivedParams>),
+    Http3HeadersDecoded(EventPayload<Http3HeadersParams>),
+    Http3DataFrameReceived(EventPayload<Http3DataParams>),
 }
 #[derive(Serialize, Deserialize, Debug, Default)]
 #[serde(rename_all = "snake_case")]
@@ -63,33 +64,18 @@ pub struct Http3PriorityUpdateSentParams {
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3PriorityUpdateSentEvent {
-    pub params: Http3PriorityUpdateSentParams,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3HeadersSentParams {
+pub struct Http3HeadersParams {
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
     pub headers: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3HeadersSentEvent {
-    pub params: Http3HeadersSentParams,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3DataSentParams {
+pub struct Http3DataParams {
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub payload_length: u64,
     #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub stream_id: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3DataSentEvent {
-    pub params: Http3DataSentParams,
 }
 
 #[derive(Serialize, Deserialize, Debug, Default)]
@@ -100,36 +86,6 @@ pub struct Http3HeadersReceivedParams {
     pub compressed_headers_length: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3HeadersReceivedEvent {
-    pub params: Http3HeadersReceivedParams,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3HeadersDecodedParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
-    pub stream_id: u64,
-    pub headers: Vec<String>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3HeadersDecodedEvent {
-    pub params: Http3HeadersDecodedParams,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3DataFrameReceivedParams {
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
-    pub payload_length: u64,
-    #[serde(deserialize_with = "crate::wire_number::deserialize")]
-    pub stream_id: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Default)]
-pub struct Http3DataFrameReceivedEvent {
-    pub params: Http3DataFrameReceivedParams,
-}
-
 /// Parses the provided `event` based on the event type provided in `event_hdr`.
 #[must_use = "the result contains the decoded event, or indicates that it could not be decoded"]
 pub fn parse_event(
@@ -137,32 +93,36 @@ pub fn parse_event(
 ) -> Option<super::Event> {
     match event_hdr.ty_string.as_str() {
         "HTTP3_HEADERS_SENT" => {
-            let ev: Http3HeadersSentEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3HeadersParams> =
+                super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersSent(ev)));
         },
 
         "HTTP3_DATA_SENT" => {
-            let ev: Http3DataSentEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3DataParams> = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3DataSent(ev)));
         },
 
         "HTTP3_HEADERS_RECEIVED" => {
-            let ev: Http3HeadersReceivedEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3HeadersReceivedParams> =
+                super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersReceived(ev)));
         },
 
         "HTTP3_HEADERS_DECODED" => {
-            let ev: Http3HeadersDecodedEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3HeadersParams> =
+                super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3HeadersDecoded(ev)));
         },
 
         "HTTP3_DATA_FRAME_RECEIVED" => {
-            let ev: Http3DataFrameReceivedEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3DataParams> = super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3DataFrameReceived(ev)));
         },
 
         "HTTP3_PRIORITY_UPDATE_SENT" => {
-            let ev: Http3PriorityUpdateSentEvent = super::decode_event(event)?;
+            let ev: EventPayload<Http3PriorityUpdateSentParams> =
+                super::decode_event(event)?;
             return Some(super::Event::H3(Event::Http3PriorityUpdateSent(ev)));
         },
 

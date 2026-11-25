@@ -490,7 +490,7 @@ fn cumulative_total(
 ///
 /// For bidirectional streams bit zero
 /// selects the initiator; bit one identifies unidirectional streams.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct InitialStreamLimits {
     pub connection: Option<u64>,
     pub bidi_local: Option<u64>,
@@ -672,23 +672,16 @@ impl Datastore {
             length: Some(params.length),
             fin: Some(params.fin),
         };
-        match direction {
-            LocalDirection::Sent => self.sent_quic_streams.observe(
-                params.stream_id,
-                observation,
-                time,
-            ),
-            LocalDirection::Received => self.record_received_quic_stream(
-                params.stream_id,
-                observation,
-                time,
-            ),
-        }
+        self.record_quic_stream(direction, params.stream_id, observation, time)
     }
 
-    fn record_received_quic_stream(
-        &mut self, stream_id: u64, observation: QuicStreamObservation, time: f64,
+    fn record_quic_stream(
+        &mut self, direction: LocalDirection, stream_id: u64,
+        observation: QuicStreamObservation, time: f64,
     ) -> Result<(), TrackerError> {
+        if matches!(direction, LocalDirection::Sent) {
+            return self.sent_quic_streams.observe(stream_id, observation, time);
+        }
         self.received_quic_streams
             .observe(stream_id, observation, time)?;
         if matches!(observation, QuicStreamObservation::Frame {
@@ -1576,6 +1569,66 @@ impl Datastore {
         }
     }
 
+    fn record_qlog_stream_frame(
+        &mut self, direction: LocalDirection, frame: &QuicFrame, time: f64,
+    ) -> Result<(), TrackerError> {
+        match frame {
+            QuicFrame::MaxData { maximum, .. } => {
+                self.record_quic_max_data(direction, time, *maximum);
+            },
+
+            QuicFrame::MaxStreamData {
+                stream_id, maximum, ..
+            } => self.record_quic_max_stream_data(
+                direction, *stream_id, time, *maximum,
+            )?,
+
+            QuicFrame::ResetStream {
+                stream_id,
+                final_size,
+                ..
+            } => {
+                let (tracker, resets) = match direction {
+                    LocalDirection::Sent =>
+                        (&mut self.sent_quic_streams, &mut self.sent_reset_stream),
+                    LocalDirection::Received => (
+                        &mut self.received_quic_streams,
+                        &mut self.received_reset_stream,
+                    ),
+                };
+                tracker.observe(
+                    *stream_id,
+                    QuicStreamObservation::Reset {
+                        final_size: *final_size,
+                    },
+                    time,
+                )?;
+                resets.entry(*stream_id).or_default().push(frame.clone());
+            },
+
+            QuicFrame::Stream {
+                stream_id,
+                offset,
+                fin,
+                raw,
+            } => {
+                self.record_quic_stream(
+                    direction,
+                    *stream_id,
+                    QuicStreamObservation::Frame {
+                        offset: *offset,
+                        length: raw.as_ref().and_then(|raw| raw.payload_length),
+                        fin: *fin,
+                    },
+                    time,
+                )?;
+            },
+
+            _ => (),
+        }
+        Ok(())
+    }
+
     fn consume_qlog_packet_received(
         &mut self, pr: &qlog::events::quic::PacketReceived, ev_time: f64,
         process_acks: bool,
@@ -1604,60 +1657,6 @@ impl Datastore {
                         ..
                     } if process_acks => self.mark_qlog_acks(packet_type, ranges),
 
-                    QuicFrame::MaxData { maximum, .. } => {
-                        self.record_quic_max_data(
-                            LocalDirection::Received,
-                            ev_time,
-                            *maximum,
-                        );
-                    },
-
-                    QuicFrame::MaxStreamData {
-                        stream_id, maximum, ..
-                    } => self.record_quic_max_stream_data(
-                        LocalDirection::Received,
-                        *stream_id,
-                        ev_time,
-                        *maximum,
-                    )?,
-
-                    QuicFrame::ResetStream {
-                        stream_id,
-                        final_size,
-                        ..
-                    } => {
-                        self.received_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Reset {
-                                final_size: *final_size,
-                            },
-                            ev_time,
-                        )?;
-                        self.received_reset_stream
-                            .entry(*stream_id)
-                            .or_default()
-                            .push(frame.clone());
-                    },
-
-                    QuicFrame::Stream {
-                        stream_id,
-                        offset,
-                        fin,
-                        raw,
-                    } => {
-                        self.record_received_quic_stream(
-                            *stream_id,
-                            QuicStreamObservation::Frame {
-                                offset: *offset,
-                                length: raw
-                                    .as_ref()
-                                    .and_then(|raw| raw.payload_length),
-                                fin: *fin,
-                            },
-                            ev_time,
-                        )?;
-                    },
-
                     QuicFrame::DataBlocked { .. } => {
                         self.quic_peer_window_blocked
                             .entry(-1)
@@ -1665,7 +1664,11 @@ impl Datastore {
                             .push(ev_time);
                     },
 
-                    _ => (),
+                    _ => self.record_qlog_stream_frame(
+                        LocalDirection::Received,
+                        frame,
+                        ev_time,
+                    )?,
                 }
             }
         }
@@ -1705,60 +1708,6 @@ impl Datastore {
                         // TODO
                     },
 
-                    QuicFrame::MaxData { maximum, .. } => {
-                        self.record_quic_max_data(
-                            LocalDirection::Sent,
-                            event_time,
-                            *maximum,
-                        );
-                    },
-
-                    QuicFrame::MaxStreamData {
-                        stream_id, maximum, ..
-                    } => self.record_quic_max_stream_data(
-                        LocalDirection::Sent,
-                        *stream_id,
-                        event_time,
-                        *maximum,
-                    )?,
-
-                    QuicFrame::ResetStream {
-                        stream_id,
-                        final_size,
-                        ..
-                    } => {
-                        self.sent_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Reset {
-                                final_size: *final_size,
-                            },
-                            event_time,
-                        )?;
-                        self.sent_reset_stream
-                            .entry(*stream_id)
-                            .or_default()
-                            .push(frame.clone());
-                    },
-
-                    QuicFrame::Stream {
-                        stream_id,
-                        offset,
-                        fin,
-                        raw,
-                    } => {
-                        self.sent_quic_streams.observe(
-                            *stream_id,
-                            QuicStreamObservation::Frame {
-                                offset: *offset,
-                                length: raw
-                                    .as_ref()
-                                    .and_then(|raw| raw.payload_length),
-                                fin: *fin,
-                            },
-                            event_time,
-                        )?;
-                    },
-
                     QuicFrame::DataBlocked { limit, .. } => {
                         trace!("todo DATA_BLOCKED t={event_time} limit={limit}");
                     },
@@ -1771,7 +1720,11 @@ impl Datastore {
                         );
                     },
 
-                    _ => (),
+                    _ => self.record_qlog_stream_frame(
+                        LocalDirection::Sent,
+                        frame,
+                        event_time,
+                    )?,
                 }
             }
         }
@@ -2333,8 +2286,8 @@ mod netlog_tests {
 
     fn h3_received(stream_id: u64, size: u64) -> netlog::Event {
         netlog::Event::H3(h3::Event::Http3DataFrameReceived(
-            h3::Http3DataFrameReceivedEvent {
-                params: h3::Http3DataFrameReceivedParams {
+            netlog::EventPayload {
+                params: h3::Http3DataParams {
                     stream_id,
                     payload_length: size,
                 },
@@ -2349,8 +2302,8 @@ mod netlog_tests {
         let mut datastore = Datastore::default();
         for (time, length) in [(101, 4), (105, 9), (108, 0)] {
             let event = netlog::Event::H3(h3::Event::Http3DataSent(
-                h3::Http3DataSentEvent {
-                    params: h3::Http3DataSentParams {
+                netlog::EventPayload {
+                    params: h3::Http3DataParams {
                         stream_id: 5,
                         payload_length: length,
                     },
