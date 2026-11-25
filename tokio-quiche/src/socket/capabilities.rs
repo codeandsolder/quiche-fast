@@ -38,7 +38,6 @@ mod linux_imports {
     pub use libc::IP_PMTUDISC_PROBE;
     pub use libc::SOL_SOCKET;
     pub use libc::SO_RCVMARK;
-    pub use nix::errno::Errno;
     pub use nix::sys::socket::getsockopt;
     pub use nix::sys::socket::setsockopt;
     pub use nix::sys::socket::sockopt::IpFreebind;
@@ -63,86 +62,28 @@ mod linux_imports {
 #[cfg(target_os = "linux")]
 use linux_imports::*;
 
+/// Integer-valued Linux socket options not exposed by nix.
 #[cfg(target_os = "linux")]
-#[derive(Clone)]
-struct IpMtuDiscoverProbe;
-
-#[cfg(target_os = "linux")]
-impl SetSockOpt for IpMtuDiscoverProbe {
-    type Val = ();
-
-    fn set<F: AsFd>(&self, fd: &F, _val: &Self::Val) -> nix::Result<()> {
-        let pmtud_mode: c_int = IP_PMTUDISC_PROBE;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd.as_fd().as_raw_fd(),
-                IPPROTO_IP,
-                IP_MTU_DISCOVER,
-                &pmtud_mode as *const c_int as *const c_void,
-                std::mem::size_of::<c_int>() as socklen_t,
-            )
-        };
-
-        match ret {
-            0 => Ok(()),
-            _ => Err(Errno::last()),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Clone)]
-struct Ipv6MtuDiscoverProbe;
-
-#[cfg(target_os = "linux")]
-impl SetSockOpt for Ipv6MtuDiscoverProbe {
-    type Val = ();
-
-    fn set<F: AsFd>(&self, fd: &F, _val: &Self::Val) -> nix::Result<()> {
-        let pmtud_mode: c_int = IPV6_PMTUDISC_PROBE;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd.as_fd().as_raw_fd(),
-                IPPROTO_IPV6,
-                IPV6_MTU_DISCOVER,
-                &pmtud_mode as *const c_int as *const c_void,
-                std::mem::size_of::<c_int>() as socklen_t,
-            )
-        };
-
-        match ret {
-            0 => Ok(()),
-            _ => Err(Errno::last()),
-        }
-    }
-}
-
-#[cfg(target_os = "linux")]
-#[derive(Clone)]
-struct RcvMark;
-
-#[cfg(target_os = "linux")]
-impl SetSockOpt for RcvMark {
-    type Val = ();
-
-    fn set<F: AsFd>(&self, fd: &F, _val: &Self::Val) -> nix::Result<()> {
-        // https://elixir.bootlin.com/linux/v6.17/source/net/core/sock.c#L1523
-        const ENABLE_SOCKOPT: i32 = 1;
-
-        let ret = unsafe {
-            libc::setsockopt(
-                fd.as_fd().as_raw_fd(),
-                SOL_SOCKET,
-                SO_RCVMARK,
-                &ENABLE_SOCKOPT as *const c_int as *const c_void,
-                std::mem::size_of::<c_int>() as socklen_t,
-            )
-        };
-
-        match ret {
-            0 => Ok(()),
-            _ => Err(Errno::last()),
-        }
+fn set_integer_option(
+    socket: BorrowedFd<'_>, level: c_int, option: c_int, value: c_int,
+) -> io::Result<()> {
+    let length =
+        socklen_t::try_from(size_of::<c_int>()).map_err(io::Error::other)?;
+    // SAFETY: the borrowed descriptor stays alive for the call, and value
+    // points to an initialized integer of exactly the supplied length.
+    let result = unsafe {
+        libc::setsockopt(
+            socket.as_raw_fd(),
+            level,
+            option,
+            (&raw const value).cast::<c_void>(),
+            length,
+        )
+    };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
     }
 }
 
@@ -163,6 +104,23 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
         }
     }
 
+    fn enable<O: SetSockOpt>(
+        &mut self, option: O, value: &O::Val, capability: SocketCapability,
+    ) -> io::Result<()> {
+        setsockopt(&self.socket, option, value)?;
+        self.cap.insert(capability);
+        Ok(())
+    }
+
+    fn enable_integer(
+        &mut self, level: c_int, option: c_int, value: c_int,
+        capability: SocketCapability,
+    ) -> io::Result<()> {
+        set_integer_option(self.socket, level, option, value)?;
+        self.cap.insert(capability);
+        Ok(())
+    }
+
     /// Enables [`UDP_SEGMENT`](https://man7.org/linux/man-pages/man7/udp.7.html),
     /// a generic segmentation offload (GSO).
     ///
@@ -176,18 +134,13 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
         //
         // https://elixir.bootlin.com/linux/v6.14.6/source/net/ipv4/udp.c#L2998
         // https://elixir.bootlin.com/linux/v6.14.6/source/include/vdso/limits.h#L5
-        setsockopt(&self.socket.as_fd(), UdpGsoSegment, &(u16::MAX as i32))?;
-        self.cap.has_gso = true;
-        Ok(())
+        self.enable(UdpGsoSegment, &i32::from(u16::MAX), SocketCapability::Gso)
     }
 
     /// Enables [`SO_RXQ_OVFL`](https://man7.org/linux/man-pages/man7/socket.7.html),
     /// which reports dropped packets due to insufficient buffer space.
     pub fn check_udp_drop(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), RxqOvfl, &1)?;
-
-        self.cap.check_udp_drop = true;
-        Ok(())
+        self.enable(RxqOvfl, &1, SocketCapability::ReceiveDropCount)
     }
 
     /// Enables [`SO_TXTIME`](https://man7.org/linux/man-pages/man8/tc-etf.8.html)
@@ -197,20 +150,18 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
             clockid: libc::CLOCK_MONOTONIC,
             flags: 0,
         };
-        setsockopt(&self.socket.as_fd(), TxTime, &cfg)?;
-
-        self.cap.has_txtime = true;
-        Ok(())
+        self.enable(TxTime, &cfg, SocketCapability::TransmitTime)
     }
 
     /// Enables [`SO_TIMESTAMPNS`](https://man7.org/linux/man-pages/man7/socket.7.html),
     /// which records a wall-clock timestamp for each received packet.
     #[cfg(feature = "perf-quic-listener-metrics")]
     pub fn rxtime(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), ReceiveTimestampns, &true)?;
-
-        self.cap.has_rxtime = true;
-        Ok(())
+        self.enable(
+            ReceiveTimestampns,
+            &true,
+            SocketCapability::ReceiveTimestamp,
+        )
     }
 
     /// Enables [`UDP_GRO`](https://man7.org/linux/man-pages/man7/udp.7.html),
@@ -220,19 +171,13 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
     /// multiple UDP packets in one [`recvmsg(2)`](https://man7.org/linux/man-pages/man2/recv.2.html)
     /// call. It is the equivalent of GSO for the receive path.
     pub fn gro(&mut self) -> io::Result<()> {
-        UdpGroSegment.set(&self.socket.as_fd(), &true)?;
-
-        self.cap.has_gro = true;
-        Ok(())
+        self.enable(UdpGroSegment, &true, SocketCapability::Gro)
     }
 
     /// Enables [`IP_PKTINFO`](https://man7.org/linux/man-pages/man7/ip.7.html)
     /// to control the source IP in outbound IPv4 packets.
     pub fn ipv4_pktinfo(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), Ipv4PacketInfo, &true)?;
-
-        self.cap.has_ippktinfo = true;
-        Ok(())
+        self.enable(Ipv4PacketInfo, &true, SocketCapability::Ipv4PacketInfo)
     }
 
     /// Enables [`IP_RECVORIGDSTADDR`](https://man7.org/linux/man-pages/man7/ip.7.html),
@@ -241,19 +186,17 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
     /// This can be different from the socket's local address due to netfilter
     /// TPROXY rules or eBPF redirects.
     pub fn ipv4_recvorigdstaddr(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), Ipv4OrigDstAddr, &true)?;
-
-        self.cap.has_iprecvorigdstaddr = true;
-        Ok(())
+        self.enable(
+            Ipv4OrigDstAddr,
+            &true,
+            SocketCapability::Ipv4OriginalDestination,
+        )
     }
 
     /// Enables [`IPV6_RECVPKTINFO`](https://man7.org/linux/man-pages/man7/ipv6.7.html)
     /// to control the source IP in outbound IPv6 packets.
     pub fn ipv6_pktinfo(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), Ipv6RecvPacketInfo, &true)?;
-
-        self.cap.has_ipv6pktinfo = true;
-        Ok(())
+        self.enable(Ipv6RecvPacketInfo, &true, SocketCapability::Ipv6PacketInfo)
     }
 
     /// Enables [`IPV6_RECVORIGDSTADDR`](https://elixir.bootlin.com/linux/v6.12/source/net/ipv6/datagram.c#L722-L743),
@@ -262,30 +205,35 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
     /// This can be different from the socket's local address due to netfilter
     /// TPROXY rules or eBPF redirects.
     pub fn ipv6_recvorigdstaddr(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), Ipv6OrigDstAddr, &true)?;
-
-        self.cap.has_ipv6recvorigdstaddr = true;
-        Ok(())
+        self.enable(
+            Ipv6OrigDstAddr,
+            &true,
+            SocketCapability::Ipv6OriginalDestination,
+        )
     }
 
     /// Sets [`IP_MTU_DISCOVER`](https://man7.org/linux/man-pages/man7/ip.7.html), to
     /// `IP_PMTUDISC_PROBE`, which disables kernel PMTUD and sets the `DF`
     /// (Don't Fragment) flag.
     pub fn ip_mtu_discover_probe(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), IpMtuDiscoverProbe, &())?;
-
-        self.cap.has_ip_mtu_discover_probe = true;
-        Ok(())
+        self.enable_integer(
+            IPPROTO_IP,
+            IP_MTU_DISCOVER,
+            IP_PMTUDISC_PROBE,
+            SocketCapability::Ipv4MtuProbe,
+        )
     }
 
     /// Sets [`IPV6_MTU_DISCOVER`](https://man7.org/linux/man-pages/man7/ipv6.7.html), to
     /// `IPV6_PMTUDISC_PROBE`, which disables kernel PMTUD and sets the `DF`
     /// (Don't Fragment) flag.
     pub fn ipv6_mtu_discover_probe(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), Ipv6MtuDiscoverProbe, &())?;
-
-        self.cap.has_ipv6_mtu_discover_probe = true;
-        Ok(())
+        self.enable_integer(
+            IPPROTO_IPV6,
+            IPV6_MTU_DISCOVER,
+            IPV6_PMTUDISC_PROBE,
+            SocketCapability::Ipv6MtuProbe,
+        )
     }
 
     /// Tests whether [`IP_FREEBIND`](https://man7.org/linux/man-pages/man7/ip.7.html)
@@ -302,10 +250,12 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
     }
 
     pub fn rcvmark(&mut self) -> io::Result<()> {
-        setsockopt(&self.socket.as_fd(), RcvMark, &())?;
-
-        self.cap.has_mark = true;
-        Ok(())
+        self.enable_integer(
+            SOL_SOCKET,
+            SO_RCVMARK,
+            1,
+            SocketCapability::ReceiveMark,
+        )
     }
 
     /// Consumes the builder and returns the configured [`SocketCapabilities`].
@@ -314,124 +264,86 @@ impl<'s> SocketCapabilitiesBuilder<'s> {
     }
 }
 
-// TODO(erittenhouse): use `dgram`'s SocketCapabilities when we migrate over
-#[cfg_attr(
-    not(target_os = "linux"),
-    expect(
-        rustdoc::broken_intra_doc_links,
-        reason = "Linux-only capability links are unavailable on non-Linux targets"
-    )
-)]
-/// Indicators of sockopts configured for a socket.
-///
-/// On Linux, a socket can be configured using a [`SocketCapabilitiesBuilder`],
-/// which returns the sockopts that were applied successfully. By default, all
-/// options are assumed to be disabled (including on OSes besides Linux).
-///
-/// As a shortcut, you may call `apply_all_and_get_compatibility` to apply the
-/// maxmimum set of capabilities supported by this crate. The result will
-/// indicate which options were actually enabled.
-#[derive(Debug, Default)]
-pub struct SocketCapabilities {
-    /// Indicates if the socket has `UDP_SEGMENT` enabled.
-    pub(crate) has_gso: bool,
+/// Socket options successfully enabled by the builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SocketCapability {
+    /// UDP segmentation offload.
+    Gso,
+    /// Receive queue overflow counter.
+    ReceiveDropCount,
+    /// Kernel transmit scheduling.
+    TransmitTime,
+    /// Nanosecond receive timestamp.
+    ReceiveTimestamp,
+    /// UDP generic receive offload.
+    Gro,
+    /// IPv4 source/destination packet information.
+    Ipv4PacketInfo,
+    /// IPv4 original destination address.
+    Ipv4OriginalDestination,
+    /// IPv6 source/destination packet information.
+    Ipv6PacketInfo,
+    /// IPv6 original destination address.
+    Ipv6OriginalDestination,
+    /// IPv4 probe-mode path MTU discovery.
+    Ipv4MtuProbe,
+    /// IPv6 probe-mode path MTU discovery.
+    Ipv6MtuProbe,
+    /// Receive socket mark.
+    ReceiveMark,
+}
 
-    /// Indicates if the socket has `SO_RXQ_OVFL` set.
-    // NOTE: RX-side sockopts are `expect(dead_code, reason = "Capability is
-    // Linux-only or consumed indirectly through ancillary-message handling")`
-    // because we check for received cmsgs directly
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) check_udp_drop: bool,
+impl SocketCapability {
+    const ALL: [Self; 12] = [
+        Self::Gso,
+        Self::ReceiveDropCount,
+        Self::TransmitTime,
+        Self::ReceiveTimestamp,
+        Self::Gro,
+        Self::Ipv4PacketInfo,
+        Self::Ipv4OriginalDestination,
+        Self::Ipv6PacketInfo,
+        Self::Ipv6OriginalDestination,
+        Self::Ipv4MtuProbe,
+        Self::Ipv6MtuProbe,
+        Self::ReceiveMark,
+    ];
 
-    /// Indicates if the socket was configured with `SO_TXTIME`.
-    pub(crate) has_txtime: bool,
+    const fn mask(self) -> u16 {
+        1 << self as u8
+    }
+}
 
-    /// Indicates if the socket has `SO_TIMESTAMPNS` enabled.
-    #[cfg_attr(
-        not(all(target_os = "linux", feature = "perf-quic-listener-metrics")),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_rxtime: bool,
+/// Compact set of enabled socket options. Failed probes never add a capability.
+/// All options are disabled by default, including on non-Linux targets.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct SocketCapabilities(u16);
 
-    /// Indicates if the socket has `UDP_GRO` enabled.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_gro: bool,
-
-    /// Indicates if the socket has `IP_PKTINFO` set.
-    pub(crate) has_ippktinfo: bool,
-
-    /// Indicates if the socket has `IP_RECVORIGDSTADDR` set.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_iprecvorigdstaddr: bool,
-
-    /// Indicates if the socket has `IPV6_RECVPKTINFO` set.
-    pub(crate) has_ipv6pktinfo: bool,
-
-    /// Indicates if the socket has `IPV6_RECVORIGDSTADDR` set.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_ipv6recvorigdstaddr: bool,
-
-    // Indicates if the socket has `IP_MTU_DISCOVER` set to `IP_PMTUDISC_PROBE`.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_ip_mtu_discover_probe: bool,
-
-    // Indicates if the socket has `IPV6_MTU_DISCOVER` set to
-    // `IPV6_PMTUDISC_PROBE`.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_ipv6_mtu_discover_probe: bool,
-
-    /// Indicates if the socket is set to receive `SO_MARK` messages via
-    /// `SO_RCVMARK`.
-    #[cfg_attr(
-        not(target_os = "linux"),
-        expect(
-            dead_code,
-            reason = "Capability is Linux-only or consumed indirectly through ancillary-message handling"
-        )
-    )]
-    pub(crate) has_mark: bool,
+impl std::fmt::Debug for SocketCapabilities {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_set().entries(self.iter()).finish()
+    }
 }
 
 impl SocketCapabilities {
+    /// Reports whether a capability has been successfully enabled.
+    pub const fn contains(self, capability: SocketCapability) -> bool {
+        self.0 & capability.mask() != 0
+    }
+
+    /// Lists the enabled capabilities.
+    pub fn iter(self) -> impl Iterator<Item = SocketCapability> {
+        SocketCapability::ALL
+            .into_iter()
+            .filter(move |capability| self.contains(*capability))
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    const fn insert(&mut self, capability: SocketCapability) {
+        self.0 |= capability.mask();
+    }
+
     /// Tries to enable all supported sockopts and returns indicators
     /// of which settings were successfully applied.
     #[cfg(target_os = "linux")]
@@ -459,5 +371,53 @@ impl SocketCapabilities {
             let _ = b.ipv6_recvorigdstaddr();
         }
         b.finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SocketCapabilities;
+    use super::SocketCapability;
+
+    #[test]
+    fn capability_set_preserves_independent_flags() {
+        let mut capabilities = SocketCapabilities::default();
+        assert_eq!(capabilities.iter().count(), 0);
+        for (count, capability) in SocketCapability::ALL.into_iter().enumerate() {
+            assert!(!capabilities.contains(capability));
+            capabilities.insert(capability);
+            assert!(capabilities.contains(capability));
+            assert_eq!(capabilities.iter().count(), count + 1);
+        }
+        assert_eq!(
+            capabilities.iter().collect::<Vec<_>>(),
+            SocketCapability::ALL
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn failed_socket_option_does_not_record_capability() -> std::io::Result<()> {
+        let file = std::fs::File::open("/dev/null")?;
+        let mut builder = super::SocketCapabilitiesBuilder::new(&file);
+        assert!(builder.gro().is_err());
+        assert!(builder.ip_mtu_discover_probe().is_err());
+        assert_eq!(builder.finish(), SocketCapabilities::default());
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn successful_integer_and_typed_options_are_recorded() -> std::io::Result<()>
+    {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        let mut builder = super::SocketCapabilitiesBuilder::new(&socket);
+        builder.ip_mtu_discover_probe()?;
+        builder.check_udp_drop()?;
+        let capabilities = builder.finish();
+        assert!(capabilities.contains(SocketCapability::Ipv4MtuProbe));
+        assert!(capabilities.contains(SocketCapability::ReceiveDropCount));
+        assert!(!capabilities.contains(SocketCapability::Ipv6MtuProbe));
+        Ok(())
     }
 }

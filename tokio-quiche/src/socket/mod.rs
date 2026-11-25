@@ -33,6 +33,7 @@ mod listener;
 pub use self::capabilities::SocketCapabilities;
 #[cfg(target_os = "linux")]
 pub use self::capabilities::SocketCapabilitiesBuilder;
+pub use self::capabilities::SocketCapability;
 pub use self::connected::BoxedSocket;
 pub use self::connected::Socket;
 pub use self::listener::QuicListener;
