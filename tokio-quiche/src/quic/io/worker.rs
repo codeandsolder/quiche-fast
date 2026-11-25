@@ -1542,7 +1542,7 @@ mod pooled_send_buf_tests {
     // with other tests sharing the harness's worker threads.
 
     #[test]
-    fn caps_retained_buffers() {
+    fn caps_retained_buffers() -> QuicResult<()> {
         std::thread::spawn(|| {
             // Acquire more than the cap at once (all misses, so all fresh
             // allocations), then drop them. Only `SEND_BUF_POOL_CAP` may be
@@ -1556,11 +1556,12 @@ mod pooled_send_buf_tests {
             assert_eq!(retained, SEND_BUF_POOL_CAP);
         })
         .join()
-        .unwrap();
+        .map_err(|_| "pool test thread panicked")?;
+        Ok(())
     }
 
     #[test]
-    fn reuses_a_returned_buffer() {
+    fn reuses_a_returned_buffer() -> QuicResult<()> {
         std::thread::spawn(|| {
             let first_ptr = {
                 let buf = PooledSendBuf::acquire();
@@ -1576,15 +1577,18 @@ mod pooled_send_buf_tests {
             );
         })
         .join()
-        .unwrap();
+        .map_err(|_| "pool test thread panicked")?;
+        Ok(())
     }
 
     #[test]
-    fn returns_to_the_dropping_thread() {
+    fn returns_to_the_dropping_thread() -> QuicResult<()> {
         // Acquire on one thread, drop on another: the buffer lands in the
         // dropping thread's pool (work-stealing migration across `.await` is
         // benign).
-        let buf = std::thread::spawn(PooledSendBuf::acquire).join().unwrap();
+        let buf = std::thread::spawn(PooledSendBuf::acquire)
+            .join()
+            .map_err(|_| "pool test thread panicked")?;
 
         std::thread::spawn(move || {
             assert_eq!(SEND_BUF_POOL.with(|pool| pool.borrow().len()), 0);
@@ -1592,6 +1596,7 @@ mod pooled_send_buf_tests {
             assert_eq!(SEND_BUF_POOL.with(|pool| pool.borrow().len()), 1);
         })
         .join()
-        .unwrap();
+        .map_err(|_| "pool test thread panicked")?;
+        Ok(())
     }
 }

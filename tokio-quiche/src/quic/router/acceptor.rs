@@ -337,7 +337,7 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sender = Arc::new(UdpSocket::bind(bind_addr).await?);
         let receiver = UdpSocket::bind(bind_addr).await?;
-        enable_tos(&receiver);
+        enable_tos(&receiver)?;
         let tos = i32::from(dscp) << 2;
         if sender.local_addr()?.is_ipv4() {
             setsockopt(sender.as_ref(), sockopt::Ipv4Tos, &tos)?;
@@ -381,7 +381,7 @@ mod tests {
             Ok(5)
         })?;
 
-        let (payload, tos) = recv_tos(&receiver).await;
+        let (payload, tos) = recv_tos(&receiver).await?;
         assert_eq!(payload, b"reply");
         assert_eq!(tos >> 2, dscp);
         Ok(())

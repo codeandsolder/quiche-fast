@@ -724,43 +724,14 @@ mod tests {
     use tokio::net::UdpSocket;
     use tokio::time;
 
-    fn test_credentials() -> (&'static str, &'static str) {
-        static CREDENTIALS: std::sync::OnceLock<(String, String)> =
-            std::sync::OnceLock::new();
+    use crate::test_credentials::TestCredentials;
 
-        let (cert, key) = CREDENTIALS.get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "tokio-quiche-test-credentials-{}",
-                std::process::id()
-            ));
-            std::fs::create_dir_all(&dir).unwrap();
-
-            let cert = dir.join("cert.crt");
-            let key = dir.join("cert.key");
-            std::fs::write(
-                &cert,
-                include_bytes!("../../../../quiche/examples/cert.crt"),
-            )
-            .unwrap();
-            std::fs::write(
-                &key,
-                include_bytes!("../../../../quiche/examples/cert.key"),
-            )
-            .unwrap();
-
-            (
-                cert.to_string_lossy().into_owned(),
-                key.to_string_lossy().into_owned(),
-            )
-        });
-
-        (cert.as_str(), key.as_str())
-    }
-
-    fn test_connect(host_port: String, wait_before_close: Option<Duration>) {
-        let mut h3i_config = h3i::config::Config::new("test.com").unwrap();
+    fn test_connect(
+        host_port: &str, wait_before_close: Option<Duration>,
+    ) -> crate::QuicResult<()> {
+        let mut h3i_config = h3i::config::Config::new("test.com")?;
         h3i_config.idle_timeout = 2000;
-        h3i_config.endpoint.connect_to = Some(host_port.parse().unwrap());
+        h3i_config.endpoint.connect_to = Some(host_port.parse()?);
         h3i_config.tls.verify_peer = false;
         h3i_config.datagrams = Some(h3i::config::DatagramQueues::default());
 
@@ -777,7 +748,8 @@ mod tests {
         }
         actions.push(Action::ConnectionClose { error: conn_close });
 
-        let _ = h3i::client::sync_client::connect(h3i_config, actions, None);
+        h3i::client::sync_client::connect(h3i_config, actions, None)?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -791,7 +763,8 @@ mod tests {
             ..Default::default()
         };
 
-        let (cert, private_key) = test_credentials();
+        let credentials = TestCredentials::new()?;
+        let (cert, private_key) = credentials.paths();
         let tls_cert_settings = TlsCertificatePaths {
             cert,
             private_key,
@@ -841,7 +814,7 @@ mod tests {
         tokio::spawn(socket_driver);
 
         // Start a request and drop it after connection establishment
-        std::thread::spawn(move || test_connect(host_port, None));
+        let client = std::thread::spawn(move || test_connect(&host_port, None));
 
         // Wait for a new connection
         time::pause();
@@ -863,43 +836,50 @@ mod tests {
         time::advance(Duration::new(30, 0)).await;
         time::resume();
 
-        // This is a smoke test. A failure leaves `notified()` unresolved and
-        // hangs the test.
-        drop_check.closed().await;
+        // Bound the smoke test so a leaked connection fails promptly.
+        time::timeout(Duration::from_secs(5), drop_check.closed()).await?;
+        // The deliberately tiny idle timeout can interrupt the client
+        // handshake.
+        let _ = client.join().map_err(|_| "client thread panicked")?;
         Ok(())
     }
 
     #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
     #[tokio::test]
-    async fn test_worker_dscp_across_handshake_ipv4() {
-        check_worker_dscp_across_handshake("127.0.0.1:0").await;
+    async fn test_worker_dscp_across_handshake_ipv4() -> crate::QuicResult<()> {
+        check_worker_dscp_across_handshake("127.0.0.1:0").await
     }
 
     #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
     #[tokio::test]
-    async fn test_worker_dscp_across_handshake_ipv6() {
-        check_worker_dscp_across_handshake("[::1]:0").await;
+    async fn test_worker_dscp_across_handshake_ipv6() -> crate::QuicResult<()> {
+        check_worker_dscp_across_handshake("[::1]:0").await
     }
 
     #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-    async fn check_worker_dscp_across_handshake(bind_addr: &str) {
+    async fn check_worker_dscp_across_handshake(
+        bind_addr: &str,
+    ) -> crate::QuicResult<()> {
         use crate::quic::io::gso::test::enable_tos;
         use crate::quic::io::gso::test::recv_tos;
         use futures::StreamExt;
         use nix::sys::socket::setsockopt;
         use nix::sys::socket::sockopt;
 
-        let socket = std::net::UdpSocket::bind(bind_addr).unwrap();
-        let server_addr = socket.local_addr().unwrap();
+        let socket = std::net::UdpSocket::bind(bind_addr)?;
+        let server_addr = socket.local_addr()?;
         if server_addr.is_ipv4() {
-            setsockopt(&socket, sockopt::Ipv4Tos, &0).unwrap();
+            setsockopt(&socket, sockopt::Ipv4Tos, &0)?;
         } else {
-            setsockopt(&socket, sockopt::Ipv6TClass, &0).unwrap();
+            setsockopt(&socket, sockopt::Ipv6TClass, &0)?;
         }
 
-        let mut settings = QuicSettings::default();
-        settings.disable_client_ip_validation = true;
-        let (cert, private_key) = test_credentials();
+        let settings = QuicSettings {
+            disable_client_ip_validation: true,
+            ..QuicSettings::default()
+        };
+        let credentials = TestCredentials::new()?;
+        let (cert, private_key) = credentials.paths();
         let tls_cert = TlsCertificatePaths {
             cert,
             private_key,
@@ -908,14 +888,13 @@ mod tests {
         let mut params =
             ConnectionParams::new_server(settings, tls_cert, Hooks::default());
         params.enable_per_connection_dscp = true;
-        let mut incoming = crate::listen(vec![socket], &params, &DefaultMetrics)
-            .unwrap()
-            .remove(0);
+        let mut incoming =
+            crate::listen(vec![socket], &params, &DefaultMetrics)?.remove(0);
 
-        let frontend = UdpSocket::bind(bind_addr).await.unwrap();
-        let backend = UdpSocket::bind(bind_addr).await.unwrap();
-        enable_tos(&backend);
-        let host_port = frontend.local_addr().unwrap().to_string();
+        let frontend = UdpSocket::bind(bind_addr).await?;
+        let backend = UdpSocket::bind(bind_addr).await?;
+        enable_tos(&backend)?;
+        let host_port = frontend.local_addr()?.to_string();
         let (marks_tx, mut marks_rx) = tokio::sync::mpsc::unbounded_channel();
         let relay = tokio::spawn(async move {
             let mut client_addr = None;
@@ -923,75 +902,74 @@ mod tests {
             loop {
                 tokio::select! {
                     received = frontend.recv_from(&mut buf) => {
-                        let (len, addr) = received.unwrap();
+                        let (len, addr) = received?;
                         client_addr = Some(addr);
-                        backend.send_to(&buf[..len], server_addr).await.unwrap();
+                        backend.send_to(&buf[..len], server_addr).await?;
                     }
-                    (packet, tos) = recv_tos(&backend) => {
-                        marks_tx.send(tos >> 2).unwrap();
-                        frontend.send_to(&packet, client_addr.unwrap()).await.unwrap();
+                    received = recv_tos(&backend) => {
+                        let (packet, tos) = received?;
+                        if marks_tx.send(tos >> 2).is_err() { return Ok::<(), crate::BoxError>(()); }
+                        frontend.send_to(&packet, client_addr.ok_or("missing client address")?).await?;
                     }
                 }
             }
         });
         let client = tokio::task::spawn_blocking(move || {
-            test_connect(host_port, Some(Duration::from_secs(1)));
+            test_connect(&host_port, Some(Duration::from_secs(1)))
         });
 
         let conn = time::timeout(Duration::from_secs(5), incoming.next())
-            .await
-            .expect("no initial packet")
-            .expect("listener closed")
-            .expect("initial packet rejected");
-        let dscp = conn.dscp_handle().unwrap().clone();
+            .await?
+            .ok_or("listener closed")??;
+        let dscp = conn.dscp_handle().ok_or("missing DSCP handle")?.clone();
         dscp.set(Dscp::new(34));
         let (driver, controller) = ServerH3Driver::new(&Http3Settings::default());
         let (_, mut worker) =
             time::timeout(Duration::from_secs(5), conn.handshake(driver))
-                .await
-                .expect("handshake timed out")
-                .expect("handshake failed");
+                .await??;
 
         // No stateless packets are sent when client IP validation is disabled.
         assert_eq!(
-            time::timeout(Duration::from_secs(5), marks_rx.recv())
-                .await
-                .expect("no handshake packet"),
+            time::timeout(Duration::from_secs(5), marks_rx.recv()).await?,
             Some(34)
         );
 
         // Force a packet in the running worker to verify the handle survives
         // handshake() and resume(), not just the initial atomic clone.
         dscp.set(Dscp::new(28));
-        worker.qconn.send_ack_eliciting().unwrap();
+        worker.qconn.send_ack_eliciting()?;
         InitialQuicConnection::resume(worker);
         time::timeout(Duration::from_secs(5), async {
             loop {
-                match marks_rx.recv().await.expect("UDP relay closed") {
+                match marks_rx.recv().await.ok_or("UDP relay closed")? {
                     34 => (), // Handshake packets already in flight.
-                    28 => break,
-                    mark => panic!("unexpected post-handshake DSCP {mark}"),
+                    28 => break Ok::<(), crate::BoxError>(()),
+                    mark =>
+                        break Err(format!(
+                            "unexpected post-handshake DSCP {mark}"
+                        )
+                        .into()),
                 }
             }
         })
-        .await
-        .expect("no post-handshake packet with DSCP 28");
+        .await??;
 
-        client.await.unwrap();
+        client.await??;
         drop(controller);
         relay.abort();
+        Ok(())
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn idle_listener_releases_socket_after_stream_drop() {
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let addr = socket.local_addr().unwrap();
+    async fn idle_listener_releases_socket_after_stream_drop(
+    ) -> crate::QuicResult<()> {
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let addr = socket.local_addr()?;
         let streams = crate::listen(
             [socket],
             &ConnectionParams::default(),
             &DefaultMetrics,
-        )
-        .unwrap();
+        )?;
 
         time::sleep(Duration::from_millis(20)).await;
         drop(streams);
@@ -999,18 +977,16 @@ mod tests {
         time::timeout(Duration::from_secs(1), async {
             loop {
                 match UdpSocket::bind(addr).await {
-                    Ok(_) => break,
+                    Ok(_) => break Ok::<(), io::Error>(()),
                     Err(error) if error.kind() == io::ErrorKind::AddrInUse => {
                         time::sleep(Duration::from_millis(5)).await;
                     },
-                    Err(error) => {
-                        panic!("failed to rebind listener socket: {error}")
-                    },
+                    Err(error) => break Err(error),
                 }
             }
         })
-        .await
-        .expect("idle listener retained its socket after stream drop");
+        .await??;
+        Ok(())
     }
 
     struct NoopDatagramSender;
@@ -1052,18 +1028,19 @@ mod tests {
         }
     }
 
+    type TestRouter<R> = InboundPacketRouter<
+        NoopDatagramSender,
+        R,
+        DefaultMetrics,
+        NoopInitialHandler,
+    >;
+    type TestConnStream = ConnStream<NoopDatagramSender, DefaultMetrics>;
+
     fn test_router<R: DatagramSocketRecv>(
         receiver: R,
-    ) -> crate::QuicResult<(
-        InboundPacketRouter<
-            NoopDatagramSender,
-            R,
-            DefaultMetrics,
-            NoopInitialHandler,
-        >,
-        ConnStream<NoopDatagramSender, DefaultMetrics>,
-    )> {
-        let (cert, private_key) = test_credentials();
+    ) -> crate::QuicResult<(TestRouter<R>, TestConnStream)> {
+        let credentials = TestCredentials::new()?;
+        let (cert, private_key) = credentials.paths();
         let tls_cert_settings = TlsCertificatePaths {
             cert,
             private_key,

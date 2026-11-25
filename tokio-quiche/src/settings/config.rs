@@ -333,8 +333,10 @@ mod tests {
 
     #[test]
     fn invalid_alpn_is_reported_as_configuration_error() {
-        let mut settings = QuicSettings::default();
-        settings.alpn = vec![vec![b'x'; 256]];
+        let settings = QuicSettings {
+            alpn: vec![vec![b'x'; 256]],
+            ..QuicSettings::default()
+        };
         let params =
             ConnectionParams::new_client(settings, None, Hooks::default());
 
@@ -343,7 +345,7 @@ mod tests {
 
     #[cfg(not(feature = "rpk"))]
     #[test]
-    fn raw_public_key_without_feature_is_unsupported() {
+    fn raw_public_key_without_feature_is_unsupported() -> crate::QuicResult<()> {
         let tls = TlsCertificatePaths {
             cert: "unused-rpk-cert",
             private_key: "unused-rpk-key",
@@ -351,12 +353,13 @@ mod tests {
         };
 
         let Err(err) = quiche_config_with_tls(Some(tls)) else {
-            panic!("RPK without the rpk feature must return an error");
+            return Err("RPK without the rpk feature must return an error".into());
         };
 
         let io_err = err
             .downcast_ref::<std::io::Error>()
-            .expect("unsupported RPK error should be an io::Error");
+            .ok_or("unsupported RPK error should be an io::Error")?;
         assert_eq!(io_err.kind(), std::io::ErrorKind::Unsupported);
+        Ok(())
     }
 }

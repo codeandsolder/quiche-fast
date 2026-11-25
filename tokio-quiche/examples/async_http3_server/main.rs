@@ -37,9 +37,7 @@ use tokio::net::UdpSocket;
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
 use tokio_quiche::metrics::DefaultMetrics;
-use tokio_quiche::settings::CertificateKind::{
-    self,
-};
+use tokio_quiche::settings::CertificateKind;
 use tokio_quiche::settings::Hooks;
 use tokio_quiche::settings::QuicSettings;
 use tokio_quiche::settings::TlsCertificatePaths;
@@ -47,24 +45,22 @@ use tokio_quiche::ConnectionParams;
 use tokio_quiche::ServerH3Driver;
 
 #[tokio::main]
-async fn main() {
+async fn main() -> tokio_quiche::QuicResult<()> {
     env_logger::builder().format_timestamp_nanos().init();
 
     // Use `ConnectionParams::new_server()` to create a listening socket.
     let args = Args::parse();
-    let socket = UdpSocket::bind(&args.address)
-        .await
-        .expect("UDP socket should be bindable");
+    let socket = UdpSocket::bind(&args.address).await?;
     let mut quic_settings = QuicSettings::default();
     quic_settings.qlog_dir = std::env::var("QLOGDIR").ok();
-    quic_settings.cc_algorithm = args.cc_algorithm.clone();
+    quic_settings.cc_algorithm = args.cc_algorithm;
     quic_settings.initial_congestion_window_packets = args.initial_cwnd_packets;
     quic_settings.enable_hystart = !args.disable_hystart;
     quic_settings.enable_pacing = args.enable_pacing;
     quic_settings.max_pacing_rate =
         (args.max_pacing_rate > 0).then_some(args.max_pacing_rate);
 
-    let mut listeners = listen(
+    let listeners = listen(
         [socket],
         &ConnectionParams::new_server(
             quic_settings,
@@ -76,11 +72,13 @@ async fn main() {
             Hooks::default(),
         ),
         &DefaultMetrics,
-    )
-    .expect("should be able to create a listener from a UDP socket");
+    )?;
 
     // Pull connections off the socket and serve them.
-    let accepted_connection_stream = &mut listeners[0];
+    let mut accepted_connection_stream =
+        listeners.into_iter().next().ok_or_else(|| {
+            std::io::Error::other("listener creation returned no streams")
+        })?;
     while let Some(conn_res) = accepted_connection_stream.next().await {
         match conn_res {
             Ok(conn) => {
@@ -98,11 +96,15 @@ async fn main() {
 
                 // Spawn a task to process the new connection.
                 tokio::spawn(async move {
-                    let mut server = Server::new(service_fn);
+                    let server = Server::new(service_fn);
 
                     // tokio-quiche will send events to the `H3Controller`'s
                     // receiver for processing.
-                    let _ = server.serve_connection(&mut controller).await;
+                    if let Err(error) =
+                        server.serve_connection(&mut controller).await
+                    {
+                        log::error!("HTTP/3 connection failed: {error}");
+                    }
                 });
             },
             Err(e) => {
@@ -110,4 +112,5 @@ async fn main() {
             },
         }
     }
+    Ok(())
 }

@@ -45,7 +45,6 @@ use tokio_quiche::http3::driver::H3Event;
 use tokio_quiche::http3::driver::IncomingH3Headers;
 use tokio_quiche::http3::driver::OutboundFrame;
 use tokio_quiche::http3::driver::OutboundFrameSender;
-use tokio_quiche::http3::driver::RawPriorityValue;
 use tokio_quiche::http3::driver::RequestSender;
 use tokio_quiche::http3::driver::ServerH3Command;
 use tokio_quiche::http3::driver::ServerH3Controller;
@@ -53,7 +52,6 @@ use tokio_quiche::http3::driver::StreamShutdown;
 
 type StreamCommands = RequestSender<ServerH3Command, H3Command>;
 use tokio_quiche::http3::driver::ServerH3Event;
-use tokio_quiche::BoxError;
 use tokio_quiche::QuicResult;
 
 /// A simple [service function].
@@ -67,7 +65,7 @@ use tokio_quiche::QuicResult;
 /// [service function]: https://docs.rs/hyper/latest/hyper/service/index.html
 pub async fn service_fn(req: Request<()>) -> Response<ExampleBody> {
     let body = ExampleBody::new(&req);
-    Response::builder().status(200).body(body).unwrap()
+    Response::new(body)
 }
 
 /// A basic asynchronous HTTP/3 server served by tokio-quiche.
@@ -105,7 +103,7 @@ where
     /// tokio-quiche's `H3Driver` emits these events in response to data that
     /// comes off the underlying socket.
     pub async fn serve_connection(
-        &mut self, controller: &mut ServerH3Controller,
+        &self, controller: &mut ServerH3Controller,
     ) -> QuicResult<()> {
         let commands = controller.h3_cmd_sender();
         loop {
@@ -120,21 +118,11 @@ where
     /// Handle a [`H3Event`].
     ///
     /// For simplicity's sake, we only handle a couple of events here.
-    fn handle_h3_event(event: H3Event) -> QuicResult<()> {
+    fn handle_h3_event(event: &H3Event) -> QuicResult<()> {
         match event {
-            // Received an explicit connection level error. Not much to do here.
-            H3Event::ConnectionError(err) => QuicResult::Err(Box::new(err)),
-
-            // The connection has shutdown.
-            H3Event::ConnectionShutdown(err) => {
-                let err = match err {
-                    Some(err) => Box::new(err),
-                    None => Box::new(quiche::h3::Error::Done) as BoxError,
-                };
-
-                QuicResult::Err(err)
-            },
-
+            H3Event::ConnectionError(error) => Err(Box::new(*error)),
+            H3Event::ConnectionShutdown(Some(error)) => Err(Box::new(*error)),
+            H3Event::ConnectionShutdown(None) => Ok(()),
             _ => {
                 log::info!("received unhandled event: {event:?}");
                 Ok(())
@@ -146,22 +134,16 @@ where
     ///
     /// TODO(evanrittenhouse): support POST requests
     fn handle_server_h3_event(
-        &mut self, event: ServerH3Event, commands: &StreamCommands,
+        &self, event: ServerH3Event, commands: &StreamCommands,
     ) -> QuicResult<()> {
         match event {
-            ServerH3Event::Core(event) => Self::handle_h3_event(event),
+            ServerH3Event::Core(event) => Self::handle_h3_event(&event),
 
             ServerH3Event::Headers {
-                incoming_headers,
-                priority,
-                is_in_early_data: _,
+                incoming_headers, ..
             } => {
                 // Received headers for a new stream from the H3Driver.
-                self.handle_incoming_headers(
-                    incoming_headers,
-                    priority,
-                    commands,
-                );
+                self.handle_incoming_headers(incoming_headers, commands);
                 Ok(())
             },
         }
@@ -173,8 +155,7 @@ where
     /// creating the proper response body if requested. It then spawns a
     /// Tokio task which calls the `service_fn` on the [`Request`].
     fn handle_incoming_headers(
-        &mut self, headers: IncomingH3Headers,
-        _priority: Option<RawPriorityValue>, commands: &StreamCommands,
+        &self, headers: IncomingH3Headers, commands: &StreamCommands,
     ) {
         log::info!("received headers: {headers:?}");
 
@@ -201,7 +182,6 @@ where
 
         let service_fn = Arc::clone(&self.service_fn);
 
-        // TODO: use the _priority input parameter in request handling
         let commands = commands.clone();
         tokio::spawn(async move {
             Self::handle_request(
@@ -271,16 +251,12 @@ fn convert_headers(
         let name = header.name();
         let value = header.value();
 
-        let Some(first) = name
-            .iter()
-            .next()
-            .and_then(|f| std::char::from_u32(u32::from(*f)))
-        else {
+        let Some(&first) = name.first() else {
             log::warn!("received header with no or invalid first character");
             continue;
         };
 
-        if first == ':' {
+        if first == b':' {
             match name {
                 b":method" => {
                     req_builder = req_builder.method(value);
@@ -304,7 +280,9 @@ fn convert_headers(
         } else {
             let name = HeaderName::from_bytes(name)?;
             let value = HeaderValue::from_bytes(value)?;
-            req_builder.headers_mut().map(|h| h.insert(name, value));
+            if let Some(headers) = req_builder.headers_mut() {
+                headers.append(name, value);
+            }
         }
     }
 

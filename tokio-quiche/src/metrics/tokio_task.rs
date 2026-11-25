@@ -211,16 +211,21 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::panic,
+        reason = "this test must unwind while holding the mutex to poison it"
+    )]
     fn instrumented_waker_recovers_poisoned_timer() {
         let timer = Arc::new(Mutex::new(None));
         let poisoner = Arc::clone(&timer);
 
-        let _ = std::thread::spawn(move || {
-            let _guard =
-                poisoner.lock().expect("fresh lock should not be poisoned");
-            panic!("poison task timer");
+        let poisoned = std::thread::spawn(move || {
+            let Ok(_guard) = poisoner.lock() else { return };
+            panic!("poison timer lock");
         })
         .join();
+        assert!(poisoned.is_err());
+        assert!(timer.is_poisoned());
 
         let instrumented = Arc::new(InstrumentedWaker {
             timer: Arc::clone(&timer),

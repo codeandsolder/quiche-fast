@@ -118,6 +118,8 @@ pub mod quic;
 mod result;
 pub mod settings;
 pub mod socket;
+#[cfg(test)]
+mod test_credentials;
 
 pub use datagram_socket;
 

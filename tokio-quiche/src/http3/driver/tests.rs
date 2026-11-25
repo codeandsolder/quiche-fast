@@ -1,4 +1,4 @@
-type TestResult = Result<(), Box<dyn std::error::Error>>;
+type TestResult = crate::QuicResult<()>;
 
 use assert_matches::assert_matches;
 use rstest::rstest;
@@ -545,7 +545,7 @@ mod client_side_driver {
         assert_eq!(helper.peer_server_recv_body_vec(0, 1024), Ok(vec![1; 5]));
 
         // The client sends FIN. The server sends a body and FIN.
-        to_server.try_send(OutboundFrame::Body(Default::default(), true))?;
+        to_server.try_send(OutboundFrame::Body(bytes::Bytes::new(), true))?;
         helper.peer_server_send_body(0, &[2; 10], true)?;
 
         // The server reads FIN.
@@ -1172,7 +1172,7 @@ mod client_side_driver {
         resp.send
             .get_ref()
             .ok_or("missing outbound stream sender")?
-            .try_send(OutboundFrame::Body(Default::default(), true))?;
+            .try_send(OutboundFrame::Body(bytes::Bytes::new(), true))?;
         helper.advance_and_run_loop()?;
 
         // clsoe the channel.
@@ -1346,7 +1346,7 @@ mod server_side_driver {
         to_client
             .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
         helper.work_loop_iter()?;
-        to_client.try_send(OutboundFrame::Body(Default::default(), true))?;
+        to_client.try_send(OutboundFrame::Body(bytes::Bytes::new(), true))?;
         helper.advance_and_run_loop()?;
 
         // Client receives the headers-only response.
@@ -2366,7 +2366,7 @@ mod server_side_driver {
         );
 
         // send fin to client
-        to_client.try_send(OutboundFrame::Body(Default::default(), true))?;
+        to_client.try_send(OutboundFrame::Body(bytes::Bytes::new(), true))?;
         helper.advance_and_run_loop()?;
 
         assert_eq!(

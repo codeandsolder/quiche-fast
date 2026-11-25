@@ -299,7 +299,7 @@ mod tests {
         let protocol = h3::Header::new(b":protocol", b"connect-udp");
         assert!(is_extended_connect(&[method.clone(), protocol.clone()]));
         assert!(is_extended_connect(&[protocol.clone(), method.clone()]));
-        assert!(!is_extended_connect(&[method.clone()]));
+        assert!(!is_extended_connect(std::slice::from_ref(&method)));
         assert!(!is_extended_connect(&[
             method,
             h3::Header::new(b":protocol", b"")

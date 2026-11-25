@@ -102,7 +102,6 @@ tokio-util = { workspace = true, features = [
   "io",
   "rt",
 ] }
-url = { workspace = true }
 
 # `foundations/tracing` pulls cf-rustracing's backtrace dependency. libc 0.2.190
 # removed dyld APIs that backtrace 0.3.76 still references on Apple mobile OSs.
@@ -112,6 +111,7 @@ url = { workspace = true }
 foundations = { workspace = true, default-features = false, features = ["tracing"] }
 
 [dev-dependencies]
+url = { workspace = true }
 assert_matches = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
