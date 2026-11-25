@@ -609,24 +609,15 @@ pub enum EventData {
 }
 
 impl EventData {
-    /// Returns size of `EventData` array of `QuicFrame`s if it exists.
-    #[must_use = "the result describes the number of QUIC frames if present"]
-    pub fn contains_quic_frames(&self) -> Option<usize> {
-        // For some EventData variants, the frame array is optional
-        // but for others it is mandatory.
+    /// Borrow the QUIC frames carried by this event, if any.
+    #[must_use = "the result borrows the frames carried by the event"]
+    pub fn quic_frames(&self) -> Option<&[quic::QuicFrame]> {
         match self {
-            Self::QuicPacketSent(pkt) =>
-                pkt.frames.as_ref().map(std::vec::Vec::len),
-
-            Self::QuicPacketReceived(pkt) =>
-                pkt.frames.as_ref().map(std::vec::Vec::len),
-
-            Self::QuicPacketLost(pkt) =>
-                pkt.frames.as_ref().map(std::vec::Vec::len),
-
-            Self::QuicMarkedForRetransmit(ev) => Some(ev.frames.len()),
-            Self::QuicFramesProcessed(ev) => Some(ev.frames.len()),
-
+            Self::QuicPacketSent(packet) => packet.frames.as_deref(),
+            Self::QuicPacketReceived(packet) => packet.frames.as_deref(),
+            Self::QuicPacketLost(packet) => packet.frames.as_deref(),
+            Self::QuicMarkedForRetransmit(event) => Some(&event.frames),
+            Self::QuicFramesProcessed(event) => Some(&event.frames),
             _ => None,
         }
     }

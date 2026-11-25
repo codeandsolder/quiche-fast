@@ -41,8 +41,11 @@ expressions and matching behavior. The fields supported are:
 
 * category: A string representing the qlog category of the event
 * name: A string representing the qlog event name without category.
-* stream_id: An integer representing a QUIC stream ID, that can appear in many
-  types of event. A filter based on stream ID will match several events.
+* stream_id: An array of exact integer QUIC stream IDs. Includes stream
+  references from sent, received, lost, processed and retransmitted QUIC
+  frames, stream-state and flow-control events, HTTP/3 events (including
+  priority targets and datagram quarter-stream IDs), and explicit top-level
+  stream identifiers in custom event data. Push IDs are not stream IDs.
 
 Some examples:
 
