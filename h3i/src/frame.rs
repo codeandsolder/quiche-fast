@@ -162,9 +162,10 @@ impl EnrichedHeaders {
     pub fn header_values<'a>(
         &'a self, name: &'a [u8],
     ) -> impl Iterator<Item = &'a [u8]> {
-        self.headers.iter().filter_map(move |header| {
-            (header.name() == name).then(|| header.value())
-        })
+        self.headers
+            .iter()
+            .filter(move |header| header.name() == name)
+            .map(NameValue::value)
     }
 
     /// Fetch the first value of the `:status` pseudo-header, when present.
