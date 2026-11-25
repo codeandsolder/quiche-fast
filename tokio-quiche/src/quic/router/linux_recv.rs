@@ -65,8 +65,8 @@ impl LinuxReceiver {
     pub(super) fn new(metrics: &impl Metrics) -> Self {
         Self {
             buffer: Vec::new(),
-            // Reserve for every enabled control message, including packet info
-            // that we intentionally ignore. Never accept a truncated GRO batch.
+            // Reserve for every enabled control message. Never accept a
+            // truncated GRO batch.
             control_space: nix::cmsg_space!(
                 i32,
                 nix::sys::time::TimeSpec,
@@ -130,7 +130,7 @@ impl LinuxReceiver {
             })
             .ok_or_else(|| invalid("UDP source address is missing or not IP"))?;
         let metadata = Ancillary::decode(message.cmsgs()?)?;
-        let payload = message.iovs().next().map(Vec::from).unwrap_or_default();
+        let payload = message.iovs().next().map_or_else(Vec::new, Vec::from);
         if payload.len() != message.bytes {
             return Err(invalid(
                 "UDP payload length does not match recvmsg result",
@@ -151,7 +151,7 @@ impl LinuxReceiver {
         Ok(Incoming {
             buf: payload,
             peer_addr: peer,
-            local_addr: metadata.destination.unwrap_or(local_addr),
+            local_addr: metadata.destination_for(local_addr, peer),
             rx_time: metadata.rx_time,
             gro: metadata.segment_size,
             so_mark_data: metadata.mark,
@@ -174,6 +174,8 @@ struct Ancillary {
     rx_time: Option<SystemTime>,
     segment_size: Option<NonZeroUsize>,
     destination: Option<SocketAddr>,
+    ipv4_destination: Option<Ipv4Addr>,
+    ipv6_destination: Option<(Ipv6Addr, u32)>,
     mark: Option<[u8; 4]>,
 }
 
@@ -196,9 +198,19 @@ impl Ancillary {
                     let size = usize::try_from(size)
                         .ok()
                         .and_then(NonZeroUsize::new)
-                        .filter(|size| size.get() <= usize::from(u16::MAX))
+                        .filter(|size| u16::try_from(size.get()).is_ok())
                         .ok_or_else(|| invalid("invalid UDP GRO segment size"))?;
                     metadata.segment_size = Some(size);
+                },
+                ControlMessageOwned::Ipv4PacketInfo(info) => {
+                    metadata.ipv4_destination =
+                        Some(Ipv4Addr::from(info.ipi_addr.s_addr.to_ne_bytes()));
+                },
+                ControlMessageOwned::Ipv6PacketInfo(info) => {
+                    metadata.ipv6_destination = Some((
+                        Ipv6Addr::from(info.ipi6_addr.s6_addr),
+                        info.ipi6_ifindex,
+                    ));
                 },
                 ControlMessageOwned::Ipv4OrigDstAddr(address) => {
                     metadata.destination =
@@ -220,12 +232,70 @@ impl Ancillary {
                 },
                 ControlMessageOwned::SoMark(mark) =>
                     metadata.mark = Some(mark.to_ne_bytes()),
-                // Packet-info and unknown options do not override the original
-                // destination.
+                // Unknown options do not change the destination.
                 _ => (),
             }
         }
         Ok(metadata)
+    }
+
+    /// Original destination includes the pre-redirection port. Ordinary
+    /// packet info provides the local IP and interface, but not the port.
+    /// Keep IPv4-mapped addresses in the same representation as the peer.
+    fn destination_for(&self, bound: SocketAddr, peer: SocketAddr) -> SocketAddr {
+        let packet_info = match peer {
+            SocketAddr::V4(_) => self
+                .ipv4_destination
+                .map(|ip| SocketAddr::V4(SocketAddrV4::new(ip, bound.port()))),
+            SocketAddr::V6(peer) if peer.ip().to_ipv4_mapped().is_some() => self
+                .ipv4_destination
+                .map(|ip| {
+                    SocketAddr::V6(SocketAddrV6::new(
+                        ip.to_ipv6_mapped(),
+                        bound.port(),
+                        0,
+                        0,
+                    ))
+                })
+                .or_else(|| {
+                    self.ipv6_destination.map(|(ip, _)| {
+                        SocketAddr::V6(SocketAddrV6::new(ip, bound.port(), 0, 0))
+                    })
+                }),
+            SocketAddr::V6(_) => self.ipv6_destination.map(|(ip, interface)| {
+                SocketAddr::V6(SocketAddrV6::new(
+                    ip,
+                    bound.port(),
+                    0,
+                    if ip.is_unicast_link_local() {
+                        interface
+                    } else {
+                        0
+                    },
+                ))
+            }),
+        };
+        let mut destination = self.destination.or(packet_info).unwrap_or(bound);
+        match (destination, peer) {
+            (SocketAddr::V4(addr), SocketAddr::V6(peer))
+                if peer.ip().to_ipv4_mapped().is_some() =>
+            {
+                destination = SocketAddr::V6(SocketAddrV6::new(
+                    addr.ip().to_ipv6_mapped(),
+                    addr.port(),
+                    0,
+                    0,
+                ));
+            },
+            (SocketAddr::V6(mut addr), SocketAddr::V6(_))
+                if addr.ip().is_unicast_link_local() && addr.scope_id() == 0 =>
+                if let Some((_, interface)) = self.ipv6_destination {
+                    addr.set_scope_id(interface);
+                    destination = SocketAddr::V6(addr);
+                },
+            _ => (),
+        }
+        destination
     }
 }
 
@@ -350,6 +420,108 @@ mod tests {
             assert_eq!(packet.local_addr, destination);
             assert!(packet.rx_time.is_some());
             assert!(packet.gro.is_none());
+        }
+        Ok(())
+    }
+
+    #[cfg(not(feature = "fuzzing"))]
+    #[tokio::test]
+    async fn wildcard_packet_info_preserves_reply_source() -> crate::QuicResult<()>
+    {
+        use crate::quic::io::gso::send_packets_before;
+        use crate::quic::io::gso::PacketSend;
+        use crate::quic::io::gso::SendOutcome;
+        use crate::socket::SocketCapabilitiesBuilder;
+        use std::time::Instant;
+        use tokio::net::UdpSocket;
+        for (wildcard, source, peer_addr, dualstack) in [
+            ("0.0.0.0:0", "127.0.0.2", "127.0.0.1:0", false),
+            ("[::]:0", "::1", "[::1]:0", false),
+            ("[::]:0", "127.0.0.2", "127.0.0.1:0", true),
+        ] {
+            let socket = if dualstack {
+                use nix::sys::socket::bind;
+                use nix::sys::socket::setsockopt;
+                use nix::sys::socket::socket;
+                use nix::sys::socket::AddressFamily;
+                use nix::sys::socket::SockFlag;
+                use nix::sys::socket::SockType;
+                use nix::sys::socket::SockaddrIn6;
+                use std::os::fd::AsRawFd;
+                let fd = socket(
+                    AddressFamily::Inet6,
+                    SockType::Datagram,
+                    SockFlag::SOCK_NONBLOCK | SockFlag::SOCK_CLOEXEC,
+                    None,
+                )?;
+                setsockopt(&fd, nix::sys::socket::sockopt::Ipv6V6Only, &false)?;
+                bind(
+                    fd.as_raw_fd(),
+                    &SockaddrIn6::from(SocketAddrV6::new(
+                        Ipv6Addr::UNSPECIFIED,
+                        0,
+                        0,
+                        0,
+                    )),
+                )?;
+                UdpSocket::from_std(std::net::UdpSocket::from(fd))?
+            } else {
+                UdpSocket::bind(wildcard).await?
+            };
+            let peer = UdpSocket::bind(peer_addr).await?;
+            let bound = socket.local_addr()?;
+            let destination = SocketAddr::new(source.parse()?, bound.port());
+            let mut builder = SocketCapabilitiesBuilder::new(&socket);
+            if destination.is_ipv4() {
+                builder.ipv4_pktinfo()?;
+            }
+            if bound.is_ipv6() {
+                builder.ipv6_pktinfo()?;
+            }
+            let caps = builder.finish();
+            peer.send_to(b"hello", destination).await?;
+            let mut receiver =
+                super::LinuxReceiver::new(&crate::metrics::DefaultMetrics);
+            let packet = tokio::time::timeout(
+                Duration::from_secs(1),
+                std::future::poll_fn(|cx| receiver.poll(&socket, bound, cx)),
+            )
+            .await??;
+            let expected_local = match destination {
+                SocketAddr::V4(addr) if dualstack =>
+                    SocketAddr::V6(SocketAddrV6::new(
+                        addr.ip().to_ipv6_mapped(),
+                        addr.port(),
+                        0,
+                        0,
+                    )),
+                addr => addr,
+            };
+            assert_eq!(packet.local_addr, expected_local);
+            assert!(caps.supports_pktinfo(packet.local_addr));
+            let outcome = send_packets_before(
+                &socket,
+                b"reply",
+                PacketSend {
+                    to: packet.peer_addr,
+                    from: Some(packet.local_addr),
+                    segment_size: None,
+                    tx_time: None,
+                    dscp: None,
+                },
+                &crate::metrics::DefaultMetrics,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await?;
+            assert_eq!(outcome, SendOutcome::Sent);
+            let mut reply = [0u8; 16];
+            let (len, from) = tokio::time::timeout(
+                Duration::from_secs(1),
+                peer.recv_from(&mut reply),
+            )
+            .await??;
+            assert_eq!(&reply[..len], b"reply");
+            assert_eq!(from, destination);
         }
         Ok(())
     }

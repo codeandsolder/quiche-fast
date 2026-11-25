@@ -113,19 +113,8 @@ impl Config {
         })
     }
 
-    pub(crate) const fn supports(&self, capability: SocketCapability) -> bool {
-        self.socket_capabilities.contains(capability)
-    }
-
-    /// Select packet information for the socket's address family.
-    pub(crate) const fn supports_pktinfo(
-        &self, addr: std::net::SocketAddr,
-    ) -> bool {
-        self.supports(if addr.is_ipv4() {
-            SocketCapability::Ipv4PacketInfo
-        } else {
-            SocketCapability::Ipv6PacketInfo
-        })
+    pub(crate) const fn socket_capabilities(&self) -> SocketCapabilities {
+        self.socket_capabilities
     }
 }
 
@@ -162,7 +151,9 @@ fn make_quiche_config(
         .connection_hook
         .as_ref()
         .zip(params.tls_cert)
-        .and_then(|(hook, tls)| hook.create_custom_ssl_context_builder(tls));
+        .map(|(hook, tls)| hook.create_custom_ssl_context_builder(tls))
+        .transpose()?
+        .flatten();
 
     let mut config = if let Some(builder) = ssl_ctx_builder {
         quiche::Config::with_btls_ssl_ctx_builder(
@@ -344,17 +335,47 @@ mod tests {
 
     #[test]
     fn invalid_alpn_is_reported_as_configuration_error() {
-        let mut settings = QuicSettings::default();
-        settings.alpn = vec![vec![b'x'; 256]];
+        let settings = QuicSettings {
+            alpn: vec![vec![b'x'; 256]],
+            ..QuicSettings::default()
+        };
         let params =
             ConnectionParams::new_client(settings, None, Hooks::default());
 
         assert!(make_quiche_config(&params, false).is_err());
     }
 
+    #[test]
+    fn tls_hook_error_is_not_a_default_context_fallback() -> QuicResult<()> {
+        struct FailingHook;
+        impl crate::quic::ConnectionHook for FailingHook {
+            fn create_custom_ssl_context_builder(
+                &self, _settings: TlsCertificatePaths<'_>,
+            ) -> QuicResult<Option<btls::ssl::SslContextBuilder>> {
+                Err(std::io::Error::other("custom TLS context rejected").into())
+            }
+        }
+        let params = ConnectionParams::new_server(
+            QuicSettings::default(),
+            TlsCertificatePaths {
+                cert: "unused",
+                private_key: "unused",
+                kind: CertificateKind::X509,
+            },
+            Hooks {
+                connection_hook: Some(std::sync::Arc::new(FailingHook)),
+            },
+        );
+        let error = make_quiche_config(&params, false)
+            .err()
+            .ok_or("TLS hook failure was ignored")?;
+        assert_eq!(error.to_string(), "custom TLS context rejected");
+        Ok(())
+    }
+
     #[cfg(not(feature = "rpk"))]
     #[test]
-    fn raw_public_key_without_feature_is_unsupported() {
+    fn raw_public_key_without_feature_is_unsupported() -> crate::QuicResult<()> {
         let tls = TlsCertificatePaths {
             cert: "unused-rpk-cert",
             private_key: "unused-rpk-key",
@@ -362,12 +383,13 @@ mod tests {
         };
 
         let Err(err) = quiche_config_with_tls(Some(tls)) else {
-            panic!("RPK without the rpk feature must return an error");
+            return Err("RPK without the rpk feature must return an error".into());
         };
 
         let io_err = err
             .downcast_ref::<std::io::Error>()
-            .expect("unsupported RPK error should be an io::Error");
+            .ok_or("unsupported RPK error should be an io::Error")?;
         assert_eq!(io_err.kind(), std::io::ErrorKind::Unsupported);
+        Ok(())
     }
 }

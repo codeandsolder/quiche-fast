@@ -37,15 +37,11 @@ use crate::ApplicationOverQuic as _;
 
 type Pipe = quiche::test_utils::Pipe<BufFactory>;
 
-pub fn default_quiche_config() -> quiche::Config {
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    config
-        .load_cert_chain_from_pem_file("examples/cert.crt")
-        .unwrap();
-    config
-        .load_priv_key_from_pem_file("examples/cert.key")
-        .unwrap();
-    config.set_application_protos(&[b"h3"]).unwrap();
+pub fn default_quiche_config() -> quiche::Result<quiche::Config> {
+    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+    config.load_cert_chain_from_pem_file("examples/cert.crt")?;
+    config.load_priv_key_from_pem_file("examples/cert.key")?;
+    config.set_application_protos(&[b"h3"])?;
     config.set_initial_max_data(1500);
     config.set_initial_max_stream_data_bidi_local(150);
     config.set_initial_max_stream_data_bidi_remote(150);
@@ -53,7 +49,7 @@ pub fn default_quiche_config() -> quiche::Config {
     config.set_initial_max_streams_bidi(100);
     config.set_initial_max_streams_uni(5);
     config.verify_peer(false);
-    config
+    Ok(config)
 }
 
 pub fn make_request_headers(method: &str) -> Vec<Header> {
@@ -76,9 +72,7 @@ pub fn make_response_trailers() -> Vec<Header> {
     vec![Header::new(b"trailers", b"1")]
 }
 
-/// Helper trait to get the either right `quiche::Connection` for
-/// ourselvers (to use with the `H3Driver`) or our peer (to use
-/// with `quiche::H3::Connection`
+/// Selects the transport endpoint used by the driver and by its peer.
 pub trait GetConnectionForHook {
     fn qconn(pipe: &mut Pipe) -> &mut QuicheConnection;
     fn peer_qconn(pipe: &mut Pipe) -> &mut QuicheConnection;
@@ -119,9 +113,18 @@ pub struct DriverTestHelper<H: DriverHooks + GetConnectionForHook> {
 impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
     pub fn new() -> anyhow::Result<Self> {
         Self::with_pipe_and_http3_settings(
-            Pipe::with_config_and_buf(&mut default_quiche_config())?,
+            Pipe::with_config_and_buf(&mut default_quiche_config()?)?,
             Http3Settings::default(),
         )
+    }
+
+    /// Creates an initialized driver with the initial settings exchange
+    /// drained.
+    pub fn ready() -> anyhow::Result<Self> {
+        let mut helper = Self::new()?;
+        helper.complete_handshake()?;
+        helper.advance_and_run_loop()?;
+        Ok(helper)
     }
 
     pub fn with_pipe(pipe: Pipe) -> anyhow::Result<Self> {
@@ -132,7 +135,7 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         mut pipe: Pipe, h3_settings: Http3Settings,
     ) -> anyhow::Result<Self> {
         pipe.handshake().context("Failed to handshake pipe")?;
-        let (driver, controller) = H3Driver::<H>::new(h3_settings);
+        let (driver, controller) = H3Driver::<H>::new(&h3_settings);
         let peer = h3::Connection::with_transport(
             H::peer_qconn(&mut pipe),
             &h3::Config::new(),
@@ -162,16 +165,16 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         Ok(())
     }
 
-    /// call `on_conn_established()` on the driver and advance to pipe to
+    /// call `on_application_ready()` on the driver and advance to pipe to
     /// complete the H3 handshake
     pub fn complete_handshake(&mut self) -> anyhow::Result<()> {
         self.driver
-            .on_conn_established(
+            .on_application_ready(
                 H::qconn(&mut self.pipe),
                 &HandshakeInfo::new(Instant::now(), None),
             )
             .map_err(anyhow::Error::from_boxed)
-            .context("on_conn_established")?;
+            .context("on_application_ready")?;
         // advance pipe to complete H3 handshake
         self.pipe.advance().context("advance pipe")?;
         self.driver.settings_received_and_forwarded = true;
@@ -182,7 +185,7 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
     /// IncomingSettings event for the controller
     /// deal with IncomingSettings events
     pub fn forward_settings(&mut self) -> anyhow::Result<()> {
-        Ok(self.driver.forward_settings()?)
+        self.driver.forward_settings().map_err(Into::into)
     }
 
     /// Run one iteration of the work loop *without* advancing the pipe
@@ -250,29 +253,23 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         Ok(buf)
     }
 
-    /// Repeately calls try_recv() on the given receiver and work_loop_iter()
-    /// until the receiver returns an empty or disconnected.
-    /// Merges all received parts into a single Vec.
+    /// Drains the receiver and advances the driver between frames until empty
+    /// or disconnected, collecting body bytes and the FIN marker.
     pub fn driver_try_recv_body(
         &mut self, recv: &mut InboundFrameStream,
-    ) -> (Vec<u8>, bool, TryRecvError) {
+    ) -> anyhow::Result<(Vec<u8>, bool, TryRecvError)> {
         let mut buf = Vec::new();
         let mut had_fin = false;
         loop {
             match recv.try_recv() {
-                Ok(InboundFrame::Body(pooled, fin)) => {
-                    if had_fin {
-                        panic!("Received data after fin");
-                    }
+                Ok(InboundFrame { body: pooled, fin }) => {
+                    anyhow::ensure!(!had_fin, "Received data after FIN");
                     buf.extend_from_slice(&pooled);
                     had_fin = fin;
                 },
-                Ok(InboundFrame::Datagram(..)) => {
-                    panic!("Unexepected InboundFrame::Datagram");
-                },
-                Err(err) => return (buf, had_fin, err),
+                Err(err) => return Ok((buf, had_fin, err)),
             }
-            self.work_loop_iter().unwrap();
+            self.work_loop_iter()?;
         }
     }
 
@@ -298,7 +295,7 @@ impl DriverTestHelper<ClientHooks> {
             let (tx, _) = oneshot::channel();
             Some(tx)
         };
-        self.driver_enqueue_request(1, headers, body_writer_oneshot_tx);
+        self.driver_enqueue_request(1, headers, body_writer_oneshot_tx)?;
         anyhow::ensure!(
             self.process_commands()? == 1,
             "More than one command processed"
@@ -316,15 +313,17 @@ impl DriverTestHelper<ClientHooks> {
     pub fn driver_enqueue_request(
         &mut self, request_id: u64, headers: Vec<Header>,
         body_writer: Option<oneshot::Sender<OutboundFrameSender>>,
-    ) {
+    ) -> anyhow::Result<()> {
         self.controller
             .request_sender()
             .send(NewClientRequest {
                 request_id,
-                headers: headers.clone(),
+                headers,
                 body_writer,
             })
-            .unwrap();
+            .map_err(|err| {
+                anyhow::anyhow!("enqueue request {request_id}: {err:?}")
+            })
     }
 
     /// Try to receive an event from the controller, returns an error if
@@ -463,7 +462,7 @@ impl Metrics for TestMetrics {
         Gauge::default()
     }
 
-    fn maximum_writable_streams(&self) -> Histogram {
+    fn request_streams_opened(&self) -> Histogram {
         Histogram::new(std::iter::empty())
     }
 

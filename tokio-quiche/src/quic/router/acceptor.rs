@@ -51,13 +51,14 @@ use crate::quic::io::gso::send_packets_before;
 use crate::quic::io::gso::PacketSend;
 use crate::quic::router::NewConnection;
 use crate::quic::Incoming;
+use crate::socket::SocketCapabilities;
 use crate::QuicResultExt;
 
 use super::InitialPacketHandler;
 
 /// A [`ConnectionAcceptor`] is an [`InitialPacketHandler`] that acts as a
 /// server and accepts quic connections.
-pub(crate) struct ConnectionAcceptor<M> {
+pub struct ConnectionAcceptor<M> {
     config: ConnectionAcceptorConfig,
     replies: mpsc::Sender<StatelessReply>,
     token_manager: Option<AddrValidationTokenManager>,
@@ -76,15 +77,14 @@ struct StatelessReply {
     deadline: Instant,
 }
 
-pub(crate) struct ConnectionAcceptorConfig {
+pub struct ConnectionAcceptorConfig {
     pub(crate) disable_client_ip_validation: bool,
     pub(crate) reply_backlog: usize,
     pub(crate) enable_per_connection_dscp: bool,
     pub(crate) qlog_dir: Option<String>,
     pub(crate) qlog_compression: QlogCompression,
     pub(crate) keylog_file: Option<File>,
-    #[cfg(target_os = "linux")]
-    pub(crate) with_pktinfo: bool,
+    pub(crate) socket_capabilities: SocketCapabilities,
 }
 
 impl<M: Metrics> ConnectionAcceptor<M> {
@@ -196,7 +196,7 @@ impl<M: Metrics> ConnectionAcceptor<M> {
     }
 
     fn handshake_reply(
-        &self, incoming: Incoming,
+        &self, incoming: &Incoming,
         writer: impl FnOnce(&mut [u8]) -> io::Result<usize>,
     ) -> io::Result<Option<NewConnection>> {
         let permit = match self.replies.try_reserve() {
@@ -222,10 +222,11 @@ impl<M: Metrics> ConnectionAcceptor<M> {
                 "handshake reply exceeds buffer",
             ));
         }
-        #[cfg(target_os = "linux")]
-        let from = self.config.with_pktinfo.then_some(incoming.local_addr);
-        #[cfg(not(target_os = "linux"))]
-        let from = None;
+        let from = self
+            .config
+            .socket_capabilities
+            .supports_pktinfo(incoming.local_addr)
+            .then_some(incoming.local_addr);
 
         let packet = PacketSend {
             to: incoming.peer_addr,
@@ -244,7 +245,7 @@ impl<M: Metrics> ConnectionAcceptor<M> {
     }
 
     fn stateless_retry(
-        &self, incoming: Incoming, hdr: &Header,
+        &self, incoming: &Incoming, hdr: &Header,
         manager: &AddrValidationTokenManager,
     ) -> io::Result<Option<NewConnection>> {
         let scid = crate::quic::connection::generate_routable_cid(
@@ -288,7 +289,7 @@ impl<M: Metrics> InitialPacketHandler for ConnectionAcceptor<M> {
         }
 
         if !quiche::version_is_supported(hdr.version) {
-            return self.handshake_reply(incoming, |buf| {
+            return self.handshake_reply(&incoming, |buf| {
                 quiche::negotiate_version(&hdr.scid, &hdr.dcid, buf).into_io()
             });
         }
@@ -302,7 +303,7 @@ impl<M: Metrics> InitialPacketHandler for ConnectionAcceptor<M> {
             .as_deref()
             .ok_or(labels::QuicInvalidInitialPacketError::FailedToParse)?;
         if token.is_empty() {
-            return self.stateless_retry(incoming, &hdr, manager);
+            return self.stateless_retry(&incoming, &hdr, manager);
         }
 
         let original_dcid = manager
@@ -336,12 +337,20 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let sender = Arc::new(UdpSocket::bind(bind_addr).await?);
         let receiver = UdpSocket::bind(bind_addr).await?;
-        enable_tos(&receiver);
+        enable_tos(&receiver)?;
         let tos = i32::from(dscp) << 2;
         if sender.local_addr()?.is_ipv4() {
             setsockopt(sender.as_ref(), sockopt::Ipv4Tos, &tos)?;
         } else {
             setsockopt(sender.as_ref(), sockopt::Ipv6TClass, &tos)?;
+        }
+
+        let mut capabilities =
+            crate::socket::SocketCapabilitiesBuilder::new(sender.as_ref());
+        if sender.local_addr()?.is_ipv4() {
+            capabilities.ipv4_pktinfo()?;
+        } else {
+            capabilities.ipv6_pktinfo()?;
         }
 
         let acceptor = ConnectionAcceptor::new(
@@ -352,7 +361,7 @@ mod tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                with_pktinfo: true,
+                socket_capabilities: capabilities.finish(),
             },
             Arc::clone(&sender),
             Arc::new(SimpleConnectionIdGenerator),
@@ -367,12 +376,12 @@ mod tests {
             gro: None,
             so_mark_data: None,
         };
-        acceptor.handshake_reply(incoming, |buf| {
+        acceptor.handshake_reply(&incoming, |buf| {
             buf[..5].copy_from_slice(b"reply");
             Ok(5)
         })?;
 
-        let (payload, tos) = recv_tos(&receiver).await;
+        let (payload, tos) = recv_tos(&receiver).await?;
         assert_eq!(payload, b"reply");
         assert_eq!(tos >> 2, dscp);
         Ok(())
@@ -446,8 +455,7 @@ mod initial_size_tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                #[cfg(target_os = "linux")]
-                with_pktinfo: false,
+                socket_capabilities: SocketCapabilities::default(),
             },
             Arc::new(socket),
             generator,
@@ -472,8 +480,7 @@ mod initial_size_tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                #[cfg(target_os = "linux")]
-                with_pktinfo: false,
+                socket_capabilities: SocketCapabilities::default(),
             },
             socket,
             Arc::new(SimpleConnectionIdGenerator),
@@ -489,12 +496,12 @@ mod initial_size_tests {
             so_mark_data: None,
         };
         // Single-thread runtime: neither call yields to the send task.
-        acceptor.handshake_reply(packet(), |buf| {
+        acceptor.handshake_reply(&packet(), |buf| {
             buf[..5].copy_from_slice(b"first");
             Ok(5)
         })?;
         let mut generated = false;
-        acceptor.handshake_reply(packet(), |_| {
+        acceptor.handshake_reply(&packet(), |_| {
             generated = true;
             Ok(0)
         })?;
@@ -674,7 +681,7 @@ mod initial_size_tests {
             local_addr,
         )?;
         let error = acceptor
-            .handshake_reply(incoming, |buf| Ok(buf.len() + 1))
+            .handshake_reply(&incoming, |buf| Ok(buf.len() + 1))
             .err()
             .ok_or("oversize reply accepted")?;
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);

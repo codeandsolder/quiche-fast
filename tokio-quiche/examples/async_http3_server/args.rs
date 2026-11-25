@@ -50,7 +50,7 @@ pub struct Args {
     #[arg(long, default_value_t = 10)]
     pub initial_cwnd_packets: usize,
 
-    /// Disable HyStart++ slow-start algorithm (only affects cubic/reno).
+    /// Disable `HyStart`++ slow-start algorithm (only affects cubic/reno).
     #[arg(long, default_value_t = false)]
     pub disable_hystart: bool,
 
@@ -73,10 +73,8 @@ fn default_private_key_path() -> String {
 }
 
 fn path_relative_to_manifest_dir(path: &str) -> String {
-    std::fs::canonicalize({
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path)
-    })
-    .unwrap()
-    .to_string_lossy()
-    .into_owned()
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join(path)
+        .to_string_lossy()
+        .into_owned()
 }

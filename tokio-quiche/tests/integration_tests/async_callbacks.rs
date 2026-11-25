@@ -40,7 +40,7 @@ use tokio_quiche::quic::ConnectionHook;
 use tokio_quiche::settings::TlsCertificatePaths;
 
 #[tokio::test]
-async fn test_hello_world_async_callbacks() {
+async fn test_hello_world_async_callbacks() -> QuicResult<()> {
     // TODO: migrate this to rxtx-h3, copied from examples/client as a simple
     // Hello World to sanity check that the client builder works.
 
@@ -50,10 +50,9 @@ async fn test_hello_world_async_callbacks() {
 
     impl ConnectionHook for TestAsyncCallbackConnectionHook {
         fn create_custom_ssl_context_builder(
-            &self, _settings: TlsCertificatePaths<'_>,
-        ) -> Option<SslContextBuilder> {
-            let mut ssl_ctx_builder =
-                SslContextBuilder::new(SslMethod::tls()).ok()?;
+            &self, settings: TlsCertificatePaths<'_>,
+        ) -> QuicResult<Option<SslContextBuilder>> {
+            let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls())?;
             ssl_ctx_builder.set_async_select_certificate_callback(|_| {
                 Ok(Box::pin(async {
                     yield_now().await;
@@ -62,16 +61,14 @@ async fn test_hello_world_async_callbacks() {
                 }))
             });
 
-            let (cert, private_key) = test_credentials();
             ssl_ctx_builder
-                .set_private_key_file(private_key, SslFiletype::PEM)
-                .unwrap();
+                .set_private_key_file(settings.private_key, SslFiletype::PEM)?;
 
-            ssl_ctx_builder.set_certificate_chain_file(cert).unwrap();
+            ssl_ctx_builder.set_certificate_chain_file(settings.cert)?;
 
             self.was_called.store(true, Ordering::SeqCst);
 
-            Some(ssl_ctx_builder)
+            Ok(Some(ssl_ctx_builder))
         }
     }
 
@@ -83,19 +80,18 @@ async fn test_hello_world_async_callbacks() {
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
+    )?;
 
     let url = format!("{url}/1");
-    let summary = h3i_fixtures::request(&url, 1)
-        .await
-        .expect("request failed");
+    let summary = h3i_fixtures::request(&url, 1).await?;
 
     assert!(received_status_code_on_stream(&summary, 0, 200));
     assert!(hook.was_called.load(Ordering::SeqCst));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_async_callbacks_fail_after_initial_send() {
+async fn test_async_callbacks_fail_after_initial_send() -> QuicResult<()> {
     // TODO: migrate this to rxtx-h3, copied from examples/client as a simple
     // Hello World to sanity check that the client builder works.
     use h3i::client::ClientError;
@@ -104,10 +100,9 @@ async fn test_async_callbacks_fail_after_initial_send() {
 
     impl ConnectionHook for TestAsyncCallbackConnectionHook {
         fn create_custom_ssl_context_builder(
-            &self, _settings: TlsCertificatePaths<'_>,
-        ) -> Option<SslContextBuilder> {
-            let mut ssl_ctx_builder =
-                SslContextBuilder::new(SslMethod::tls()).ok()?;
+            &self, settings: TlsCertificatePaths<'_>,
+        ) -> QuicResult<Option<SslContextBuilder>> {
+            let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls())?;
             ssl_ctx_builder.set_async_select_certificate_callback(|_| {
                 Ok(Box::pin(async {
                     // Calls to `quiche` methods drive tokio-quiche callbacks.
@@ -121,14 +116,12 @@ async fn test_async_callbacks_fail_after_initial_send() {
                 }))
             });
 
-            let (cert, private_key) = test_credentials();
             ssl_ctx_builder
-                .set_private_key_file(private_key, SslFiletype::PEM)
-                .unwrap();
+                .set_private_key_file(settings.private_key, SslFiletype::PEM)?;
 
-            ssl_ctx_builder.set_certificate_chain_file(cert).unwrap();
+            ssl_ctx_builder.set_certificate_chain_file(settings.cert)?;
 
-            Some(ssl_ctx_builder)
+            Ok(Some(ssl_ctx_builder))
         }
     }
 
@@ -138,9 +131,10 @@ async fn test_async_callbacks_fail_after_initial_send() {
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
+    )?;
 
     let url = format!("{url}/1");
     let client_res = h3i_fixtures::request(&url, 1).await;
     assert!(matches!(client_res, Err(ClientError::HandshakeFail)));
+    Ok(())
 }

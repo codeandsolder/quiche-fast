@@ -25,21 +25,13 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #[cfg(not(target_has_atomic = "64"))]
-use portable_atomic::AtomicI64;
-#[cfg(not(target_has_atomic = "64"))]
 use portable_atomic::AtomicU64;
-use std::ops::Deref;
-#[cfg(target_has_atomic = "64")]
-use std::sync::atomic::AtomicI64;
 #[cfg(target_has_atomic = "64")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::AtomicU8;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
-use std::sync::PoisonError;
-use std::sync::RwLock;
 use std::time::Duration;
 use std::time::SystemTime;
 
@@ -102,22 +94,31 @@ pub enum StartupExitReason {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// A connection-close code and its wire-level namespace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicCloseCode {
+    Transport(u64),
+    Application(u64),
+}
+
+impl QuicCloseCode {
+    #[must_use = "the namespace is part of the close code"]
+    pub const fn from_parts(is_app: bool, code: u64) -> Self {
+        if is_app {
+            Self::Application(code)
+        } else {
+            Self::Transport(code)
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct QuicAuditStats {
-    /// A transport-level connection error code received from the client.
-    recvd_conn_close_transport_error_code: AtomicI64,
-    /// A transport-level connection error code sent to the client.
-    sent_conn_close_transport_error_code: AtomicI64,
-    /// An application-level connection error code received from the client.
-    recvd_conn_close_application_error_code: AtomicI64,
-    /// An application-level connection error code sent to the client.
-    sent_conn_close_application_error_code: AtomicI64,
-    /// Time taken for the QUIC handshake in microseconds.
-    transport_handshake_duration_us: AtomicI64,
-    /// The start time of the handshake.
-    transport_handshake_start: Arc<RwLock<Option<SystemTime>>>,
-    /// The reason the QUIC connection was closed
-    connection_close_reason: RwLock<Option<BoxError>>,
+    peer_close_code: OnceLock<QuicCloseCode>,
+    local_close_code: OnceLock<QuicCloseCode>,
+    transport_handshake_duration: OnceLock<Duration>,
+    transport_handshake_start: OnceLock<SystemTime>,
+    connection_close_reason: OnceLock<BoxError>,
     /// Max recorded bandwidth.
     max_bandwidth: AtomicU64,
     /// Loss at max recorded bandwidth.
@@ -139,13 +140,11 @@ impl QuicAuditStats {
     #[must_use = "the returned statistics object holds the per-connection counters"]
     pub fn new(quic_connection_id: Vec<u8>) -> Self {
         Self {
-            recvd_conn_close_transport_error_code: AtomicI64::new(-1),
-            sent_conn_close_transport_error_code: AtomicI64::new(-1),
-            recvd_conn_close_application_error_code: AtomicI64::new(-1),
-            sent_conn_close_application_error_code: AtomicI64::new(-1),
-            transport_handshake_duration_us: AtomicI64::new(-1),
-            transport_handshake_start: Arc::new(RwLock::new(None)),
-            connection_close_reason: RwLock::new(None),
+            peer_close_code: OnceLock::new(),
+            local_close_code: OnceLock::new(),
+            transport_handshake_duration: OnceLock::new(),
+            transport_handshake_start: OnceLock::new(),
+            connection_close_reason: OnceLock::new(),
             max_bandwidth: AtomicU64::new(0),
             max_loss_pct: AtomicU8::new(0),
             #[cfg(target_os = "linux")]
@@ -154,102 +153,52 @@ impl QuicAuditStats {
         }
     }
 
-    #[inline]
-    pub fn recvd_conn_close_transport_error_code(&self) -> i64 {
-        self.recvd_conn_close_transport_error_code
-            .load(Ordering::Relaxed)
+    #[must_use = "the code identifies why the peer closed the connection"]
+    pub fn peer_close_code(&self) -> Option<QuicCloseCode> {
+        self.peer_close_code.get().copied()
     }
 
-    #[inline]
-    pub fn sent_conn_close_transport_error_code(&self) -> i64 {
-        self.sent_conn_close_transport_error_code
-            .load(Ordering::Relaxed)
+    #[must_use = "the code identifies why this endpoint closed the connection"]
+    pub fn local_close_code(&self) -> Option<QuicCloseCode> {
+        self.local_close_code.get().copied()
     }
 
-    #[inline]
-    pub fn recvd_conn_close_application_error_code(&self) -> i64 {
-        self.recvd_conn_close_application_error_code
-            .load(Ordering::Relaxed)
+    pub fn set_peer_close_code(&self, code: QuicCloseCode) {
+        let _ = self.peer_close_code.set(code);
     }
 
-    #[inline]
-    pub fn sent_conn_close_application_error_code(&self) -> i64 {
-        self.sent_conn_close_application_error_code
-            .load(Ordering::Relaxed)
+    pub fn set_local_close_code(&self, code: QuicCloseCode) {
+        let _ = self.local_close_code.set(code);
     }
 
-    #[inline]
-    pub fn set_recvd_conn_close_transport_error_code(
-        &self, recvd_conn_close_transport_error_code: i64,
-    ) {
-        self.recvd_conn_close_transport_error_code
-            .store(recvd_conn_close_transport_error_code, Ordering::Relaxed);
+    /// None until the transport handshake actually completes.
+    #[must_use = "an incomplete handshake has no measured duration"]
+    pub fn transport_handshake_duration(&self) -> Option<Duration> {
+        self.transport_handshake_duration.get().copied()
     }
 
-    #[inline]
-    pub fn set_sent_conn_close_transport_error_code(
-        &self, sent_conn_close_transport_error_code: i64,
-    ) {
-        self.sent_conn_close_transport_error_code
-            .store(sent_conn_close_transport_error_code, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn set_recvd_conn_close_application_error_code(
-        &self, recvd_conn_close_application_error_code: i64,
-    ) {
-        self.recvd_conn_close_application_error_code
-            .store(recvd_conn_close_application_error_code, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn set_sent_conn_close_application_error_code(
-        &self, sent_conn_close_application_error_code: i64,
-    ) {
-        self.sent_conn_close_application_error_code
-            .store(sent_conn_close_application_error_code, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub fn transport_handshake_duration_us(&self) -> i64 {
-        self.transport_handshake_duration_us.load(Ordering::Relaxed)
-    }
-
-    #[inline]
     pub fn set_transport_handshake_start(&self, start_time: SystemTime) {
-        *self
-            .transport_handshake_start
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(start_time);
+        let _ = self.transport_handshake_start.set(start_time);
     }
 
-    #[inline]
     pub fn set_transport_handshake_duration(&self, duration: Duration) {
-        let dur = i64::try_from(duration.as_micros()).unwrap_or(-1);
-        self.transport_handshake_duration_us
-            .store(dur, Ordering::Relaxed);
+        let _ = self.transport_handshake_duration.set(duration);
     }
 
-    #[inline]
-    pub fn transport_handshake_start(&self) -> Arc<RwLock<Option<SystemTime>>> {
-        Arc::clone(&self.transport_handshake_start)
+    #[must_use = "the timestamp anchors the handshake"]
+    pub fn transport_handshake_start(&self) -> Option<SystemTime> {
+        self.transport_handshake_start.get().copied()
     }
 
-    #[inline]
+    #[must_use = "the first worker failure explains connection termination"]
     pub fn connection_close_reason(
         &self,
-    ) -> impl Deref<Target = Option<BoxError>> + '_ {
-        self.connection_close_reason
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
+    ) -> Option<&(dyn std::error::Error + Send + Sync + 'static)> {
+        self.connection_close_reason.get().map(Box::as_ref)
     }
 
-    #[inline]
     pub fn set_connection_close_reason(&self, error: BoxError) {
-        *self
-            .connection_close_reason
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = Some(error);
+        let _ = self.connection_close_reason.set(error);
     }
 
     #[inline]
@@ -299,43 +248,48 @@ mod tests {
     use super::*;
 
     #[test]
-    fn audit_stats_recovers_poisoned_handshake_start() {
+    fn audit_handshake_publication_is_write_once() {
         let stats = Arc::new(QuicAuditStats::new(Vec::new()));
-        let poisoner = Arc::clone(&stats);
-
-        let poison_result = std::thread::spawn(move || {
-            if let Ok(_guard) = poisoner.transport_handshake_start.write() {
-                std::panic::resume_unwind(Box::new(()));
-            }
-        })
-        .join();
-        assert!(poison_result.is_err(), "poisoner should unwind");
-
-        let now = SystemTime::now();
-        stats.set_transport_handshake_start(now);
-
-        let start = stats.transport_handshake_start();
-        let guard = start.read().unwrap_or_else(PoisonError::into_inner);
-        assert_eq!(*guard, Some(now));
+        assert_eq!(stats.transport_handshake_duration(), None);
+        assert_eq!(stats.transport_handshake_start(), None);
+        let start = SystemTime::now();
+        stats.set_transport_handshake_start(start);
+        let duration = Duration::MAX;
+        std::thread::scope(|scope| {
+            scope.spawn(|| stats.set_transport_handshake_duration(duration));
+        });
+        stats.set_transport_handshake_duration(Duration::ZERO);
+        stats.set_transport_handshake_start(SystemTime::UNIX_EPOCH);
+        assert_eq!(stats.transport_handshake_start(), Some(start));
+        assert_eq!(stats.transport_handshake_duration(), Some(duration));
     }
 
     #[test]
-    fn audit_stats_recovers_poisoned_close_reason() {
-        let stats = Arc::new(QuicAuditStats::new(Vec::new()));
-        let poisoner = Arc::clone(&stats);
-
-        let poison_result = std::thread::spawn(move || {
-            if let Ok(_guard) = poisoner.connection_close_reason.write() {
-                std::panic::resume_unwind(Box::new(()));
-            }
-        })
-        .join();
-        assert!(poison_result.is_err(), "poisoner should unwind");
-
+    fn audit_close_publication_preserves_namespace_and_first_failure() {
+        let stats = QuicAuditStats::new(Vec::new());
+        assert_eq!(stats.peer_close_code(), None);
+        assert_eq!(stats.local_close_code(), None);
+        assert!(stats.connection_close_reason().is_none());
+        stats.set_peer_close_code(QuicCloseCode::Transport(0));
+        stats.set_local_close_code(QuicCloseCode::Application(u64::MAX));
+        stats.set_local_close_code(QuicCloseCode::Transport(1));
         stats.set_connection_close_reason(Box::new(std::io::Error::other(
-            "connection closed",
+            "first",
         )));
-
-        assert!(stats.connection_close_reason().is_some());
+        stats.set_connection_close_reason(Box::new(std::io::Error::other(
+            "second",
+        )));
+        assert_eq!(stats.peer_close_code(), Some(QuicCloseCode::Transport(0)));
+        assert_eq!(
+            stats.local_close_code(),
+            Some(QuicCloseCode::Application(u64::MAX))
+        );
+        assert_eq!(
+            stats
+                .connection_close_reason()
+                .map(ToString::to_string)
+                .as_deref(),
+            Some("first")
+        );
     }
 }

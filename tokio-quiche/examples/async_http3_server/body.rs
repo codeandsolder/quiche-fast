@@ -60,16 +60,12 @@ impl ExampleBody {
         const CHUNK_SIZE: usize = 1024 * 1024; // 1MB
         static CHUNK_DATA: [u8; CHUNK_SIZE] = [DUMMY_CONTENT; CHUNK_SIZE];
 
-        let req_path = req.uri().path();
-        let size = if req_path.starts_with(STREAM_BYTES) {
-            req_path
-                .split("/")
-                .last()
-                .and_then(|last| last.parse::<usize>().ok())
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let size = req
+            .uri()
+            .path()
+            .strip_prefix(STREAM_BYTES)
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or_default();
 
         Self {
             remaining: size,
@@ -88,12 +84,19 @@ impl ExampleBody {
         while let Some(chunk) = body_stream.next().await {
             match chunk {
                 Ok(chunk) => {
-                    for chunk in chunk.chunks(BufFactoryImpl::MAX_BUF_SIZE) {
-                        let chunk = OutboundFrame::Body(
-                            Bytes::copy_from_slice(chunk),
-                            false,
-                        );
-                        frame_sender.send(chunk).await.ok()?;
+                    for start in
+                        (0..chunk.len()).step_by(BufFactoryImpl::MAX_BUF_SIZE)
+                    {
+                        let end = start
+                            .saturating_add(BufFactoryImpl::MAX_BUF_SIZE)
+                            .min(chunk.len());
+                        frame_sender
+                            .send(OutboundFrame::Body(
+                                chunk.slice(start..end),
+                                false,
+                            ))
+                            .await
+                            .ok()?;
                     }
                 },
                 Err(error) => {
@@ -105,7 +108,7 @@ impl ExampleBody {
         }
 
         frame_sender
-            .send(OutboundFrame::Body(Default::default(), true))
+            .send(OutboundFrame::Body(Bytes::new(), true))
             .await
             .ok()?;
 
@@ -120,18 +123,12 @@ impl Body for ExampleBody {
     fn poll_frame(
         mut self: Pin<&mut Self>, _cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        Poll::Ready(match self.remaining {
-            0 => None,
-
-            _ => {
-                let chunk_len = std::cmp::min(self.remaining, self.chunk.len());
-
-                self.remaining -= chunk_len;
-
-                // Borrowing the slice of data and avoid copy.
-                Some(Ok(Frame::data(self.chunk.slice(..chunk_len))))
-            },
-        })
+        if self.remaining == 0 {
+            return Poll::Ready(None);
+        }
+        let chunk_len = self.remaining.min(self.chunk.len());
+        self.remaining -= chunk_len;
+        Poll::Ready(Some(Ok(Frame::data(self.chunk.slice(..chunk_len)))))
     }
 
     fn size_hint(&self) -> SizeHint {

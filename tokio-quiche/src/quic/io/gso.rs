@@ -35,23 +35,25 @@ use datagram_socket::DatagramSocketSend;
 use datagram_socket::DatagramSocketSendExt;
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-mod linux_imports {
-    pub(super) use nix::sys::socket::sendmsg;
-    pub(super) use nix::sys::socket::ControlMessage;
-    pub(super) use nix::sys::socket::MsgFlags;
-    pub(super) use nix::sys::socket::SockaddrStorage;
-    pub(super) use smallvec::SmallVec;
-    pub(super) use std::io::ErrorKind;
-    pub(super) use std::os::fd::AsRawFd;
-    pub(super) use tokio::io::Interest;
-}
-
+use nix::sys::socket::sendmsg;
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-use self::linux_imports::*;
+use nix::sys::socket::ControlMessage;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use nix::sys::socket::MsgFlags;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use nix::sys::socket::SockaddrStorage;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use smallvec::SmallVec;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use std::io::ErrorKind;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use std::os::fd::AsRawFd;
+#[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
+use tokio::io::Interest;
 
 /// Metadata for one UDP datagram or one equal-sized GSO batch.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct PacketSend {
+pub(in crate::quic) struct PacketSend {
     pub(crate) to: SocketAddr,
     pub(crate) from: Option<SocketAddr>,
     pub(crate) segment_size: Option<usize>,
@@ -71,7 +73,7 @@ impl PacketSend {
 /// Preserve UDP datagram boundaries even on a non-UDP transport wrapper.
 /// Ancillary options are independent of segmentation: a source address,
 /// pacing deadline or DSCP alone is sufficient to use sendmsg on Linux.
-pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
+async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
     socket: &S, buffer: &[u8], packet: PacketSend, metrics: &M,
 ) -> io::Result<()> {
     let segment_size = match checked_segment_size(packet.segment_size) {
@@ -116,7 +118,7 @@ pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
 /// Result of a deadline-bounded send. Expired batches are treated as packet
 /// loss by the QUIC worker, not retried with the same packet numbers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SendOutcome {
+pub(in crate::quic) enum SendOutcome {
     Sent,
     DeadlineExpired,
 }
@@ -124,7 +126,7 @@ pub(crate) enum SendOutcome {
 /// Cancel a pending datagram send when its owner needs to service a timer.
 /// Software segmentation may have already sent a prefix of the batch; the
 /// transport recovery machinery, rather than this layer, recovers its suffix.
-pub(crate) async fn send_packets_before<
+pub(in crate::quic) async fn send_packets_before<
     S: DatagramSocketSend + ?Sized,
     M: Metrics,
 >(
@@ -185,7 +187,7 @@ fn check_datagram_send<M: Metrics>(
 /// path-local or temporary network failure is therefore recoverable as
 /// ordinary loss. Local transport contract/configuration errors must not be
 /// silently converted into endless retransmission.
-pub(crate) fn recoverable_send_error(error: &io::Error) -> bool {
+pub(super) fn recoverable_send_error(error: &io::Error) -> bool {
     #[cfg(target_os = "linux")]
     if matches!(error.raw_os_error(), Some(libc::EMSGSIZE | libc::ENOBUFS)) {
         return true;
@@ -205,50 +207,48 @@ pub(crate) fn recoverable_send_error(error: &io::Error) -> bool {
 }
 
 // Maximum number of packets can be sent in UDP GSO.
-pub(crate) const UDP_MAX_SEGMENT_COUNT: usize = 64;
+pub(super) const UDP_MAX_SEGMENT_COUNT: usize = 64;
 
 #[cfg(not(feature = "gcongestion"))]
 /// Returns a new max send buffer size to avoid the fragmentation
-/// at the end. Maximum send buffer size is min(MAX_SEND_BUF_SIZE,
-/// connection's send_quantum).
+/// at the end. Maximum send buffer size is min(`MAX_SEND_BUF_SIZE`,
+/// connection's `send_quantum`).
 /// For example,
 ///
-/// - max_send_buf = 1000 and mss = 100, return 1000
-/// - max_send_buf = 1000 and mss = 90, return 990
+/// - `max_send_buf` = 1000 and `mss` = 100, return 1000
+/// - `max_send_buf` = 1000 and `mss` = 90, return 990
 ///
 /// not to have last 10 bytes packet.
-pub(crate) fn tune_max_send_size(
+pub(super) fn tune_max_send_size(
     segment_size: Option<usize>, send_quantum: usize, max_capacity: usize,
 ) -> usize {
     let max_send_buf_size = send_quantum.min(max_capacity);
 
-    if let Some(mss) = segment_size {
-        max_send_buf_size / mss * mss
-    } else {
-        max_send_buf_size
-    }
+    segment_size
+        .filter(|size| *size != 0)
+        .map_or(max_send_buf_size, |mss| max_send_buf_size / mss * mss)
 }
 
 // https://wiki.cfdata.org/pages/viewpage.action?pageId=436188159
-pub(crate) const UDP_MAX_GSO_PACKET_SIZE: usize = 65507;
+pub(super) const UDP_MAX_GSO_PACKET_SIZE: usize = 65507;
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 #[derive(Copy, Clone, Debug)]
-pub(crate) enum PktInfo {
+enum PktInfo {
     V4(libc::in_pktinfo),
     V6(libc::in6_pktinfo),
 }
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 impl PktInfo {
-    fn make_cmsg(&'_ self) -> ControlMessage<'_> {
+    const fn make_cmsg(&'_ self) -> ControlMessage<'_> {
         match self {
             Self::V4(pkt) => ControlMessage::Ipv4PacketInfo(pkt),
             Self::V6(pkt) => ControlMessage::Ipv6PacketInfo(pkt),
         }
     }
 
-    fn from_socket_addr(addr: SocketAddr) -> Self {
+    const fn from_socket_addr(addr: SocketAddr) -> Self {
         match addr {
             SocketAddr::V4(ipv4) => {
                 // This is basically a safe wrapper around `mem::transmute()`.
@@ -262,12 +262,19 @@ impl PktInfo {
                     ipi_addr: libc::in_addr { s_addr: 0 },
                 })
             },
-            SocketAddr::V6(ipv6) => Self::V6(libc::in6_pktinfo {
-                ipi6_ifindex: ipv6.scope_id(),
-                ipi6_addr: libc::in6_addr {
-                    s6_addr: ipv6.ip().octets(),
-                },
-            }),
+            SocketAddr::V6(ipv6) => {
+                if let Some(ipv4) = ipv6.ip().to_ipv4_mapped() {
+                    return Self::from_socket_addr(SocketAddr::V4(
+                        std::net::SocketAddrV4::new(ipv4, ipv6.port()),
+                    ));
+                }
+                Self::V6(libc::in6_pktinfo {
+                    ipi6_ifindex: ipv6.scope_id(),
+                    ipi6_addr: libc::in6_addr {
+                        s6_addr: ipv6.ip().octets(),
+                    },
+                })
+            },
         }
     }
 }
@@ -289,8 +296,8 @@ fn monotonic_timespec_ns(ts: libc::timespec) -> io::Result<u64> {
         .ok_or_else(|| io::ErrorKind::InvalidData.into())
 }
 
-/// Translate an opaque Rust Instant relative to a sampled CLOCK_MONOTONIC
-/// value, without relying on Instant's private layout.
+/// Translate an opaque Rust Instant relative to a sampled `CLOCK_MONOTONIC`
+/// value, without relying on `Instant`'s private layout.
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 fn tx_time_from_anchor(
     deadline: Instant, anchor: Instant, anchor_ns: u64,
@@ -408,7 +415,7 @@ async fn send_to<M: Metrics>(
                     );
                 }
                 metrics.write_errors(QuicWriteError::WouldBlock).inc();
-                socket.writable().await?
+                socket.writable().await?;
             },
             res => return res,
         }
@@ -424,7 +431,7 @@ async fn send_to<M: Metrics>(
 }
 
 #[cfg(all(target_os = "linux", test, not(feature = "fuzzing")))]
-pub(crate) mod test {
+pub mod test {
     use super::*;
     use crate::metrics::DefaultMetrics;
     use crate::quic::DscpHandle;
@@ -439,23 +446,23 @@ pub(crate) mod test {
     use tokio::time::timeout;
     use tokio::time::Duration;
 
-    const TEST_DSCP: Dscp = Dscp::new(34).unwrap();
+    const TEST_DSCP_VALUE: u8 = 34;
 
-    pub(crate) fn enable_tos(socket: &UdpSocket) {
-        if socket.local_addr().unwrap().is_ipv4() {
-            setsockopt(socket, sockopt::IpRecvTos, &true).unwrap();
+    pub fn enable_tos(socket: &UdpSocket) -> io::Result<()> {
+        if socket.local_addr()?.is_ipv4() {
+            setsockopt(socket, sockopt::IpRecvTos, &true)?;
         } else {
-            setsockopt(socket, sockopt::Ipv6RecvTClass, &true).unwrap();
+            setsockopt(socket, sockopt::Ipv6RecvTClass, &true)?;
         }
+        Ok(())
     }
 
-    pub(crate) async fn recv_tos(socket: &UdpSocket) -> (Vec<u8>, u8) {
+    pub async fn recv_tos(socket: &UdpSocket) -> io::Result<(Vec<u8>, u8)> {
         let receive = async {
             let mut buf = [0u8; 2048];
             let mut cmsg_space = nix::cmsg_space!(libc::c_int);
-
             loop {
-                socket.readable().await.unwrap();
+                socket.readable().await?;
                 match socket.try_io(Interest::READABLE, || {
                     let mut iov = [IoSliceMut::new(&mut buf)];
                     let msg = recvmsg::<()>(
@@ -463,43 +470,49 @@ pub(crate) mod test {
                         &mut iov,
                         Some(&mut cmsg_space),
                         MsgFlags::empty(),
-                    )
-                    .map_err(io::Error::from)?;
-                    let tos =
-                        msg.cmsgs().map_err(io::Error::from)?.find_map(|cmsg| {
-                            match cmsg {
-                                ControlMessageOwned::Ipv4Tos(tos) => Some(tos),
-                                ControlMessageOwned::Ipv6TClass(tclass) =>
-                                    Some(u8::try_from(tclass).unwrap()),
-                                _ => None,
-                            }
-                        });
+                    )?;
+                    let mut tos = None;
+                    for cmsg in msg.cmsgs()? {
+                        match cmsg {
+                            ControlMessageOwned::Ipv4Tos(value) =>
+                                tos = Some(value),
+                            ControlMessageOwned::Ipv6TClass(value) =>
+                                tos = Some(
+                                    u8::try_from(value)
+                                        .map_err(io::Error::other)?,
+                                ),
+                            _ => (),
+                        }
+                    }
                     Ok((msg.bytes, tos))
                 }) {
-                    Ok((len, Some(tos))) => return (buf[..len].to_vec(), tos),
-                    Ok((_, None)) => panic!("IP TOS control message missing"),
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
-                    Err(e) => panic!("recvmsg failed: {e}"),
+                    Ok((len, Some(tos))) =>
+                        return Ok((buf[..len].to_vec(), tos)),
+                    Ok((_, None)) =>
+                        return Err(io::Error::other(
+                            "IP TOS control message missing",
+                        )),
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => (),
+                    Err(error) => return Err(error),
                 }
             }
         };
-
         timeout(Duration::from_secs(2), receive)
             .await
-            .expect("timed out waiting for UDP packet")
+            .map_err(|error| io::Error::new(io::ErrorKind::TimedOut, error))?
     }
 
     async fn send_packet(
         sender: &UdpSocket, receiver: &UdpSocket, buf: &[u8],
         segment_size: Option<usize>, from: Option<SocketAddr>,
         dscp: Option<Dscp>,
-    ) {
+    ) -> crate::QuicResult<()> {
         let metrics = DefaultMetrics;
         let bytes = send_to(
             sender,
             buf,
             PacketSend {
-                to: receiver.local_addr().unwrap(),
+                to: receiver.local_addr()?,
                 from,
                 segment_size,
                 tx_time: None,
@@ -507,20 +520,21 @@ pub(crate) mod test {
             },
             &metrics,
         )
-        .await
-        .unwrap();
+        .await?;
         assert_eq!(bytes, buf.len());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn per_packet_dscp_overrides_socket_without_leaking() {
-        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        enable_tos(&receiver);
+    async fn per_packet_dscp_overrides_socket_without_leaking(
+    ) -> crate::QuicResult<()> {
+        let sender = UdpSocket::bind("127.0.0.1:0").await?;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await?;
+        enable_tos(&receiver)?;
 
         // A nonzero socket default makes an explicit zero distinguishable from
         // omitting the cmsg after a marking is cleared.
-        setsockopt(&sender, sockopt::Ipv4Tos, &136).unwrap();
+        setsockopt(&sender, sockopt::Ipv4Tos, &136)?;
         let first = DscpHandle::new();
         let second = DscpHandle::new();
         second.set(Dscp::new(1));
@@ -533,35 +547,36 @@ pub(crate) mod test {
                 &receiver,
                 b"quic",
                 None,
-                Some(sender.local_addr().unwrap()),
+                Some(sender.local_addr()?),
                 dscp,
             )
-            .await;
-            let (payload, tos) = recv_tos(&receiver).await;
+            .await?;
+            let (payload, tos) = recv_tos(&receiver).await?;
             assert_eq!(payload, b"quic");
             assert_eq!(tos & 0xfc, expected);
         }
 
         first.set(Dscp::new(28));
         send_packet(&sender, &receiver, b"updated", None, None, first.get())
-            .await;
-        assert_eq!(recv_tos(&receiver).await.1 & 0xfc, 112);
+            .await?;
+        assert_eq!(recv_tos(&receiver).await?.1 & 0xfc, 112);
 
         first.set(Dscp::new(0));
-        send_packet(&sender, &receiver, b"zero", None, None, first.get()).await;
-        assert_eq!(recv_tos(&receiver).await.1 & 0xfc, 0);
+        send_packet(&sender, &receiver, b"zero", None, None, first.get()).await?;
+        assert_eq!(recv_tos(&receiver).await?.1 & 0xfc, 0);
 
         first.set(None);
         send_packet(&sender, &receiver, b"unmarked", None, None, first.get())
-            .await;
-        assert_eq!(recv_tos(&receiver).await.1 & 0xfc, 136);
+            .await?;
+        assert_eq!(recv_tos(&receiver).await?.1 & 0xfc, 136);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn gso_segments_keep_dscp_with_pktinfo() {
-        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        enable_tos(&receiver);
+    async fn gso_segments_keep_dscp_with_pktinfo() -> crate::QuicResult<()> {
+        let sender = UdpSocket::bind("127.0.0.1:0").await?;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await?;
+        enable_tos(&receiver)?;
 
         let buf = vec![42u8; 2400];
         send_packet(
@@ -569,50 +584,52 @@ pub(crate) mod test {
             &receiver,
             &buf,
             Some(1200),
-            Some(sender.local_addr().unwrap()),
-            Some(TEST_DSCP),
+            Some(sender.local_addr()?),
+            Dscp::new(TEST_DSCP_VALUE),
         )
-        .await;
+        .await?;
 
         for _ in 0..2 {
-            let (payload, tos) = recv_tos(&receiver).await;
+            let (payload, tos) = recv_tos(&receiver).await?;
             assert_eq!(payload, &buf[..1200]);
-            assert_eq!(tos >> 2, TEST_DSCP.value());
+            assert_eq!(tos >> 2, TEST_DSCP_VALUE);
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ipv6_tclass_marks_packet_without_gso() {
-        let sender = UdpSocket::bind("[::1]:0").await.unwrap();
-        let receiver = UdpSocket::bind("[::1]:0").await.unwrap();
-        enable_tos(&receiver);
+    async fn ipv6_tclass_marks_packet_without_gso() -> crate::QuicResult<()> {
+        let sender = UdpSocket::bind("[::1]:0").await?;
+        let receiver = UdpSocket::bind("[::1]:0").await?;
+        enable_tos(&receiver)?;
 
         send_packet(
             &sender,
             &receiver,
             b"ipv6",
             None,
-            Some(sender.local_addr().unwrap()),
-            Some(TEST_DSCP),
+            Some(sender.local_addr()?),
+            Dscp::new(TEST_DSCP_VALUE),
         )
-        .await;
-        let (payload, tos) = recv_tos(&receiver).await;
+        .await?;
+        let (payload, tos) = recv_tos(&receiver).await?;
         assert_eq!(payload, b"ipv6");
-        assert_eq!(tos >> 2, TEST_DSCP.value());
+        assert_eq!(tos >> 2, TEST_DSCP_VALUE);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ipv4_mapped_ipv6_peer_uses_ipv4_tos() {
+    async fn ipv4_mapped_ipv6_peer_uses_ipv4_tos() -> crate::QuicResult<()> {
         use std::net::Ipv4Addr;
         use std::net::SocketAddr;
         use std::net::SocketAddrV6;
 
-        let sender = UdpSocket::bind("[::]:0").await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        enable_tos(&receiver);
+        let sender = UdpSocket::bind("[::]:0").await?;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await?;
+        enable_tos(&receiver)?;
 
-        let SocketAddr::V4(peer) = receiver.local_addr().unwrap() else {
-            unreachable!()
+        let SocketAddr::V4(peer) = receiver.local_addr()? else {
+            return Err("expected IPv4 socket".into());
         };
         let mapped = SocketAddr::V6(SocketAddrV6::new(
             peer.ip().to_ipv6_mapped(),
@@ -622,7 +639,7 @@ pub(crate) mod test {
         ));
         let mapped_source = SocketAddr::V6(SocketAddrV6::new(
             Ipv4Addr::LOCALHOST.to_ipv6_mapped(),
-            sender.local_addr().unwrap().port(),
+            sender.local_addr()?.port(),
             0,
             0,
         ));
@@ -636,86 +653,97 @@ pub(crate) mod test {
                     from,
                     segment_size: None,
                     tx_time: None,
-                    dscp: Some(TEST_DSCP),
+                    dscp: Dscp::new(TEST_DSCP_VALUE),
                 },
                 &metrics,
             )
-            .await
-            .unwrap();
+            .await?;
 
-            let (payload, tos) = recv_tos(&receiver).await;
+            let (payload, tos) = recv_tos(&receiver).await?;
             assert_eq!(payload, b"mapped");
-            assert_eq!(tos >> 2, TEST_DSCP.value());
+            assert_eq!(tos >> 2, TEST_DSCP_VALUE);
         }
+        Ok(())
     }
 
     #[test]
-    fn monotonic_tx_time_checked_arithmetic() {
+    fn monotonic_tx_time_checked_arithmetic() -> crate::QuicResult<()> {
         let anchor = Instant::now();
-        let ahead = anchor.checked_add(Duration::from_nanos(5)).unwrap();
-        let behind = anchor.checked_sub(Duration::from_nanos(5)).unwrap();
+        let ahead = anchor
+            .checked_add(Duration::from_nanos(5))
+            .ok_or("instant overflow")?;
+        let behind = anchor
+            .checked_sub(Duration::from_nanos(5))
+            .ok_or("instant underflow")?;
 
-        assert_eq!(tx_time_from_anchor(anchor, anchor, 42).unwrap(), 42);
-        assert_eq!(tx_time_from_anchor(ahead, anchor, 42).unwrap(), 47);
-        assert_eq!(tx_time_from_anchor(behind, anchor, 42).unwrap(), 37);
-        assert_eq!(
-            tx_time_from_anchor(ahead, anchor, u64::MAX - 5).unwrap(),
-            u64::MAX
-        );
-        assert_eq!(tx_time_from_anchor(behind, anchor, 5).unwrap(), 0);
+        assert_eq!(tx_time_from_anchor(anchor, anchor, 42)?, 42);
+        assert_eq!(tx_time_from_anchor(ahead, anchor, 42)?, 47);
+        assert_eq!(tx_time_from_anchor(behind, anchor, 42)?, 37);
+        assert_eq!(tx_time_from_anchor(ahead, anchor, u64::MAX - 5)?, u64::MAX);
+        assert_eq!(tx_time_from_anchor(behind, anchor, 5)?, 0);
 
         assert_eq!(
             tx_time_from_anchor(ahead, anchor, u64::MAX - 4)
-                .unwrap_err()
+                .err()
+                .ok_or("expected invalid packet or time to be rejected")?
                 .kind(),
             io::ErrorKind::InvalidInput
         );
         assert_eq!(
-            tx_time_from_anchor(behind, anchor, 4).unwrap_err().kind(),
+            tx_time_from_anchor(behind, anchor, 4)
+                .err()
+                .ok_or("expected invalid packet or time to be rejected")?
+                .kind(),
             io::ErrorKind::InvalidInput
         );
 
         // Exercise the real CLOCK_MONOTONIC sampling path too; no timing
         // assertions that can fail under CI scheduling delays.
-        assert!(monotonic_tx_time(anchor).unwrap() > 0);
+        assert!(monotonic_tx_time(anchor)? > 0);
+        Ok(())
     }
 
     #[test]
-    fn monotonic_timespec_checks_kernel_values() {
+    fn monotonic_timespec_checks_kernel_values() -> crate::QuicResult<()> {
         let ts = |sec, nsec| libc::timespec {
             tv_sec: sec,
             tv_nsec: nsec,
         };
-        assert_eq!(
-            monotonic_timespec_ns(ts(2, 999_999_999)).unwrap(),
-            2_999_999_999
-        );
+        assert_eq!(monotonic_timespec_ns(ts(2, 999_999_999))?, 2_999_999_999);
         for invalid in [ts(-1, 0), ts(0, -1), ts(0, 1_000_000_000)] {
             assert_eq!(
-                monotonic_timespec_ns(invalid).unwrap_err().kind(),
+                monotonic_timespec_ns(invalid)
+                    .err()
+                    .ok_or("expected invalid packet or time to be rejected")?
+                    .kind(),
                 io::ErrorKind::InvalidData
             );
         }
         if let Ok(seconds) = libc::time_t::try_from(u64::MAX / 1_000_000_000 + 1)
         {
             assert_eq!(
-                monotonic_timespec_ns(ts(seconds, 0)).unwrap_err().kind(),
+                monotonic_timespec_ns(ts(seconds, 0))
+                    .err()
+                    .ok_or("expected invalid packet or time to be rejected")?
+                    .kind(),
                 io::ErrorKind::InvalidData
             );
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn invalid_udp_segment_sizes_are_errors_not_truncations() {
-        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    async fn invalid_udp_segment_sizes_are_errors_not_truncations(
+    ) -> crate::QuicResult<()> {
+        let sender = UdpSocket::bind("127.0.0.1:0").await?;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await?;
         let metrics = DefaultMetrics;
         for size in [0, usize::from(u16::MAX) + 1, usize::MAX] {
             let err = send_to(
                 &sender,
                 b"segment",
                 PacketSend {
-                    to: receiver.local_addr().unwrap(),
+                    to: receiver.local_addr()?,
                     from: None,
                     segment_size: Some(size),
                     tx_time: None,
@@ -724,27 +752,30 @@ pub(crate) mod test {
                 &metrics,
             )
             .await
-            .unwrap_err();
+            .err()
+            .ok_or("expected invalid packet or time to be rejected")?;
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "size={size}");
         }
+        Ok(())
     }
 
     #[tokio::test]
-    async fn txtime_control_message_is_accepted_by_linux_socket() {
-        let sender = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let receiver = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    async fn txtime_control_message_is_accepted_by_linux_socket(
+    ) -> crate::QuicResult<()> {
+        let sender = UdpSocket::bind("127.0.0.1:0").await?;
+        let receiver = UdpSocket::bind("127.0.0.1:0").await?;
         let cfg = libc::sock_txtime {
             clockid: libc::CLOCK_MONOTONIC,
             flags: 0,
         };
-        setsockopt(&sender, sockopt::TxTime, &cfg).unwrap();
+        setsockopt(&sender, sockopt::TxTime, &cfg)?;
 
         let metrics = DefaultMetrics;
         let sent = send_to(
             &sender,
             b"deadline",
             PacketSend {
-                to: receiver.local_addr().unwrap(),
+                to: receiver.local_addr()?,
                 from: None,
                 segment_size: None,
                 tx_time: Some(Instant::now() + Duration::from_millis(100)),
@@ -752,9 +783,9 @@ pub(crate) mod test {
             },
             &metrics,
         )
-        .await
-        .unwrap();
+        .await?;
         assert_eq!(sent, b"deadline".len());
+        Ok(())
     }
 }
 
@@ -780,19 +811,17 @@ mod send_tests {
         fn poll_send(
             &self, _cx: &mut Context<'_>, buffer: &[u8],
         ) -> Poll<io::Result<usize>> {
-            match self.datagrams.lock() {
-                Ok(mut datagrams) => {
-                    datagrams.push(buffer.to_vec());
-                    Poll::Ready(Ok(if self.partial {
-                        buffer.len().saturating_sub(1)
-                    } else {
-                        buffer.len()
-                    }))
-                },
-                Err(_) => Poll::Ready(Err(io::Error::other(
+            let Ok(mut datagrams) = self.datagrams.lock() else {
+                return Poll::Ready(Err(io::Error::other(
                     "recording socket poisoned",
-                ))),
-            }
+                )));
+            };
+            datagrams.push(buffer.to_vec());
+            Poll::Ready(Ok(if self.partial {
+                buffer.len().saturating_sub(1)
+            } else {
+                buffer.len()
+            }))
         }
 
         fn poll_send_to(

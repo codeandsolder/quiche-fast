@@ -397,6 +397,19 @@ impl SocketCapabilities {
         self.0 & capability.mask() != 0
     }
 
+    /// Whether source address selection is supported for this address family.
+    /// IPv4-mapped IPv6 addresses use IPv4 control messages on Linux.
+    #[must_use = "the result determines whether the source address can be selected"]
+    pub const fn supports_pktinfo(self, addr: std::net::SocketAddr) -> bool {
+        self.contains(match addr {
+            std::net::SocketAddr::V4(_) => SocketCapability::Ipv4PacketInfo,
+            std::net::SocketAddr::V6(addr)
+                if addr.ip().to_ipv4_mapped().is_some() =>
+                SocketCapability::Ipv4PacketInfo,
+            std::net::SocketAddr::V6(_) => SocketCapability::Ipv6PacketInfo,
+        })
+    }
+
     /// Derives a capability set with a particular option disabled by policy.
     #[must_use = "the returned capability set contains the policy change"]
     pub const fn without(self, capability: SocketCapability) -> Self {
@@ -435,10 +448,12 @@ impl SocketCapabilities {
         // the relevant options for both
         let _ = b.ip_mtu_discover_probe();
         let _ = b.ipv6_mtu_discover_probe();
+        // Packet information is useful on ordinary wildcard-bound sockets too:
+        // it preserves the actual destination and lets replies use that source.
+        let _ = b.ipv4_pktinfo();
+        let _ = b.ipv6_pktinfo();
         if matches!(b.allows_nonlocal_source(), Ok(true)) {
-            let _ = b.ipv4_pktinfo();
             let _ = b.ipv4_recvorigdstaddr();
-            let _ = b.ipv6_pktinfo();
             let _ = b.ipv6_recvorigdstaddr();
         }
         b.finish()

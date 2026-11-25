@@ -67,6 +67,9 @@ pub type BoxedSocket = Socket<
 impl<Tx, Rx> Socket<Tx, Rx> {
     /// Creates a [`Socket`] from a [`UdpSocket`] by wrapping the file
     /// descriptor in an [`Arc`].
+    ///
+    /// # Errors
+    /// Returns an error if the local or peer socket address cannot be obtained.
     pub fn from_udp(
         socket: UdpSocket,
     ) -> io::Result<Socket<Arc<UdpSocket>, Arc<UdpSocket>>> {
