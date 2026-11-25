@@ -216,7 +216,7 @@ impl MultiplexLayout {
 
 /// Select the recorded DATA frames for the trace vantage without collecting a
 /// second vector of per-request references.
-fn request_data_frames(
+const fn request_data_frames(
     request: &HttpRequestStub, vantage: VantagePoint,
 ) -> &[DataObservation] {
     match vantage {
