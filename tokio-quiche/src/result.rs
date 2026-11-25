@@ -47,6 +47,9 @@ pub type QuicResult<T> = Result<T, BoxError>;
 pub trait QuicResultExt<T, E> {
     /// Turns the [Result] into an [`io::Result`] with
     /// [`ErrorKind::Other`](io::ErrorKind::Other).
+    ///
+    /// # Errors
+    /// Converts an existing error to an I/O error retaining its source.
     fn into_io(self) -> io::Result<T>
     where
         E: Into<BoxError>;

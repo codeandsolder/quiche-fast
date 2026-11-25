@@ -34,6 +34,10 @@ pub use qlog::writer::QlogCompression;
 /// QUIC configuration parameters.
 #[serde_as]
 #[settings]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These are independent protocol and deployment options, not mutually exclusive states"
+)]
 #[non_exhaustive]
 pub struct QuicSettings {
     /// Configures the list of supported application protocols.
@@ -220,7 +224,7 @@ pub struct QuicSettings {
     ///
     /// The expensive versions add a label for the peer IP subnet (`/24` for
     /// IPv4, `/32` for IPv6). They thus generate many more time series if
-    /// peers are arbitrary eyeballs from the global Internet.
+    /// peers are arbitrary eyeballs from the global internet.
     pub enable_expensive_packet_count_metrics: bool,
 
     /// Forwards [`quiche`] logs into the logging system currently used by
@@ -269,23 +273,15 @@ pub struct QuicSettings {
     #[serde(default = "QuicSettings::default_max_connection_window")]
     pub max_connection_window: u64,
 
-    /// The maximum size of the receiveer stream flow control window.
+    /// The maximum size of the receiver stream flow control window.
     ///
     /// Defaults to 16MB.
     #[serde(default = "QuicSettings::default_max_stream_window")]
     pub max_stream_window: u64,
 
-    /// Deprecated: this is now always enabled and this setting is
-    /// ignored.
-    ///
-    /// Previously controlled whether to use the `initial_max_data`
-    /// transport parameter as the initial connection and stream flow
-    /// control window.
-    pub use_initial_max_data_as_fc_window: bool,
-
-    /// If true, send an advisory STREAMS_BLOCKED frame when the
+    /// If true, send an advisory `STREAMS_BLOCKED` frame when the
     /// application's local stream creation attempts fail due to the
-    /// peer advertised MAX_STREAMS limit.
+    /// peer advertised `MAX_STREAMS` limit.
     ///
     /// Defaults to false.
     pub enable_send_streams_blocked: bool,
@@ -324,7 +320,7 @@ pub struct QuicSettings {
     #[serde(default = "QuicSettings::default_max_ack_delay")]
     pub max_ack_delay: u64,
 
-    /// Configures the max number of queued received PATH_CHALLENGE frames.
+    /// Configures the max number of queued received `PATH_CHALLENGE` frames.
     ///
     /// Defaults to 3.
     #[serde(default = "QuicSettings::default_max_path_challenge_recv_queue_len")]
@@ -338,7 +334,7 @@ pub struct QuicSettings {
     /// Defaults to `None`.
     pub stateless_reset_token: Option<u128>,
 
-    /// Sets whether the QUIC connection should avoid reusing DCIDs over
+    /// Sets whether the QUIC connection should avoid reusing `DCID`s over
     /// different paths.
     ///
     /// Defaults to `false`. See [`set_disable_dcid_reuse()`] for more.
@@ -381,52 +377,56 @@ impl QuicSettings {
     }
 
     #[inline]
-    fn default_enable_dgram() -> bool {
+    const fn default_enable_dgram() -> bool {
         true
     }
 
     #[inline]
-    fn default_pool_send_buffer() -> bool {
+    const fn default_pool_send_buffer() -> bool {
         true
     }
 
     #[inline]
-    fn default_dgram_max_queue_len() -> usize {
+    const fn default_dgram_max_queue_len() -> usize {
         65536
     }
 
     #[inline]
-    fn default_initial_max_data() -> u64 {
+    const fn default_initial_max_data() -> u64 {
         10_000_000
     }
 
     #[inline]
-    fn default_initial_max_stream_data() -> u64 {
+    const fn default_initial_max_stream_data() -> u64 {
         1_000_000
     }
 
     #[inline]
-    fn default_initial_max_streams() -> u64 {
+    const fn default_initial_max_streams() -> u64 {
         100
     }
 
     #[inline]
-    fn default_max_idle_timeout() -> Option<Duration> {
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "Serde's default function must return the field's optional type; explicit null disables the timeout"
+    )]
+    const fn default_max_idle_timeout() -> Option<Duration> {
         Some(Duration::from_secs(56))
     }
 
     #[inline]
-    fn default_max_recv_udp_payload_size() -> usize {
+    const fn default_max_recv_udp_payload_size() -> usize {
         1350
     }
 
     #[inline]
-    fn default_max_send_udp_payload_size() -> usize {
+    const fn default_max_send_udp_payload_size() -> usize {
         1350
     }
 
     #[inline]
-    fn default_disable_active_migration() -> bool {
+    const fn default_disable_active_migration() -> bool {
         true
     }
 
@@ -436,17 +436,17 @@ impl QuicSettings {
     }
 
     #[inline]
-    fn default_initial_congestion_window_packets() -> usize {
+    const fn default_initial_congestion_window_packets() -> usize {
         10
     }
 
     #[inline]
-    fn default_enable_hystart() -> bool {
+    const fn default_enable_hystart() -> bool {
         true
     }
 
     #[inline]
-    fn default_listen_backlog() -> usize {
+    const fn default_listen_backlog() -> usize {
         // With a worst-case one-minute timeout and 4096 concurrent handshakes,
         // at least 70 connections are dequeued per second. A backlog of 1024
         // therefore limits queueing latency to about 15 seconds.
@@ -454,52 +454,52 @@ impl QuicSettings {
     }
 
     #[inline]
-    fn default_max_connection_window() -> u64 {
+    const fn default_max_connection_window() -> u64 {
         24 * 1024 * 1024
     }
 
     #[inline]
-    fn default_max_stream_window() -> u64 {
+    const fn default_max_stream_window() -> u64 {
         16 * 1024 * 1024
     }
 
     #[inline]
-    fn default_grease() -> bool {
+    const fn default_grease() -> bool {
         true
     }
 
     #[inline]
-    fn default_amplification_factor() -> usize {
+    const fn default_amplification_factor() -> usize {
         3
     }
 
     #[inline]
-    fn default_send_capacity_factor() -> f64 {
+    const fn default_send_capacity_factor() -> f64 {
         1.0
     }
 
     #[inline]
-    fn default_ack_delay_exponent() -> u64 {
+    const fn default_ack_delay_exponent() -> u64 {
         3
     }
 
     #[inline]
-    fn default_max_ack_delay() -> u64 {
+    const fn default_max_ack_delay() -> u64 {
         25
     }
 
     #[inline]
-    fn default_active_connection_id_limit() -> u64 {
+    const fn default_active_connection_id_limit() -> u64 {
         2
     }
 
     #[inline]
-    fn default_max_path_challenge_recv_queue_len() -> usize {
+    const fn default_max_path_challenge_recv_queue_len() -> usize {
         3
     }
 
     #[inline]
-    fn default_pmtud_max_probes() -> u8 {
+    const fn default_pmtud_max_probes() -> u8 {
         3
     }
 }
@@ -510,13 +510,24 @@ mod test {
     use std::time::Duration;
 
     #[test]
-    fn timeouts_parse_as_milliseconds() {
+    fn timeouts_parse_as_milliseconds() -> Result<(), serde_json::Error> {
         let quic = serde_json::from_str::<QuicSettings>(
             r#"{ "handshake_timeout_ms": 5000, "max_idle_timeout_ms": 7000 }"#,
-        )
-        .unwrap();
+        )?;
 
-        assert_eq!(quic.handshake_timeout.unwrap(), Duration::from_secs(5));
-        assert_eq!(quic.max_idle_timeout.unwrap(), Duration::from_secs(7));
+        assert_eq!(quic.handshake_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(quic.max_idle_timeout, Some(Duration::from_secs(7)));
+        Ok(())
+    }
+
+    #[test]
+    fn idle_timeout_default_and_explicit_null_are_distinct(
+    ) -> Result<(), serde_json::Error> {
+        let defaults: QuicSettings = serde_json::from_str("{}")?;
+        let disabled: QuicSettings =
+            serde_json::from_str(r#"{"max_idle_timeout_ms": null}"#)?;
+        assert_eq!(defaults.max_idle_timeout, Some(Duration::from_secs(56)));
+        assert_eq!(disabled.max_idle_timeout, None);
+        Ok(())
     }
 }

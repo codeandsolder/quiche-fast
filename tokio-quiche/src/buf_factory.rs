@@ -40,10 +40,11 @@ impl BufFactory {
 
     /// Return a `DgramBuffer` with enough capacity for `MAX_DATAGRAM_SIZE`
     /// payload bytes and enough headroom for two QUIC varints.
+    #[must_use = "the returned buffer provides datagram payload and prefix capacity"]
     pub fn get_max_dgram_buf() -> DgramBuffer {
         DgramBuffer::with_capacity_and_headroom(
-            datagram_socket::MAX_DATAGRAM_SIZE + BufFactory::DGRAM_HEADROOM,
-            BufFactory::DGRAM_HEADROOM,
+            datagram_socket::MAX_DATAGRAM_SIZE + Self::DGRAM_HEADROOM,
+            Self::DGRAM_HEADROOM,
         )
     }
 }

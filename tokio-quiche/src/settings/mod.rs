@@ -90,7 +90,7 @@ impl core::fmt::Debug for ConnectionParams<'_> {
         #[cfg(feature = "custom-client-dcid")]
         s.field("dcid", &self.dcid);
 
-        s.finish()
+        s.finish_non_exhaustive()
     }
 }
 
@@ -98,7 +98,8 @@ impl<'a> ConnectionParams<'a> {
     /// Creates [`ConnectionParams`] for a QUIC server.
     /// Servers should always specify TLS credentials.
     #[inline]
-    pub fn new_server(
+    #[must_use = "the returned parameters configure the connection"]
+    pub const fn new_server(
         settings: QuicSettings, tls_cert: TlsCertificatePaths<'a>, hooks: Hooks,
     ) -> Self {
         Self {
@@ -115,7 +116,8 @@ impl<'a> ConnectionParams<'a> {
     /// Creates [`ConnectionParams`] for a QUIC client.
     /// Clients may enable mTLS by specifying TLS credentials.
     #[inline]
-    pub fn new_client(
+    #[must_use = "the returned parameters configure the connection"]
+    pub const fn new_client(
         settings: QuicSettings, tls_cert: Option<TlsCertificatePaths<'a>>,
         hooks: Hooks,
     ) -> Self {

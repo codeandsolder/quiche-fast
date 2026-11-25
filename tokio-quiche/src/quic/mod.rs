@@ -316,11 +316,7 @@ where
                 .as_ref()
                 .and_then(|f| f.try_clone().ok()),
             #[cfg(target_os = "linux")]
-            with_pktinfo: if local_addr.is_ipv4() {
-                config.has_ippktinfo
-            } else {
-                config.has_ipv6pktinfo
-            },
+            with_pktinfo: config.supports_pktinfo(local_addr),
         },
         Arc::clone(&socket_tx),
         socket.cid_generator,
