@@ -65,13 +65,21 @@ use tokio_quiche::ServerH3Connection;
 
 #[derive(Debug, Default, Clone)]
 struct TestContext {
-    did_recv_early_data_request: bool,
     requests_handled_count: usize,
-    hosts_seen: Vec<String>,
+    requests_seen: Vec<(String, bool)>,
 }
 
 #[tokio::test]
 async fn handle_0_rtt_request() {
+    check_resumed_requests(false).await;
+}
+
+#[tokio::test]
+async fn handle_0_rtt_request_with_retry() {
+    check_resumed_requests(true).await;
+}
+
+async fn check_resumed_requests(retry: bool) {
     let context = Arc::new(Mutex::new(TestContext::default()));
     let early_stream_id = 0;
     let stream_id = 4;
@@ -79,6 +87,7 @@ async fn handle_0_rtt_request() {
     let context_clone = context.clone();
     let mut quic_settings = QuicSettings::default();
     quic_settings.enable_early_data = true;
+    quic_settings.disable_client_ip_validation = !retry;
     let (url, _) = start_server_with_settings(
         quic_settings,
         Http3Settings::default(),
@@ -99,10 +108,11 @@ async fn handle_0_rtt_request() {
 
         {
             let context = context.lock().unwrap();
-            assert_eq!(context.hosts_seen.len(), 1);
-            assert!(context.hosts_seen.contains(&"test.com".to_string()));
+            assert_eq!(context.requests_seen, vec![(
+                "test.com".to_owned(),
+                false
+            )]);
             assert_eq!(context.requests_handled_count, 1);
-            assert!(!context.did_recv_early_data_request);
         }
 
         // Get Session data from this connection to resume the 0-RTT connection.
@@ -134,10 +144,18 @@ async fn handle_0_rtt_request() {
 
         {
             let context = context.lock().unwrap();
-            assert_eq!(context.hosts_seen.len(), 2);
-            assert_eq!(context.hosts_seen, vec!["early.test.com", "test.com"]);
+            // QUIC does not order requests across independent streams.
+            let mut requests = context.requests_seen.clone();
+            requests.sort_unstable();
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0].0, "early.test.com");
+            assert_eq!(requests[1], ("test.com".to_owned(), false));
+            // Retry can require recovery of early stream data after the
+            // handshake. Without Retry, prove actual early delivery.
+            if !retry {
+                assert!(requests[0].1);
+            }
             assert_eq!(context.requests_handled_count, 2);
-            assert!(context.did_recv_early_data_request);
         }
     }
 }
@@ -217,11 +235,10 @@ fn helper_server_handler(
                     {
                         let mut context = context.lock().unwrap();
                         context.requests_handled_count += 1;
-                        context.did_recv_early_data_request |= *is_in_early_data;
                         let host = std::str::from_utf8(authority.value())
                             .unwrap()
                             .to_string();
-                        context.hosts_seen.push(host);
+                        context.requests_seen.push((host, *is_in_early_data));
                     }
 
                     // Send headers.

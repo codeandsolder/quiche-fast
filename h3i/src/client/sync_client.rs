@@ -24,60 +24,29 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Responsible for creating a [quiche::Connection] and managing I/O.
+//! Responsible for creating a [`quiche::Connection`] and managing I/O.
 
-use std::slice::Iter;
-use std::time::Duration;
 use std::time::Instant;
 
-use ring::rand::*;
-
-use crate::client::QUIC_VERSION;
-use crate::frame::H3iFrame;
-use crate::quiche;
+use ring::rand::SecureRandom;
+use ring::rand::SystemRandom;
 
 use crate::actions::h3::Action;
-use crate::actions::h3::WaitType;
-use crate::actions::h3::WaitingFor;
-use crate::client::execute_action;
-use crate::client::parse_streams;
-use crate::client::ClientError;
-use crate::client::ConnectionCloseDetails;
-use crate::client::MAX_DATAGRAM_SIZE;
 use crate::config::Config;
+use crate::quiche;
 
+use super::action_queue::ActionQueue;
 use super::parse_args;
-use super::Client;
+use super::parse_streams;
+use super::sync_io::SyncIo;
+use super::sync_io::TxStatus;
+use super::ClientError;
+use super::ClientState;
 use super::CloseTriggerFrames;
 use super::ConnectionSummary;
 use super::ParsedArgs;
-use super::StreamMap;
-use super::StreamParserMap;
-
-#[derive(Default)]
-struct SyncClient {
-    streams: StreamMap,
-    stream_parsers: StreamParserMap,
-}
-
-impl SyncClient {
-    fn new(close_trigger_frames: Option<CloseTriggerFrames>) -> Self {
-        Self {
-            streams: StreamMap::new(close_trigger_frames),
-            ..Default::default()
-        }
-    }
-}
-
-impl Client for SyncClient {
-    fn stream_parsers_mut(&mut self) -> &mut StreamParserMap {
-        &mut self.stream_parsers
-    }
-
-    fn handle_response_frame(&mut self, stream_id: u64, frame: H3iFrame) {
-        self.streams.insert(stream_id, frame);
-    }
-}
+use super::MAX_DATAGRAM_SIZE;
+use super::QUIC_VERSION;
 
 fn create_config(
     args: &Config, should_log_keys: bool,
@@ -94,21 +63,20 @@ fn create_config(
     config.set_send_capacity_factor(args.send_capacity_factor);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(args.flow.max_data);
-    config.set_initial_max_stream_data_bidi_local(
-        args.flow.max_stream_data_bidi_local,
-    );
+    config.set_initial_max_data(args.flow.data);
+    config
+        .set_initial_max_stream_data_bidi_local(args.flow.stream_data_bidi_local);
     config.set_initial_max_stream_data_bidi_remote(
-        args.flow.max_stream_data_bidi_remote,
+        args.flow.stream_data_bidi_remote,
     );
-    config.set_initial_max_stream_data_uni(args.flow.max_stream_data_uni);
-    config.set_initial_max_streams_bidi(args.flow.max_streams_bidi);
-    config.set_initial_max_streams_uni(args.flow.max_streams_uni);
+    config.set_initial_max_stream_data_uni(args.flow.stream_data_uni);
+    config.set_initial_max_streams_bidi(args.flow.streams_bidi);
+    config.set_initial_max_streams_uni(args.flow.streams_uni);
     config.set_disable_active_migration(true);
     config.set_active_connection_id_limit(0);
 
-    config.set_max_connection_window(args.flow.max_window);
-    config.set_max_stream_window(args.flow.max_stream_window);
+    config.set_max_connection_window(args.flow.window);
+    config.set_max_stream_window(args.flow.stream_window);
     config.set_enable_send_streams_blocked(true);
     config.grease(false);
 
@@ -120,444 +88,203 @@ fn create_config(
         config.enable_dgram(true, queues.receive, queues.send);
     }
     if should_log_keys {
-        config.log_keys()
+        config.log_keys();
     }
 
     Ok(config)
 }
 
-/// Connect to a server and execute provided actions.
+/// Connect to a server and execute the provided actions.
 ///
-/// Constructs a socket and [quiche::Connection] based on the provided `args`,
-/// then iterates over `actions`.
+/// If close triggers are supplied, close as soon as every trigger is observed.
 ///
-/// If `close_trigger_frames` is specified, h3i will close the connection
-/// immediately upon receiving all of the supplied frames rather than waiting
-/// for the idle timeout. See [`CloseTriggerFrames`] for details.
-///
-/// Returns a [ConnectionSummary] on success, [ClientError] on failure.
+/// # Errors
+/// Returns a client error if connection setup, the handshake, I/O, or an
+/// action fails.
 pub fn connect(
     args: Config, actions: Vec<Action>,
     close_trigger_frames: Option<CloseTriggerFrames>,
-) -> std::result::Result<ConnectionSummary, ClientError> {
+) -> Result<ConnectionSummary, ClientError> {
     connect_with_early_data(args, None, actions, close_trigger_frames)
 }
 
-/// Connect to a server and execute provided early_action and actions.
+/// Connect and execute the early-action queue when 0-RTT is available,
+/// followed by the regular action queue after the handshake.
 ///
-/// See `connect` for additional documentation.
+/// # Errors
+/// Returns a client error if connection setup, the handshake, I/O, or an
+/// action fails.
 pub fn connect_with_early_data(
     args: Config, early_actions: Option<Vec<Action>>, actions: Vec<Action>,
     close_trigger_frames: Option<CloseTriggerFrames>,
-) -> std::result::Result<ConnectionSummary, ClientError> {
-    let mut buf = [0; 65535];
-    let mut out = [0; MAX_DATAGRAM_SIZE];
+) -> Result<ConnectionSummary, ClientError> {
+    let (mut conn, mut io) = create_connection(args)?;
+    io.stage_initial(&mut conn)?;
+    let mut early = if conn.is_in_early_data() {
+        early_actions.map(ActionQueue::new)
+    } else {
+        None
+    };
+    let mut normal = ActionQueue::new(actions);
+    let mut client = ClientState::new(close_trigger_frames);
+    // Queue early data before the ClientHello reaches the peer. Once the
+    // socket accepts the first datagram, flush can generate the 0-RTT packets
+    // immediately, without processing a handshake response first.
+    if let Some(queue) = early.as_mut() {
+        queue
+            .advance(Instant::now, &mut conn, &mut client.parsers)
+            .map_err(ClientError::Other)?;
+    }
+    let mut tx_status = io.flush(&mut conn)?;
 
+    while !conn.is_closed() {
+        let now = Instant::now();
+        if conn
+            .timeout_instant()
+            .is_some_and(|deadline| deadline <= now)
+        {
+            conn.on_timeout();
+            if conn.is_closed() {
+                break;
+            }
+        }
+        if let Some(queue) = active_queue(&mut early, &mut normal, &conn) {
+            process_application(queue, &mut client, &mut conn, tx_status)?;
+        }
+        provide_connection_ids(&mut conn)?;
+        tx_status = io.flush(&mut conn)?;
+        if conn.is_closed() {
+            break;
+        }
+        if early.as_ref().is_some_and(ActionQueue::is_finished) {
+            early = None;
+        }
+        let now = Instant::now();
+        let action_deadline = if tx_status == TxStatus::Idle {
+            active_queue(&mut early, &mut normal, &conn)
+                .and_then(|queue| queue.wakeup(now))
+        } else {
+            None
+        };
+        let deadline = [
+            conn.timeout_instant(),
+            tx_status.deadline(now),
+            action_deadline,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        io.wait(&mut conn, deadline)?;
+    }
+    if !conn.is_established() {
+        return Err(ClientError::HandshakeFail);
+    }
+    Ok(ConnectionSummary::from_connection(&conn, client.streams))
+}
+
+fn active_queue<'a>(
+    early: &'a mut Option<ActionQueue>, normal: &'a mut ActionQueue,
+    conn: &quiche::Connection,
+) -> Option<&'a mut ActionQueue> {
+    if conn.is_draining() || conn.is_closed() || conn.local_error().is_some() {
+        return None;
+    }
+    if conn.is_established() || conn.is_in_early_data() {
+        if let Some(early) = early.as_mut() {
+            return Some(early);
+        }
+        if conn.is_established() {
+            return Some(normal);
+        }
+    }
+    None
+}
+
+fn process_application(
+    queue: &mut ActionQueue, client: &mut ClientState,
+    conn: &mut quiche::Connection, tx_status: TxStatus,
+) -> Result<(), ClientError> {
+    queue
+        .before_reads(Instant::now(), conn)
+        .map_err(ClientError::Other)?;
+    for event in parse_streams(conn, client) {
+        queue.on_stream_event(event);
+    }
+    if client.streams.all_close_trigger_frames_seen() {
+        client.streams.close_due_to_trigger_frames(conn);
+    } else if tx_status == TxStatus::Idle && !conn.is_draining() {
+        queue
+            .advance(Instant::now, conn, &mut client.parsers)
+            .map_err(ClientError::Other)?;
+    }
+    Ok(())
+}
+
+fn create_connection(
+    args: Config,
+) -> Result<(quiche::Connection, SyncIo), ClientError> {
     let ParsedArgs {
         connect_url,
         bind_addr,
         peer_addr,
     } = parse_args(&args)?;
-
-    // Setup the event loop.
-    let mut poll = mio::Poll::new()
-        .map_err(|error| ClientError::Other(error.to_string()))?;
-    let mut events = mio::Events::with_capacity(1024);
-
-    // Create the UDP socket backing the QUIC connection, and register it with
-    // the event loop.
-    let mut socket = mio::net::UdpSocket::bind(bind_addr)
-        .map_err(|error| ClientError::Other(error.to_string()))?;
-    poll.registry()
-        .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-        .map_err(|error| ClientError::Other(error.to_string()))?;
-
-    let mut keylog = None;
-    if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(keylog_path)
-            .map_err(|error| ClientError::Other(error.to_string()))?;
-
-        keylog = Some(file);
-    }
-
+    let io = SyncIo::bind(bind_addr)?;
+    let keylog = std::env::var_os("SSLKEYLOGFILE")
+        .map(|path| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .map_err(|error| {
+                    ClientError::Other(format!("open key log: {error}"))
+                })
+        })
+        .transpose()?;
     let mut config = create_config(&args, keylog.is_some())?;
-
-    // Generate a random source connection ID for the connection.
-    let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-
-    let rng = SystemRandom::new();
-    rng.fill(&mut scid)
+    let mut scid_bytes = [0; quiche::MAX_CONN_ID_LEN];
+    SystemRandom::new()
+        .fill(&mut scid_bytes)
         .map_err(|error| ClientError::Other(error.to_string()))?;
-
-    let scid = quiche::ConnectionId::from_ref(&scid);
-
-    let Ok(local_addr) = socket.local_addr() else {
-        return Err(ClientError::Other("invalid socket".to_string()));
-    };
-
-    // Create a new client-side QUIC connection.
+    let scid = quiche::ConnectionId::from_ref(&scid_bytes);
+    let local_addr = io.local_addr();
     let mut conn =
         quiche::connect(connect_url, &scid, local_addr, peer_addr, &mut config)
-            .map_err(|e| ClientError::Other(e.to_string()))?;
-
-    if let Some(session) = &args.session {
-        conn.set_session(session)
+            .map_err(|error| ClientError::Other(error.to_string()))?;
+    if let Some(session) = args.session {
+        conn.set_session(&session)
             .map_err(|error| ClientError::Other(error.to_string()))?;
     }
-
-    if let Some(keylog) = &mut keylog {
-        if let Ok(keylog) = keylog.try_clone() {
-            conn.set_keylog(Box::new(keylog));
-        }
+    if let Some(keylog) = keylog {
+        conn.set_keylog(Box::new(keylog));
     }
-
-    log::info!(
-        "connecting to {peer_addr:} from {local_addr:} with scid {scid:?}",
-    );
-
-    let mut app_proto_selected = false;
-
-    // Send ClientHello and initiate the handshake.
-    let (write, send_info) = conn.send(&mut out).expect("initial send failed");
-
-    let mut client = SyncClient::new(close_trigger_frames);
-    // Send early data if connection is_in_early_data (resumption with 0-RTT was
-    // successful) and if we have early_actions.
-    if conn.is_in_early_data() {
-        if let Some(early_actions) = early_actions {
-            let mut early_action_iter = early_actions.iter();
-            let mut wait_deadline = None;
-            let mut waiting_for = WaitingFor::default();
-
-            check_duration_and_do_actions(
-                &mut wait_deadline,
-                &mut early_action_iter,
-                &mut conn,
-                &mut waiting_for,
-                client.stream_parsers_mut(),
-            )?;
-        }
-    }
-
-    while let Err(e) = socket.send_to(&out[..write], send_info.to) {
-        if e.kind() == std::io::ErrorKind::WouldBlock {
-            log::debug!(
-                "{} -> {}: send() would block",
-                socket.local_addr().unwrap(),
-                send_info.to
-            );
-            continue;
-        }
-
-        return Err(ClientError::Other(format!("send() failed: {e:?}")));
-    }
-
-    let app_data_start = std::time::Instant::now();
-
-    let mut action_iter = actions.iter();
-    let mut wait_deadline = None;
-
-    let mut waiting_for = WaitingFor::default();
-
-    loop {
-        let actual_sleep = [
-            wait_deadline.map(|deadline: Instant| {
-                deadline.saturating_duration_since(Instant::now())
-            }),
-            conn.timeout(),
-        ]
-        .into_iter()
-        .flatten()
-        .min();
-
-        log::debug!("actual sleep is {actual_sleep:?}");
-        poll.poll(&mut events, actual_sleep).unwrap();
-
-        // If the event loop reported no events, run a belt and braces check on
-        // the quiche connection's timeouts.
-        if events.is_empty() {
-            log::debug!("timed out");
-
-            conn.on_timeout();
-        }
-
-        // Read incoming UDP packets from the socket and feed them to quiche,
-        // until there are no more packets to read.
-        for event in &events {
-            let socket = match event.token() {
-                mio::Token(0) => &socket,
-
-                _ => unreachable!(),
-            };
-
-            let local_addr = socket.local_addr().unwrap();
-            'read: loop {
-                let (len, from) = match socket.recv_from(&mut buf) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        // There are no more UDP packets to read on this socket.
-                        // Process subsequent events.
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            break 'read;
-                        }
-
-                        return Err(ClientError::Other(format!(
-                            "{local_addr}: recv() failed: {e:?}"
-                        )));
-                    },
-                };
-
-                let recv_info = quiche::RecvInfo {
-                    to: local_addr,
-                    from,
-                };
-
-                // Process potentially coalesced packets.
-                let _read = match conn.recv(&mut buf[..len], recv_info) {
-                    Ok(v) => v,
-
-                    Err(e) => {
-                        log::debug!("{local_addr}: recv failed: {e:?}");
-                        continue 'read;
-                    },
-                };
-            }
-        }
-
-        log::debug!("done reading");
-
-        if conn.is_closed() {
-            log::info!(
-                "connection closed with error={:?} did_idle_timeout={}, stats={:?} path_stats={:?}",
-                conn.peer_error(),
-                conn.is_timed_out(),
-                conn.stats(),
-                conn.path_stats().collect::<Vec<quiche::PathStats>>(),
-            );
-
-            if !conn.is_established() {
-                log::info!(
-                    "connection timed out after {:?}",
-                    app_data_start.elapsed(),
-                );
-
-                return Err(ClientError::HandshakeFail);
-            }
-
-            break;
-        }
-
-        // Create a new application protocol session once the QUIC connection is
-        // established.
-        if (conn.is_established() || conn.is_in_early_data()) &&
-            !app_proto_selected
-        {
-            app_proto_selected = true;
-        }
-
-        if app_proto_selected {
-            check_duration_and_do_actions(
-                &mut wait_deadline,
-                &mut action_iter,
-                &mut conn,
-                &mut waiting_for,
-                client.stream_parsers_mut(),
-            )?;
-
-            let mut wait_cleared = false;
-            for response in parse_streams(&mut conn, &mut client) {
-                waiting_for.remove_wait(response);
-                wait_cleared = true;
-            }
-
-            // Check if a CanOpenNumStreams wait is satisfied.
-            let before = waiting_for.is_empty();
-            waiting_for.check_can_open_num_streams(&conn);
-            if !before && waiting_for.is_empty() {
-                wait_cleared = true;
-            }
-
-            if client.streams.all_close_trigger_frames_seen() {
-                client.streams.close_due_to_trigger_frames(&mut conn);
-            }
-
-            if wait_cleared {
-                check_duration_and_do_actions(
-                    &mut wait_deadline,
-                    &mut action_iter,
-                    &mut conn,
-                    &mut waiting_for,
-                    client.stream_parsers_mut(),
-                )?;
-            }
-        }
-
-        // Provides as many CIDs as possible.
-        while conn.scids_left() > 0 {
-            let (scid, reset_token) = generate_cid_and_reset_token()?;
-
-            if conn.new_scid(&scid, reset_token, false).is_err() {
-                break;
-            }
-        }
-
-        // Generate outgoing QUIC packets and send them on the UDP socket, until
-        // quiche reports that there are no more packets to be sent.
-        let sockets = vec![&socket];
-
-        for socket in sockets {
-            let local_addr = socket.local_addr().unwrap();
-
-            for peer_addr in conn.paths_iter(local_addr) {
-                loop {
-                    let (write, send_info) = match conn.send_on_path(
-                        &mut out,
-                        Some(local_addr),
-                        Some(peer_addr),
-                    ) {
-                        Ok(v) => v,
-
-                        Err(quiche::Error::Done) => {
-                            break;
-                        },
-
-                        Err(e) => {
-                            log::error!(
-                                "{local_addr} -> {peer_addr}: send failed: {e:?}"
-                            );
-
-                            conn.close(false, 0x1, b"fail").ok();
-                            break;
-                        },
-                    };
-
-                    if let Err(e) = socket.send_to(&out[..write], send_info.to) {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            log::debug!(
-                                "{} -> {}: send() would block",
-                                local_addr,
-                                send_info.to
-                            );
-                            break;
-                        }
-
-                        return Err(ClientError::Other(format!(
-                            "{} -> {}: send() failed: {:?}",
-                            local_addr, send_info.to, e
-                        )));
-                    }
-                }
-            }
-        }
-
-        if conn.is_closed() {
-            log::info!(
-                "connection closed, {:?} {:?}",
-                conn.stats(),
-                conn.path_stats().collect::<Vec<quiche::PathStats>>()
-            );
-
-            if !conn.is_established() {
-                log::info!(
-                    "connection timed out after {:?}",
-                    app_data_start.elapsed(),
-                );
-
-                return Err(ClientError::HandshakeFail);
-            }
-
-            break;
-        }
-    }
-
-    Ok(ConnectionSummary {
-        stream_map: client.streams,
-        stats: Some(conn.stats()),
-        path_stats: conn.path_stats().collect(),
-        conn_close_details: ConnectionCloseDetails::new(&conn),
-    })
+    log::info!("connecting to {peer_addr} from {local_addr} with scid {scid:?}");
+    Ok((conn, io))
 }
 
-fn check_duration_and_do_actions(
-    wait_deadline: &mut Option<Instant>, action_iter: &mut Iter<Action>,
-    conn: &mut quiche::Connection, waiting_for: &mut WaitingFor,
-    stream_parsers: &mut StreamParserMap,
+fn provide_connection_ids(
+    conn: &mut quiche::Connection,
 ) -> Result<(), ClientError> {
-    if wait_deadline.is_some_and(|deadline| Instant::now() < deadline) {
-        return Ok(());
+    while conn.scids_left() > 0 {
+        let (scid, reset_token) = generate_cid_and_reset_token()?;
+        if conn.new_scid(&scid, reset_token, false).is_err() {
+            break;
+        }
     }
-    *wait_deadline =
-        handle_actions(action_iter, conn, waiting_for, stream_parsers)?
-            .map(|duration| {
-                Instant::now().checked_add(duration).ok_or_else(|| {
-                    ClientError::Other("wait duration exceeds clock range".into())
-                })
-            })
-            .transpose()?;
     Ok(())
 }
 
-/// Generate a new pair of Source Connection ID and reset token.
+/// Generate a source connection ID and stateless reset token.
+///
+/// # Errors
+/// Returns an error if the operating system random source fails.
 pub fn generate_cid_and_reset_token(
 ) -> Result<(quiche::ConnectionId<'static>, u128), ClientError> {
     let rng = SystemRandom::new();
-
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
     rng.fill(&mut scid)
         .map_err(|error| ClientError::Other(error.to_string()))?;
-    let scid = scid.to_vec().into();
-
     let mut reset_token = [0; 16];
     rng.fill(&mut reset_token)
         .map_err(|error| ClientError::Other(error.to_string()))?;
-
-    let reset_token = u128::from_be_bytes(reset_token);
-    Ok((scid, reset_token))
-}
-
-fn handle_actions<'a, I>(
-    iter: &mut I, conn: &mut quiche::Connection, waiting_for: &mut WaitingFor,
-    stream_parsers: &mut StreamParserMap,
-) -> Result<Option<Duration>, ClientError>
-where
-    I: Iterator<Item = &'a Action>,
-{
-    if !waiting_for.is_empty() {
-        log::debug!(
-            "won't fire an action due to waiting for responses: {waiting_for:?}"
-        );
-        return Ok(None);
-    }
-
-    // Send actions
-    for action in iter {
-        match action {
-            Action::FlushPackets => return Ok(None),
-            Action::Wait { wait_type } => match wait_type {
-                WaitType::WaitDuration(period) => return Ok(Some(*period)),
-                WaitType::StreamEvent(response) => {
-                    log::info!(
-                        "waiting for {response:?} before executing more actions"
-                    );
-                    waiting_for.add_wait(response);
-                    return Ok(None);
-                },
-                WaitType::CanOpenNumStreams(required_streams) => {
-                    log::info!(
-                        "h3i: waiting for peer_streams_left_bidi >= {required_streams:?}"
-                    );
-                    waiting_for.set_required_stream_quota(*required_streams);
-                    return Ok(None);
-                },
-            },
-            action => execute_action(action, conn, stream_parsers)
-                .map_err(ClientError::Other)?,
-        }
-    }
-
-    Ok(None)
+    Ok((scid.to_vec().into(), u128::from_be_bytes(reset_token)))
 }

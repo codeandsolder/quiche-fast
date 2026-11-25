@@ -7,7 +7,7 @@ use h3i::QPACK_DECODER_STREAM_TYPE_ID;
 use h3i::QPACK_ENCODER_STREAM_TYPE_ID;
 
 /// Test that opening too many unidirectional streams correctly triggers a
-/// StreamLimit error. Most servers advertise a max_streams_uni of 3, so
+/// `StreamLimit` error. Most servers advertise a `max_streams_uni` of 3, so
 /// attempting to open a 4th stream should fail.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::new("cloudflare-quic.com")?;

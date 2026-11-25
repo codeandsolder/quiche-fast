@@ -17,7 +17,9 @@ src/
     h3.rs             # Action enum: SendFrame, SendHeadersFrame, StreamBytes, SendDatagram,
                       #   OpenUniStream, ResetStream, StopSending, ConnectionClose, Wait, FlushPackets
   client/
-    mod.rs            # Client trait, execute_action(), parse_streams(), shared logic
+    mod.rs            # ClientState, execute_action(), parse_streams(), shared logic
+    action_queue.rs   # Common wait barriers and ordered action execution
+    sync_io.rs        # Nonblocking UDP I/O, pacing, pending datagram ownership
     sync_client.rs    # Blocking mio-based client: connect() -> ConnectionSummary
     async_client.rs   # tokio-quiche-based client (behind `async` feature)
     connection_summary.rs  # ConnectionSummary: StreamMap + Stats + PathStats + close details
@@ -46,6 +48,6 @@ src/
 - **quiche `internal` feature**: always enabled -- accesses `quiche::h3::frame::Frame` internals for raw frame construction.
 - **Stream type constants**: `HTTP3_CONTROL_STREAM_TYPE_ID` (0x0), `QPACK_ENCODER_STREAM_TYPE_ID` (0x2), `QPACK_DECODER_STREAM_TYPE_ID` (0x3) in `lib.rs`.
 - **Action execution**: `client/mod.rs::execute_action()` matches on `Action` variants, writes directly to `quiche::Connection` streams, encoding header actions only when executed. Raw frames retain arbitrary wire contents; executor errors propagate to callers.
-- **ConnectionSummary**: returned from sync `connect()` and the async summary future, both as fallible results. Contains per-stream frame maps, QUIC stats, path stats, close reason. Custom `Serialize` impl truncates binary at 16KB.
+- **ConnectionSummary**: returned from sync `connect()` and the async completion future, both as fallible results. Contains per-stream frame maps, QUIC stats, path stats, close reason. Custom `Serialize` impl truncates binary at 16KB.
 - **Literal header encoding**: `encode_header_block_literal()` bypasses Huffman + lowercase normalization for testing malformed headers.
 - **Close triggers**: optional `CloseTriggerFrame` list causes automatic connection close when matching frame received.

@@ -166,7 +166,7 @@ struct StreamIdAllocator {
 }
 
 impl StreamIdAllocator {
-    const fn next_id(&self) -> Option<u64> {
+    const fn next_id(self) -> Option<u64> {
         if self.id <= octets::MAX_VAR_INT {
             Some(self.id)
         } else {

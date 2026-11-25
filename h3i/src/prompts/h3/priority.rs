@@ -38,7 +38,7 @@ use crate::quiche;
 const REQUEST: &str = "request";
 const PUSH: &str = "push";
 
-pub fn prompt_priority() -> InquireResult<Action> {
+pub(super) fn prompt_priority() -> InquireResult<Action> {
     let stream_id = h3::prompt_stream_id()?;
 
     let ty = prompt_request_or_push()?;

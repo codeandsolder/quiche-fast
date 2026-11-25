@@ -1,4 +1,5 @@
 use h3i::actions::h3::Action;
+use h3i::actions::h3::ExpectedStreamSendResult;
 use h3i::actions::h3::StreamEvent;
 use h3i::actions::h3::StreamEventType;
 use h3i::actions::h3::WaitType;
@@ -8,12 +9,12 @@ use quiche::h3::frame::Frame;
 use quiche::h3::Header;
 
 /// The QUIC stream to send the frames on. See
-/// https://datatracker.ietf.org/doc/html/rfc9000#name-streams and
-/// https://datatracker.ietf.org/doc/html/rfc9114#request-streams for more.
+/// <https://datatracker.ietf.org/doc/html/rfc9000#name-streams> and
+/// <https://datatracker.ietf.org/doc/html/rfc9114#request-streams> for more.
 const STREAM_ID: u64 = 0;
 
 /// Send a request with a Content-Length header that specifies 5 bytes, but a
-/// body that is only 4 bytes long. This verifies https://datatracker.ietf.org/doc/html/rfc9114#section-4.1.2-3 for
+/// body that is only 4 bytes long. This verifies <https://datatracker.ietf.org/doc/html/rfc9114#section-4.1.2-3> for
 /// cloudflare-quic.com.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::new("cloudflare-quic.com")?;
@@ -34,7 +35,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             fin_stream: false,
             headers,
             literal_headers: false,
-            expected_result: Default::default(),
+            expected_result: ExpectedStreamSendResult::default(),
         },
         Action::SendFrame {
             stream_id: STREAM_ID,
@@ -45,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // server: https://datatracker.ietf.org/doc/html/rfc9114#section-4.1.2-3
                 payload: b"test".to_vec(),
             },
-            expected_result: Default::default(),
+            expected_result: ExpectedStreamSendResult::default(),
         },
         Action::Wait {
             wait_type: WaitType::StreamEvent(StreamEvent {

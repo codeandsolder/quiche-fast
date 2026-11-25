@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Actions are small operations such as sending HTTP/3 frames or managing QUIC
-//! streams. Each independent use case for h3i requires its own collection of
-//! Actions, that h3i iterates over in sequence and executes.
+//! Actions for sending HTTP/3 frames and managing QUIC streams.
+//!
+//! h3i executes each supplied action sequence in order.
 pub mod h3;

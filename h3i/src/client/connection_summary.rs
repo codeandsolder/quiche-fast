@@ -63,6 +63,19 @@ pub struct ConnectionSummary {
     pub conn_close_details: ConnectionCloseDetails,
 }
 
+impl ConnectionSummary {
+    pub(crate) fn from_connection<F: quiche::BufFactory>(
+        conn: &quiche::Connection<F>, stream_map: StreamMap,
+    ) -> Self {
+        Self {
+            stream_map,
+            stats: Some(conn.stats()),
+            path_stats: conn.path_stats().collect(),
+            conn_close_details: ConnectionCloseDetails::new(conn),
+        }
+    }
+}
+
 impl Serialize for ConnectionSummary {
     fn serialize<S>(&self, s: S) -> Result<S::Ok, S::Error>
     where
@@ -193,19 +206,19 @@ impl StreamMap {
             .push(frame);
     }
 
-    /// Close a [`quiche::Connection`] with the `CONNECTION_CLOSE` frame
-    /// specified by [`CloseTriggerFrames`]. If no [`CloseTriggerFrames`] exist,
-    /// this is a no-op.
-    pub(crate) fn close_due_to_trigger_frames(
-        &self, qconn: &mut quiche::Connection,
+    /// Borrow the configured close error only after all triggers match.
+    pub(crate) fn triggered_close_error(&self) -> Option<&ConnectionError> {
+        self.close_trigger_frames
+            .as_ref()
+            .filter(|frames| frames.saw_all_trigger_frames())
+            .map(|frames| &frames.close_with)
+    }
+
+    pub(crate) fn close_due_to_trigger_frames<F: quiche::BufFactory>(
+        &self, qconn: &mut quiche::Connection<F>,
     ) {
-        if let Some(ConnectionError {
-            is_app,
-            error_code,
-            reason,
-        }) = self.close_trigger_frames.as_ref().map(|tf| &tf.close_with)
-        {
-            let _ = qconn.close(*is_app, *error_code, reason);
+        if let Some(error) = self.triggered_close_error() {
+            let _ = qconn.close(error.is_app, error.error_code, &error.reason);
         }
     }
 }

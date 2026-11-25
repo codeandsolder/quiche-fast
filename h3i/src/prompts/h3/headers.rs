@@ -43,8 +43,8 @@ use super::PUSH_ID_PROMPT;
 use crate::actions::h3::Action;
 use crate::actions::h3::ExpectedStreamSendResult;
 
-pub fn prompt_headers(
-    sid_alloc: &StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
+pub(super) fn prompt_headers(
+    sid_alloc: StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
     let mut headers = if raw {
@@ -66,7 +66,7 @@ pub fn prompt_headers(
     Ok(action)
 }
 
-pub fn prompt_push_promise() -> InquireResult<Action> {
+pub(super) fn prompt_push_promise() -> InquireResult<Action> {
     let stream_id = h3::prompt_stream_id()?;
     let push_id = h3::prompt_varint(PUSH_ID_PROMPT)?;
 

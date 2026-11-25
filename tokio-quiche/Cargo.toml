@@ -115,7 +115,7 @@ foundations = { workspace = true, default-features = false, features = ["tracing
 assert_matches = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
-h3i = { workspace = true }
+h3i = { workspace = true, features = ["async"] }
 http = "1"
 http-body = "1"
 http-body-util = "0.1"

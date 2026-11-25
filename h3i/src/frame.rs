@@ -435,7 +435,9 @@ impl Serialize for Comparator {
     }
 }
 
-/// Instructs h3i to watch for certain incoming [`H3iFrame`]s. The incoming
+/// Instructs h3i to watch for certain incoming [`H3iFrame`]s.
+///
+/// The incoming
 /// frames can either be supplied directly via [`CloseTriggerFrame::new`], or
 /// via a verification callback  passed to
 /// [`CloseTriggerFrame::new_with_comparator`].
