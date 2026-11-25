@@ -44,8 +44,8 @@ use crate::config::TimingTableConfig;
 use crate::datastore::Datastore;
 use crate::datastore::PacketInfoStub;
 use crate::request_stub::CLIENT_CONTENT_LENGTH;
+use crate::request_stub::CLIENT_OBSERVED_DATA;
 use crate::request_stub::CLIENT_PRI;
-use crate::request_stub::CLIENT_TRANSFERRED;
 use crate::request_stub::SERVER_PRI;
 use crate::request_stub::SERVER_RX_HDR_TX_HDR;
 use crate::request_stub::SERVER_TX_FIRST_DATA_TX_LAST_DATA;
@@ -65,7 +65,7 @@ pub fn request_timing_table(
     if config.omit_upload {
         table
             .with(Remove::column(ByColumnName::new(CLIENT_CONTENT_LENGTH)))
-            .with(Remove::column(ByColumnName::new(CLIENT_TRANSFERRED)))
+            .with(Remove::column(ByColumnName::new(CLIENT_OBSERVED_DATA)))
             .with(Remove::column(ByColumnName::new(UPLOAD_TIME)))
             .with(Remove::column(ByColumnName::new(UPLOAD_RATE)));
     }

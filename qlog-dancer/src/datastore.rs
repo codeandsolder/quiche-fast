@@ -138,13 +138,13 @@ impl std::fmt::Display for UnsupportedVantagePoint {
 impl std::error::Error for UnsupportedVantagePoint {}
 
 /// Failure to build a qlog or Chrome netlog datastore from recorded events:
-/// unsupported vantage point, stream arithmetic overflow, or netlog counters
+/// unsupported vantage point, stream arithmetic overflow, or event counters
 /// that cannot be represented without wrapping.
 #[derive(Debug)]
 pub enum DatastoreError {
     UnsupportedVantagePoint(UnsupportedVantagePoint),
     Tracker(TrackerError),
-    NetlogCounterOverflow { field: &'static str },
+    CounterOverflow { field: &'static str },
 }
 
 impl From<UnsupportedVantagePoint> for DatastoreError {
@@ -165,8 +165,8 @@ impl std::fmt::Display for DatastoreError {
             Self::UnsupportedVantagePoint(error) =>
                 std::fmt::Display::fmt(error, f),
             Self::Tracker(error) => std::fmt::Display::fmt(error, f),
-            Self::NetlogCounterOverflow { field } => {
-                write!(f, "netlog counter overflow: {field}")
+            Self::CounterOverflow { field } => {
+                write!(f, "log counter overflow: {field}")
             },
         }
     }
@@ -177,7 +177,7 @@ impl std::error::Error for DatastoreError {
         match self {
             Self::UnsupportedVantagePoint(error) => Some(error),
             Self::Tracker(error) => Some(error),
-            Self::NetlogCounterOverflow { .. } => None,
+            Self::CounterOverflow { .. } => None,
         }
     }
 }
@@ -490,26 +490,26 @@ fn netlog_relative_time(timestamp: u64, reference: u64) -> f64 {
     }
 }
 
-fn checked_netlog_sum(
+fn checked_counter_sum(
     previous: u64, increment: u64, field: &'static str,
 ) -> Result<u64, DatastoreError> {
     previous
         .checked_add(increment)
-        .ok_or(DatastoreError::NetlogCounterOverflow { field })
+        .ok_or(DatastoreError::CounterOverflow { field })
 }
 
-fn checked_netlog_count(
+fn checked_counter_count(
     previous: usize, field: &'static str,
 ) -> Result<usize, DatastoreError> {
     previous
         .checked_add(1)
-        .ok_or(DatastoreError::NetlogCounterOverflow { field })
+        .ok_or(DatastoreError::CounterOverflow { field })
 }
 
 fn cumulative_total(
     values: &[(f64, u64)], length: u64, field: &'static str,
 ) -> Result<u64, DatastoreError> {
-    checked_netlog_sum(values.last().map_or(0, |value| value.1), length, field)
+    checked_counter_sum(values.last().map_or(0, |value| value.1), length, field)
 }
 
 /// Initial receive limits are relative to the endpoint advertising them.
@@ -582,9 +582,61 @@ enum NetlogH2Direction {
 
 /// Whether an HTTP/3 frame was written by this endpoint or read from its peer.
 #[derive(Clone, Copy)]
-enum QlogH3Direction {
-    Created,
-    Parsed,
+enum HttpDataDirection {
+    Sent,
+    Received,
+}
+
+impl HttpDataDirection {
+    const fn is_client_data(self, vantage: VantagePoint) -> bool {
+        matches!(
+            (self, vantage),
+            (Self::Sent, VantagePoint::Client) |
+                (Self::Received, VantagePoint::Server)
+        )
+    }
+}
+
+/// All directional DATA history fields are updated by the same operation.
+struct HttpDataHistoryMut<'a> {
+    frames: &'a mut BTreeMap<u64, Vec<(f64, u64)>>,
+    count_frames: &'a mut BTreeMap<u64, Vec<(u64, u64)>>,
+    count: &'a mut u64,
+    cumulative: &'a mut BTreeMap<u64, Vec<(f64, u64)>>,
+    maxima: &'a mut BTreeMap<u64, u64>,
+    largest: &'a mut u64,
+    count_field: &'static str,
+    cumulative_field: &'static str,
+}
+
+impl HttpDataHistoryMut<'_> {
+    fn record(
+        &mut self, stream_id: u64, length: u64, time: f64,
+    ) -> Result<u64, DatastoreError> {
+        let next_count = checked_counter_sum(*self.count, 1, self.count_field)?;
+        let cumulative = cumulative_total(
+            self.cumulative.get(&stream_id).map_or(&[], Vec::as_slice),
+            length,
+            self.cumulative_field,
+        )?;
+        self.frames
+            .entry(stream_id)
+            .or_default()
+            .push((time, length));
+        self.count_frames
+            .entry(stream_id)
+            .or_default()
+            .push((*self.count, length));
+        *self.count = next_count;
+        self.cumulative
+            .entry(stream_id)
+            .or_default()
+            .push((time, cumulative));
+        let maximum = self.maxima.entry(stream_id).or_default();
+        *maximum = (*maximum).max(cumulative);
+        *self.largest = (*self.largest).max(length);
+        Ok(cumulative)
+    }
 }
 
 impl Datastore {
@@ -598,7 +650,7 @@ impl Datastore {
         match direction {
             NetlogAckDirection::Sent => {
                 let count =
-                    checked_netlog_count(self.total_tx_ack, "total_tx_ack")?;
+                    checked_counter_count(self.total_tx_ack, "total_tx_ack")?;
                 self.total_tx_ack = count;
                 self.max_ack_sent_missing_packets_size = self
                     .max_ack_sent_missing_packets_size
@@ -617,7 +669,7 @@ impl Datastore {
             },
             NetlogAckDirection::Received => {
                 let count =
-                    checked_netlog_count(self.total_rx_ack, "total_rx_ack")?;
+                    checked_counter_count(self.total_rx_ack, "total_rx_ack")?;
                 self.total_rx_ack = count;
                 self.max_ack_received_missing_packets_size = self
                     .max_ack_received_missing_packets_size
@@ -685,7 +737,7 @@ impl Datastore {
     ) -> Result<(), DatastoreError> {
         // Validate all counters before mutating any of this event's
         // state.
-        let next_count = checked_netlog_sum(
+        let next_count = checked_counter_sum(
             self.total_received_stream_frame_count,
             1,
             "total_received_stream_frame_count",
@@ -744,7 +796,7 @@ impl Datastore {
             self.received_netlog_packet_numbers.previous(packet_type)
         {
             if previous.abs_diff(params.packet_number) > 1 {
-                self.discontinuous_packet_number_count = checked_netlog_sum(
+                self.discontinuous_packet_number_count = checked_counter_sum(
                     self.discontinuous_packet_number_count,
                     1,
                     "discontinuous_packet_number_count",
@@ -972,27 +1024,92 @@ impl Datastore {
         Ok(())
     }
 
-    /// Record received HTTP/2 or HTTP/3 DATA with the same per-stream
-    /// semantics. Only HTTP/2 additionally maintains a connection-wide total.
-    ///
-    /// Validate every fallible counter first: a rejected frame must not leave
-    /// updated request timing or any partial stream history behind.
+    /// Record known DATA lengths consistently across log formats and endpoint
+    /// roles. Validate arithmetic before mutating frame history or request
+    /// metadata.
+    fn record_http_data(
+        &mut self, direction: HttpDataDirection, stream_id: u64,
+        length: Option<u64>, time: f64,
+    ) -> Result<(), DatastoreError> {
+        let cumulative = length
+            .map(|length| {
+                self.record_known_http_data(direction, stream_id, length, time)
+            })
+            .transpose()?;
+        let client_data = direction.is_client_data(self.vantage_point);
+        let req = self.get_or_insert_http_req(stream_id);
+        let (first, last, samples) = match direction {
+            HttpDataDirection::Sent => (
+                &mut req.time_first_data_tx,
+                &mut req.time_last_data_tx,
+                &mut req.time_data_tx_set,
+            ),
+            HttpDataDirection::Received => (
+                &mut req.time_first_data_rx,
+                &mut req.time_last_data_rx,
+                &mut req.time_data_rx_set,
+            ),
+        };
+        *first = Some(first.map_or(time, |value| value.min(time)));
+        *last = Some(last.map_or(time, |value| value.max(time)));
+        if let Some(length) = length {
+            samples.push((time, length));
+        }
+        let (observed, incomplete) = if client_data {
+            (
+                &mut req.client_observed_data_bytes,
+                &mut req.client_data_lengths_incomplete,
+            )
+        } else {
+            (
+                &mut req.server_observed_data_bytes,
+                &mut req.server_data_lengths_incomplete,
+            )
+        };
+        if let Some(cumulative) = cumulative {
+            *observed = NaOption::new(Some(cumulative));
+        } else {
+            *incomplete = true;
+        }
+        Ok(())
+    }
+
+    /// Apply a known length to directional series only after validating
+    /// the new aggregate.
+    fn record_known_http_data(
+        &mut self, direction: HttpDataDirection, stream_id: u64, length: u64,
+        time: f64,
+    ) -> Result<u64, DatastoreError> {
+        let mut history = match direction {
+            HttpDataDirection::Sent => HttpDataHistoryMut {
+                frames: &mut self.sent_data_frames,
+                count_frames: &mut self.sent_data_frames_count_based,
+                count: &mut self.total_sent_data_frame_count,
+                cumulative: &mut self.sent_data_cumulative,
+                maxima: &mut self.sent_data_cumulative_max,
+                largest: &mut self.largest_data_frame_tx_length_global,
+                count_field: "total_sent_data_frame_count",
+                cumulative_field: "sent_data_cumulative",
+            },
+            HttpDataDirection::Received => HttpDataHistoryMut {
+                frames: &mut self.received_data_frames,
+                count_frames: &mut self.received_data_frames_count_based,
+                count: &mut self.total_received_data_frame_count,
+                cumulative: &mut self.received_data_cumulative,
+                maxima: &mut self.received_data_cumulative_max,
+                largest: &mut self.largest_data_frame_rx_length_global,
+                count_field: "total_received_data_frame_count",
+                cumulative_field: "received_data_cumulative",
+            },
+        };
+        history.record(stream_id, length, time)
+    }
+
+    /// Chrome HTTP/2 additionally records a connection-wide DATA total.
     fn record_netlog_received_data(
         &mut self, proto: ApplicationProto, stream_id: u64, length: u64,
         event_time: f64,
     ) -> Result<(), DatastoreError> {
-        let next_count = checked_netlog_sum(
-            self.total_received_data_frame_count,
-            1,
-            "total_received_data_frame_count",
-        )?;
-        let cumulative = cumulative_total(
-            self.received_data_cumulative
-                .get(&stream_id)
-                .map_or(&[], Vec::as_slice),
-            length,
-            "received_data_cumulative",
-        )?;
         let connection_total = match proto {
             ApplicationProto::Http2 => Some(cumulative_total(
                 &self.netlog_h2_stream_received_connection_cumulative,
@@ -1001,38 +1118,12 @@ impl Datastore {
             )?),
             ApplicationProto::Http3 => None,
         };
-
-        let previous_count = self.total_received_data_frame_count;
-        let req = self.get_or_insert_http_req(stream_id);
-        req.time_first_data_rx.get_or_insert(event_time);
-        req.time_last_data_rx = Some(event_time);
-        req.time_data_rx_set.push((event_time, length));
-        req.server_transferred_bytes = std::cmp::max(
-            req.server_transferred_bytes,
-            NaOption::new(Some(cumulative)),
-        );
-
-        self.largest_data_frame_rx_length_global =
-            self.largest_data_frame_rx_length_global.max(length);
-        self.received_data_frames
-            .entry(stream_id)
-            .or_default()
-            .push((event_time, length));
-        self.received_data_frames_count_based
-            .entry(stream_id)
-            .or_default()
-            .push((previous_count, length));
-        self.total_received_data_frame_count = next_count;
-        self.received_data_cumulative
-            .entry(stream_id)
-            .or_default()
-            .push((event_time, cumulative));
-        let maximum = self
-            .received_data_cumulative_max
-            .entry(stream_id)
-            .or_default();
-        *maximum = (*maximum).max(cumulative);
-
+        self.record_http_data(
+            HttpDataDirection::Received,
+            stream_id,
+            Some(length),
+            event_time,
+        )?;
         if let Some(total) = connection_total {
             self.netlog_h2_stream_received_connection_cumulative
                 .push((event_time, total));
@@ -1040,60 +1131,20 @@ impl Datastore {
         Ok(())
     }
 
-    /// HTTP/2 outbound DATA contributes to the local upload stream counters
-    /// and consumes send-window credit, unlike a received DATA frame.
+    /// HTTP/2 outbound DATA also consumes send-window credit.
     fn record_netlog_sent_h2_data(
         &mut self, stream_id: u32, size: u32, event_time: f64,
     ) -> Result<(), DatastoreError> {
-        let stream_id_u64 = u64::from(stream_id);
-        let length = u64::from(size);
-        let next_count = checked_netlog_sum(
-            self.total_sent_data_frame_count,
-            1,
-            "total_sent_data_frame_count",
+        self.record_http_data(
+            HttpDataDirection::Sent,
+            u64::from(stream_id),
+            Some(u64::from(size)),
+            event_time,
         )?;
-        let cumulative = cumulative_total(
-            self.sent_data_cumulative
-                .get(&stream_id_u64)
-                .map_or(&[], Vec::as_slice),
-            length,
-            "sent_data_cumulative",
-        )?;
-
-        let previous_count = self.total_sent_data_frame_count;
-        let req = self.get_or_insert_http_req(stream_id_u64);
-        req.time_first_data_tx.get_or_insert(event_time);
-        req.time_last_data_tx = Some(event_time);
-        req.time_data_tx_set.push((event_time, length));
-        req.client_transferred_bytes = std::cmp::max(
-            req.client_transferred_bytes,
-            NaOption::new(Some(cumulative)),
-        );
-
-        self.largest_data_frame_tx_length_global =
-            self.largest_data_frame_tx_length_global.max(length);
-        self.sent_data_frames
-            .entry(stream_id_u64)
-            .or_default()
-            .push((event_time, length));
-        self.sent_data_frames_count_based
-            .entry(stream_id_u64)
-            .or_default()
-            .push((previous_count, length));
-        self.total_sent_data_frame_count = next_count;
         self.h2_send_window_updates_balanced
             .entry(stream_id)
             .or_default()
             .push((event_time, -i64::from(size)));
-        self.sent_data_cumulative
-            .entry(stream_id_u64)
-            .or_default()
-            .push((event_time, cumulative));
-        let maximum = self
-            .sent_data_cumulative_max
-            .entry(stream_id_u64)
-            .or_default();
-        *maximum = (*maximum).max(cumulative);
         Ok(())
     }
 
@@ -1340,12 +1391,12 @@ impl Datastore {
     /// Consume one typed qlog event.
     ///
     /// # Errors
-    /// Returns the tracker overflow. A multi-frame event may already have
-    /// updated unrelated fields; discard the datastore on failure. Both log
-    /// constructors and the browser's transactional builder do so.
+    /// Returns tracker or DATA counter overflow. A multi-frame event may
+    /// already have updated unrelated fields; discard the datastore on failure.
+    /// Both log constructors and the browser's transactional builder do so.
     pub fn consume_qlog_event(
         &mut self, event: &qlog::events::Event, process_acks: bool,
-    ) -> Result<(), TrackerError> {
+    ) -> Result<(), DatastoreError> {
         let ev_time = event.time;
 
         match &event.data {
@@ -1370,18 +1421,22 @@ impl Datastore {
             EventData::Http3FrameCreated(v) => self.consume_qlog_h3_frame(
                 v.stream_id,
                 &v.frame,
-                v.length,
+                v.length.or_else(|| {
+                    v.raw.as_ref().and_then(|raw| raw.payload_length)
+                }),
                 ev_time,
-                QlogH3Direction::Created,
-            ),
+                HttpDataDirection::Sent,
+            )?,
 
             EventData::Http3FrameParsed(v) => self.consume_qlog_h3_frame(
                 v.stream_id,
                 &v.frame,
-                v.length,
+                v.length.or_else(|| {
+                    v.raw.as_ref().and_then(|raw| raw.payload_length)
+                }),
                 ev_time,
-                QlogH3Direction::Parsed,
-            ),
+                HttpDataDirection::Received,
+            )?,
 
             _ => (), // trace!("skipping {:?}", event.data),
         }
@@ -1790,79 +1845,52 @@ impl Datastore {
 
     /// Record an HTTP/3 frame with the same semantics regardless of source
     /// endpoint. Client/server vantage determines which headers represent
-    /// requests and responses; only the client records parsed DATA in the
-    /// received-frame series.
+    /// requests and responses and which DATA lengths are client/server bytes.
     fn consume_qlog_h3_frame(
         &mut self, stream_id: u64, frame: &Http3Frame, length: Option<u64>,
-        ev_time: f64, direction: QlogH3Direction,
-    ) {
+        ev_time: f64, direction: HttpDataDirection,
+    ) -> Result<(), DatastoreError> {
         match frame {
             Http3Frame::Headers { headers, .. } => {
                 let vantage = self.vantage_point;
                 let req = self.get_or_insert_http_req(stream_id);
                 match direction {
-                    QlogH3Direction::Created => {
+                    HttpDataDirection::Sent => {
                         req.time_first_headers_tx.get_or_insert(ev_time);
                     },
-                    QlogH3Direction::Parsed => {
+                    HttpDataDirection::Received => {
                         req.time_first_headers_rx.get_or_insert(ev_time);
                     },
                 }
-                match (direction, vantage) {
-                    (QlogH3Direction::Created, VantagePoint::Client) |
-                    (QlogH3Direction::Parsed, VantagePoint::Server) =>
-                        req.set_request_info_from_qlog(headers),
-                    (QlogH3Direction::Created, VantagePoint::Server) |
-                    (QlogH3Direction::Parsed, VantagePoint::Client) =>
-                        req.set_response_info_from_qlog(headers),
+                if direction.is_client_data(vantage) {
+                    req.set_request_info_from_qlog(headers);
+                } else {
+                    req.set_response_info_from_qlog(headers);
                 }
             },
 
-            Http3Frame::Data { .. } => {
-                let length = length.unwrap_or_default();
-                let req = self.get_or_insert_http_req(stream_id);
-                match direction {
-                    QlogH3Direction::Created => {
-                        req.time_first_data_tx.get_or_insert(ev_time);
-                        req.time_last_data_tx = Some(ev_time);
-                        req.time_data_tx_set.push((ev_time, length));
-                        self.largest_data_frame_tx_length_global =
-                            self.largest_data_frame_tx_length_global.max(length);
-                    },
-                    QlogH3Direction::Parsed => {
-                        req.time_first_data_rx.get_or_insert(ev_time);
-                        req.time_last_data_rx = Some(ev_time);
-                        req.time_data_rx_set.push((ev_time, length));
-                        self.largest_data_frame_rx_length_global =
-                            self.largest_data_frame_rx_length_global.max(length);
-                        if matches!(self.vantage_point, VantagePoint::Client) {
-                            self.received_data_frames
-                                .entry(stream_id)
-                                .or_default()
-                                .push((ev_time, length));
-                        }
-                    },
-                }
+            Http3Frame::Data { raw } => {
+                // The frame declares a payload length, not necessarily
+                // delivery of its entire body. Unknown lengths still carry
+                // timing evidence but cannot contribute numeric bytes.
+                let length = length
+                    .or_else(|| raw.as_ref().and_then(|raw| raw.payload_length));
+                self.record_http_data(direction, stream_id, length, ev_time)?;
             },
 
             Http3Frame::PriorityUpdate {
                 stream_id: Some(priority_stream_id),
                 priority_field_value,
                 ..
-            } => {
-                if matches!(
-                    (direction, self.vantage_point),
-                    (QlogH3Direction::Created, VantagePoint::Client) |
-                        (QlogH3Direction::Parsed, VantagePoint::Server)
-                ) {
-                    self.get_or_insert_http_req(*priority_stream_id)
-                        .priority_updates
-                        .push(priority_field_value.clone());
-                }
+            } if direction.is_client_data(self.vantage_point) => {
+                self.get_or_insert_http_req(*priority_stream_id)
+                    .priority_updates
+                    .push(priority_field_value.clone());
             },
 
             _ => (),
         }
+        Ok(())
     }
 
     /// Builds a datastore from qlog JSON-SEQ events.
@@ -2308,7 +2336,7 @@ mod netlog_tests {
                 (4.0, 7),
                 (6.0, 0)
             ]);
-            assert_eq!(request.server_transferred_bytes.inner, Some(12));
+            assert_eq!(request.server_observed_data_bytes.inner, Some(12));
         }
 
         // Only HTTP/2 records connection-wide received DATA. HTTP/3 uses
@@ -2357,7 +2385,7 @@ mod netlog_tests {
         let request = &datastore.http_requests[&5];
         assert_eq!(request.time_first_data_tx, Some(1.0));
         assert_eq!(request.time_last_data_tx, Some(8.0));
-        assert_eq!(request.client_transferred_bytes.inner, Some(13));
+        assert_eq!(request.client_observed_data_bytes.inner, Some(13));
         assert_eq!(request.time_data_tx_set, vec![(1.0, 4), (5.0, 9), (8.0, 0)]);
         assert!(datastore.received_data_frames.is_empty());
         Ok(())
@@ -2374,7 +2402,7 @@ mod netlog_tests {
             };
             assert!(matches!(
                 consume(&constants, &mut datastore, 105, &event),
-                Err(DatastoreError::NetlogCounterOverflow {
+                Err(DatastoreError::CounterOverflow {
                     field: "total_received_data_frame_count"
                 })
             ));
@@ -2390,7 +2418,7 @@ mod netlog_tests {
         };
         assert!(matches!(
             consume(&constants, &mut datastore, 105, &h2_sent(5, 1)),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "total_sent_data_frame_count"
             })
         ));
@@ -2548,7 +2576,7 @@ mod netlog_tests {
         datastore.total_received_stream_frame_count = u64::MAX;
         assert!(matches!(
             consume(&constants, &mut datastore, 120, &fin),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "total_received_stream_frame_count"
             })
         ));
@@ -2591,7 +2619,7 @@ mod netlog_tests {
         let event = quic_stream(1);
         assert!(matches!(
             consume(&constants, &mut datastore, 120, &event),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "netlog_quic_stream_received_connection_cumulative"
             })
         ));
@@ -2610,7 +2638,7 @@ mod netlog_tests {
         datastore.total_received_stream_frame_count = u64::MAX;
         assert!(matches!(
             consume(&constants, &mut datastore, 120, &event),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "total_received_stream_frame_count"
             })
         ));
@@ -2634,7 +2662,7 @@ mod netlog_tests {
         ));
         assert!(matches!(
             consume(&constants, &mut h3, 120, &event),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "received_data_cumulative"
             })
         ));
@@ -2646,7 +2674,7 @@ mod netlog_tests {
             .insert(11, vec![(0.0, u64::MAX)]);
         assert!(matches!(
             consume(&constants, &mut h2, 120, &h2_received(11, 1)),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "received_data_cumulative"
             })
         ));
@@ -2656,7 +2684,7 @@ mod netlog_tests {
             .push((0.0, u64::MAX));
         assert!(matches!(
             consume(&constants, &mut h2, 120, &h2_received(11, 1)),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "netlog_h2_stream_received_connection_cumulative"
             })
         ));
@@ -2667,7 +2695,7 @@ mod netlog_tests {
         h2.sent_data_cumulative.insert(11, vec![(0.0, u64::MAX)]);
         assert!(matches!(
             consume(&constants, &mut h2, 120, &h2_sent(11, 1)),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "sent_data_cumulative"
             })
         ));
@@ -2817,7 +2845,7 @@ mod netlog_tests {
         ] {
             assert!(matches!(
                 consume(&constants, &mut datastore, 120, &event),
-                Err(DatastoreError::NetlogCounterOverflow {
+                Err(DatastoreError::CounterOverflow {
                     field: actual
                 }) if actual == field
             ));
@@ -2949,7 +2977,7 @@ mod netlog_tests {
         );
         assert!(matches!(
             consume(&constants, &mut datastore, 120, &event),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "discontinuous_packet_number_count"
             })
         ));
@@ -2996,7 +3024,7 @@ mod netlog_tests {
         datastore.total_rx_ack = usize::MAX;
         assert!(matches!(
             consume(&constants, &mut datastore, 103, &received),
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "total_rx_ack"
             })
         ));
@@ -3251,7 +3279,7 @@ mod netlog_tests {
             with_netlog_reader(&mut reader, &HashSet::new(), &parsed_constants);
         assert!(matches!(
             result,
-            Err(DatastoreError::NetlogCounterOverflow {
+            Err(DatastoreError::CounterOverflow {
                 field: "netlog_quic_stream_received_connection_cumulative"
             })
         ));
@@ -3395,13 +3423,136 @@ mod qlog_h3_direction_tests {
                 ds.http_requests.get(&12).ok_or("priority target missing")?;
             assert_eq!(priority_req.priority_updates, vec!["u=2"]);
 
-            let observed = ds.received_data_frames.get(&8);
-            match vantage {
-                VantagePointType::Client =>
-                    assert_eq!(observed, Some(&vec![(4.0, 17)])),
-                VantagePointType::Server => assert!(observed.is_none()),
-                _ => return Err("unexpected vantage in fixture".into()),
-            }
+            assert_eq!(
+                ds.received_data_frames.get(&8).map(Vec::as_slice),
+                Some([(4.0, 17)].as_slice())
+            );
+            assert_eq!(
+                ds.sent_data_frames.get(&8).map(Vec::as_slice),
+                Some([(3.0, 11)].as_slice())
+            );
+            let (client_bytes, server_bytes) =
+                if request_created { (11, 17) } else { (17, 11) };
+            assert_eq!(req.client_observed_data_bytes.inner, Some(client_bytes));
+            assert_eq!(req.server_observed_data_bytes.inner, Some(server_bytes));
+        }
+        Ok(())
+    }
+    #[test]
+    fn data_accounting_preserves_known_zero_and_raw_payload_lengths(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use qlog::events::RawInfo;
+
+        let mut events = vec![
+            event(5.0, true, data(), Some(4)),
+            event(2.0, true, data(), Some(0)),
+            event(7.0, true, data(), None),
+            event(
+                8.0,
+                false,
+                Http3Frame::Data {
+                    raw: Some(RawInfo {
+                        payload_length: Some(12),
+                        ..RawInfo::default()
+                    }),
+                },
+                None,
+            ),
+        ];
+        events.push(Event::with_time(
+            9.0,
+            EventData::Http3FrameParsed(FrameParsed {
+                stream_id: 8,
+                length: None,
+                frame: data(),
+                raw: Some(RawInfo {
+                    payload_length: Some(3),
+                    ..RawInfo::default()
+                }),
+            }),
+        ));
+        let sequential = events
+            .iter()
+            .cloned()
+            .map(qlog::reader::Event::Qlog)
+            .collect::<Vec<_>>();
+        for ds in [
+            Datastore::with_qlog_events(
+                &events,
+                &VantagePointType::Client,
+                false,
+            )?,
+            Datastore::with_sqlog_reader_events(
+                &sequential,
+                &VantagePointType::Client,
+                false,
+            )?,
+        ] {
+            let request = ds.http_requests.get(&8).ok_or("missing request")?;
+            assert_eq!(request.time_first_data_tx, Some(2.0));
+            assert_eq!(request.time_last_data_tx, Some(7.0));
+            assert_eq!(request.client_observed_data_bytes.inner, Some(4));
+            assert!(request.client_data_lengths_incomplete);
+            assert!(request.avg_upload_rate.inner.is_none());
+            assert!(!request.server_data_lengths_incomplete);
+            assert_eq!(request.server_observed_data_bytes.inner, Some(15));
+            assert_eq!(ds.total_sent_data_frame_count, 2);
+            assert_eq!(ds.total_received_data_frame_count, 2);
+            assert_eq!(
+                ds.sent_data_frames.get(&8).map(Vec::as_slice),
+                Some([(5.0, 4), (2.0, 0)].as_slice())
+            );
+            assert_eq!(
+                ds.received_data_cumulative.get(&8).map(Vec::as_slice),
+                Some([(8.0, 12), (9.0, 15)].as_slice())
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn data_counter_overflow_is_atomic_for_both_qlog_directions(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for sent in [true, false] {
+            let mut ds = Datastore::default();
+            ds.consume_qlog_event(
+                &event(1.0, sent, data(), Some(u64::MAX)),
+                false,
+            )?;
+            let result =
+                ds.consume_qlog_event(&event(2.0, sent, data(), Some(1)), false);
+            let field = if sent {
+                "sent_data_cumulative"
+            } else {
+                "received_data_cumulative"
+            };
+            assert!(
+                matches!(result, Err(super::DatastoreError::CounterOverflow { field: actual }) if actual == field)
+            );
+            let request = ds.http_requests.get(&8).ok_or("missing request")?;
+            let (count, frames, last, bytes) = if sent {
+                (
+                    ds.total_sent_data_frame_count,
+                    &ds.sent_data_frames,
+                    request.time_last_data_tx,
+                    request.client_observed_data_bytes.inner,
+                )
+            } else {
+                (
+                    ds.total_received_data_frame_count,
+                    &ds.received_data_frames,
+                    request.time_last_data_rx,
+                    request.server_observed_data_bytes.inner,
+                )
+            };
+            assert_eq!(count, 1);
+            assert_eq!(
+                frames.get(&8).map(Vec::as_slice),
+                Some([(1.0, u64::MAX)].as_slice())
+            );
+            assert_eq!(last, Some(1.0));
+            assert_eq!(bytes, Some(u64::MAX));
+            assert_eq!(ds.last_event_time, 1.0);
         }
         Ok(())
     }

@@ -246,17 +246,17 @@ pub fn requests(
                     <li><strong>Path</strong> - the request Path</li>
                     <li><strong>Status</strong> - the response Status</li>
                     <li><strong>Response Content-Length</strong> - for downloads; the value of the response Content-Length, if any. A response can omit this header. </li>
-                    <li><strong>Response Transferred</strong> - for downloads; the actual number of bytes of response that were received. This can be less than Response Content-Length, indicating that the request or connection was terminated early.</li>
+                    <li><strong>Response Observed DATA</strong> - sum of known response DATA payload lengths. A missing length produces n/a. A qlog DATA frame may describe a declared payload before its body has been received, so matching Content-Length is not proof of completed delivery.</li>
                     <li><strong>Download Duration (d2d) (ms)</strong> - the time duration between receiving the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This number has caveats - can be very high if data size or durations are small.</li>
+                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
                     <li><strong>Download Duration (h2d) (ms)</strong> - the time duration between receiving the first HEADERS and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This number has caveats - can be very high if data size or durations are small.</li>
+                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
                     <li><strong>Client Tx Hdr, Rx First Data</strong> - the duration between the client sending a HEADERS frame, and the first DATA frame being received. This is analogous to TTFB.</li>
                     <li><strong>Client Tx Hdr, Rx Last Data</strong> - the duration between the client sending a HEADERS frame, and the last DATA frame being received. This is analogous to TTLB.</li>
                     <li><strong>Request Content-Length</strong> - for uploads; the value of the request Content-Length, if any. A request can omit this header. </li>
-                    <li><strong>Request Transferred</strong> - for uploads; the actual number of bytes of request that were sent. This can be less than Request Content-Length, indicating that the request or connection was terminated early.</li>
+                    <li><strong>Request Observed DATA</strong> - sum of known request DATA payload lengths. Missing lengths produce n/a; logged DATA sizes do not prove peer delivery.</li>
                     <li><strong>Upload Duration (ms)</strong> - the time duration between sending the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This number has caveats - can be very high if data size or durations are small.</li>
+                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
                     <li><strong>Client Priority Header</strong> - the value of the RFC 9218 request Priority header, if any.</li>
                     <li><strong>Server Priority Header</strong> - the value of the RFC 9218 response Priority header, if any.</li>
                     <li><strong>Reset Stream Sent</strong> - the value of the error code in a Reset Stream, if sent.</li>
@@ -350,7 +350,7 @@ impl RowColor {
 struct RequestColumns {
     status: Option<usize>,
     length: Option<usize>,
-    transferred: Option<usize>,
+    observed_data: Option<usize>,
     reset_sent: Option<usize>,
     reset_received: Option<usize>,
 }
@@ -373,7 +373,7 @@ impl RowClassifier {
             TableKind::Requests => Self::Requests(RequestColumns {
                 status: column("Status"),
                 length: column("Response Content-Length (bytes)"),
-                transferred: column("Response Transferred (bytes)"),
+                observed_data: column(crate::request_stub::SERVER_OBSERVED_DATA),
                 reset_sent: column("Reset Stream Sent"),
                 reset_received: column("Reset Stream Received"),
             }),
@@ -423,10 +423,11 @@ impl RequestColumns {
         if !status.is_some_and(|code| (100..400).contains(&code)) {
             return Some(RowColor::Red);
         }
-        // Missing length or transfer count is not proof of a completed body.
+        // Only compare recorded DATA lengths; agreement is not proof of a
+        // completed body.
         let length = cell(row, self.length)?.parse::<u64>().ok()?;
-        let transferred = cell(row, self.transferred)?.parse::<u64>().ok()?;
-        Some(if length == transferred {
+        let observed = cell(row, self.observed_data)?.parse::<u64>().ok()?;
+        Some(if length == observed {
             RowColor::Green
         } else {
             RowColor::Red
@@ -588,7 +589,7 @@ mod report_event_html_tests {
         let fields = [
             "Status",
             "Response Content-Length (bytes)",
-            "Response Transferred (bytes)",
+            crate::request_stub::SERVER_OBSERVED_DATA,
             "Reset Stream Sent",
             "Reset Stream Received",
             "Client Priority Header",
