@@ -77,7 +77,7 @@ fn main() -> Result<(), ClientError> {
     #[cfg(not(feature = "async"))]
     let summary = sync_client(config, actions);
     #[cfg(feature = "async")]
-    let summary = async_client(config, actions);
+    let summary = async_client(&config, actions);
 
     let summary = summary?;
     log::debug!(
@@ -275,7 +275,7 @@ fn config_from_matches(matches: &ArgMatches) -> Result<Config, String> {
 
 #[cfg(feature = "async")]
 fn async_client(
-    config: Config, frame_actions: Vec<Action>,
+    config: &Config, frame_actions: Vec<Action>,
 ) -> Result<ConnectionSummary, ClientError> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
