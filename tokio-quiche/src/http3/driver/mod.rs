@@ -161,6 +161,15 @@ fn body_recv_buf_size(readable: usize, max: usize) -> usize {
     readable.clamp(floor, max)
 }
 
+enum StreamStatus {
+    Drained,
+    ReceiverClosed,
+    Reset(u64),
+    Failed(h3::Error),
+    FinDelivered,
+    Blocked,
+}
+
 /// Read a chunk into reusable scratch storage and transfer its ownership.
 /// A failed read may already have appended bytes; never reuse that partially
 /// written buffer for another stream.
@@ -548,15 +557,6 @@ impl<H: DriverHooks> H3Driver<H> {
     fn process_h3_data(
         &mut self, qconn: &mut QuicheConnection, stream_id: u64,
     ) -> H3ConnectionResult<()> {
-        enum StreamStatus {
-            Drained,
-            ReceiverClosed,
-            Reset(u64),
-            Failed(h3::Error),
-            FinDelivered,
-            Blocked,
-        }
-
         let conn = self.conn.as_mut().ok_or(Self::connection_not_present())?;
         let ctx = self
             .stream_map
@@ -566,60 +566,14 @@ impl<H: DriverHooks> H3Driver<H> {
             return Ok(());
         }
 
-        let status = loop {
-            let Some(sender) = ctx.send.as_ref().and_then(PollSender::get_ref)
-            else {
-                break StreamStatus::Drained;
-            };
-            let permit = match sender.try_reserve() {
-                Ok(permit) => permit,
-                Err(TrySendError::Closed(())) =>
-                    break StreamStatus::ReceiverClosed,
-                Err(TrySendError::Full(())) => {
-                    if ctx.read_state == ReadState::FinPending ||
-                        qconn.stream_readable(stream_id)
-                    {
-                        break StreamStatus::Blocked;
-                    }
-                    break StreamStatus::Drained;
-                },
-            };
-
-            if ctx.read_state == ReadState::FinPending {
-                // FIN is delivered exactly once, even if the app was blocked.
-                permit.send(InboundFrame {
-                    body: BytesMut::new(),
-                    fin: true,
-                });
-                break StreamStatus::FinDelivered;
-            }
-
-            let want = body_recv_buf_size(
-                qconn.stream_readable_len(stream_id, self.max_recv_body_buf_size),
-                self.max_recv_body_buf_size,
-            );
-            match read_body_chunk(&mut self.body_recv_buf, want, |buffer| {
-                conn.recv_body_buf(qconn, stream_id, buffer)
-            }) {
-                Ok(body) => {
-                    let num_bytes = body.len() as u64;
-                    ctx.audit_stats.add_downstream_bytes_recvd(num_bytes);
-                    let _ = self.h3_event_sender.send(
-                        H3Event::BodyBytesReceived {
-                            stream_id,
-                            num_bytes,
-                            fin: false,
-                        }
-                        .into(),
-                    );
-                    permit.send(InboundFrame { body, fin: false });
-                },
-                Err(h3::Error::Done) => break StreamStatus::Drained,
-                Err(h3::Error::Transport(quiche::Error::StreamReset(code))) =>
-                    break StreamStatus::Reset(code),
-                Err(error) => break StreamStatus::Failed(error),
-            }
-        };
+        let status = Self::drain_stream_body(
+            conn,
+            qconn,
+            ctx,
+            &mut self.body_recv_buf,
+            self.max_recv_body_buf_size,
+            &self.h3_event_sender,
+        );
 
         match status {
             StreamStatus::Drained => {
@@ -681,6 +635,70 @@ impl<H: DriverHooks> H3Driver<H> {
         }
 
         Ok(())
+    }
+
+    /// Transfer available body data without mutating stream lifecycle state.
+    fn drain_stream_body(
+        conn: &mut h3::Connection, qconn: &mut QuicheConnection, ctx: &StreamCtx,
+        body_recv_buf: &mut Option<bytes::buf::Limit<BytesMut>>,
+        max_recv_body_buf_size: usize,
+        event_sender: &mpsc::UnboundedSender<H::Event>,
+    ) -> StreamStatus {
+        let stream_id = ctx.audit_stats.stream_id();
+        loop {
+            let Some(sender) = ctx.send.as_ref().and_then(PollSender::get_ref)
+            else {
+                return StreamStatus::Drained;
+            };
+            let permit = match sender.try_reserve() {
+                Ok(permit) => permit,
+                Err(TrySendError::Closed(())) =>
+                    return StreamStatus::ReceiverClosed,
+                Err(TrySendError::Full(())) => {
+                    if ctx.read_state == ReadState::FinPending ||
+                        qconn.stream_readable(stream_id)
+                    {
+                        return StreamStatus::Blocked;
+                    }
+                    return StreamStatus::Drained;
+                },
+            };
+
+            if ctx.read_state == ReadState::FinPending {
+                // FIN is delivered exactly once, even if the app was blocked.
+                permit.send(InboundFrame {
+                    body: BytesMut::new(),
+                    fin: true,
+                });
+                return StreamStatus::FinDelivered;
+            }
+
+            let want = body_recv_buf_size(
+                qconn.stream_readable_len(stream_id, max_recv_body_buf_size),
+                max_recv_body_buf_size,
+            );
+            match read_body_chunk(body_recv_buf, want, |buffer| {
+                conn.recv_body_buf(qconn, stream_id, buffer)
+            }) {
+                Ok(body) => {
+                    let num_bytes = body.len() as u64;
+                    ctx.audit_stats.add_downstream_bytes_recvd(num_bytes);
+                    let _ = event_sender.send(
+                        H3Event::BodyBytesReceived {
+                            stream_id,
+                            num_bytes,
+                            fin: false,
+                        }
+                        .into(),
+                    );
+                    permit.send(InboundFrame { body, fin: false });
+                },
+                Err(h3::Error::Done) => return StreamStatus::Drained,
+                Err(h3::Error::Transport(quiche::Error::StreamReset(code))) =>
+                    return StreamStatus::Reset(code),
+                Err(error) => return StreamStatus::Failed(error),
+            }
+        }
     }
 
     /// Processes an end-of-stream event from the [`quiche::h3::Connection`].

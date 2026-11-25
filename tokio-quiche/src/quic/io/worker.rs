@@ -733,29 +733,12 @@ where
                 break outcome;
             }
 
-            #[cfg(not(feature = "gcongestion"))]
-            let max_send_size = if gcongestion_enabled {
-                usize::MAX
-            } else {
-                // Only call qconn.send_quantum when !gcongestion_enabled.
-                tune_max_send_size(
-                    segment_size,
-                    qconn.send_quantum(),
-                    send_buf.len(),
-                )
-            };
-
-            #[cfg(feature = "gcongestion")]
-            let max_send_size = usize::MAX;
-
-            // If segment_size is known, update the maximum of
-            // GSO sender buffer size to the multiple of
-            // segment_size.
-            let buffer_is_full = self.write_state.num_pkts ==
-                UDP_MAX_SEGMENT_COUNT ||
-                self.write_state.bytes_written >= max_send_size;
-
-            if buffer_is_full {
+            if self.gso_batch_full(
+                qconn,
+                segment_size,
+                send_buf.len(),
+                gcongestion_enabled,
+            ) {
                 break outcome;
             }
 
@@ -810,6 +793,29 @@ where
         }
 
         buffer_write_outcome
+    }
+
+    /// Check both the kernel GSO segment limit and the legacy recovery send
+    /// quantum.
+    fn gso_batch_full(
+        &self, qconn: &QuicheConnection, segment_size: Option<usize>,
+        capacity: usize, gcongestion_enabled: bool,
+    ) -> bool {
+        if self.write_state.num_pkts >= UDP_MAX_SEGMENT_COUNT {
+            return true;
+        }
+        #[cfg(not(feature = "gcongestion"))]
+        if !gcongestion_enabled {
+            return self.write_state.bytes_written >=
+                tune_max_send_size(
+                    segment_size,
+                    qconn.send_quantum(),
+                    capacity,
+                );
+        }
+        #[cfg(feature = "gcongestion")]
+        let _ = (qconn, segment_size, capacity, gcongestion_enabled);
+        false
     }
 
     fn defer_legacy_pacing(
@@ -1030,6 +1036,7 @@ where
         {
             qconn.on_timeout();
             self.write_state.next_release_time = None;
+            self.write_state.has_pending_data = true;
         }
         Ok(())
     }

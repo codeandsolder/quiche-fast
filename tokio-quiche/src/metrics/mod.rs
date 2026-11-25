@@ -396,6 +396,6 @@ pub(crate) fn quic_expensive_metrics_ip_reduce(ip: IpAddr) -> Option<IpAddr> {
     clippy::cast_precision_loss,
     reason = "the histogram backend represents samples as f64"
 )]
-pub(crate) fn histogram_value(value: u64) -> f64 {
+pub(crate) const fn histogram_value(value: u64) -> f64 {
     value as f64
 }
