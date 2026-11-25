@@ -138,6 +138,24 @@ impl Serialize for SerializableHeader<'_> {
 }
 
 impl EnrichedHeaders {
+    pub(crate) fn from_wire(header_block: Vec<u8>) -> quiche::h3::Result<Self> {
+        let headers = quiche::h3::qpack::decode(&header_block, u64::MAX)
+            .map_err(|_| quiche::h3::Error::QpackDecompressionFailed)?;
+        Ok(Self::from_parts(header_block, headers))
+    }
+
+    fn from_parts(header_block: Vec<u8>, headers: Vec<Header>) -> Self {
+        let mut header_map = MultiMap::with_capacity(headers.len());
+        for header in &headers {
+            header_map.insert(header.name().to_vec(), header.value().to_vec());
+        }
+        Self {
+            header_block,
+            headers,
+            header_map,
+        }
+    }
+
     /// Return the array of headers in this frame.
     ///
     /// # Examples
@@ -232,16 +250,7 @@ impl From<Vec<Header>> for EnrichedHeaders {
     fn from(headers: Vec<Header>) -> Self {
         let header_block = encode_header_block(&headers).unwrap();
 
-        let mut header_map: HeaderMap = MultiMap::with_capacity(headers.len());
-        for header in headers.iter() {
-            header_map.insert(header.name().to_vec(), header.value().to_vec());
-        }
-
-        Self {
-            header_block,
-            headers,
-            header_map,
-        }
+        Self::from_parts(header_block, headers)
     }
 }
 
@@ -250,11 +259,8 @@ impl TryFrom<QFrame> for EnrichedHeaders {
 
     fn try_from(value: QFrame) -> Result<Self, Self::Error> {
         match value {
-            QFrame::Headers { header_block } => {
-                let headers = quiche::h3::qpack::decode(&header_block, u64::MAX)?;
-
-                Ok(EnrichedHeaders::from(headers))
-            },
+            QFrame::Headers { header_block } =>
+                Ok(Self::from_wire(header_block)?),
             _ => Err("Cannot convert non-Headers frame into HeadersFrame".into()),
         }
     }
@@ -598,6 +604,27 @@ impl PartialEq for CloseTriggerFrame {
 mod tests {
     use super::*;
     use quiche::h3::frame::Frame;
+
+    #[test]
+    fn decoded_header_block_preserves_original_wire_representation(
+    ) -> Result<(), BoxError> {
+        let headers = vec![
+            Header::new(b":status", b"200"),
+            Header::new(b"x-test", b"test"),
+        ];
+        let literal = crate::encode_header_block_literal(&headers)?;
+        let compressed = encode_header_block(&headers)?;
+        assert_ne!(literal, compressed);
+        let enriched = EnrichedHeaders::from_wire(literal.clone())?;
+        assert_eq!(enriched.header_block, literal);
+        assert_eq!(enriched.headers(), headers);
+        let decoded = EnrichedHeaders::try_from(QFrame::Headers {
+            header_block: compressed.clone(),
+        })?;
+        assert_eq!(decoded.header_block, compressed);
+        assert_eq!(decoded.headers(), headers);
+        Ok(())
+    }
 
     #[test]
     fn test_header_equivalence() {
