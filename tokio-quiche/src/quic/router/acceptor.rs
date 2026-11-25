@@ -30,7 +30,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use datagram_socket::DatagramSocketSend;
-use datagram_socket::DatagramSocketSendExt;
 use datagram_socket::MAX_DATAGRAM_SIZE;
 use qlog::writer::make_qlog_writer_from_path;
 use qlog::writer::qlog_file_name;
@@ -46,6 +45,8 @@ use crate::metrics::labels;
 use crate::metrics::Metrics;
 use crate::quic::addr_validation_token::AddrValidationTokenManager;
 use crate::quic::connection::SharedConnectionIdGenerator;
+use crate::quic::io::gso::send_packets;
+use crate::quic::io::gso::PacketSend;
 use crate::quic::router::NewConnection;
 use crate::quic::Incoming;
 use crate::QuicResultExt;
@@ -166,47 +167,29 @@ where
             ));
         }
         let socket = Arc::clone(&self.socket);
+        let metrics = self.metrics.clone();
         #[cfg(target_os = "linux")]
-        let with_pktinfo = self.config.with_pktinfo;
-        #[cfg(target_os = "linux")]
-        let would_block_metric = self
-            .metrics
-            .write_errors(labels::QuicWriteError::WouldBlock);
-        #[cfg(target_os = "linux")]
-        let send_to_wouldblock_duration_s =
-            self.metrics.send_to_wouldblock_duration_s();
+        let from = self.config.with_pktinfo.then_some(incoming.local_addr);
+        #[cfg(not(target_os = "linux"))]
+        let from = None;
 
+        let packet = PacketSend {
+            to: incoming.peer_addr,
+            from,
+            segment_size: None,
+            tx_time: None,
+            dscp: None,
+        };
         spawn_with_killswitch(async move {
-            let send_buf = &send_buf[..written];
-            let to = incoming.peer_addr;
-
-            let Some(udp) = socket.as_udp_socket() else {
-                let _ = socket.send_to(send_buf, to).await;
-                return;
-            };
-
-            #[cfg(not(target_os = "linux"))]
-            let _ = udp;
-
-            #[cfg(target_os = "linux")]
-            {
-                let from = with_pktinfo.then_some(incoming.local_addr);
-                let _ = crate::quic::io::gso::send_to(
-                    udp,
-                    to,
-                    from,
-                    send_buf,
-                    Some(send_buf.len()),
-                    None,
-                    None,
-                    would_block_metric,
-                    send_to_wouldblock_duration_s,
-                )
-                .await;
-            }
-
-            #[cfg(not(target_os = "linux"))]
-            let _ = socket.send_to(send_buf, to).await;
+            // Stateless replies have no worker to report errors to. The
+            // common sender records the failure using the same write metrics.
+            let _ = send_packets(
+                socket.as_ref(),
+                &send_buf[..written],
+                packet,
+                &metrics,
+            )
+            .await;
         });
 
         Ok(None)

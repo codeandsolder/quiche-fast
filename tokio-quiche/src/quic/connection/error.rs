@@ -67,6 +67,11 @@ pub(crate) fn make_handshake_result<T>(res: &QuicResult<()>) -> io::Result<T> {
     // the types we expect manually & clone/copy them.
     if let Some(hs_err) = err.downcast_ref::<HandshakeError>() {
         Err(hs_err.clone().into())
+    } else if let Some(io_err) = err.downcast_ref::<io::Error>() {
+        Err(io_err.raw_os_error().map_or_else(
+            || io::Error::new(io_err.kind(), io_err.to_string()),
+            io::Error::from_raw_os_error,
+        ))
     } else if let Some(quiche_err) = err.downcast_ref::<quiche::Error>() {
         Err(io::Error::other(*quiche_err))
     } else {
