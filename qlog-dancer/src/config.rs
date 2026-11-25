@@ -29,6 +29,7 @@ use std::collections::HashSet;
 use clap::Arg;
 use clap::ArgAction;
 use clap::Command;
+use clap::ValueEnum;
 
 use crate::plots::colors::PlotColors;
 use crate::plots::colors::DARK_MODE;
@@ -48,11 +49,13 @@ pub enum ChartKind {
     Pending,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum ChartSelection {
     All,
     Overview,
+    #[value(name = "pkt-rx")]
     PacketReceived,
+    #[value(name = "conn-flow")]
     ConnectionFlowControl,
     Sparks,
     Multiplex,
@@ -62,20 +65,6 @@ pub enum ChartSelection {
 }
 
 impl ChartSelection {
-    fn parse(value: &str) -> Result<Self, String> {
-        Ok(match value {
-            "all" => Self::All,
-            "overview" => Self::Overview,
-            "pkt-rx" => Self::PacketReceived,
-            "conn-flow" => Self::ConnectionFlowControl,
-            "sparks" => Self::Sparks,
-            "multiplex" => Self::Multiplex,
-            "pending" => Self::Pending,
-            "none" => Self::None,
-            _ => return Err(format!("unknown chart selection: {value}")),
-        })
-    }
-
     #[must_use = "indicates whether the selected chart is enabled"]
     pub const fn includes(self, kind: ChartKind) -> bool {
         matches!(
@@ -114,10 +103,11 @@ impl PlotTheme {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum SparkLayout {
     Grid,
     #[default]
+    #[value(name = "vert")]
     Vertical,
 }
 
@@ -172,17 +162,12 @@ impl PlotConfig {
         if stream_y_max == Some(0) || cwnd_y_max == Some(0) {
             return Err("Chart Y-axis maxima must be positive.".into());
         }
-        let selection = ChartSelection::parse(
-            &matches
-                .remove_one::<String>("charts")
-                .ok_or("missing chart selection")?,
-        )?;
-        let spark_layout =
-            match matches.remove_one::<String>("sparks_layout").as_deref() {
-                Some("grid") => SparkLayout::Grid,
-                Some("vert") => SparkLayout::Vertical,
-                _ => return Err("invalid or missing spark layout".into()),
-            };
+        let selection = matches
+            .remove_one::<ChartSelection>("charts")
+            .ok_or("missing chart selection")?;
+        let spark_layout = matches
+            .remove_one::<SparkLayout>("sparks_layout")
+            .ok_or("missing spark layout")?;
         let theme = if matches.get_flag("dark_mode") {
             PlotTheme::Dark
         } else {
@@ -203,7 +188,7 @@ impl PlotConfig {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 pub enum StatsSelection {
     All,
     Stream,
@@ -213,16 +198,6 @@ pub enum StatsSelection {
 }
 
 impl StatsSelection {
-    fn parse(value: &str) -> Result<Self, String> {
-        Ok(match value {
-            "all" => Self::All,
-            "stream" => Self::Stream,
-            "packets" => Self::Packets,
-            "none" => Self::None,
-            _ => return Err(format!("unknown stats selection: {value}")),
-        })
-    }
-
     #[must_use = "indicates whether stream statistics are enabled"]
     pub const fn stream(self) -> bool {
         matches!(self, Self::All | Self::Stream)
@@ -250,11 +225,9 @@ pub struct ReportConfig {
 
 impl ReportConfig {
     fn from_matches(matches: &mut clap::ArgMatches) -> Result<Self, String> {
-        let stats = StatsSelection::parse(
-            &matches
-                .remove_one::<String>("print_stats")
-                .ok_or("missing stats selection")?,
-        )?;
+        let stats = matches
+            .remove_one::<StatsSelection>("print_stats")
+            .ok_or("missing stats selection")?;
         Ok(Self {
             text: matches.get_flag("report_text").then(|| TextReportConfig {
                 omit_upload: matches.get_flag("report_omit_upload"),
@@ -317,16 +290,7 @@ impl AppConfig {
             Arg::new("charts")
                 .long("charts")
                 .help("Type of charts to plot")
-                .value_parser([
-                    "all",
-                    "overview",
-                    "pkt-rx",
-                    "sparks",
-                    "multiplex",
-                    "pending",
-                    "conn-flow",
-                    "none",
-                ])
+                .value_parser(clap::value_parser!(ChartSelection))
                 .default_value("none"),
             Arg::new("charts_directory")
                 .long("charts-directory")
@@ -334,7 +298,7 @@ impl AppConfig {
             Arg::new("sparks_layout")
                 .long("sparks-layout")
                 .help("Layout of spark charts")
-                .value_parser(["grid", "vert"])
+                .value_parser(clap::value_parser!(SparkLayout))
                 .default_value("vert"),
             Arg::new("start")
                 .short('s')
@@ -366,7 +330,7 @@ impl AppConfig {
             Arg::new("print_stats")
                 .long("print-stats")
                 .help("Print stats about qlog events")
-                .value_parser(["all", "stream", "packets", "none"])
+                .value_parser(clap::value_parser!(StatsSelection))
                 .default_value("none"),
             Arg::new("report_text")
                 .long("report-text")

@@ -14,7 +14,7 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-clap = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
 log = { workspace = true }
 netlog = { workspace = true }
