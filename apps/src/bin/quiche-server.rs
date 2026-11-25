@@ -24,737 +24,738 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[macro_use]
-extern crate log;
-
-use std::io;
-
-use std::net;
-
-use std::io::prelude::*;
-
-use std::collections::HashMap;
-
-use std::rc::Rc;
-
+use log::debug;
+use log::error;
+use log::info;
+use quiche::Connection;
+use quiche::ConnectionId;
+use quiche::Header;
+use quiche::RecvInfo;
+use quiche::SendInfo;
+use quiche_apps::args::Args;
+use quiche_apps::args::CommonArgs;
+use quiche_apps::args::ServerArgs;
+use quiche_apps::args::SERVER_USAGE;
+use quiche_apps::common::alpns;
+use quiche_apps::common::generate_cid_and_reset_token;
+use quiche_apps::common::stdout_sink;
+use quiche_apps::common::Http09Conn;
+use quiche_apps::common::Http3Conn;
+use quiche_apps::common::HttpConn;
+use quiche_apps::common::PartialRequest;
+use quiche_apps::common::PartialResponse;
+use quiche_apps::sendto::detect_gso;
+use quiche_apps::sendto::DatagramBatch;
+use quiche_apps::sendto::DatagramQueue;
+use ring::hmac;
+use ring::rand::SystemRandom;
 use std::cell::RefCell;
-
-use ring::rand::*;
-
-use quiche_apps::args::*;
-
-use quiche_apps::common::*;
-
-use quiche_apps::sendto::*;
+use std::collections::HashMap;
+use std::collections::VecDeque;
+use std::io;
+use std::net::IpAddr;
+use std::net::SocketAddr;
+use std::rc::Rc;
+use std::time::Duration;
+use std::time::Instant;
 
 const MAX_BUF_SIZE: usize = 65_507;
-
 const MAX_DATAGRAM_SIZE: usize = 1350;
+const MAX_READ_BURST: usize = 64;
+const SOCKET_TOKEN: mio::Token = mio::Token(0);
+const RETRY_TOKEN_LIFETIME: u64 = 60;
+
+type ClientId = u64;
+
+fn failure(context: &str, error: impl std::fmt::Display) -> io::Error {
+    io::Error::other(format!("{context}: {error}"))
+}
 
 fn main() {
-    let mut buf = vec![0; MAX_BUF_SIZE];
-    let mut out = vec![0; MAX_BUF_SIZE];
-    let mut pacing = false;
-    let mut batches = Vec::new();
-
     env_logger::builder().format_timestamp_nanos().init();
-
-    // Parse CLI parameters.
     let parsed = docopt::Docopt::new(SERVER_USAGE)
         .and_then(|parser| parser.parse())
         .unwrap_or_else(|error| error.exit());
-    let conn_args =
+    let common =
         CommonArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
     let args =
         ServerArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
-
-    // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
-    let mut events = mio::Events::with_capacity(1024);
-
-    // Create the UDP listening socket, and register it with the event loop.
-    let mut socket = mio::net::UdpSocket::bind(args.listen).unwrap();
-
-    // Set SO_TXTIME socket option on the listening UDP socket for pacing
-    // outgoing packets.
-    if args.socket.pacing {
-        match set_txtime_sockopt(&socket) {
-            Ok(_) => {
-                pacing = true;
-                debug!("successfully set SO_TXTIME socket option");
-            },
-            Err(e) => debug!("setsockopt failed {e:?}"),
-        };
+    if let Err(error) = run(&args, &common) {
+        error!("server: {error}");
+        std::process::exit(1);
     }
+}
 
-    info!("listening on {:}", socket.local_addr().unwrap());
-
-    poll.registry()
-        .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-        .unwrap();
-
-    let max_datagram_size = MAX_DATAGRAM_SIZE;
-    let enable_gso = args.socket.gso && detect_gso(&socket, max_datagram_size);
-
-    trace!("GSO detected: {enable_gso}");
-    let mut tx = DatagramQueue::new(MAX_BUF_SIZE, enable_gso);
-
-    // Create the configuration for the QUIC connections.
-    let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-
-    config.load_cert_chain_from_pem_file(&args.cert).unwrap();
-    config.load_priv_key_from_pem_file(&args.key).unwrap();
-
-    conn_args
-        .configure(&mut config, max_datagram_size)
-        .unwrap_or_else(|error| {
-            docopt::Error::Argv(format!("connection configuration: {error}"))
-                .exit()
-        });
-    config.discover_pmtu(args.enable_pmtud);
-    config.enable_pacing(pacing);
-
-    let mut keylog = None;
-
-    if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(keylog_path)
-            .unwrap();
-
-        keylog = Some(file);
-
-        config.log_keys();
-    }
-
-    let rng = SystemRandom::new();
-    let conn_id_seed =
-        ring::hmac::Key::generate(ring::hmac::HMAC_SHA256, &rng).unwrap();
-
-    let mut next_client_id = 0;
-    let mut clients_ids = ClientIdMap::new();
-    let mut clients = ClientMap::new();
-
-    let mut pkt_count = 0;
-
-    let mut continue_write = false;
-
-    let local_addr = socket.local_addr().unwrap();
+fn run(args: &ServerArgs, common: &CommonArgs) -> io::Result<()> {
+    let mut io = ServerIo::new(args)?;
+    let mut connections = Connections::new(args, common, io.pacing)?;
+    let mut immediate = false;
 
     loop {
-        // Find the shorter timeout from all the active connections.
-        //
-        // TODO: use event loop that properly supports timers
-        let timeout = match continue_write {
-            true => Some(std::time::Duration::from_secs(0)),
-
-            false => clients.values().filter_map(|c| c.conn.timeout()).min(),
+        let timeout = if immediate {
+            Some(Duration::ZERO)
+        } else {
+            connections.timeout()
         };
-
-        let mut poll_res = poll.poll(&mut events, timeout);
-        while let Err(e) = poll_res.as_ref() {
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                trace!("mio poll() call failed, retrying: {e:?}");
-                poll_res = poll.poll(&mut events, timeout);
-            } else {
-                panic!("mio poll() call failed fatally: {e:?}");
-            }
+        match io.poll.poll(&mut io.events, timeout) {
+            Ok(()) => (),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => (),
+            Err(error) => return Err(failure("poll", error)),
         }
 
-        // Handle elapsed timers independently of socket backpressure.
-        if events.is_empty() && !continue_write {
-            clients
-                .values_mut()
-                .for_each(|client| client.conn.on_timeout());
-        }
+        // A readable socket can remain continuously ready. Timers are due
+        // according to their deadlines, not the absence of readiness events.
+        connections.expire();
+        let drained = io.flush()?;
+        let more_input = drained && io.receive(&mut connections)?;
+        connections.expire();
+        let more_output = connections.send_available(&mut io)?;
+        connections.collect_closed();
+        immediate = !io.tx.is_pending() && (more_input || more_output);
+    }
+}
 
-        // A blocked burst owns its buffer until accepted by the kernel.
-        // Resume draining reads after writable readiness, even if the read
-        // edge occurred while the socket was blocked.
-        let drained = tx
-            .flush(&mut socket, poll.registry(), mio::Token(0))
-            .unwrap_or_else(|error| {
-                error!("UDP flush failed: {error}");
-                std::process::exit(1);
-            });
-        continue_write = false;
-        'read: while drained && !tx.is_pending() {
-            let (len, from) = match socket.recv_from(&mut buf) {
-                Ok(v) => v,
+struct ServerIo {
+    poll: mio::Poll,
+    events: mio::Events,
+    socket: mio::net::UdpSocket,
+    local: SocketAddr,
+    pacing: bool,
+    tx: DatagramQueue,
+    input: Vec<u8>,
+    output: Vec<u8>,
+    batches: Vec<DatagramBatch>,
+    packet_count: u64,
+}
 
-                Err(e) => {
-                    // There are no more UDP packets to read, so end the read
-                    // loop.
-                    if e.kind() == std::io::ErrorKind::WouldBlock {
-                        trace!("recv() would block");
-                        break 'read;
-                    }
-
-                    panic!("recv() failed: {e:?}");
+impl ServerIo {
+    fn new(args: &ServerArgs) -> io::Result<Self> {
+        let poll = mio::Poll::new()?;
+        let mut socket = mio::net::UdpSocket::bind(args.listen)?;
+        let pacing = args.socket.pacing &&
+            match set_txtime_sockopt(&socket) {
+                Ok(()) => true,
+                Err(error) => {
+                    debug!("SO_TXTIME unavailable: {error}");
+                    false
                 },
             };
+        let gso = args.socket.gso && detect_gso(&socket, MAX_DATAGRAM_SIZE);
+        let local = socket.local_addr()?;
+        info!("listening on {local}; GSO={gso}, pacing={pacing}");
+        poll.registry().register(
+            &mut socket,
+            SOCKET_TOKEN,
+            mio::Interest::READABLE,
+        )?;
+        Ok(Self {
+            poll,
+            events: mio::Events::with_capacity(1024),
+            socket,
+            local,
+            pacing,
+            tx: DatagramQueue::new(MAX_BUF_SIZE, gso),
+            input: vec![0; MAX_BUF_SIZE],
+            output: vec![0; MAX_BUF_SIZE],
+            batches: Vec::new(),
+            packet_count: 0,
+        })
+    }
 
-            trace!("got {len} bytes from {from} to {local_addr}");
+    fn flush(&mut self) -> io::Result<bool> {
+        self.tx
+            .flush(&mut self.socket, self.poll.registry(), SOCKET_TOKEN)
+    }
 
-            let pkt_buf = &mut buf[..len];
+    fn submit(&mut self) -> io::Result<bool> {
+        self.tx.submit(
+            &mut self.output,
+            &mut self.batches,
+            &mut self.socket,
+            self.poll.registry(),
+            SOCKET_TOKEN,
+        )
+    }
 
-            if let Some(target_path) = conn_args.dump_packet_path.as_ref() {
-                let path = format!("{target_path}/{pkt_count}.pkt");
-
-                if let Ok(f) = std::fs::File::create(path) {
-                    let mut f = std::io::BufWriter::new(f);
-                    f.write_all(pkt_buf).ok();
-                }
+    fn receive(&mut self, connections: &mut Connections<'_>) -> io::Result<bool> {
+        for _ in 0..MAX_READ_BURST {
+            if self.tx.is_pending() {
+                return Ok(false);
             }
+            let (len, peer) = match self.socket.recv_from(&mut self.input) {
+                Ok(value) => value,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock =>
+                    return Ok(false),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted =>
+                    continue,
+                Err(error) => return Err(failure("receive UDP", error)),
+            };
+            if let Some(directory) = &connections.common.dump_packet_path {
+                let path = std::path::Path::new(directory)
+                    .join(format!("{}.pkt", self.packet_count));
+                std::fs::write(path, &self.input[..len])
+                    .map_err(|error| failure("dump UDP packet", error))?;
+            }
+            self.packet_count += 1;
 
-            pkt_count += 1;
-
-            // Parse the QUIC packet's header.
-            let hdr = match quiche::Header::from_slice(
-                pkt_buf,
+            let header = match Header::from_slice(
+                &self.input[..len],
                 quiche::MAX_CONN_ID_LEN,
             ) {
-                Ok(v) => v,
-
-                Err(e) => {
-                    error!("Parsing packet header failed: {e:?}");
-                    continue 'read;
+                Ok(header) => header,
+                Err(error) => {
+                    debug!("invalid QUIC header from {peer}: {error}");
+                    continue;
                 },
             };
-
-            trace!("got packet {hdr:?}");
-
-            let conn_id = if !cfg!(feature = "fuzzing") {
-                let conn_id = ring::hmac::sign(&conn_id_seed, &hdr.dcid);
-                let conn_id = &conn_id.as_ref()[..quiche::MAX_CONN_ID_LEN];
-                conn_id.to_vec().into()
-            } else {
-                // When fuzzing use an all zero connection ID.
-                [0; quiche::MAX_CONN_ID_LEN].to_vec().into()
-            };
-
-            // Lookup a connection based on the packet's connection ID. If there
-            // is no connection matching, create a new one.
-            let client = if !clients_ids.contains_key(&hdr.dcid) &&
-                !clients_ids.contains_key(&conn_id)
-            {
-                if hdr.ty != quiche::Type::Initial {
-                    error!("Packet is not Initial");
-                    continue 'read;
-                }
-
-                // Clients must expand Initial datagrams to at least 1200
-                // bytes (RFC 9000 Section 14.1), so anything shorter is
-                // dropped before a Version Negotiation or Retry is sent.
-                if len < quiche::MIN_CLIENT_INITIAL_LEN {
-                    error!("Initial datagram too short: {len} bytes");
-                    continue 'read;
-                }
-
-                let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-                scid.copy_from_slice(&conn_id);
-                let mut odcid = None;
-
-                // Both stateless responses use the same queued send path.
-                let reply = if !quiche::version_is_supported(hdr.version) {
-                    warn!("Doing version negotiation");
-                    Some(quiche::negotiate_version(
-                        &hdr.scid, &hdr.dcid, &mut out,
-                    ))
-                } else if !args.no_retry {
-                    let Some(token) = hdr.token.as_deref() else {
-                        error!("Initial packet has no token field");
-                        continue 'read;
-                    };
-                    if token.is_empty() {
-                        warn!("Doing stateless retry");
-                        let scid = quiche::ConnectionId::from_ref(&scid);
-                        let new_token = mint_token(&hdr, &from);
-                        Some(quiche::retry(
-                            &hdr.scid,
-                            &hdr.dcid,
-                            &scid,
-                            &new_token,
-                            hdr.version,
-                            &mut out,
-                        ))
-                    } else {
-                        odcid = validate_token(&from, token);
-                        if odcid.is_none() {
-                            error!("Invalid address validation token");
-                            continue 'read;
-                        }
-                        if scid.len() != hdr.dcid.len() {
-                            error!("Invalid destination connection ID");
-                            continue 'read;
-                        }
-                        // Reuse the source connection ID sent in the Retry.
-                        scid.copy_from_slice(&hdr.dcid);
-                        None
-                    }
-                } else {
-                    None
-                };
-                if let Some(reply) = reply {
-                    let len = match reply {
-                        Ok(len) => len,
-                        Err(error) => {
-                            error!("Failed to generate stateless reply: {error}");
-                            continue 'read;
-                        },
-                    };
-                    let info = quiche::SendInfo {
-                        from: local_addr,
-                        to: from,
-                        at: std::time::Instant::now(),
-                    };
-                    DatagramBatch::push(&mut batches, 0..len, info, false);
-                    tx.submit(
-                        &mut out,
-                        &mut batches,
-                        &mut socket,
-                        poll.registry(),
-                        mio::Token(0),
-                    )
-                    .unwrap_or_else(|error| {
-                        error!("UDP stateless reply failed: {error}");
-                        std::process::exit(1);
-                    });
-                    continue 'read;
-                }
-
-                let scid = quiche::ConnectionId::from_vec(scid.to_vec());
-
-                debug!("New connection: dcid={:?} scid={:?}", hdr.dcid, scid);
-
-                #[cfg_attr(
-                    not(feature = "qlog"),
-                    expect(
-                        unused_mut,
-                        reason = "qlog-disabled builds do not mutate the connection before storage"
-                    )
-                )]
-                let mut conn = quiche::accept(
-                    &scid,
-                    odcid.as_ref(),
-                    local_addr,
-                    from,
-                    &mut config,
-                )
-                .unwrap();
-
-                if let Some(keylog) = &mut keylog {
-                    if let Ok(keylog) = keylog.try_clone() {
-                        conn.set_keylog(Box::new(keylog));
-                    }
-                }
-
-                // Only bother with qlog if the user specified it.
-                #[cfg(feature = "qlog")]
-                {
-                    if let Some(dir) = std::env::var_os("QLOGDIR") {
-                        let id = format!("{:?}", scid);
-                        match make_qlog_writer(&dir, "server", &id) {
-                            Ok(writer) => conn.set_qlog(
-                                std::boxed::Box::new(writer),
-                                "quiche-server qlog".to_string(),
-                                format!("quiche-server qlog id={id}"),
-                            ),
-                            Err(error) => error!("open qlog: {error}"),
-                        }
-                    }
-                }
-
-                let client_id = next_client_id;
-
-                let client = ServerClient {
-                    conn,
-                    http_conn: None,
-                    id: client_id,
-                    partial_requests: HashMap::new(),
-                    partial_responses: HashMap::new(),
-                    app_proto_selected: false,
-                    loss_rate: 0.0,
-                    max_send_burst: MAX_BUF_SIZE,
-                };
-
-                clients.insert(client_id, client);
-                clients_ids.insert(scid.clone(), client_id);
-
-                next_client_id += 1;
-
-                clients.get_mut(&client_id).unwrap()
-            } else {
-                let cid = match clients_ids.get(&hdr.dcid) {
-                    Some(v) => v,
-
-                    None => clients_ids.get(&conn_id).unwrap(),
-                };
-
-                clients.get_mut(cid).unwrap()
-            };
-
-            let recv_info = quiche::RecvInfo {
-                to: local_addr,
-                from,
-            };
-
-            // Process potentially coalesced packets.
-            let read = match client.conn.recv(pkt_buf, recv_info) {
-                Ok(v) => v,
-
-                Err(e) => {
-                    error!("{} recv failed: {:?}", client.conn.trace_id(), e);
-                    continue 'read;
-                },
-            };
-
-            trace!("{} processed {} bytes", client.conn.trace_id(), read);
-
-            // Create a new application protocol session as soon as the QUIC
-            // connection is established.
-            if !client.app_proto_selected &&
-                (client.conn.is_in_early_data() ||
-                    client.conn.is_established())
-            {
-                // At this stage the ALPN negotiation succeeded and selected a
-                // single application protocol name. We'll use this to construct
-                // the correct type of HttpConn but `application_proto()`
-                // returns a slice, so we have to convert it to a str in order
-                // to compare to our lists of protocols. We `unwrap()` because
-                // we need the value and if something fails at this stage, there
-                // is not much anyone can do to recover.
-                let app_proto = client.conn.application_proto();
-
-                if alpns::HTTP_09.contains(&app_proto) {
-                    client.http_conn = Some(Box::<Http09Conn>::default());
-
-                    client.app_proto_selected = true;
-                } else if alpns::HTTP_3.contains(&app_proto) {
-                    client.http_conn = match Http3Conn::with_conn(
-                        &mut client.conn,
-                        &conn_args,
-                        Rc::new(RefCell::new(stdout_sink)),
-                    ) {
-                        Ok(v) => Some(v),
-
-                        Err(e) => {
-                            trace!("{} {}", client.conn.trace_id(), e);
-                            None
-                        },
-                    };
-
-                    client.app_proto_selected = true;
-                }
-            }
-
-            if let Some(http_conn) = client.http_conn.as_mut() {
-                let conn = &mut client.conn;
-                let partial_responses = &mut client.partial_responses;
-
-                // Visit all writable response streams to send any remaining
-                // HTTP content.
-                for stream_id in writable_response_streams(conn) {
-                    http_conn.handle_writable(conn, partial_responses, stream_id);
-                }
-
-                if http_conn
-                    .handle_requests(
-                        conn,
-                        &mut client.partial_requests,
-                        partial_responses,
-                        &args.root,
-                        &args.index,
-                        &mut buf,
-                    )
-                    .is_err()
-                {
-                    continue 'read;
-                }
-            }
-
-            handle_path_events(client);
-
-            // See whether source Connection IDs have been retired.
-            while let Some(retired_scid) = client.conn.retired_scid_next() {
-                info!("Retiring source CID {retired_scid:?}");
-                clients_ids.remove(&retired_scid);
-            }
-
-            // Provides as many CIDs as possible.
-            while client.conn.scids_left() > 0 {
-                let (scid, reset_token) = match generate_cid_and_reset_token(&rng)
-                {
-                    Ok(value) => value,
-                    Err(error) => {
-                        error!("generate CID: {error}");
-                        break;
-                    },
-                };
-                if client.conn.new_scid(&scid, reset_token, false).is_err() {
-                    break;
-                }
-
-                clients_ids.insert(scid, client.id);
-            }
-        }
-
-        // Generate outgoing QUIC packets for all active connections and send
-        // them on the UDP socket, until quiche reports that there are no more
-        // packets to be sent.
-        for client in clients.values_mut() {
-            if tx.is_pending() {
-                break;
-            }
-            // Reduce `max_send_burst` by 25% when loss rises by more than 0.1%.
-            let loss_rate =
-                client.conn.stats().lost as f64 / client.conn.stats().sent as f64;
-            if loss_rate > client.loss_rate + 0.001 {
-                client.max_send_burst = client.max_send_burst / 4 * 3;
-                // Minimum bound of 10xMSS.
-                client.max_send_burst = client
-                    .max_send_burst
-                    .max(client.conn.max_send_udp_payload_size() * 10);
-                client.loss_rate = loss_rate;
-            }
-
-            // Always leave enough room for a single maximum-sized probe,
-            // even before its candidate size is reflected in the path MSS.
-            let max_send_burst = client
-                .conn
-                .send_quantum()
-                .min(client.max_send_burst)
-                .max(MAX_DATAGRAM_SIZE)
-                .min(out.len());
-            let mut total_write = 0;
-            batches.clear();
-
-            while total_write < max_send_burst {
-                let (write, send_info) = match client
-                    .conn
-                    .send(&mut out[total_write..max_send_burst])
-                {
-                    Ok(v) => v,
-
-                    Err(quiche::Error::Done) => {
-                        trace!("{} done writing", client.conn.trace_id());
-                        break;
-                    },
-
-                    Err(e) => {
-                        error!("{} send failed: {:?}", client.conn.trace_id(), e);
-
-                        client.conn.close(false, 0x1, b"fail").ok();
-                        break;
-                    },
-                };
-
-                let start = total_write;
-                total_write += write;
-                DatagramBatch::push(
-                    &mut batches,
-                    start..total_write,
-                    send_info,
-                    pacing,
-                );
-
-                if write < client.conn.max_send_udp_payload_size() {
-                    continue_write = true;
-                    break;
-                }
-            }
-
-            if batches.is_empty() {
-                continue;
-            }
-
-            let batch_count = batches.len();
-            let drained = tx
-                .submit(
-                    &mut out,
-                    &mut batches,
-                    &mut socket,
-                    poll.registry(),
-                    mio::Token(0),
-                )
-                .unwrap_or_else(|error| {
-                    error!("UDP burst failed: {error}");
-                    std::process::exit(1);
-                });
-            if !drained {
-                continue_write = false;
-                break;
-            }
-            trace!("{} written {total_write} bytes in {batch_count} datagram batches", client.conn.trace_id());
-
-            if total_write >= max_send_burst {
-                trace!("{} pause writing", client.conn.trace_id(),);
-                continue_write = true;
-                break;
-            }
-        }
-
-        // Garbage collect closed connections.
-        clients.retain(|_, ref mut c| {
-            trace!("Collecting garbage");
-
-            if c.conn.is_closed() {
-                info!(
-                    "{} connection collected {:?} {:?}",
-                    c.conn.trace_id(),
-                    c.conn.stats(),
-                    c.conn.path_stats().collect::<Vec<quiche::PathStats>>()
-                );
-
-                for id in c.conn.source_ids() {
-                    let id_owned = id.clone().into_owned();
-                    clients_ids.remove(&id_owned);
-                }
-            }
-
-            !c.conn.is_closed()
-        });
-    }
-}
-
-/// Generate a stateless retry token.
-///
-/// The token includes the static string `"quiche"` followed by the IP address
-/// of the client and by the original destination connection ID generated by the
-/// client.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-fn mint_token(hdr: &quiche::Header, src: &net::SocketAddr) -> Vec<u8> {
-    let mut token = Vec::new();
-
-    token.extend_from_slice(b"quiche");
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    token.extend_from_slice(&addr);
-    token.extend_from_slice(&hdr.dcid);
-
-    token
-}
-
-/// Validates a stateless retry token.
-///
-/// This checks that the ticket includes the `"quiche"` static string, and that
-/// the client IP address matches the address stored in the ticket.
-///
-/// Note that this function is only an example and doesn't do any cryptographic
-/// authenticate of the token. *It should not be used in production system*.
-fn validate_token<'a>(
-    src: &net::SocketAddr, token: &'a [u8],
-) -> Option<quiche::ConnectionId<'a>> {
-    if token.len() < 6 {
-        return None;
-    }
-
-    if &token[..6] != b"quiche" {
-        return None;
-    }
-
-    let token = &token[6..];
-
-    let addr = match src.ip() {
-        std::net::IpAddr::V4(a) => a.octets().to_vec(),
-        std::net::IpAddr::V6(a) => a.octets().to_vec(),
-    };
-
-    if token.len() < addr.len() || &token[..addr.len()] != addr.as_slice() {
-        return None;
-    }
-
-    Some(quiche::ConnectionId::from_ref(&token[addr.len()..]))
-}
-
-fn handle_path_events(client: &mut ServerClient) {
-    while let Some(qe) = client.conn.path_event_next() {
-        match qe {
-            quiche::PathEvent::New(local_addr, peer_addr) => {
-                info!(
-                    "{} Seen new path ({}, {})",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-
-                // Directly probe the new path.
-                client
-                    .conn
-                    .probe_path(local_addr, peer_addr)
-                    .expect("cannot probe");
-            },
-
-            quiche::PathEvent::Validated(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) is now validated",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            },
-
-            quiche::PathEvent::FailedValidation(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) failed validation",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            },
-
-            quiche::PathEvent::Closed(local_addr, peer_addr) => {
-                info!(
-                    "{} Path ({}, {}) is now closed and unusable",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            },
-
-            quiche::PathEvent::ReusedSourceConnectionId(cid_seq, old, new) => {
-                info!(
-                    "{} Peer reused cid seq {} (initially {:?}) on {:?}",
-                    client.conn.trace_id(),
-                    cid_seq,
-                    old,
-                    new
-                );
-            },
-
-            quiche::PathEvent::PeerMigrated(local_addr, peer_addr) => {
-                info!(
-                    "{} Connection migrated to ({}, {})",
-                    client.conn.trace_id(),
-                    local_addr,
-                    peer_addr
-                );
-            },
-
-            quiche::PathEvent::PmtuUpdated { local, peer, pmtu } => info!(
-                "{} Path ({}, {}) validated PMTU {}",
-                client.conn.trace_id(),
-                local,
+            let route = match connections.route(
+                &header,
+                len,
+                self.local,
                 peer,
-                pmtu
-            ),
+                &mut self.output,
+            ) {
+                Ok(route) => route,
+                Err(error) => {
+                    debug!("admission from {peer}: {error}");
+                    continue;
+                },
+            };
+            match route {
+                Route::Drop => (),
+                Route::Reply(written) => {
+                    let info = SendInfo {
+                        from: self.local,
+                        to: peer,
+                        at: Instant::now(),
+                    };
+                    DatagramBatch::push(
+                        &mut self.batches,
+                        0..written,
+                        info,
+                        false,
+                    );
+                    self.submit()?;
+                },
+                Route::Client(id) => {
+                    connections.receive(
+                        id,
+                        RecvInfo {
+                            to: self.local,
+                            from: peer,
+                        },
+                        len,
+                        &mut self.input,
+                    );
+                },
+            }
+        }
+        // Edge-triggered readiness may not repeat; explicitly revisit unread
+        // packets after giving timers and transmit work a chance to run.
+        Ok(true)
+    }
+}
 
-            _ => (),
+enum Route {
+    Drop,
+    Reply(usize),
+    Client(ClientId),
+}
+
+struct Connections<'a> {
+    args: &'a ServerArgs,
+    common: &'a CommonArgs,
+    config: quiche::Config,
+    keylog: Option<std::fs::File>,
+    rng: SystemRandom,
+    cid_key: hmac::Key,
+    retry: RetryTokens,
+    next_id: ClientId,
+    clients: HashMap<ClientId, Client>,
+    ids: HashMap<ConnectionId<'static>, ClientId>,
+    schedule: VecDeque<ClientId>,
+}
+
+impl<'a> Connections<'a> {
+    fn new(
+        args: &'a ServerArgs, common: &'a CommonArgs, pacing: bool,
+    ) -> io::Result<Self> {
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)
+            .map_err(|error| failure("QUIC configuration", error))?;
+        config
+            .load_cert_chain_from_pem_file(&args.cert)
+            .map_err(|error| failure("certificate", error))?;
+        config
+            .load_priv_key_from_pem_file(&args.key)
+            .map_err(|error| failure("private key", error))?;
+        common
+            .configure(&mut config, MAX_DATAGRAM_SIZE)
+            .map_err(|error| failure("transport configuration", error))?;
+        config.discover_pmtu(args.enable_pmtud);
+        config.enable_pacing(pacing);
+        let keylog = std::env::var_os("SSLKEYLOGFILE")
+            .map(|path| {
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            })
+            .transpose()?;
+        if keylog.is_some() {
+            config.log_keys();
+        }
+        let rng = SystemRandom::new();
+        let cid_key = hmac::Key::generate(hmac::HMAC_SHA256, &rng)
+            .map_err(|error| failure("CID key", error))?;
+        let retry = RetryTokens::new(&rng)?;
+        Ok(Self {
+            args,
+            common,
+            config,
+            keylog,
+            rng,
+            cid_key,
+            retry,
+            next_id: 0,
+            clients: HashMap::new(),
+            ids: HashMap::new(),
+            schedule: VecDeque::new(),
+        })
+    }
+
+    fn derived_cid(&self, dcid: &ConnectionId<'_>) -> ConnectionId<'static> {
+        if cfg!(feature = "fuzzing") {
+            return ConnectionId::copy_from_slice(&[0; quiche::MAX_CONN_ID_LEN]);
+        }
+        let tag = hmac::sign(&self.cid_key, dcid);
+        ConnectionId::copy_from_slice(&tag.as_ref()[..quiche::MAX_CONN_ID_LEN])
+    }
+
+    fn route(
+        &mut self, header: &Header<'static>, len: usize, local: SocketAddr,
+        peer: SocketAddr, output: &mut [u8],
+    ) -> quiche::Result<Route> {
+        if let Some(&id) = self.ids.get(&header.dcid) {
+            return Ok(Route::Client(id));
+        }
+        let derived = self.derived_cid(&header.dcid);
+        if let Some(&id) = self.ids.get(&derived) {
+            return Ok(Route::Client(id));
+        }
+        if header.ty != quiche::Type::Initial ||
+            len < quiche::MIN_CLIENT_INITIAL_LEN
+        {
+            return Ok(Route::Drop);
+        }
+        if !quiche::version_is_supported(header.version) {
+            return quiche::negotiate_version(&header.scid, &header.dcid, output)
+                .map(Route::Reply);
+        }
+
+        let (scid, odcid) = if self.args.no_retry {
+            (derived, None)
+        } else {
+            let Some(token) = header.token.as_deref() else {
+                return Ok(Route::Drop);
+            };
+            if token.is_empty() {
+                let token = self.retry.mint(peer.ip(), &derived, &header.dcid);
+                return quiche::retry(
+                    &header.scid,
+                    &header.dcid,
+                    &derived,
+                    &token,
+                    header.version,
+                    output,
+                )
+                .map(Route::Reply);
+            }
+            let Some(original) =
+                self.retry.validate(peer.ip(), &header.dcid, token)
+            else {
+                return Ok(Route::Drop);
+            };
+            (header.dcid.clone(), Some(original))
+        };
+        let mut conn =
+            quiche::accept(&scid, odcid.as_ref(), local, peer, &mut self.config)?;
+        self.attach_logs(&mut conn, &scid);
+        let id = self.next_id;
+        self.next_id = id.checked_add(1).ok_or(quiche::Error::InvalidState)?;
+        self.clients.insert(id, Client::new(conn));
+        self.ids.insert(scid, id);
+        self.schedule.push_back(id);
+        Ok(Route::Client(id))
+    }
+
+    fn attach_logs(&self, conn: &mut Connection, scid: &ConnectionId<'_>) {
+        if let Some(log) = &self.keylog {
+            match log.try_clone() {
+                Ok(file) => conn.set_keylog(Box::new(file)),
+                Err(error) => error!("clone key log: {error}"),
+            }
+        }
+        #[cfg(feature = "qlog")]
+        if let Some(directory) = std::env::var_os("QLOGDIR") {
+            let id = format!("{scid:?}");
+            match quiche_apps::common::make_qlog_writer(&directory, "server", &id)
+            {
+                Ok(writer) => conn.set_qlog(
+                    Box::new(writer),
+                    "quiche-server qlog".to_owned(),
+                    format!("quiche-server qlog id={id}"),
+                ),
+                Err(error) => error!("open qlog: {error}"),
+            }
+        }
+        #[cfg(not(feature = "qlog"))]
+        let _ = scid;
+    }
+
+    fn receive(
+        &mut self, id: ClientId, info: RecvInfo, len: usize, buffer: &mut [u8],
+    ) {
+        let Some(client) = self.clients.get_mut(&id) else {
+            error!("CID references missing connection {id}");
+            return;
+        };
+        if let Err(error) = client.conn.recv(&mut buffer[..len], info) {
+            debug!("{} receive: {error}", client.conn.trace_id());
+            return;
+        }
+        client.process_http(self.args, self.common, buffer);
+        client.path_events();
+        while let Some(retired) = client.conn.retired_scid_next() {
+            self.ids.remove(&retired);
+        }
+        while client.conn.scids_left() > 0 {
+            let (cid, reset) = match generate_cid_and_reset_token(&self.rng) {
+                Ok(value) => value,
+                Err(error) => {
+                    error!("generate CID: {error}");
+                    break;
+                },
+            };
+            if self.ids.contains_key(&cid) ||
+                client.conn.new_scid(&cid, reset, false).is_err()
+            {
+                break;
+            }
+            self.ids.insert(cid, id);
+        }
+    }
+
+    fn timeout(&self) -> Option<Duration> {
+        self.clients
+            .values()
+            .filter_map(|client| client.conn.timeout())
+            .min()
+    }
+
+    fn expire(&mut self) {
+        let now = Instant::now();
+        for client in self.clients.values_mut() {
+            if client
+                .conn
+                .timeout_instant()
+                .is_some_and(|deadline| deadline <= now)
+            {
+                client.conn.on_timeout();
+            }
+        }
+    }
+
+    fn send_available(&mut self, io: &mut ServerIo) -> io::Result<bool> {
+        let mut more = false;
+        // Rotate after each visited connection, including one whose burst
+        // blocks, so a single large stream cannot monopolize the socket.
+        for _ in 0..self.schedule.len() {
+            if io.tx.is_pending() {
+                break;
+            }
+            let Some(id) = self.schedule.pop_front() else {
+                break;
+            };
+            let Some(client) = self.clients.get_mut(&id) else {
+                continue;
+            };
+            self.schedule.push_back(id);
+            more |= client.generate(&mut io.output, &mut io.batches, io.pacing);
+            if !io.batches.is_empty() && !io.submit()? {
+                break;
+            }
+        }
+        Ok(more)
+    }
+
+    fn collect_closed(&mut self) {
+        let previous = self.clients.len();
+        self.clients.retain(|_, client| {
+            if client.conn.is_closed() {
+                info!(
+                    "{} collected {:?}",
+                    client.conn.trace_id(),
+                    client.conn.stats()
+                );
+                false
+            } else {
+                true
+            }
+        });
+        if self.clients.len() != previous {
+            self.ids.retain(|_, id| self.clients.contains_key(id));
+            self.schedule.retain(|id| self.clients.contains_key(id));
         }
     }
 }
 
-/// Set SO_TXTIME socket option.
+struct Client {
+    conn: Connection,
+    http: Option<Box<dyn HttpConn>>,
+    requests: HashMap<u64, PartialRequest>,
+    responses: HashMap<u64, PartialResponse>,
+    burst: BurstLimit,
+}
+
+impl Client {
+    fn new(conn: Connection) -> Self {
+        Self {
+            conn,
+            http: None,
+            requests: HashMap::new(),
+            responses: HashMap::new(),
+            burst: BurstLimit::new(),
+        }
+    }
+
+    fn process_http(
+        &mut self, args: &ServerArgs, common: &CommonArgs, buffer: &mut [u8],
+    ) {
+        if self.http.is_none() &&
+            (self.conn.is_established() || self.conn.is_in_early_data())
+        {
+            let protocol = self.conn.application_proto();
+            let result: Result<Box<dyn HttpConn>, String> =
+                if alpns::HTTP_09.contains(&protocol) {
+                    Ok(Box::<Http09Conn>::default())
+                } else if alpns::HTTP_3.contains(&protocol) {
+                    Http3Conn::with_conn(
+                        &mut self.conn,
+                        common,
+                        Rc::new(RefCell::new(stdout_sink)),
+                    )
+                } else {
+                    Err(format!("unsupported ALPN {protocol:?}"))
+                };
+            match result {
+                Ok(http) => self.http = Some(http),
+                Err(error) => {
+                    error!(
+                        "{} application initialization: {error}",
+                        self.conn.trace_id()
+                    );
+                    let _ = self.conn.close(
+                        true,
+                        0x102,
+                        b"application initialization failed",
+                    );
+                    return;
+                },
+            }
+        }
+        if let Some(http) = &mut self.http {
+            if let Err(error) = http.handle_requests(
+                &mut self.conn,
+                &mut self.requests,
+                &mut self.responses,
+                &args.root,
+                &args.index,
+                buffer,
+            ) {
+                debug!("{} HTTP processing: {error}", self.conn.trace_id());
+                let _ = self.conn.close(true, 0x102, b"HTTP processing failed");
+            }
+        }
+    }
+
+    fn path_events(&mut self) {
+        while let Some(event) = self.conn.path_event_next() {
+            if let quiche::PathEvent::New(local, peer) = event {
+                if let Err(error) = self.conn.probe_path(local, peer) {
+                    debug!(
+                        "{} probe {local} -> {peer}: {error}",
+                        self.conn.trace_id()
+                    );
+                }
+            } else {
+                info!("{} path event {event:?}", self.conn.trace_id());
+            }
+        }
+    }
+
+    fn generate(
+        &mut self, output: &mut [u8], batches: &mut Vec<DatagramBatch>,
+        pacing: bool,
+    ) -> bool {
+        if self.conn.is_closed() {
+            return false;
+        }
+        let stats = self.conn.stats();
+        self.burst.observe(
+            stats.lost,
+            stats.sent,
+            self.conn.max_send_udp_payload_size(),
+        );
+        let budget = self
+            .conn
+            .send_quantum()
+            .min(self.burst.bytes)
+            .max(MAX_DATAGRAM_SIZE)
+            .min(output.len());
+        let mut written = 0;
+        // Reserve one maximum-sized packet before calling send. A short
+        // remainder is not a transport failure and must not close a client.
+        while budget - written >= MAX_DATAGRAM_SIZE {
+            match self.conn.send(&mut output[written..budget]) {
+                Ok((len, info)) if len > 0 => {
+                    DatagramBatch::push(
+                        batches,
+                        written..written + len,
+                        info,
+                        pacing,
+                    );
+                    written += len;
+                },
+                Ok(_) | Err(quiche::Error::Done) => return false,
+                Err(error) => {
+                    debug!("{} generate UDP: {error}", self.conn.trace_id());
+                    let _ = self.conn.close(false, 0x1, b"send failed");
+                    return false;
+                },
+            }
+        }
+        written > 0
+    }
+}
+
+struct BurstLimit {
+    bytes: usize,
+    previous_lost: usize,
+    previous_sent: usize,
+}
+
+impl BurstLimit {
+    const fn new() -> Self {
+        Self {
+            bytes: MAX_BUF_SIZE,
+            previous_lost: 0,
+            previous_sent: 1,
+        }
+    }
+
+    fn observe(&mut self, lost: usize, sent: usize, mss: usize) {
+        if sent == 0 {
+            return;
+        }
+        // Compare exact rational loss rates. Avoid a lossy float conversion
+        // and division by zero; usize products fit in u128 on supported hosts.
+        let current = lost as u128 * self.previous_sent as u128;
+        let previous = self.previous_lost as u128 * sent as u128;
+        let denominator = sent as u128 * self.previous_sent as u128;
+        if current.saturating_sub(previous) > denominator / 1000 {
+            self.bytes = (self.bytes / 4 * 3).max(mss.saturating_mul(10));
+            self.previous_lost = lost;
+            self.previous_sent = sent;
+        }
+    }
+}
+
+struct RetryTokens {
+    key: hmac::Key,
+    start: Instant,
+}
+
+impl RetryTokens {
+    fn new(rng: &SystemRandom) -> io::Result<Self> {
+        let key = hmac::Key::generate(hmac::HMAC_SHA256, rng)
+            .map_err(|error| failure("Retry token key", error))?;
+        Ok(Self {
+            key,
+            start: Instant::now(),
+        })
+    }
+
+    fn mint(
+        &self, ip: IpAddr, retry_cid: &ConnectionId<'_>,
+        original: &ConnectionId<'_>,
+    ) -> Vec<u8> {
+        self.mint_at(ip, retry_cid, original, self.start.elapsed().as_secs())
+    }
+
+    fn mint_at(
+        &self, ip: IpAddr, retry_cid: &ConnectionId<'_>,
+        original: &ConnectionId<'_>, now: u64,
+    ) -> Vec<u8> {
+        let mut token = now.to_be_bytes().to_vec();
+        append_ip(&mut token, ip);
+        token.extend_from_slice(retry_cid);
+        token.extend_from_slice(original);
+        let tag = hmac::sign(&self.key, &token);
+        token.extend_from_slice(tag.as_ref());
+        token
+    }
+
+    fn validate<'a>(
+        &self, ip: IpAddr, retry_cid: &ConnectionId<'_>, token: &'a [u8],
+    ) -> Option<ConnectionId<'a>> {
+        self.validate_at(ip, retry_cid, token, self.start.elapsed().as_secs())
+    }
+
+    fn validate_at<'a>(
+        &self, ip: IpAddr, retry_cid: &ConnectionId<'_>, token: &'a [u8],
+        now: u64,
+    ) -> Option<ConnectionId<'a>> {
+        if retry_cid.len() != quiche::MAX_CONN_ID_LEN {
+            return None;
+        }
+        let (payload, tag) =
+            token.split_at_checked(token.len().checked_sub(
+                hmac::HMAC_SHA256.digest_algorithm().output_len(),
+            )?)?;
+        hmac::verify(&self.key, payload, tag).ok()?;
+        let (issued, rest) = payload.split_at_checked(8)?;
+        let issued = u64::from_be_bytes(issued.try_into().ok()?);
+        if now.checked_sub(issued)? > RETRY_TOKEN_LIFETIME {
+            return None;
+        }
+        let mut binding = Vec::new();
+        append_ip(&mut binding, ip);
+        binding.extend_from_slice(retry_cid);
+        let original = rest.strip_prefix(binding.as_slice())?;
+        if original.len() > quiche::MAX_CONN_ID_LEN {
+            return None;
+        }
+        Some(ConnectionId::from_ref(original))
+    }
+}
+
+fn append_ip(buffer: &mut Vec<u8>, ip: IpAddr) {
+    match ip {
+        IpAddr::V4(address) => {
+            buffer.push(4);
+            buffer.extend_from_slice(&address.octets());
+        },
+        IpAddr::V6(address) => {
+            buffer.push(6);
+            buffer.extend_from_slice(&address.octets());
+        },
+    }
+}
+
+/// Set `SO_TXTIME` socket option.
 ///
 /// This socket option is set to send to kernel the outgoing UDP
-/// packet transmission time in the sendmsg syscall.
+/// packet transmission time in the `sendmsg` syscall.
 ///
 /// Note that this socket option is set only on linux platforms.
 #[cfg(target_os = "linux")]
@@ -778,4 +779,80 @@ fn set_txtime_sockopt(_: &mio::net::UdpSocket) -> io::Result<()> {
     use std::io::Error;
 
     Err(Error::other("Not supported on this platform"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BurstLimit;
+    use super::RetryTokens;
+    use super::RETRY_TOKEN_LIFETIME;
+    use quiche::ConnectionId;
+    use ring::rand::SystemRandom;
+    use std::net::IpAddr;
+    use std::net::Ipv4Addr;
+    use std::net::Ipv6Addr;
+
+    #[test]
+    fn retry_tokens_bind_ip_connection_and_expiry() -> std::io::Result<()> {
+        let rng = SystemRandom::new();
+        let tokens = RetryTokens::new(&rng)?;
+        let foreign = RetryTokens::new(&rng)?;
+        let retry = ConnectionId::copy_from_slice(&[1; quiche::MAX_CONN_ID_LEN]);
+        let other = ConnectionId::copy_from_slice(&[2; quiche::MAX_CONN_ID_LEN]);
+        let original = ConnectionId::copy_from_slice(b"original");
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            let token = tokens.mint_at(ip, &retry, &original, 10);
+            assert_eq!(
+                tokens.validate_at(ip, &retry, &token, 10),
+                Some(original.clone())
+            );
+            assert_eq!(
+                tokens.validate_at(ip, &retry, &token, 10 + RETRY_TOKEN_LIFETIME),
+                Some(original.clone())
+            );
+            assert!(tokens.validate_at(ip, &retry, &token, 9).is_none());
+            assert!(tokens
+                .validate_at(ip, &retry, &token, 11 + RETRY_TOKEN_LIFETIME)
+                .is_none());
+            assert!(tokens.validate_at(ip, &other, &token, 10).is_none());
+            assert!(foreign.validate_at(ip, &retry, &token, 10).is_none());
+            assert!(tokens
+                .validate_at(
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    &retry,
+                    &token,
+                    10
+                )
+                .is_none());
+            for len in 0..token.len() {
+                assert!(tokens
+                    .validate_at(ip, &retry, &token[..len], 10)
+                    .is_none());
+            }
+            for index in 0..token.len() {
+                let mut damaged = token.clone();
+                damaged[index] ^= 1;
+                assert!(tokens.validate_at(ip, &retry, &damaged, 10).is_none());
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn burst_loss_threshold_is_exact_even_for_large_counters() {
+        let mut limit = BurstLimit::new();
+        let initial = limit.bytes;
+        limit.observe(0, 0, 1350);
+        limit.observe(1, 1000, 1350);
+        assert_eq!(limit.bytes, initial);
+        limit.observe(2, 1000, 1350);
+        assert_eq!(limit.bytes, initial / 4 * 3);
+        limit.observe(2, 1000, 1350);
+        assert_eq!(limit.bytes, initial / 4 * 3);
+        limit.observe(usize::MAX / 2, usize::MAX, 1350);
+        assert_eq!(limit.bytes, initial / 4 * 3 / 4 * 3);
+    }
 }
