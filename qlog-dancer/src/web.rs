@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use crate::config::AppConfig;
+use crate::config::PlotTheme;
 use crate::plots::congestion_control::plot_cc_plot;
 use crate::plots::conn_flow_control::plot_conn_flow_control_canvas;
 use crate::plots::conn_overview::plot_main_plot;
@@ -345,7 +345,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN,
                 area_margin: AREA_MARGIN,
                 display_chart_title: false,
@@ -382,7 +382,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN,
                 area_margin: AREA_MARGIN,
                 display_chart_title: false,
@@ -418,7 +418,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN,
                 area_margin: AREA_MARGIN,
                 display_chart_title: false,
@@ -451,7 +451,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN,
                 area_margin: AreaMargin { x: 40, y: 80 },
                 display_chart_title: false,
@@ -490,7 +490,7 @@ impl QlogDancerWeb {
                     end: None,
                     stream_y_max: None,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 sparks_per_row: 1,
                 captions_on_top: false,
                 spark_dimension_x: 600,
@@ -545,7 +545,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN,
                 area_margin: AreaMargin { x: 40, y: 80 },
                 display_chart_title: false,
@@ -583,7 +583,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 600,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 display_chart_title: false,
             };
 
@@ -621,7 +621,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN_TIGHT,
                 area_margin: AreaMargin { x: 40, y: 80 },
                 display_chart_title: false,
@@ -661,7 +661,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN_TIGHT,
                 area_margin: AreaMargin { x: 40, y: 80 },
                 display_chart_title: false,
@@ -697,7 +697,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN_TIGHT,
                 area_margin: AreaMargin { x: 40, y: 5 },
                 display_chart_title: false,
@@ -736,7 +736,7 @@ impl QlogDancerWeb {
                     width: 1042,
                     height: 800,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 chart_margin: CHART_MARGIN_TIGHT,
                 area_margin: AreaMargin { x: 40, y: 80 },
                 display_chart_title: false,
@@ -770,7 +770,7 @@ impl QlogDancerWeb {
                     end: None,
                     stream_y_max: None,
                 },
-                colors: AppConfig::colors(false),
+                colors: PlotTheme::Light.colors(),
                 ..Default::default()
             };
 

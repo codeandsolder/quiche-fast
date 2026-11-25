@@ -39,19 +39,21 @@ use tabled::settings::Remove;
 use tabled::settings::Style;
 use tabled::Table;
 
-use crate::config::AppConfig;
+use crate::config::StatsSelection;
+use crate::config::TextReportConfig;
 use crate::datastore::Datastore;
 use crate::datastore::PacketInfoStub;
-use crate::datastore::PrintStatsConfig;
 use crate::request_stub::*;
 use crate::stringify_last;
 use crate::LogFileData;
 
-pub fn request_timing_table(lf: &LogFileData, config: &AppConfig) -> Table {
+pub fn request_timing_table(
+    lf: &LogFileData, config: &TextReportConfig,
+) -> Table {
     let mut table = Table::new(lf.datastore.http_requests.values());
     table.with(Modify::new(Segment::all()).with(Alignment::right()));
 
-    if config.report_omit_upload {
+    if config.omit_upload {
         table
             .with(Remove::column(ByColumnName::new(CLIENT_CONTENT_LENGTH)))
             .with(Remove::column(ByColumnName::new(CLIENT_TRANSFERRED)))
@@ -79,13 +81,13 @@ pub fn request_timing_table(lf: &LogFileData, config: &AppConfig) -> Table {
         },
     }
 
-    if config.report_omit_priorities {
+    if config.omit_priorities {
         table
             .with(Remove::column(ByColumnName::new(CLIENT_PRI)))
             .with(Remove::column(ByColumnName::new(SERVER_PRI)));
     }
 
-    if config.report_text_csv {
+    if config.csv {
         let style = Style::empty().vertical(',');
 
         table.with(style);
@@ -94,27 +96,15 @@ pub fn request_timing_table(lf: &LogFileData, config: &AppConfig) -> Table {
     table
 }
 
-pub fn print_stats(data_store: &Datastore, config: &PrintStatsConfig) {
-    if config.rx_flow_control {
+pub fn print_stats(data_store: &Datastore, config: StatsSelection) {
+    if config.stream() {
         print_rx_max_data_frames(data_store);
         print_rx_max_stream_data_frames(data_store);
-    }
-
-    if config.tx_flow_control {
         print_tx_max_data_frames(data_store);
         print_tx_max_stream_data_frames(data_store);
-    }
-
-    if config.reset_streams {
         print_tx_reset_stream_frames(data_store);
         print_rx_reset_stream_frames(data_store);
-    }
-
-    if config.tx_stream_frames {
         print_tx_stream_frames(data_store);
-    }
-
-    if config.stream_buffering {
         print_local_stream_buffer_reads(data_store);
         print_local_stream_buffer_writes(data_store);
         print_local_stream_buffer_dropped(data_store);
@@ -128,7 +118,7 @@ pub fn print_stats(data_store: &Datastore, config: &PrintStatsConfig) {
         );
     }
 
-    if config.packet_stats {
+    if config.packets() {
         print_sent_packet_stats(data_store);
     }
 }

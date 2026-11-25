@@ -33,6 +33,8 @@ use log::error;
 use log::info;
 use log::warn;
 use qlog_dancer::config::AppConfig;
+use qlog_dancer::config::ChartKind;
+use qlog_dancer::config::ChartSelection;
 use qlog_dancer::parse_log_file;
 use qlog_dancer::plots;
 use qlog_dancer::plots::conn_flow_control;
@@ -48,7 +50,6 @@ use qlog_dancer::plots::AreaMargin;
 use qlog_dancer::plots::ChartMargin;
 use qlog_dancer::plots::ChartOutputType;
 use qlog_dancer::plots::ChartSize;
-use qlog_dancer::plots::ClampParams;
 use qlog_dancer::plots::PlotParameters;
 use qlog_dancer::reports::report;
 use qlog_dancer::seriesstore::SeriesStore;
@@ -132,14 +133,7 @@ fn run() -> i32 {
     }
     println!();
 
-    if config.plot_conn_overview ||
-        config.plot_pkt_sent ||
-        config.plot_pkt_received ||
-        config.plot_sparks ||
-        config.plot_multiplex ||
-        config.plot_pending ||
-        config.plot_conn_flow_control
-    {
+    if config.plots.selection != ChartSelection::None {
         if log_file.data.is_empty() {
             error!("File exists but trace information was empty or invalid. If you used a netlog-filter, check it exactly matched session host in the file.");
             return 1;
@@ -160,17 +154,13 @@ fn run() -> i32 {
         debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
         let plot_params = PlotParameters {
-            clamp: ClampParams {
-                start: config.start,
-                end: config.end,
-                stream_y_max: config.stream_y_max,
-            },
-            cwnd_y_max: config.cwnd_y_max,
+            clamp: config.plots.clamp.clone(),
+            cwnd_y_max: config.plots.cwnd_y_max,
             chart_size: ChartSize {
                 width: 1600,
                 height: 1200,
             },
-            colors: AppConfig::colors(config.dark_mode),
+            colors: config.plots.theme.colors(),
             chart_margin: ChartMargin {
                 top: 20,
                 bottom: 20,
@@ -184,13 +174,13 @@ fn run() -> i32 {
         };
 
         let overview_chart_config = OverviewChartOutputType::Png {
-            output_dir: config.charts_dir.clone(),
+            output_dir: config.plots.directory.clone(),
             cwnd_y_max: plot_params.cwnd_y_max,
             stream_y_max: plot_params.clamp.stream_y_max,
         };
 
         let chart_config = ChartOutputType::Png {
-            output_dir: config.charts_dir.clone(),
+            output_dir: config.plots.directory.clone(),
             cwnd_y_max: plot_params.cwnd_y_max,
             stream_y_max: plot_params.clamp.stream_y_max,
         };
@@ -234,7 +224,11 @@ fn run() -> i32 {
                 |trace| format!("{} ({:?})", trace.label(), trace.vantage_point),
             );
 
-            if config.plot_conn_overview {
+            if config
+                .plots
+                .selection
+                .includes(ChartKind::ConnectionOverview)
+            {
                 let mark = std::time::Instant::now();
                 info!("drawing overview for {}...", label);
 
@@ -252,7 +246,7 @@ fn run() -> i32 {
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
-            if config.plot_pkt_sent {
+            if config.plots.selection.includes(ChartKind::PacketSent) {
                 let mark = std::time::Instant::now();
                 info!("drawing packet sent chart for {}...", label);
                 if let Err(error) = packet_sent::plot_packet_sent(
@@ -271,7 +265,7 @@ fn run() -> i32 {
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
-            if config.plot_pkt_received {
+            if config.plots.selection.includes(ChartKind::PacketReceived) {
                 let mark = std::time::Instant::now();
                 info!("drawing packet received chart for {}...", label);
                 if let Err(error) = packet_received::plot_packet_received(
@@ -288,7 +282,11 @@ fn run() -> i32 {
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
-            if config.plot_conn_flow_control {
+            if config
+                .plots
+                .selection
+                .includes(ChartKind::ConnectionFlowControl)
+            {
                 let mark = std::time::Instant::now();
                 info!("drawing connection flow control chart for {}...", label);
                 if let Err(error) = conn_flow_control::plot_conn_flow_control(
@@ -306,12 +304,12 @@ fn run() -> i32 {
 
             debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
 
-            if config.plot_sparks {
+            if config.plots.selection.includes(ChartKind::Sparks) {
                 let mark = std::time::Instant::now();
                 info!("drawing sparks for {}...", label);
 
                 if let Err(error) = stream_sparks::plot_sparks(
-                    &config.sparks_layout,
+                    &config.plots.spark_params(),
                     &chart_filename,
                     ss,
                     &data.datastore,
@@ -326,14 +324,10 @@ fn run() -> i32 {
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
-            if config.plot_multiplex {
+            if config.plots.selection.includes(ChartKind::Multiplex) {
                 let multiplex_params = MultiplexPlotsParams {
-                    clamp: ClampParams {
-                        start: config.start,
-                        end: config.end,
-                        stream_y_max: config.stream_y_max,
-                    },
-                    colors: AppConfig::colors(config.dark_mode),
+                    clamp: config.plots.clamp.clone(),
+                    colors: config.plots.theme.colors(),
                     ..Default::default()
                 };
                 let mark = std::time::Instant::now();
@@ -351,18 +345,14 @@ fn run() -> i32 {
                 debug!("\tcomplete in {:?}", std::time::Instant::now() - mark);
             }
 
-            if config.plot_pending {
+            if config.plots.selection.includes(ChartKind::Pending) {
                 let pending_params = PendingPlotParams {
-                    clamp: ClampParams {
-                        start: config.start,
-                        end: config.end,
-                        stream_y_max: config.stream_y_max,
-                    },
+                    clamp: config.plots.clamp.clone(),
                     chart_size: ChartSize {
                         width: 1600,
                         height: 600,
                     },
-                    colors: AppConfig::colors(config.dark_mode),
+                    colors: config.plots.theme.colors(),
                     display_chart_title: true,
                 };
 

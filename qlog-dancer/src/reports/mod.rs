@@ -39,9 +39,9 @@ use crate::LogFileParseResult;
 pub fn report(
     log_file: &LogFileParseResult, config: &AppConfig,
 ) -> std::io::Result<()> {
-    if config.report_text {
+    if let Some(text_config) = &config.reports.text {
         for data in &log_file.data {
-            let table = text::request_timing_table(data, config);
+            let table = text::request_timing_table(data, text_config);
             if let Some(trace) = &data.trace {
                 println!(
                     "Request timing table for {} ({:?})",
@@ -59,7 +59,7 @@ pub fn report(
             println!("{}", table);
             println!();
 
-            text::print_stats(&data.datastore, &config.stats_config);
+            text::print_stats(&data.datastore, text_config.stats);
             println!();
 
             let mut table = event_list(&data.raw)
@@ -75,7 +75,7 @@ pub fn report(
         text::print_flow_control(&log_file.data);
     }
 
-    if config.report_html {
+    if config.reports.html {
         html::overview(log_file, config)?;
         html::closures(log_file, config)?;
         html::requests(log_file, config)?;
