@@ -2199,7 +2199,7 @@ mod netlog_tests {
                 (6.0, Some(0))
             ]);
             assert_eq!(request.server_data().complete_bytes(), Some(12));
-            assert!(request.sent_data.observations().is_empty());
+            assert_eq!(request.sent_data.observations(), []);
             let series = crate::seriesstore::SeriesStore::from_datastore(ds)?;
             assert_eq!(
                 series
@@ -2244,7 +2244,7 @@ mod netlog_tests {
             (5.0, Some(9)),
             (8.0, Some(0))
         ]);
-        assert!(request.received_data.observations().is_empty());
+        assert_eq!(request.received_data.observations(), []);
         Ok(())
     }
 
@@ -2495,9 +2495,8 @@ mod netlog_tests {
             assert_eq!(history.observations(), [(0.0, Some(u64::MAX))]);
             assert_eq!(history.complete_bytes(), Some(u64::MAX));
             assert!(ds.h2_send_window_updates_balanced.is_empty());
-            assert!(ds
-                .netlog_h2_stream_received_connection_cumulative
-                .is_empty());
+            assert_eq!(ds.netlog_h2_stream_received_connection_cumulative, []
+                as [(f64, u64); 0]);
         }
 
         let mut h2 = Datastore::default();

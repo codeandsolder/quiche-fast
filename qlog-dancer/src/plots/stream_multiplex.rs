@@ -811,7 +811,7 @@ mod tests {
         );
         let model = MultiplexModel::new(&params, &series, &ds)?;
         assert_eq!(model.lanes.keys().copied().collect::<Vec<_>>(), [3]);
-        assert!(model.lanes[&3].frames.is_empty());
+        assert_eq!(model.lanes[&3].frames, []);
         assert!(model.layout.stream_section.is_none());
         // Cumulative DATA samples are not transport STREAM events and must
         // not influence the HTTP/2 multiplex output.
