@@ -399,12 +399,20 @@ mod initial_size_tests {
     async fn acceptor(
     ) -> io::Result<(ConnectionAcceptor<UdpSocket, DefaultMetrics>, SocketAddr)>
     {
+        acceptor_with_generator(Arc::new(SimpleConnectionIdGenerator), false)
+            .await
+    }
+
+    async fn acceptor_with_generator(
+        generator: SharedConnectionIdGenerator, disable_validation: bool,
+    ) -> io::Result<(ConnectionAcceptor<UdpSocket, DefaultMetrics>, SocketAddr)>
+    {
         let socket = UdpSocket::bind("127.0.0.1:0").await?;
         let local_addr = socket.local_addr()?;
 
         let acceptor = ConnectionAcceptor::new(
             ConnectionAcceptorConfig {
-                disable_client_ip_validation: false,
+                disable_client_ip_validation: disable_validation,
                 enable_per_connection_dscp: false,
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
@@ -413,7 +421,7 @@ mod initial_size_tests {
                 with_pktinfo: false,
             },
             Arc::new(socket),
-            Arc::new(SimpleConnectionIdGenerator),
+            generator,
             DefaultMetrics,
         )?;
 
@@ -467,6 +475,52 @@ mod initial_size_tests {
                 .await
                 .is_err()
         );
+        Ok(())
+    }
+
+    struct FailingGenerator;
+
+    impl crate::ConnectionIdGenerator<'static> for FailingGenerator {
+        fn new_connection_id(&self) -> crate::QuicResult<ConnectionId<'static>> {
+            Err("injected CID generator failure".into())
+        }
+
+        fn verify_connection_id(
+            &self, _cid: &ConnectionId<'_>,
+        ) -> crate::QuicResult<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn cid_failure_is_returned_for_retry_and_direct_accept(
+    ) -> crate::QuicResult<()> {
+        for disable_validation in [false, true] {
+            let (mut acceptor, local_addr) = acceptor_with_generator(
+                Arc::new(FailingGenerator),
+                disable_validation,
+            )
+            .await?;
+            let peer = UdpSocket::bind("127.0.0.1:0").await?;
+            let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+            let (incoming, hdr) = incoming(
+                initial_dgram(MIN_CLIENT_INITIAL_LEN),
+                peer.local_addr()?,
+                local_addr,
+            )?;
+            let error = acceptor
+                .handle_initials(incoming, hdr, &mut config)
+                .err()
+                .ok_or("CID generator failure was ignored")?;
+            assert_eq!(error.to_string(), "injected CID generator failure");
+            let mut output = [0u8; MAX_DATAGRAM_SIZE];
+            assert!(timeout(
+                Duration::from_millis(100),
+                peer.recv_from(&mut output)
+            )
+            .await
+            .is_err());
+        }
         Ok(())
     }
 
