@@ -406,7 +406,7 @@ pub fn requests(
         // This is a bit weird, we need to get our actual Table and then convert
         // it back to a builder to pass to HtmlTable.
         let table: tabled::builder::Builder =
-            request_timing_table(data, config).into();
+            request_timing_table(data, &config.reports.table).into();
         let mut reqs = escaped_html_table(table);
 
         // colorize the table
