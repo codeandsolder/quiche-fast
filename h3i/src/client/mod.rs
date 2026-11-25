@@ -30,10 +30,12 @@
 //! as series of [Action]s, and capturing the results in a
 //! [ConnectionSummary].
 
+mod action_queue;
 #[cfg(feature = "async")]
 pub mod async_client;
 pub mod connection_summary;
 pub mod sync_client;
+mod sync_io;
 
 use connection_summary::*;
 use qlog::events::http3::FrameParsed;

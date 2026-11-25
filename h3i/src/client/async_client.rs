@@ -24,12 +24,12 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Responsible for creating a [tokio_quiche::quic::QuicheConnection] and
+//! Responsible for creating a [`tokio_quiche::quic::QuicheConnection`] and
 //! yielding I/O to tokio-quiche.
 
-use log;
 use quiche::PathStats;
 use quiche::Stats;
+use std::future::pending;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Context;
@@ -38,7 +38,6 @@ use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::sleep;
 use tokio::time::sleep_until;
 use tokio::time::Instant;
 use tokio_quiche::metrics::Metrics;
@@ -52,9 +51,6 @@ use tokio_quiche::ConnectionParams;
 use tokio_quiche::QuicResult;
 
 use crate::actions::h3::Action;
-use crate::actions::h3::WaitType;
-use crate::actions::h3::WaitingFor;
-use crate::client::execute_action;
 use crate::client::parse_args;
 use crate::client::parse_streams;
 use crate::client::ClientError;
@@ -67,11 +63,15 @@ use crate::config::Config as H3iConfig;
 use crate::frame::H3iFrame;
 use crate::quiche;
 
+use super::action_queue::ActionQueue;
 use super::Client;
 use super::ConnectionCloseDetails;
 use super::StreamParserMap;
 
 /// Connect to the socket.
+///
+/// # Errors
+/// Returns a client error if connection setup or the handshake fails.
 pub async fn connect(
     args: &H3iConfig, frame_actions: Vec<Action>,
     close_trigger_frames: Option<CloseTriggerFrames>,
@@ -168,18 +168,19 @@ fn create_config(args: &H3iConfig) -> QuicSettings {
 pub struct BuildingConnectionSummary {
     rx: mpsc::UnboundedReceiver<ConnectionRecord>,
     summary: Option<ConnectionSummary>,
-    seen_all_close_trigger_frames: Option<oneshot::Sender<()>>,
+    seen_all_close_trigger_frames:
+        Option<oneshot::Sender<quiche::ConnectionError>>,
 }
 
 impl BuildingConnectionSummary {
     fn new(
         rx: mpsc::UnboundedReceiver<ConnectionRecord>,
         close_trigger_frames: Option<CloseTriggerFrames>,
-        trigger_frame_tx: oneshot::Sender<()>,
+        trigger_frame_tx: oneshot::Sender<quiche::ConnectionError>,
     ) -> Self {
         let summary = ConnectionSummary {
             stream_map: StreamMap::new(close_trigger_frames),
-            ..Default::default()
+            ..ConnectionSummary::default()
         };
 
         Self {
@@ -196,52 +197,59 @@ impl Future for BuildingConnectionSummary {
     fn poll(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>,
     ) -> Poll<Self::Output> {
-        while let Poll::Ready(Some(record)) = self.rx.poll_recv(cx) {
-            // Add all records from the current event loop iteration to the
-            // in-progress summary.
-            let summary = self.summary.as_mut().expect("summary already taken");
-
+        if self.summary.is_none() {
+            return Poll::Ready(Err(ClientError::Other(
+                "connection summary already consumed".into(),
+            )));
+        }
+        loop {
+            let record = match self.rx.poll_recv(cx) {
+                Poll::Ready(Some(record)) => record,
+                Poll::Ready(None) =>
+                    return Poll::Ready(self.summary.take().ok_or_else(|| {
+                        ClientError::Other(
+                            "connection summary already consumed".into(),
+                        )
+                    })),
+                Poll::Pending => return Poll::Pending,
+            };
+            let Some(summary) = self.summary.as_mut() else {
+                return Poll::Ready(Err(ClientError::Other(
+                    "connection summary already consumed".into(),
+                )));
+            };
             match record {
                 ConnectionRecord::StreamedFrame { stream_id, frame } => {
-                    let stream_map = &mut summary.stream_map;
-                    stream_map.insert(stream_id, frame);
-
-                    if stream_map.all_close_trigger_frames_seen() {
-                        // Signal the H3iDriver task to close the connection.
-                        if let Some(expected_tx) =
+                    summary.stream_map.insert(stream_id, frame);
+                    let close_error =
+                        summary.stream_map.triggered_close_error().cloned();
+                    if let Some(error) = close_error {
+                        if let Some(tx) =
                             self.seen_all_close_trigger_frames.take()
                         {
-                            let _ = expected_tx.send(());
+                            let _ = tx.send(error);
                         }
                     }
                 },
-                ConnectionRecord::ConnectionStats(s) => summary.stats = Some(s),
-                ConnectionRecord::PathStats(ps) => summary.path_stats = ps,
-                ConnectionRecord::Close(d) => summary.conn_close_details = d,
-                ConnectionRecord::ActionFailed(error) =>
-                    return Poll::Ready(Err(ClientError::Other(error))),
-            };
-        }
-
-        if self.rx.is_closed() {
-            // The sender drops when the Tokio-Quiche IOW finishes, so the
-            // connection is done and we're safe to yield the summary.
-            let summary = self.summary.take().expect("summary already taken");
-            Poll::Ready(Ok(summary))
-        } else {
-            Poll::Pending
+                ConnectionRecord::ConnectionStats(stats) =>
+                    summary.stats = Some(stats),
+                ConnectionRecord::PathStats(stats) => summary.path_stats = stats,
+                ConnectionRecord::Close(details) =>
+                    summary.conn_close_details = details,
+                ConnectionRecord::ActionFailed(error) => {
+                    self.summary = None;
+                    return Poll::Ready(Err(ClientError::Other(error)));
+                },
+            }
         }
     }
 }
 
 pub struct H3iDriver {
-    actions: Vec<Action>,
-    actions_executed: usize,
-    next_fire_time: Instant,
-    waiting_for_responses: WaitingFor,
+    queue: ActionQueue,
     record_tx: mpsc::UnboundedSender<ConnectionRecord>,
     stream_parsers: StreamParserMap,
-    close_trigger_seen_rx: oneshot::Receiver<()>,
+    close_trigger_seen_rx: oneshot::Receiver<quiche::ConnectionError>,
 }
 
 impl H3iDriver {
@@ -258,10 +266,7 @@ impl H3iDriver {
 
         (
             Self {
-                actions,
-                actions_executed: 0,
-                next_fire_time: Instant::now(),
-                waiting_for_responses: WaitingFor::default(),
+                queue: ActionQueue::new(actions),
                 record_tx,
                 stream_parsers: StreamParserMap::default(),
                 close_trigger_seen_rx,
@@ -270,43 +275,13 @@ impl H3iDriver {
         )
     }
 
-    /// If the next action should fire.
-    fn should_fire(&self) -> bool {
-        Instant::now() >= self.next_fire_time
-    }
-
-    /// Insert all waits into the waiting set.
-    fn register_waits(&mut self) {
-        while self.actions_executed < self.actions.len() {
-            if let Action::Wait { wait_type } =
-                &self.actions[self.actions_executed]
-            {
-                self.actions_executed += 1;
-
-                match wait_type {
-                    WaitType::WaitDuration(duration) => {
-                        self.next_fire_time = Instant::now() + *duration;
-
-                        log::debug!(
-                            "h3i: waiting for responses: {:?}",
-                            self.waiting_for_responses
-                        );
-                    },
-                    WaitType::StreamEvent(event) => {
-                        self.waiting_for_responses.add_wait(event);
-                    },
-                    WaitType::CanOpenNumStreams(required_streams) => {
-                        log::info!(
-                            "h3i: waiting for peer_streams_left_bidi >= {required_streams:?}"
-                        );
-                        self.waiting_for_responses
-                            .set_required_stream_quota(*required_streams);
-                    },
-                }
-            } else {
-                break;
-            }
-        }
+    fn action_error(
+        &self, error: String,
+    ) -> Box<dyn std::error::Error + Send + Sync> {
+        let _ = self
+            .record_tx
+            .send(ConnectionRecord::ActionFailed(error.clone()));
+        error.into()
     }
 }
 
@@ -340,107 +315,54 @@ impl ApplicationOverQuic for H3iDriver {
     fn process_reads(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
         log::trace!("h3i: process_reads");
 
-        // Register waits during `process_reads()` so `work_loop()` can clear
-        // them during the current event loop iteration. Registering them during
-        // `process_writes()` could miss waits and hang the client.
-        self.register_waits();
-
-        let stream_events = parse_streams(qconn, self);
-        for event in stream_events {
-            self.waiting_for_responses.remove_wait(event);
+        self.queue
+            .before_reads(Instant::now().into_std(), qconn)
+            .map_err(|error| self.action_error(error))?;
+        for event in parse_streams(qconn, self) {
+            self.queue.on_stream_event(event);
         }
-
-        self.waiting_for_responses.check_can_open_num_streams(qconn);
-
         Ok(())
     }
 
     fn process_writes(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
         log::trace!("h3i: process_writes");
-
-        if !self.waiting_for_responses.is_empty() {
-            log::debug!(
-                "awaiting responses on streams {:?}, skipping further action",
-                self.waiting_for_responses
-            );
-
+        if qconn.is_draining() {
             return Ok(());
         }
-
-        let iter = self.actions.iter().skip(self.actions_executed);
-
-        for action in iter {
-            match action {
-                Action::SendFrame { .. } |
-                Action::StreamBytes { .. } |
-                Action::SendDatagram { .. } |
-                Action::ResetStream { .. } |
-                Action::StopSending { .. } |
-                Action::OpenUniStream { .. } |
-                Action::ConnectionClose { .. } |
-                Action::SendHeadersFrame { .. } => {
-                    if self.should_fire() {
-                        // Reset the fire time such that the next action will
-                        // still fire.
-                        self.next_fire_time = Instant::now();
-
-                        if let Err(error) = execute_action(
-                            action,
-                            qconn,
-                            &mut self.stream_parsers,
-                        ) {
-                            let _ = self.record_tx.send(
-                                ConnectionRecord::ActionFailed(error.clone()),
-                            );
-                            return Err(error.into());
-                        }
-                        self.actions_executed += 1;
-                    } else {
-                        break;
-                    }
-                },
-                Action::Wait { .. } => {
-                    // Waits are registered during the read phase. Stop here so
-                    // that phase can register this wait and increment
-                    // `actions_executed`.
-                    break;
-                },
-                Action::FlushPackets => {
-                    self.actions_executed += 1;
-                    break;
-                },
-            }
-        }
-
-        Ok(())
+        self.queue
+            .advance(
+                || Instant::now().into_std(),
+                qconn,
+                &mut self.stream_parsers,
+            )
+            .map_err(|error| self.action_error(error))
     }
 
     async fn wait_for_data(
         &mut self, qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
-        log::trace!("h3i: wait_for_data");
-
-        let sleep_fut = if !self.should_fire() {
-            sleep_until(self.next_fire_time)
+        let deadline = if qconn.is_established() && !qconn.is_draining() {
+            self.queue
+                .wakeup(Instant::now().into_std())
+                .map(Instant::from_std)
         } else {
-            // If there is nothing to send, let the IOW resolve `wait_for_data`
-            // through a QUIC timer or incoming data.
-            sleep(Duration::MAX)
+            None
         };
-
+        let sleep_fut = async {
+            if let Some(deadline) = deadline {
+                sleep_until(deadline).await;
+            } else {
+                pending::<()>().await;
+            }
+        };
         select! {
-            rx = &mut self.close_trigger_seen_rx, if !self.close_trigger_seen_rx.is_terminated() => {
-                // NOTE: wait_for_data can be called again after all close triggers have been seen,
-                // depending on how long it takes quiche to mark the connection as closed.
-                // Therefore we can't re-poll the receiver or we'd panic.
-                if rx.is_ok() {
-                    // TODO: customizable close trigger frames
-                    let _ = qconn.close(true, quiche::h3::WireErrorCode::NoError as u64, b"saw all expected frames");
+            result = &mut self.close_trigger_seen_rx, if !self.close_trigger_seen_rx.is_terminated() => {
+                if let Ok(error) = result {
+                    let _ = qconn.close(error.is_app, error.error_code, &error.reason);
                 }
             }
-            _ = sleep_fut => {}
+            () = sleep_fut => {}
         }
-
         Ok(())
     }
 

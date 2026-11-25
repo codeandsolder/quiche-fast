@@ -228,17 +228,7 @@ impl WaitingFor {
         *quota = Some(quota.unwrap_or_default().max(required.num));
     }
 
-    /// Check and clear the stream quota conditions independently.
-    pub(crate) fn check_can_open_num_streams<F: quiche::BufFactory>(
-        &mut self, conn: &quiche::Connection<F>,
-    ) {
-        self.check_quotas(
-            conn.peer_streams_left_bidi(),
-            conn.peer_streams_left_uni(),
-        );
-    }
-
-    fn check_quotas(&mut self, bidi: u64, uni: u64) {
+    pub(crate) fn check_quotas(&mut self, bidi: u64, uni: u64) {
         for (quota, available) in [
             (&mut self.required_bidi, bidi),
             (&mut self.required_uni, uni),

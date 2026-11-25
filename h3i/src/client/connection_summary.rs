@@ -193,19 +193,19 @@ impl StreamMap {
             .push(frame);
     }
 
-    /// Close a [`quiche::Connection`] with the `CONNECTION_CLOSE` frame
-    /// specified by [`CloseTriggerFrames`]. If no [`CloseTriggerFrames`] exist,
-    /// this is a no-op.
+    /// Borrow the configured close error only after all triggers match.
+    pub(crate) fn triggered_close_error(&self) -> Option<&ConnectionError> {
+        self.close_trigger_frames
+            .as_ref()
+            .filter(|frames| frames.saw_all_trigger_frames())
+            .map(|frames| &frames.close_with)
+    }
+
     pub(crate) fn close_due_to_trigger_frames(
         &self, qconn: &mut quiche::Connection,
     ) {
-        if let Some(ConnectionError {
-            is_app,
-            error_code,
-            reason,
-        }) = self.close_trigger_frames.as_ref().map(|tf| &tf.close_with)
-        {
-            let _ = qconn.close(*is_app, *error_code, reason);
+        if let Some(error) = self.triggered_close_error() {
+            let _ = qconn.close(error.is_app, error.error_code, &error.reason);
         }
     }
 }
