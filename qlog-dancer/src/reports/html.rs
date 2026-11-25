@@ -246,17 +246,18 @@ pub fn requests(
                     <li><strong>Path</strong> - the request Path</li>
                     <li><strong>Status</strong> - the response Status</li>
                     <li><strong>Response Content-Length</strong> - for downloads; the value of the response Content-Length, if any. A response can omit this header. </li>
-                    <li><strong>Response Observed DATA</strong> - sum of known response DATA payload lengths. A missing length produces n/a. A qlog DATA frame may describe a declared payload before its body has been received, so matching Content-Length is not proof of completed delivery.</li>
-                    <li><strong>Download Duration (d2d) (ms)</strong> - the time duration between receiving the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
-                    <li><strong>Download Duration (h2d) (ms)</strong> - the time duration between receiving the first HEADERS and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
+                    <li><strong>Response Observed DATA</strong> - sum of known response DATA payload lengths. A missing length produces n/a. A qlog DATA frame may describe a declared payload before its body has been received, so matching Content-Length is not proof of completed delivery. HEAD, bodyless statuses and successful CONNECT are not ordinary Content-Length comparisons.</li>
+                    <li><strong>Last observed response activity</strong> - latest of first observed response HEADERS and last observed response DATA. This does not establish completion.</li>
+                    <li><strong>Download Duration (d2d) (ms)</strong> - the observed interval between first and last response DATA frames at the logged endpoint. Equal timestamps give zero duration.</li>
+                    <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
+                    <li><strong>Download Duration (h2d) (ms)</strong> - the observed interval between first response HEADERS and last response DATA at the logged endpoint.</li>
+                    <li><strong>Download Rate (h2d) (Mbps)</strong> - the download rate, in megabits/s, between first HEADERS and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
                     <li><strong>Client Tx Hdr, Rx First Data</strong> - the duration between the client sending a HEADERS frame, and the first DATA frame being received. This is analogous to TTFB.</li>
                     <li><strong>Client Tx Hdr, Rx Last Data</strong> - the duration between the client sending a HEADERS frame, and the last DATA frame being received. This is analogous to TTLB.</li>
                     <li><strong>Request Content-Length</strong> - for uploads; the value of the request Content-Length, if any. A request can omit this header. </li>
                     <li><strong>Request Observed DATA</strong> - sum of known request DATA payload lengths. Missing lengths produce n/a; logged DATA sizes do not prove peer delivery.</li>
-                    <li><strong>Upload Duration (ms)</strong> - the time duration between sending the first and last DATA frame. This can be 0 for various reasons.</li>
-                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. Short durations can produce high values.</li>
+                    <li><strong>Upload Duration (ms)</strong> - the observed interval between first and last request DATA at the logged endpoint.</li>
+                    <li><strong>Upload Rate (Mbps)</strong> - the upload rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
                     <li><strong>Client Priority Header</strong> - the value of the RFC 9218 request Priority header, if any.</li>
                     <li><strong>Server Priority Header</strong> - the value of the RFC 9218 response Priority header, if any.</li>
                     <li><strong>Reset Stream Sent</strong> - the value of the error code in a Reset Stream, if sent.</li>
@@ -348,6 +349,7 @@ impl RowColor {
 }
 
 struct RequestColumns {
+    method: Option<usize>,
     status: Option<usize>,
     length: Option<usize>,
     observed_data: Option<usize>,
@@ -371,6 +373,7 @@ impl RowClassifier {
             TableKind::H2Closure => Self::H2Closure(column("Error")),
             TableKind::QuicClosure => Self::QuicClosure(column("Error")),
             TableKind::Requests => Self::Requests(RequestColumns {
+                method: column("Method"),
                 status: column("Status"),
                 length: column("Response Content-Length (bytes)"),
                 observed_data: column(crate::request_stub::SERVER_OBSERVED_DATA),
@@ -414,19 +417,34 @@ impl RequestColumns {
         };
         let status =
             cell(row, self.status).and_then(|value| value.parse::<u16>().ok());
-        if reset(self.reset_received) || status.is_some_and(|code| code >= 400) {
+        if reset(self.reset_received) ||
+            status.is_some_and(|code| (400..=599).contains(&code))
+        {
             return Some(RowColor::Red);
         }
         if reset(self.reset_sent) {
             return Some(RowColor::Yellow);
         }
-        if !status.is_some_and(|code| (100..400).contains(&code)) {
-            return Some(RowColor::Red);
+        // Informational, missing and invalid statuses do not identify a
+        // final response whose body can be compared against Content-Length.
+        let status = status.filter(|code| (200..400).contains(code))?;
+        let method = cell(row, self.method)
+            .filter(|value| !value.is_empty() && *value != "n/a");
+        let observed = cell(row, self.observed_data)?.parse::<u64>().ok()?;
+        if method == Some("HEAD") || matches!(status, 204 | 205 | 304) {
+            // HEAD and 304 can describe the length of a hypothetical body.
+            // None of these responses may contain actual content.
+            return (observed > 0).then_some(RowColor::Red);
+        }
+        // Successful CONNECT switches to a tunnel; its DATA is not a body
+        // described by Content-Length. Missing method evidence is ambiguous.
+        let method = method?;
+        if method == "CONNECT" && status < 300 {
+            return None;
         }
         // Only compare recorded DATA lengths; agreement is not proof of a
         // completed body.
         let length = cell(row, self.length)?.parse::<u64>().ok()?;
-        let observed = cell(row, self.observed_data)?.parse::<u64>().ok()?;
         Some(if length == observed {
             RowColor::Green
         } else {
@@ -593,24 +611,34 @@ mod report_event_html_tests {
             "Reset Stream Sent",
             "Reset Stream Received",
             "Client Priority Header",
+            "Method",
         ];
         let cases = [
             (
-                ["200", "00012", "12", "n/a", "n/a", "u=1"],
+                ["200", "00012", "12", "n/a", "n/a", "u=1", "GET"],
                 Some(RowColor::Green),
             ),
-            (["200", "12", "1", "n/a", "n/a", "u=1"], Some(RowColor::Red)),
-            (["200", "12", "12", "n/a", "7", "u=1"], Some(RowColor::Red)),
             (
-                ["n/a", "n/a", "n/a", "7", "n/a", "u=1"],
+                ["200", "12", "1", "n/a", "n/a", "u=1", "GET"],
+                Some(RowColor::Red),
+            ),
+            (
+                ["200", "12", "12", "n/a", "7", "u=1", "GET"],
+                Some(RowColor::Red),
+            ),
+            (
+                ["n/a", "n/a", "n/a", "7", "n/a", "u=1", "GET"],
                 Some(RowColor::Yellow),
             ),
-            (["500", "12", "12", "7", "n/a", "u=1"], Some(RowColor::Red)),
-            (["200", "n/a", "12", "n/a", "n/a", "u=1"], None),
+            (
+                ["500", "12", "12", "7", "n/a", "u=1", "GET"],
+                Some(RowColor::Red),
+            ),
+            (["200", "n/a", "12", "n/a", "n/a", "u=1", "GET"], None),
         ];
-        for columns in
-            [[0, 1, 2, 3, 4, 5], [4, 3, 2, 1, 0, 5], [5, 2, 1, 3, 4, 0]]
-        {
+        for columns in [[0, 1, 2, 3, 4, 5, 6], [4, 3, 2, 1, 0, 5, 6], [
+            5, 2, 1, 3, 4, 0, 6,
+        ]] {
             for (row, expected) in cases {
                 // Remove the optional priority column independently of
                 // position.
@@ -633,6 +661,53 @@ mod report_event_html_tests {
                     expected
                 );
             }
+        }
+    }
+
+    #[test]
+    fn request_classification_respects_http_body_semantics() {
+        let headers = [
+            "Method",
+            "Status",
+            "Response Content-Length (bytes)",
+            crate::request_stub::SERVER_OBSERVED_DATA,
+            "Reset Stream Sent",
+            "Reset Stream Received",
+        ]
+        .map(str::to_owned);
+        let classifier = RowClassifier::new(TableKind::Requests, &headers);
+        for (row, expected) in [
+            (["HEAD", "200", "120", "0", "n/a", "n/a"], None),
+            (
+                ["HEAD", "200", "120", "1", "n/a", "n/a"],
+                Some(RowColor::Red),
+            ),
+            (["GET", "304", "120", "0", "n/a", "n/a"], None),
+            (["GET", "304", "120", "n/a", "n/a", "n/a"], None),
+            (
+                ["GET", "204", "n/a", "2", "n/a", "n/a"],
+                Some(RowColor::Red),
+            ),
+            (["GET", "205", "0", "0", "n/a", "n/a"], None),
+            (["CONNECT", "200", "0", "42", "n/a", "n/a"], None),
+            (
+                ["CONNECT", "302", "12", "12", "n/a", "n/a"],
+                Some(RowColor::Green),
+            ),
+            (["GET", "103", "n/a", "n/a", "n/a", "n/a"], None),
+            (["GET", "n/a", "12", "12", "n/a", "n/a"], None),
+            (["GET", "700", "12", "12", "n/a", "n/a"], None),
+            (["n/a", "200", "120", "0", "n/a", "n/a"], None),
+            (
+                ["HEAD", "404", "120", "0", "n/a", "n/a"],
+                Some(RowColor::Red),
+            ),
+        ] {
+            assert_eq!(
+                classifier.classify(&row.map(str::to_owned)),
+                expected,
+                "{row:?}"
+            );
         }
     }
 
