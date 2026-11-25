@@ -64,10 +64,8 @@ use tokio::sync::mpsc;
 
 // Re-export for convenience
 pub use tokio_quiche::http3::settings::Http3Settings;
-pub use tokio_quiche::quic::ConnectionShutdownBehaviour;
 pub use tokio_quiche::settings::QuicSettings;
 pub use tokio_quiche::QuicResult;
-pub use tokio_quiche::QuicResultExt;
 pub use tokio_quiche::ServerH3Connection;
 pub use tokio_quiche::ServerH3Driver;
 
@@ -226,11 +224,9 @@ pub fn start_server() -> QuicResult<(
     Arc<TestConnectionHook>,
     mpsc::UnboundedReceiver<Arc<QuicAuditStats>>,
 )> {
-    let quic_settings = QuicSettings {
-        max_send_udp_payload_size: 1400,
-        max_recv_udp_payload_size: 1400,
-        ..QuicSettings::default()
-    };
+    let mut quic_settings = QuicSettings::default();
+    quic_settings.max_send_udp_payload_size = 1400;
+    quic_settings.max_recv_udp_payload_size = 1400;
 
     let hook = TestConnectionHook::new();
 

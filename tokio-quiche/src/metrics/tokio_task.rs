@@ -219,12 +219,12 @@ mod tests {
         let timer = Arc::new(Mutex::new(None));
         let poisoner = Arc::clone(&timer);
 
-        let poisoned = std::thread::spawn(move || {
+        let thread_result = std::thread::spawn(move || {
             let Ok(_guard) = poisoner.lock() else { return };
             panic!("poison timer lock");
         })
         .join();
-        assert!(poisoned.is_err());
+        assert!(thread_result.is_err());
         assert!(timer.is_poisoned());
 
         let instrumented = Arc::new(InstrumentedWaker {

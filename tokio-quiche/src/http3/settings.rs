@@ -190,7 +190,9 @@ mod tests {
             ..Http3Settings::default()
         };
         let mut enforcer = Http3SettingsEnforcer::from(&settings);
-        let start = std::time::Instant::now() - Duration::from_secs(2);
+        let start = std::time::Instant::now()
+            .checked_sub(Duration::from_secs(2))
+            .ok_or("test clock cannot represent two seconds earlier")?;
         enforcer.arm_post_accept(start)?;
         assert_eq!(
             enforcer.deadline(),

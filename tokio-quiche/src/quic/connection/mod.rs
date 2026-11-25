@@ -936,12 +936,12 @@ mod stats_lock_tests {
         }));
         let poisoner = Arc::clone(&stats);
 
-        let poisoned = std::thread::spawn(move || {
+        let thread_result = std::thread::spawn(move || {
             let Ok(_guard) = poisoner.lock() else { return };
             panic!("poison stats lock");
         })
         .join();
-        assert!(poisoned.is_err());
+        assert!(thread_result.is_err());
         assert!(stats.is_poisoned());
 
         assert_eq!(shared_socket_stats(&stats).packets_sent, 0);
