@@ -324,7 +324,7 @@ enum StreamPlotDirection {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl StreamPlotDirection {
-    const fn caption(&self) -> &'static str {
+    const fn caption(self) -> &'static str {
         match self {
             Self::Send => "Stream sends",
             Self::Receive => "Stream receives",
