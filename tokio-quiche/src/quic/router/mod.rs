@@ -328,11 +328,7 @@ where
             peer_addr,
             local_addr,
             pending_cid: pending_cid.clone(),
-            with_gso: self.config.supports(crate::socket::SocketCapability::Gso),
-            pacing_offload: self
-                .config
-                .supports(crate::socket::SocketCapability::TransmitTime),
-            with_pktinfo: self.config.supports_pktinfo(self.local_addr),
+            socket_capabilities: self.config.socket_capabilities(),
             pool_send_buffer: self.config.pool_send_buffer,
         };
 
@@ -828,8 +824,7 @@ mod tests {
                     .keylog_file
                     .as_ref()
                     .and_then(|f| f.try_clone().ok()),
-                #[cfg(target_os = "linux")]
-                with_pktinfo: false,
+                socket_capabilities: SocketCapabilities::default(),
             },
             Arc::clone(&socket_tx),
             Arc::new(SimpleConnectionIdGenerator),

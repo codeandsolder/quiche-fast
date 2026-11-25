@@ -132,7 +132,7 @@ impl<F: Future, M: Metrics> Future for Instrumented<F, M> {
 
             self.metrics
                 .tokio_runtime_task_schedule_delay_histogram(&self.name)
-                .observe(elapsed.as_nanos() as u64);
+                .observe(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
         }
 
         let projected = self.project();
@@ -153,14 +153,14 @@ impl<F: Future, M: Metrics> Future for Instrumented<F, M> {
         projected
             .metrics
             .tokio_runtime_task_poll_duration_histogram(projected.name)
-            .observe(elapsed.as_nanos() as u64);
+            .observe(u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX));
 
         let total_elapsed = total_timer.elapsed();
 
         projected
             .metrics
             .tokio_runtime_task_total_poll_time_micros(projected.name)
-            .inc_by(total_elapsed.as_micros() as u64);
+            .inc_by(u64::try_from(total_elapsed.as_micros()).unwrap_or(u64::MAX));
 
         output
     }

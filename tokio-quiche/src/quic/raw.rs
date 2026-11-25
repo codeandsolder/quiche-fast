@@ -99,6 +99,7 @@ where
         send: socket,
         local_addr,
         peer_addr,
+        capabilities,
         ..
     } = tx_socket;
     let (shutdown_tx, worker_shutdown_rx) = mpsc::channel(1);
@@ -110,10 +111,7 @@ where
         pending_cid: None, // only used for unmapping in IPR
         peer_addr,
         local_addr,
-        // TODO: try to read Tx' SocketCaps. false is always a safe default.
-        with_gso: false,
-        pacing_offload: false,
-        with_pktinfo: false,
+        socket_capabilities: capabilities,
         // Match the default `QuicSettings::pool_send_buffer` (pooling on).
         pool_send_buffer: true,
     };

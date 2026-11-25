@@ -193,7 +193,7 @@ impl QuicAuditStats {
     #[must_use = "the first worker failure explains connection termination"]
     pub fn connection_close_reason(
         &self,
-    ) -> Option<&(dyn std::error::Error + Send + Sync)> {
+    ) -> Option<&(dyn std::error::Error + Send + Sync + 'static)> {
         self.connection_close_reason.get().map(Box::as_ref)
     }
 

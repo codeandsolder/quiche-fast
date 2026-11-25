@@ -262,12 +262,19 @@ impl PktInfo {
                     ipi_addr: libc::in_addr { s_addr: 0 },
                 })
             },
-            SocketAddr::V6(ipv6) => Self::V6(libc::in6_pktinfo {
-                ipi6_ifindex: ipv6.scope_id(),
-                ipi6_addr: libc::in6_addr {
-                    s6_addr: ipv6.ip().octets(),
-                },
-            }),
+            SocketAddr::V6(ipv6) => {
+                if let Some(ipv4) = ipv6.ip().to_ipv4_mapped() {
+                    return Self::from_socket_addr(SocketAddr::V4(
+                        std::net::SocketAddrV4::new(ipv4, ipv6.port()),
+                    ));
+                }
+                Self::V6(libc::in6_pktinfo {
+                    ipi6_ifindex: ipv6.scope_id(),
+                    ipi6_addr: libc::in6_addr {
+                        s6_addr: ipv6.ip().octets(),
+                    },
+                })
+            },
         }
     }
 }

@@ -51,6 +51,7 @@ use crate::quic::io::gso::send_packets_before;
 use crate::quic::io::gso::PacketSend;
 use crate::quic::router::NewConnection;
 use crate::quic::Incoming;
+use crate::socket::SocketCapabilities;
 use crate::QuicResultExt;
 
 use super::InitialPacketHandler;
@@ -83,8 +84,7 @@ pub(crate) struct ConnectionAcceptorConfig {
     pub(crate) qlog_dir: Option<String>,
     pub(crate) qlog_compression: QlogCompression,
     pub(crate) keylog_file: Option<File>,
-    #[cfg(target_os = "linux")]
-    pub(crate) with_pktinfo: bool,
+    pub(crate) socket_capabilities: SocketCapabilities,
 }
 
 impl<M: Metrics> ConnectionAcceptor<M> {
@@ -222,10 +222,11 @@ impl<M: Metrics> ConnectionAcceptor<M> {
                 "handshake reply exceeds buffer",
             ));
         }
-        #[cfg(target_os = "linux")]
-        let from = self.config.with_pktinfo.then_some(incoming.local_addr);
-        #[cfg(not(target_os = "linux"))]
-        let from = None;
+        let from = self
+            .config
+            .socket_capabilities
+            .supports_pktinfo(incoming.local_addr)
+            .then_some(incoming.local_addr);
 
         let packet = PacketSend {
             to: incoming.peer_addr,
@@ -344,6 +345,14 @@ mod tests {
             setsockopt(sender.as_ref(), sockopt::Ipv6TClass, &tos)?;
         }
 
+        let mut capabilities =
+            crate::socket::SocketCapabilitiesBuilder::new(sender.as_ref());
+        if sender.local_addr()?.is_ipv4() {
+            capabilities.ipv4_pktinfo()?;
+        } else {
+            capabilities.ipv6_pktinfo()?;
+        }
+
         let acceptor = ConnectionAcceptor::new(
             ConnectionAcceptorConfig {
                 disable_client_ip_validation: false,
@@ -352,7 +361,7 @@ mod tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                with_pktinfo: true,
+                socket_capabilities: capabilities.finish(),
             },
             Arc::clone(&sender),
             Arc::new(SimpleConnectionIdGenerator),
@@ -446,8 +455,7 @@ mod initial_size_tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                #[cfg(target_os = "linux")]
-                with_pktinfo: false,
+                socket_capabilities: SocketCapabilities::default(),
             },
             Arc::new(socket),
             generator,
@@ -472,8 +480,7 @@ mod initial_size_tests {
                 qlog_dir: None,
                 qlog_compression: QlogCompression::None,
                 keylog_file: None,
-                #[cfg(target_os = "linux")]
-                with_pktinfo: false,
+                socket_capabilities: SocketCapabilities::default(),
             },
             socket,
             Arc::new(SimpleConnectionIdGenerator),

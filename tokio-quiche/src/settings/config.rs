@@ -113,19 +113,8 @@ impl Config {
         })
     }
 
-    pub(crate) const fn supports(&self, capability: SocketCapability) -> bool {
-        self.socket_capabilities.contains(capability)
-    }
-
-    /// Select packet information for the socket's address family.
-    pub(crate) const fn supports_pktinfo(
-        &self, addr: std::net::SocketAddr,
-    ) -> bool {
-        self.supports(if addr.is_ipv4() {
-            SocketCapability::Ipv4PacketInfo
-        } else {
-            SocketCapability::Ipv6PacketInfo
-        })
+    pub(crate) const fn socket_capabilities(&self) -> SocketCapabilities {
+        self.socket_capabilities
     }
 }
 

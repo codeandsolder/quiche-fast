@@ -316,8 +316,7 @@ where
                 .keylog_file
                 .as_ref()
                 .and_then(|f| f.try_clone().ok()),
-            #[cfg(target_os = "linux")]
-            with_pktinfo: config.supports_pktinfo(local_addr),
+            socket_capabilities: config.socket_capabilities(),
         },
         Arc::clone(&socket_tx),
         socket.cid_generator,

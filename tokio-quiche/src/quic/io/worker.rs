@@ -61,6 +61,8 @@ use crate::quic::connection::SharedConnectionIdGenerator;
 use crate::quic::hooks::ConnectionHook;
 use crate::quic::DscpHandle;
 use crate::quic::QuicheConnection;
+use crate::socket::SocketCapabilities;
+use crate::socket::SocketCapability;
 use crate::QuicResult;
 
 use btls::ssl::SslRef;
@@ -260,9 +262,7 @@ pub struct WriterConfig {
     pub pending_cid: Option<ConnectionId<'static>>,
     pub peer_addr: SocketAddr,
     pub local_addr: SocketAddr,
-    pub with_gso: bool,
-    pub pacing_offload: bool,
-    pub with_pktinfo: bool,
+    pub socket_capabilities: SocketCapabilities,
     /// Whether the worker borrows its egress buffer from a per-worker-thread
     /// pool for each send burst. When `false`, the worker keeps a persistent
     /// per-connection buffer for its lifetime instead.
@@ -633,7 +633,7 @@ where
                     .handshake_time_seconds(
                         labels::QuicHandshakeStage::HandshakeResponse,
                     )
-                    .observe(delta.as_nanos() as u64);
+                    .observe(u64::try_from(delta.as_nanos()).unwrap_or(u64::MAX));
             }
         }
     }
@@ -708,7 +708,9 @@ where
 
             // Flush after one packet when GSO is disabled or the caller needs
             // each packet to start with a full buffer.
-            if single_packet || !self.cfg.with_gso {
+            if single_packet ||
+                !self.cfg.socket_capabilities.contains(SocketCapability::Gso)
+            {
                 break outcome;
             }
 
@@ -833,12 +835,17 @@ where
 
     #[cfg(not(feature = "gcongestion"))]
     const fn pacing_enabled(&self, qconn: &QuicheConnection) -> bool {
-        self.cfg.pacing_offload && qconn.pacing_enabled()
+        self.cfg
+            .socket_capabilities
+            .contains(SocketCapability::TransmitTime) &&
+            qconn.pacing_enabled()
     }
 
     #[cfg(feature = "gcongestion")]
     fn pacing_enabled(&self, _qconn: &QuicheConnection) -> bool {
-        self.cfg.pacing_offload
+        self.cfg
+            .socket_capabilities
+            .contains(SocketCapability::TransmitTime)
     }
 
     fn write_packet_to_buffer(
@@ -928,8 +935,14 @@ where
         let (from, to) = self.write_state.selected_path.unzip();
         let packet = PacketSend {
             to: to.unwrap_or(self.cfg.peer_addr),
-            from: from.filter(|_| self.cfg.with_pktinfo),
-            segment_size: (self.cfg.with_gso && self.write_state.num_pkts > 1)
+            from: from.filter(|addr| {
+                self.cfg.socket_capabilities.supports_pktinfo(*addr)
+            }),
+            segment_size: (self
+                .cfg
+                .socket_capabilities
+                .contains(SocketCapability::Gso) &&
+                self.write_state.num_pkts > 1)
                 .then_some(self.write_state.segment_size),
             tx_time: self.write_state.tx_time,
             dscp: self.dscp_handle.as_ref().and_then(DscpHandle::get),
