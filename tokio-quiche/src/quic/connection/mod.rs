@@ -341,7 +341,9 @@ where
         QuicConnection,
         impl Future<Output = io::Result<Running<Arc<Tx>, M, A>>> + Send + 'static,
     ) {
-        self.params.metrics.connections_in_memory().inc();
+        let active_connection = foundations::telemetry::metrics::GaugeGuard::new(
+            self.params.metrics.connections_in_memory(),
+        );
 
         let conn = QuicConnection {
             local_addr: self.params.local_addr,
@@ -366,6 +368,7 @@ where
             write_state: WriteState::default(),
             dscp_handle: self.params.dscp_handle,
             route_lease: self.params.route_lease,
+            active_connection,
             cid_generator: self.params.cid_generator,
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time: self.params.init_rx_time,

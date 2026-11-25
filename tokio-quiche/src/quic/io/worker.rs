@@ -62,6 +62,8 @@ use datagram_socket::DatagramSocketSendExt;
 use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
 use foundations::telemetry::log;
+use foundations::telemetry::metrics::Gauge;
+use foundations::telemetry::metrics::GaugeGuard;
 use quiche::ConnectionId;
 use quiche::Error as QuicheError;
 use quiche::SendInfo;
@@ -277,6 +279,7 @@ pub(crate) struct IoWorkerParams<Tx, M> {
     pub(crate) write_state: WriteState,
     pub(crate) dscp_handle: Option<DscpHandle>,
     pub(crate) route_lease: RouteLease,
+    pub(crate) active_connection: GaugeGuard<Gauge>,
     pub(crate) cid_generator: Option<SharedConnectionIdGenerator>,
     #[cfg(feature = "perf-quic-listener-metrics")]
     pub(crate) init_rx_time: Option<SystemTime>,
@@ -306,6 +309,7 @@ pub(crate) struct IoWorker<Tx, M, S> {
     write_state: WriteState,
     dscp_handle: Option<DscpHandle>,
     route_lease: RouteLease,
+    active_connection: GaugeGuard<Gauge>,
     cid_generator: Option<SharedConnectionIdGenerator>,
     #[cfg(feature = "perf-quic-listener-metrics")]
     init_rx_time: Option<SystemTime>,
@@ -340,6 +344,7 @@ where
             write_state: params.write_state,
             dscp_handle: params.dscp_handle,
             route_lease: params.route_lease,
+            active_connection: params.active_connection,
             cid_generator: params.cid_generator,
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time: params.init_rx_time,
@@ -1190,6 +1195,7 @@ impl<Tx, M, S> From<IoWorker<Tx, M, S>> for IoWorkerParams<Tx, M> {
             write_state: value.write_state,
             dscp_handle: value.dscp_handle,
             route_lease: value.route_lease,
+            active_connection: value.active_connection,
             cid_generator: value.cid_generator,
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time: value.init_rx_time,
@@ -1332,7 +1338,6 @@ where
 
     fn close_connection(&mut self) {
         self.route_lease.close();
-        self.metrics.connections_in_memory().dec();
     }
 }
 
