@@ -80,49 +80,51 @@ impl Client for SyncClient {
     }
 }
 
-fn create_config(args: &Config, should_log_keys: bool) -> quiche::Config {
+fn create_config(
+    args: &Config, should_log_keys: bool,
+) -> std::result::Result<quiche::Config, ClientError> {
     // Create the configuration for the QUIC connection.
-    let mut config = quiche::Config::new(QUIC_VERSION).unwrap();
+    let mut config = quiche::Config::new(QUIC_VERSION)
+        .map_err(|error| ClientError::Other(error.to_string()))?;
 
-    config.verify_peer(args.verify_peer);
-    config.set_application_protos(&[b"h3"]).unwrap();
+    config.verify_peer(args.tls.verify_peer);
+    config
+        .set_application_protos(&[b"h3"])
+        .map_err(|error| ClientError::Other(error.to_string()))?;
     config.set_max_idle_timeout(args.idle_timeout);
     config.set_send_capacity_factor(args.send_capacity_factor);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(10_000_000);
-    config
-        .set_initial_max_stream_data_bidi_local(args.max_stream_data_bidi_local);
-    config.set_initial_max_stream_data_bidi_remote(
-        args.max_stream_data_bidi_remote,
+    config.set_initial_max_data(args.flow.max_data);
+    config.set_initial_max_stream_data_bidi_local(
+        args.flow.max_stream_data_bidi_local,
     );
-    config.set_initial_max_stream_data_uni(args.max_stream_data_uni);
-    config.set_initial_max_streams_bidi(args.max_streams_bidi);
-    config.set_initial_max_streams_uni(args.max_streams_uni);
+    config.set_initial_max_stream_data_bidi_remote(
+        args.flow.max_stream_data_bidi_remote,
+    );
+    config.set_initial_max_stream_data_uni(args.flow.max_stream_data_uni);
+    config.set_initial_max_streams_bidi(args.flow.max_streams_bidi);
+    config.set_initial_max_streams_uni(args.flow.max_streams_uni);
     config.set_disable_active_migration(true);
     config.set_active_connection_id_limit(0);
 
-    config.set_max_connection_window(args.max_window);
-    config.set_max_stream_window(args.max_stream_window);
+    config.set_max_connection_window(args.flow.max_window);
+    config.set_max_stream_window(args.flow.max_stream_window);
     config.set_enable_send_streams_blocked(true);
     config.grease(false);
 
-    if args.enable_early_data {
+    if args.tls.early_data {
         config.enable_early_data();
     }
 
-    if args.enable_dgram {
-        config.enable_dgram(
-            true,
-            args.dgram_recv_queue_len,
-            args.dgram_send_queue_len,
-        );
+    if let Some(queues) = &args.datagrams {
+        config.enable_dgram(true, queues.receive, queues.send);
     }
     if should_log_keys {
         config.log_keys()
     }
 
-    config
+    Ok(config)
 }
 
 /// Connect to a server and execute provided actions.
@@ -156,18 +158,20 @@ pub fn connect_with_early_data(
         connect_url,
         bind_addr,
         peer_addr,
-    } = parse_args(&args);
+    } = parse_args(&args)?;
 
     // Setup the event loop.
-    let mut poll = mio::Poll::new().unwrap();
+    let mut poll = mio::Poll::new()
+        .map_err(|error| ClientError::Other(error.to_string()))?;
     let mut events = mio::Events::with_capacity(1024);
 
     // Create the UDP socket backing the QUIC connection, and register it with
     // the event loop.
-    let mut socket = mio::net::UdpSocket::bind(bind_addr).unwrap();
+    let mut socket = mio::net::UdpSocket::bind(bind_addr)
+        .map_err(|error| ClientError::Other(error.to_string()))?;
     poll.registry()
         .register(&mut socket, mio::Token(0), mio::Interest::READABLE)
-        .unwrap();
+        .map_err(|error| ClientError::Other(error.to_string()))?;
 
     let mut keylog = None;
     if let Some(keylog_path) = std::env::var_os("SSLKEYLOGFILE") {
@@ -175,18 +179,19 @@ pub fn connect_with_early_data(
             .create(true)
             .append(true)
             .open(keylog_path)
-            .unwrap();
+            .map_err(|error| ClientError::Other(error.to_string()))?;
 
         keylog = Some(file);
     }
 
-    let mut config = create_config(&args, keylog.is_some());
+    let mut config = create_config(&args, keylog.is_some())?;
 
     // Generate a random source connection ID for the connection.
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
 
     let rng = SystemRandom::new();
-    rng.fill(&mut scid[..]).unwrap();
+    rng.fill(&mut scid)
+        .map_err(|error| ClientError::Other(error.to_string()))?;
 
     let scid = quiche::ConnectionId::from_ref(&scid);
 
@@ -554,7 +559,8 @@ pub fn generate_cid_and_reset_token() -> (quiche::ConnectionId<'static>, u128) {
     let rng = SystemRandom::new();
 
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    rng.fill(&mut scid[..]).unwrap();
+    rng.fill(&mut scid)
+        .map_err(|error| ClientError::Other(error.to_string()))?;
     let scid = scid.to_vec().into();
 
     let mut reset_token = [0; 16];

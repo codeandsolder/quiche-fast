@@ -25,217 +25,266 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 //! Configuration for the h3i client.
+
 use std::io;
+use std::net::Ipv4Addr;
+use std::net::Ipv6Addr;
+use std::net::SocketAddr;
+use url::Position;
+use url::Url;
+
+/// The logical HTTP authority and optional transport address override.
+#[derive(Clone)]
+pub struct Endpoint {
+    url: Url,
+    pub connect_to: Option<SocketAddr>,
+    pub source_port: u16,
+}
+
+impl Endpoint {
+    /// Parse a hostname, IPv4 address or bracketed IPv6 address, optionally
+    /// followed by a port. HTTPS's default port is 443.
+    ///
+    /// # Errors
+    /// Returns invalid input if the authority is malformed.
+    pub fn new(authority: &str) -> io::Result<Self> {
+        if authority.is_empty() ||
+            authority.chars().any(|character| {
+                character.is_control() ||
+                    character.is_whitespace() ||
+                    matches!(character, '/' | '?' | '#' | '@' | '\\')
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid server authority",
+            ));
+        }
+        let url =
+            Url::parse(&format!("https://{authority}")).map_err(|error| {
+                io::Error::new(io::ErrorKind::InvalidInput, error)
+            })?;
+        if url.host().is_none() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "missing server host",
+            ));
+        }
+        Ok(Self {
+            url,
+            connect_to: None,
+            source_port: 0,
+        })
+    }
+
+    /// Canonical HTTP authority for request construction.
+    #[must_use = "the authority identifies the HTTP origin"]
+    pub fn authority(&self) -> &str {
+        &self.url[Position::BeforeHost..Position::AfterPort]
+    }
+
+    /// Hostname without the port or IPv6 brackets.
+    #[must_use = "the hostname is used for TLS identity"]
+    pub fn host(&self) -> &str {
+        self.url
+            .host_str()
+            .unwrap_or_default()
+            .trim_matches(['[', ']'])
+    }
+
+    /// Resolve the peer and a compatible wildcard bind address.
+    ///
+    /// # Errors
+    /// Returns address resolution errors or an empty DNS result.
+    pub fn socket_addresses(&self) -> io::Result<(SocketAddr, SocketAddr)> {
+        let peer = self.connect_to.map_or_else(
+            || {
+                self.url
+                    .socket_addrs(|| None)?
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| {
+                        io::Error::new(
+                            io::ErrorKind::AddrNotAvailable,
+                            "no addresses for server",
+                        )
+                    })
+            },
+            Ok,
+        )?;
+        let ip = if peer.is_ipv4() {
+            Ipv4Addr::UNSPECIFIED.into()
+        } else {
+            Ipv6Addr::UNSPECIFIED.into()
+        };
+        Ok((peer, SocketAddr::new(ip, self.source_port)))
+    }
+}
+
+/// TLS identity, verification and early-data policy.
+#[derive(Clone)]
+pub struct TlsSettings {
+    pub omit_sni: bool,
+    pub verify_peer: bool,
+    pub early_data: bool,
+}
+
+impl Default for TlsSettings {
+    fn default() -> Self {
+        Self {
+            omit_sni: false,
+            verify_peer: true,
+            early_data: false,
+        }
+    }
+}
+
+/// Initial flow-control limits and receive window ceilings.
+#[derive(Clone)]
+pub struct FlowControl {
+    pub max_data: u64,
+    pub max_stream_data_bidi_local: u64,
+    pub max_stream_data_bidi_remote: u64,
+    pub max_stream_data_uni: u64,
+    pub max_streams_bidi: u64,
+    pub max_streams_uni: u64,
+    pub max_window: u64,
+    pub max_stream_window: u64,
+}
+
+impl Default for FlowControl {
+    fn default() -> Self {
+        Self {
+            max_data: 10_000_000,
+            max_stream_data_bidi_local: 1_000_000,
+            max_stream_data_bidi_remote: 1_000_000,
+            max_stream_data_uni: 1_000_000,
+            max_streams_bidi: 100,
+            max_streams_uni: 100,
+            max_window: 25_165_824,
+            max_stream_window: 16_777_216,
+        }
+    }
+}
+
+/// Queue limits for enabled QUIC DATAGRAM support.
+#[derive(Clone)]
+pub struct DatagramQueues {
+    pub receive: usize,
+    pub send: usize,
+}
+
+impl Default for DatagramQueues {
+    fn default() -> Self {
+        Self {
+            receive: 65_536,
+            send: 65_536,
+        }
+    }
+}
 
 /// Server details and QUIC connection properties.
 #[derive(Clone)]
 pub struct Config {
-    /// A string representing the host and port to connect to using the format
-    /// `<host>:<port>`.
-    pub host_port: String,
-    /// If the SNI should be omitted during the TLS handshake.
-    pub omit_sni: bool,
-    /// Set a specific IP address to connect to, rather than use DNS resolution.
-    pub connect_to: Option<String>,
-    /// The source port to use when connecting to a server.
-    pub source_port: u32,
-    /// Whether to verify the server certificate.
-    pub verify_peer: bool,
-    /// The QUIC idle timeout value in milliseconds.
+    pub endpoint: Endpoint,
+    pub tls: TlsSettings,
+    /// Idle timeout in milliseconds.
     pub idle_timeout: u64,
     /// Multiplier applied to the connection's send capacity.
     pub send_capacity_factor: f64,
-    /// Flow control limit for the connection in bytes
-    pub max_data: u64,
-    /// Flow control limit for locally-initiated bidirectional streams in bytes.
-    pub max_stream_data_bidi_local: u64,
-    /// Flow control limit for remotely-initiated bidirectional streams in
-    /// bytes.
-    pub max_stream_data_bidi_remote: u64,
-    /// Flow control limit for unidirectional streams in bytes.
-    pub max_stream_data_uni: u64,
-    /// Maximum count for concurrent remotely-initiated bidirectional streams.
-    pub max_streams_bidi: u64,
-    /// "Maximum count for concurrent remotely-initiated unidirectional
-    /// streams".
-    pub max_streams_uni: u64,
-    /// Receiver window limit for the connection in bytes.
-    pub max_window: u64,
-    /// Receiver window limit for a stream in bytes.
-    pub max_stream_window: u64,
-    /// Set the session to attempt resumption.
+    pub flow: FlowControl,
+    /// Serialized session for resumption.
     pub session: Option<Vec<u8>>,
-    /// Enables sending or receiving early data.
-    pub enable_early_data: bool,
-    /// Whether to enable datagram sending.
-    pub enable_dgram: bool,
-    /// Datagram receive queue length.
-    pub dgram_recv_queue_len: usize,
-    /// Datagram send queue length.
-    pub dgram_send_queue_len: usize,
+    /// Datagram support is enabled when queues are supplied.
+    pub datagrams: Option<DatagramQueues>,
 }
 
 impl Config {
-    /// Construct a new config object with default values.
-    pub fn new() -> Self {
-        Self::default()
+    /// Construct a configuration for a valid authority using the same defaults
+    /// as the command line.
+    ///
+    /// # Errors
+    /// Returns invalid input if the server authority is malformed.
+    pub fn new(authority: &str) -> io::Result<Self> {
+        Ok(Self {
+            endpoint: Endpoint::new(authority)?,
+            tls: TlsSettings::default(),
+            idle_timeout: 5_000,
+            send_capacity_factor: 1.0,
+            flow: FlowControl::default(),
+            session: None,
+            datagrams: None,
+        })
     }
 
-    pub fn with_host_port(mut self, host_port: String) -> Self {
-        self.host_port = host_port;
-        self
-    }
-
-    pub fn omit_sni(mut self) -> Self {
-        self.omit_sni = true;
-        self
-    }
-
-    pub fn with_connect_to(mut self, connect_to: String) -> Self {
-        self.connect_to = Some(connect_to);
-        self
-    }
-
-    pub fn with_source_port(mut self, port: u32) -> Self {
-        self.source_port = port;
-        self
-    }
-
-    pub fn verify_peer(mut self, verify_peer: bool) -> Self {
-        self.verify_peer = verify_peer;
-        self
-    }
-
-    pub fn with_idle_timeout(mut self, idle_timeout: u64) -> Self {
-        self.idle_timeout = idle_timeout;
-        self
-    }
-
-    pub fn with_send_capacity_factor(mut self, factor: f64) -> Self {
-        self.send_capacity_factor = factor;
-        self
-    }
-
-    pub fn with_max_data(mut self, max_data: u64) -> Self {
-        self.max_data = max_data;
-        self
-    }
-
-    pub fn with_max_stream_data_bidi_local(
-        mut self, max_stream_data_bidi_local: u64,
-    ) -> Self {
-        self.max_stream_data_bidi_local = max_stream_data_bidi_local;
-        self
-    }
-
-    pub fn with_max_stream_data_bidi_remote(
-        mut self, max_stream_data_bidi_remote: u64,
-    ) -> Self {
-        self.max_stream_data_bidi_remote = max_stream_data_bidi_remote;
-        self
-    }
-
-    pub fn with_max_stream_data_uni(mut self, max_stream_data_uni: u64) -> Self {
-        self.max_stream_data_uni = max_stream_data_uni;
-        self
-    }
-
-    pub fn with_max_streams_bidi(mut self, max_streams_bidi: u64) -> Self {
-        self.max_streams_bidi = max_streams_bidi;
-        self
-    }
-
-    pub fn with_max_streams_uni(mut self, max_streams_uni: u64) -> Self {
-        self.max_streams_uni = max_streams_uni;
-        self
-    }
-
-    pub fn with_max_window(mut self, max_window: u64) -> Self {
-        self.max_window = max_window;
-        self
-    }
-
-    pub fn with_max_stream_window(mut self, max_stream_window: u64) -> Self {
-        self.max_stream_window = max_stream_window;
-        self
-    }
-
-    pub fn enable_dgram(mut self, enable_dgram: bool) -> Self {
-        self.enable_dgram = enable_dgram;
-        self
-    }
-
-    pub fn with_dgram_recv_queue_len(
-        mut self, dgram_recv_queue_len: usize,
-    ) -> Self {
-        self.dgram_recv_queue_len = dgram_recv_queue_len;
-        self
-    }
-
-    pub fn with_dgram_send_queue_len(
-        mut self, dgram_send_queue_len: usize,
-    ) -> Self {
-        self.dgram_send_queue_len = dgram_send_queue_len;
-        self
-    }
-
-    pub fn build(self) -> Result<Self, io::Error> {
-        if self.host_port.is_empty() {
+    /// Validate mutable transport settings before opening a socket.
+    ///
+    /// # Errors
+    /// Returns invalid input for a non-finite or negative capacity factor.
+    pub fn validate(&self) -> io::Result<()> {
+        if !self.send_capacity_factor.is_finite() ||
+            self.send_capacity_factor < 0.0
+        {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Must provide a <host:port> to connect".to_string(),
+                "send capacity factor must be finite and nonnegative",
             ));
         }
-
-        Ok(Config {
-            host_port: self.host_port,
-            omit_sni: self.omit_sni,
-            connect_to: self.connect_to,
-            source_port: self.source_port,
-            verify_peer: self.verify_peer,
-            idle_timeout: self.idle_timeout,
-            send_capacity_factor: self.send_capacity_factor,
-            max_data: self.max_data,
-            max_stream_data_bidi_local: self.max_stream_data_bidi_local,
-            max_stream_data_bidi_remote: self.max_stream_data_bidi_remote,
-            max_stream_data_uni: self.max_stream_data_uni,
-            max_streams_bidi: self.max_streams_bidi,
-            max_streams_uni: self.max_streams_uni,
-            max_window: self.max_window,
-            max_stream_window: self.max_stream_window,
-            session: None,
-            enable_early_data: self.enable_early_data,
-            enable_dgram: self.enable_dgram,
-            dgram_recv_queue_len: self.dgram_recv_queue_len,
-            dgram_send_queue_len: self.dgram_send_queue_len,
-        })
+        Ok(())
     }
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        // Values mirror config_from_clap()
-        Self {
-            host_port: "".to_string(),
-            omit_sni: false,
-            connect_to: None,
-            source_port: 0,
-            verify_peer: true,
-            idle_timeout: 5000,
-            send_capacity_factor: 1.0,
-            max_data: 10000000,
-            max_stream_data_bidi_local: 10000000,
-            max_stream_data_bidi_remote: 10000000,
-            max_stream_data_uni: 10000000,
-            max_streams_bidi: 100,
-            max_streams_uni: 100,
-            max_window: 25165824,
-            max_stream_window: 16777216,
-            session: None,
-            enable_early_data: false,
-            enable_dgram: true,
-            dgram_recv_queue_len: 65536,
-            dgram_send_queue_len: 65536,
+#[cfg(test)]
+mod tests {
+    use super::Config;
+    use super::DatagramQueues;
+    use super::Endpoint;
+
+    #[test]
+    fn authority_and_transport_override_are_independent() -> std::io::Result<()> {
+        let mut endpoint = Endpoint::new("example.org:8443")?;
+        endpoint.connect_to =
+            Some("[::1]:4433".parse().map_err(std::io::Error::other)?);
+        endpoint.source_port = 12_345;
+        let (peer, bind) = endpoint.socket_addresses()?;
+        assert_eq!(endpoint.authority(), "example.org:8443");
+        assert_eq!(endpoint.host(), "example.org");
+        assert_eq!(peer.to_string(), "[::1]:4433");
+        assert_eq!(bind.to_string(), "[::]:12345");
+        for (authority, host, port) in
+            [("127.0.0.1", "127.0.0.1", 443), ("[::1]:8443", "::1", 8443)]
+        {
+            let endpoint = Endpoint::new(authority)?;
+            assert_eq!(endpoint.host(), host);
+            assert_eq!(endpoint.socket_addresses()?.0.port(), port);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn invalid_authorities_and_capacity_factors_return_errors(
+    ) -> std::io::Result<()> {
+        for authority in [
+            "",
+            "https://example.org",
+            "example.org/path",
+            "a@b",
+            "example.org:65536",
+            "[::1",
+            "a b",
+        ] {
+            assert!(Endpoint::new(authority).is_err(), "{authority}");
+        }
+        let mut config = Config::new("example.org")?;
+        for factor in [f64::NAN, f64::INFINITY, -1.0] {
+            config.send_capacity_factor = factor;
+            assert!(config.validate().is_err());
+        }
+        config.send_capacity_factor = 0.0;
+        config.validate()?;
+        config.session = Some(vec![1, 2, 3]);
+        config.datagrams = Some(DatagramQueues::default());
+        assert_eq!(config.clone().session, Some(vec![1, 2, 3]));
+        Ok(())
     }
 }

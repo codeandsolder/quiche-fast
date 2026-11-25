@@ -95,6 +95,18 @@ pub enum ClientError {
     Other(String),
 }
 
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HandshakeFail => formatter.write_str("QUIC handshake failed"),
+            Self::HttpFail => formatter.write_str("HTTP/3 exchange failed"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for ClientError {}
+
 pub(crate) trait Client {
     /// Gives mutable access to the stream parsers to update their state.
     fn stream_parsers_mut(&mut self) -> &mut StreamParserMap;
@@ -551,47 +563,18 @@ pub(crate) struct ParsedArgs<'a> {
     pub(crate) connect_url: Option<&'a str>,
 }
 
-pub(crate) fn parse_args(args: &Config) -> ParsedArgs<'_> {
-    // We'll only connect to one server.
-    let connect_url = if !args.omit_sni {
-        args.host_port.split(':').next()
-    } else {
-        None
-    };
-
-    let (peer_addr, bind_addr) = resolve_socket_addrs(args);
-
-    ParsedArgs {
+pub(crate) fn parse_args(
+    args: &Config,
+) -> std::result::Result<ParsedArgs<'_>, ClientError> {
+    args.validate()
+        .map_err(|error| ClientError::Other(error.to_string()))?;
+    let (peer_addr, bind_addr) =
+        args.endpoint.socket_addresses().map_err(|error| {
+            ClientError::Other(format!("resolve server: {error}"))
+        })?;
+    Ok(ParsedArgs {
         peer_addr,
         bind_addr,
-        connect_url,
-    }
-}
-
-fn resolve_socket_addrs(args: &Config) -> (SocketAddr, SocketAddr) {
-    // Resolve server address.
-    let peer_addr = if let Some(addr) = &args.connect_to {
-        addr.parse().expect("--connect-to is expected to be a string containing an IPv4 or IPv6 address with a port. E.g. 192.0.2.0:443")
-    } else {
-        let x = format!("https://{}", args.host_port);
-        *url::Url::parse(&x)
-            .unwrap()
-            .socket_addrs(|| None)
-            .unwrap()
-            .first()
-            .unwrap()
-    };
-
-    // Bind to INADDR_ANY or IN6ADDR_ANY depending on the IP family of the
-    // server address. This is needed on macOS and BSD variants that don't
-    // support binding to IN6ADDR_ANY for both v4 and v6.
-    let bind_addr = match peer_addr {
-        std::net::SocketAddr::V4(_) => format!("0.0.0.0:{}", args.source_port),
-        std::net::SocketAddr::V6(_) => format!("[::]:{}", args.source_port),
-    };
-
-    (
-        peer_addr,
-        bind_addr.parse().expect("unable to parse bind address"),
-    )
+        connect_url: (!args.tls.omit_sni).then(|| args.endpoint.host()),
+    })
 }
