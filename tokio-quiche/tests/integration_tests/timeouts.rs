@@ -60,12 +60,11 @@ async fn native_client_handshake_timeout_includes_initial_packet_flight(
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     socket.connect(silent_peer.local_addr()?).await?;
     let socket = Socket::try_from(socket)?;
+    let mut settings = QuicSettings::default();
+    settings.handshake_timeout = Some(Duration::from_millis(100));
+    settings.max_idle_timeout = Some(Duration::from_secs(10));
     let params = tokio_quiche::ConnectionParams::new_client(
-        QuicSettings {
-            handshake_timeout: Some(Duration::from_millis(100)),
-            max_idle_timeout: Some(Duration::from_secs(10)),
-            ..QuicSettings::default()
-        },
+        settings,
         None,
         tokio_quiche::settings::Hooks::default(),
     );
