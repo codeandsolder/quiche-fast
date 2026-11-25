@@ -33,15 +33,17 @@ use netlog::h2::H2_DEFAULT_WINDOW_SIZE;
 /// One observed send-window lifetime. The initial credit belongs to the
 /// stream's first observation, rather than the session's final SETTINGS.
 #[derive(Debug)]
-pub(crate) struct H2SendWindowHistory {
+pub struct H2SendWindowHistory {
     pub(crate) opened_at: f64,
     pub(crate) initial: u32,
     pub(crate) changes: Vec<(f64, i64)>,
 }
 
-/// Reconstruct local send credit from peer SETTINGS/WINDOW_UPDATE and
-/// locally sent DATA. Only streams with an observed opening and no observed
-/// local FIN/reset are affected by subsequent SETTINGS adjustments.
+/// Reconstruct local send credit from HTTP/2 flow-control events.
+///
+/// Peer `SETTINGS` and `WINDOW_UPDATE` increase or adjust credit; locally
+/// sent DATA consumes it. Subsequent settings affect only observed open
+/// send sides.
 #[derive(Debug)]
 pub struct H2SendWindows {
     initial_stream_credit: u32,

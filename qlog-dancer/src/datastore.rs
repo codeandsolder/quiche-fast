@@ -431,7 +431,7 @@ pub struct Datastore {
     pub local_initial_stream_limits: InitialStreamLimits,
     pub peer_initial_stream_limits: InitialStreamLimits,
 
-    /// Credit granted to the peer by locally sent WINDOW_UPDATE frames.
+    /// Credit granted to the peer by locally sent `WINDOW_UPDATE` frames.
     pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, u64)>>,
 
     // Local send credit changes: received grants minus transmitted DATA.
@@ -1159,6 +1159,24 @@ impl Datastore {
         });
     }
 
+    fn record_netlog_h2_peer_setting(
+        &mut self, params: &h2::Http2SessionRecvSettingParams, time: f64,
+    ) {
+        let Some(id) = h2::parse_recv_setting_id(&params.id) else {
+            error!("parsing H2 setting {params:?}");
+            return;
+        };
+        let value = params.value;
+        if id == h2::H2_INITIAL_WINDOW_SIZE {
+            if value > h2::H2_MAX_WINDOW_SIZE {
+                error!("ignoring invalid HTTP/2 initial send window: {value}");
+                return;
+            }
+            self.h2_send_windows.set_initial_credit(time, value);
+        }
+        self.h2_server_settings.set_from_wire(id, value);
+    }
+
     fn consume_netlog_h2(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         ev: &h2::Event, constants: &netlog::constants::Constants,
@@ -1176,20 +1194,7 @@ impl Datastore {
                 },
 
             h2::Event::Http2SessionRecvSetting(e) => {
-                if let Some(id) = h2::parse_recv_setting_id(&e.params.id) {
-                    let value = e.params.value;
-                    if id == h2::H2_INITIAL_WINDOW_SIZE {
-                        if value > h2::H2_MAX_WINDOW_SIZE {
-                            error!("ignoring invalid HTTP/2 initial send window: {value}");
-                            return Ok(());
-                        }
-                        self.h2_send_windows
-                            .set_initial_credit(rel_event_time, value);
-                    }
-                    self.h2_server_settings.set_from_wire(id, value);
-                } else {
-                    error!("parsing H2 setting {:?}", e.params);
-                }
+                self.record_netlog_h2_peer_setting(&e.params, rel_event_time);
             },
             h2::Event::Http2SessionSendHeaders(e) => {
                 self.h2_send_windows

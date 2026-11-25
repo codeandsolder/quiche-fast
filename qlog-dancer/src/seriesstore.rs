@@ -668,8 +668,8 @@ impl SeriesStore {
     }
 
     /// Connection-level receive credit starts at 65,535, unaffected by
-    /// SETTINGS_INITIAL_WINDOW_SIZE. Compare only grants sent locally with
-    /// inbound DATA; peer WINDOW_UPDATE events concern our outbound data.
+    /// `SETTINGS_INITIAL_WINDOW_SIZE`. Compare only grants sent locally with
+    /// inbound DATA; peer `WINDOW_UPDATE` events concern our outbound data.
     fn h2_receive_credit(
         data_store: &Datastore,
     ) -> SeriesResult<Vec<QlogPointu64>> {
