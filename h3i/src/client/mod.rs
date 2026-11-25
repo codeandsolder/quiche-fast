@@ -380,8 +380,8 @@ pub(crate) fn parse_streams<F: quiche::BufFactory, C: Client>(
         loop {
             let stream_parse_result = client
                 .stream_parsers_mut()
-                .get_mut(&stream)
-                .expect("stream readable with no parser")
+                .entry(stream)
+                .or_insert_with(|| FrameParser::new(stream))
                 .try_parse_frame(conn);
 
             match stream_parse_result {
@@ -407,7 +407,6 @@ pub(crate) fn parse_streams<F: quiche::BufFactory, C: Client>(
                         break;
                     }
                 },
-                Ok(FrameParseResult::Retry) => {},
                 Ok(FrameParseResult::Interrupted(cause)) => {
                     if let InterruptCause::ResetStream(error_code) = cause {
                         let frame = H3iFrame::ResetStream(ResetStream {
@@ -436,26 +435,6 @@ pub(crate) fn parse_streams<F: quiche::BufFactory, C: Client>(
                     match e {
                         Error::Transport(quiche::Error::Done) => {
                             log::debug!("stream {stream} exhausted");
-                        },
-                        Error::Transport(quiche::Error::StreamReset(
-                            error_code,
-                        )) => {
-                            let frame = H3iFrame::ResetStream(ResetStream {
-                                stream_id: stream,
-                                error_code,
-                            });
-
-                            log::info!("received reset stream: {frame:?}");
-
-                            handle_response_frame(
-                                client,
-                                None,
-                                &mut responded_streams,
-                                stream,
-                                frame,
-                            );
-
-                            client.stream_parsers_mut().remove(&stream);
                         },
                         _ => {
                             log::warn!("stream read error: {e}");
