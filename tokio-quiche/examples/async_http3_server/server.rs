@@ -40,12 +40,18 @@ use http::Uri;
 use quiche::h3::Header;
 use quiche::h3::NameValue;
 use std::sync::Arc;
+use tokio_quiche::http3::driver::H3Command;
 use tokio_quiche::http3::driver::H3Event;
 use tokio_quiche::http3::driver::IncomingH3Headers;
 use tokio_quiche::http3::driver::OutboundFrame;
 use tokio_quiche::http3::driver::OutboundFrameSender;
 use tokio_quiche::http3::driver::RawPriorityValue;
-use tokio_quiche::http3::driver::ServerEventStream;
+use tokio_quiche::http3::driver::RequestSender;
+use tokio_quiche::http3::driver::ServerH3Command;
+use tokio_quiche::http3::driver::ServerH3Controller;
+use tokio_quiche::http3::driver::StreamShutdown;
+
+type StreamCommands = RequestSender<ServerH3Command, H3Command>;
 use tokio_quiche::http3::driver::ServerH3Event;
 use tokio_quiche::BoxError;
 use tokio_quiche::QuicResult;
@@ -99,11 +105,12 @@ where
     /// tokio-quiche's `H3Driver` emits these events in response to data that
     /// comes off the underlying socket.
     pub async fn serve_connection(
-        &mut self, h3_event_receiver: &mut ServerEventStream,
+        &mut self, controller: &mut ServerH3Controller,
     ) -> QuicResult<()> {
+        let commands = controller.h3_cmd_sender();
         loop {
-            match h3_event_receiver.recv().await {
-                Some(event) => self.handle_server_h3_event(event).await?,
+            match controller.event_receiver_mut().recv().await {
+                Some(event) => self.handle_server_h3_event(event, &commands)?,
                 None => return Ok(()), /* The sender was dropped, implying
                                         * connection was terminated */
             }
@@ -138,8 +145,8 @@ where
     /// Handle a [`ServerH3Event`].
     ///
     /// TODO(evanrittenhouse): support POST requests
-    async fn handle_server_h3_event(
-        &mut self, event: ServerH3Event,
+    fn handle_server_h3_event(
+        &mut self, event: ServerH3Event, commands: &StreamCommands,
     ) -> QuicResult<()> {
         match event {
             ServerH3Event::Core(event) => Self::handle_h3_event(event),
@@ -150,8 +157,11 @@ where
                 is_in_early_data: _,
             } => {
                 // Received headers for a new stream from the H3Driver.
-                self.handle_incoming_headers(incoming_headers, priority)
-                    .await;
+                self.handle_incoming_headers(
+                    incoming_headers,
+                    priority,
+                    commands,
+                );
                 Ok(())
             },
         }
@@ -162,31 +172,46 @@ where
     /// This function transforms the incoming headers into a [`Request`],
     /// creating the proper response body if requested. It then spawns a
     /// Tokio task which calls the `service_fn` on the [`Request`].
-    async fn handle_incoming_headers(
+    fn handle_incoming_headers(
         &mut self, headers: IncomingH3Headers,
-        _priority: Option<RawPriorityValue>,
+        _priority: Option<RawPriorityValue>, commands: &StreamCommands,
     ) {
         log::info!("received headers: {:?}", headers);
 
         let IncomingH3Headers {
             headers: list,
-            send: mut frame_sender,
+            stream_id,
+            send: frame_sender,
             ..
         } = headers;
 
         let Ok((uri_builder, req_builder)) = convert_headers(list) else {
-            Self::end_stream(&mut frame_sender).await;
+            Self::end_stream(commands, stream_id);
             return;
         };
 
-        let uri = uri_builder.build().expect("can't build uri");
-        let req = req_builder.uri(uri).body(()).expect("can't build request");
+        let Ok(uri) = uri_builder.build() else {
+            Self::end_stream(commands, stream_id);
+            return;
+        };
+        let Ok(req) = req_builder.uri(uri).body(()) else {
+            Self::end_stream(commands, stream_id);
+            return;
+        };
 
         let service_fn = Arc::clone(&self.service_fn);
 
         // TODO: use the _priority input parameter in request handling
+        let commands = commands.clone();
         tokio::spawn(async move {
-            Self::handle_request(service_fn, req, frame_sender).await;
+            Self::handle_request(
+                service_fn,
+                req,
+                frame_sender,
+                &commands,
+                stream_id,
+            )
+            .await;
         });
     }
 
@@ -196,25 +221,37 @@ where
     /// which communicates the data back to quiche.
     async fn handle_request(
         service_fn: Arc<S>, req: Request<()>,
-        mut frame_sender: OutboundFrameSender,
+        mut frame_sender: OutboundFrameSender, commands: &StreamCommands,
+        stream_id: u64,
     ) {
         let res = service_fn(req).await;
 
         // Convert the result of the `service_fn` into headers and a body which
         // can be transmitted to tokio-quiche.
         let (h3_headers, body) = convert_response(res);
-        let _ = frame_sender
+        if frame_sender
             .send(OutboundFrame::Headers(h3_headers, None))
-            .await;
-
-        body.send(frame_sender).await;
+            .await
+            .is_err()
+        {
+            Self::end_stream(commands, stream_id);
+            return;
+        }
+        if body.send(frame_sender).await.is_none() {
+            Self::end_stream(commands, stream_id);
+        }
     }
 
-    /// End the stream.
-    ///
-    /// This will send  STOP_SENDING and RESET_STREAM frames to the client.
-    async fn end_stream(frame_sender: &mut OutboundFrameSender) {
-        let _ = frame_sender.send(OutboundFrame::PeerStreamError).await;
+    /// Abort both directions through the independent control channel.
+    fn end_stream(commands: &StreamCommands, stream_id: u64) {
+        let code = quiche::h3::WireErrorCode::MessageError as u64;
+        let _ = commands.send(H3Command::ShutdownStream {
+            stream_id,
+            shutdown: StreamShutdown::Both {
+                read_error_code: code,
+                write_error_code: code,
+            },
+        });
     }
 }
 
@@ -265,12 +302,9 @@ fn convert_headers(
                 },
             }
         } else {
-            req_builder.headers_mut().map(|h| {
-                h.insert(
-                    HeaderName::from_bytes(name).expect("invalid header name"),
-                    HeaderValue::from_bytes(value).expect("invalid header value"),
-                )
-            });
+            let name = HeaderName::from_bytes(name)?;
+            let value = HeaderValue::from_bytes(value)?;
+            req_builder.headers_mut().map(|h| h.insert(name, value));
         }
     }
 

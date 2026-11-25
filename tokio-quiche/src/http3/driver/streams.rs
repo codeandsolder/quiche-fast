@@ -44,6 +44,13 @@ use super::OutboundFrameSender;
 use super::OutboundFrameStream;
 use crate::http3::H3AuditStats;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ReadState {
+    Open,
+    FinPending,
+    Closed,
+}
+
 pub(super) struct StreamCtx {
     /// Sends [`InboundFrame`]s to a local task, for example an `H3Body`.
     pub(super) send: Option<InboundFrameSender>,
@@ -57,9 +64,8 @@ pub(super) struct StreamCtx {
     pub(super) initial_headers_sent: bool,
     /// First time that a HEADERS frame was not fully flushed.
     pub(super) first_full_headers_flush_fail_time: Option<Instant>,
-    /// Indicates the stream received fin or reset. No more data will be
-    /// received.
-    pub(super) fin_or_reset_recv: bool,
+    /// Transport FIN can precede delivery of the final frame to the app.
+    pub(super) read_state: ReadState,
     /// Indicates the stream sent fin or reset. No more data will be sent.
     pub(super) fin_or_reset_sent: bool,
     /// The flow ID for proxying datagrams over this stream. If `None`,
@@ -85,7 +91,7 @@ impl StreamCtx {
             initial_headers_sent: false,
             first_full_headers_flush_fail_time: None,
 
-            fin_or_reset_recv: false,
+            read_state: ReadState::Open,
             fin_or_reset_sent: false,
 
             associated_dgram_flow_id: None,
@@ -137,44 +143,46 @@ impl StreamCtx {
         // write direction has closed. We still need to continue
         // reading from the stream until we receive a RESET_FRAME or
         // `fin`.
-        self.fin_or_reset_sent = true;
-        // Drop any pending data and close the write side.
-        // We can't accept additional frames
-        self.queued_frame = None;
-        self.recv = None;
+        self.close_write();
     }
 
     pub(super) fn handle_recvd_reset(&mut self, wire_err_code: u64) {
-        debug_assert!(!self.fin_or_reset_recv);
         // We received a `RESET_STREAM` frame, which closes the read direction
         // but not the write direction. If the peer wants to shut down write,
         // it must also send STOP_SENDING
         self.audit_stats
             .set_recvd_reset_stream_error_code(wire_err_code as i64);
-        self.fin_or_reset_recv = true;
-        self.send = None;
+        self.close_read();
     }
 
     pub(super) fn handle_sent_reset(&mut self, wire_err_code: u64) {
-        debug_assert!(!self.fin_or_reset_sent);
         self.audit_stats
             .set_sent_reset_stream_error_code(wire_err_code as i64);
-        self.fin_or_reset_sent = true;
+        self.close_write();
     }
 
     pub(super) fn handle_sent_stop_sending(&mut self, wire_err_code: u64) {
-        debug_assert!(!self.fin_or_reset_recv);
         self.audit_stats
             .set_sent_stop_sending_error_code(wire_err_code as i64);
-        // Setting `fin_or_reset_recv` here is safe. The peer must still send
+        // The peer must still send
         // FIN or RESET_STREAM with its final size, but `quiche` handles
         // that without an application read.
-        self.fin_or_reset_recv = true;
-        self.send = None;
+        self.close_read();
     }
 
     pub(super) const fn both_directions_done(&self) -> bool {
-        self.fin_or_reset_recv && self.fin_or_reset_sent
+        matches!(self.read_state, ReadState::Closed) && self.fin_or_reset_sent
+    }
+
+    pub(super) fn close_read(&mut self) {
+        self.read_state = ReadState::Closed;
+        self.send = None;
+    }
+
+    pub(super) fn close_write(&mut self) {
+        self.fin_or_reset_sent = true;
+        self.recv = None;
+        self.queued_frame = None;
     }
 }
 

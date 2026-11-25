@@ -102,9 +102,7 @@ async fn main() {
 
                     // tokio-quiche will send events to the `H3Controller`'s
                     // receiver for processing.
-                    let _ = server
-                        .serve_connection(controller.event_receiver_mut())
-                        .await;
+                    let _ = server.serve_connection(&mut controller).await;
                 });
             },
             Err(e) => {

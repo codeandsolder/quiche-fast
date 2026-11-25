@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 1);
 
-        tx.try_send(OutboundFrame::PeerStreamError)
+        tx.try_send(OutboundFrame::Body(Default::default(), false))
             .map_err(|_| "outbound frame queue rejected test frame")?;
 
         let ready = waiting.next().now_or_never();
@@ -214,7 +214,7 @@ mod tests {
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::PeerStreamError)
+        tx.try_send(OutboundFrame::Body(Default::default(), false))
             .map_err(|_| "outbound frame queue rejected test frame")?;
 
         let ready = waiting.next().now_or_never();
@@ -242,7 +242,7 @@ mod tests {
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::PeerStreamError)
+        tx.try_send(OutboundFrame::Body(Default::default(), false))
             .map_err(|_| "outbound frame queue rejected test frame")?;
 
         let ready = waiting.next().now_or_never();
@@ -278,7 +278,7 @@ mod tests {
         let (tx, mut wait) = downstream_wait(4);
         let mut cx = Context::from_waker(std::task::Waker::noop());
         assert!(Pin::new(&mut wait).poll(&mut cx).is_pending());
-        tx.try_send(OutboundFrame::PeerStreamError)
+        tx.try_send(OutboundFrame::Body(Default::default(), false))
             .map_err(|_| "outbound frame queue rejected test frame")?;
         assert!(Pin::new(&mut wait).poll(&mut cx).is_ready());
         assert!(Pin::new(&mut wait).poll(&mut cx).is_pending());
