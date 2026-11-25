@@ -316,48 +316,26 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_stream_send_plot<'a, DB: DrawingBackend + 'a>(
-    params: &PlotParameters, axis: &XYMinMax, ss: &SeriesStore,
-    plot: &plotters::drawing::DrawingArea<DB, Shift>,
-) -> Result<
-    ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
-    Box<dyn Error>,
->
-where
-    DB::ErrorType: 'static,
-{
-    let mut builder = ChartBuilder::on(plot);
-    builder
-        .x_label_area_size(params.area_margin.x)
-        .y_label_area_size(params.area_margin.y);
-
-    if params.display_chart_title {
-        builder.caption(
-            "Stream sends",
-            chart_subtitle_style(&params.colors.caption),
-        );
-    }
-
-    let mut chart = builder.build_cartesian_2d(axis.x.clone(), axis.y_range())?;
-
-    draw_mesh(
-        &params.colors,
-        "Relative time (ms)",
-        "Data (bytes)",
-        false,
-        &mut chart,
-    )?;
-
-    draw_send_panel_series(ss, &mut chart)?;
-
-    draw_legend(params, &mut chart)?;
-    Ok(chart)
+enum StreamPlotDirection {
+    Send,
+    Receive,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn draw_stream_recv_plot<'a, DB: DrawingBackend + 'a>(
+impl StreamPlotDirection {
+    const fn caption(&self) -> &'static str {
+        match self {
+            Self::Send => "Stream sends",
+            Self::Receive => "Stream receives",
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn draw_stream_plot<'a, DB: DrawingBackend + 'a>(
     params: &PlotParameters, axis: &XYMinMax, ss: &SeriesStore,
     plot: &plotters::drawing::DrawingArea<DB, Shift>,
+    direction: StreamPlotDirection,
 ) -> Result<
     ChartContext<'a, DB, Cartesian2d<RangedCoordf64, RangedCoordu64>>,
     Box<dyn Error>,
@@ -372,7 +350,7 @@ where
 
     if params.display_chart_title {
         builder.caption(
-            "Stream receives",
+            direction.caption(),
             chart_subtitle_style(&params.colors.caption),
         );
     }
@@ -387,7 +365,11 @@ where
         &mut chart,
     )?;
 
-    draw_receive_panel_series(ss, &mut chart)?;
+    match direction {
+        StreamPlotDirection::Send => draw_send_panel_series(ss, &mut chart)?,
+        StreamPlotDirection::Receive =>
+            draw_receive_panel_series(ss, &mut chart)?,
+    }
 
     draw_legend(params, &mut chart)?;
     Ok(chart)
@@ -459,8 +441,20 @@ pub fn plot_connection_overview(
         &chart_title_style(&params.colors.caption),
         (0, 0),
     )?;
-    draw_stream_send_plot(params, &stream_send_axis, ss, &stream_send_plot)?;
-    draw_stream_recv_plot(params, &stream_recv_axis, ss, &stream_recv_plot)?;
+    draw_stream_plot(
+        params,
+        &stream_send_axis,
+        ss,
+        &stream_send_plot,
+        StreamPlotDirection::Send,
+    )?;
+    draw_stream_plot(
+        params,
+        &stream_recv_axis,
+        ss,
+        &stream_recv_plot,
+        StreamPlotDirection::Receive,
+    )?;
     draw_congestion_plot(params, &common_axis, ss, ds, &congestion_plot)?;
     draw_rtt_plot(params, &common_axis, ss, &rtt_plot)?;
     root.present()?;
