@@ -149,7 +149,7 @@ pub fn connect_with_early_data(
     close_trigger_frames: Option<CloseTriggerFrames>,
 ) -> Result<ConnectionSummary, ClientError> {
     let (mut conn, mut io) = create_connection(args)?;
-    let mut tx_status = io.flush(&mut conn)?;
+    io.stage_initial(&mut conn)?;
     let mut early = if conn.is_in_early_data() {
         early_actions.map(ActionQueue::new)
     } else {
@@ -157,6 +157,15 @@ pub fn connect_with_early_data(
     };
     let mut normal = ActionQueue::new(actions);
     let mut client = SyncClient::new(close_trigger_frames);
+    // Queue early data before the ClientHello reaches the peer. Once the
+    // socket accepts the first datagram, flush can generate the 0-RTT packets
+    // immediately, without processing a handshake response first.
+    if let Some(queue) = early.as_mut() {
+        queue
+            .advance(Instant::now, &mut conn, client.stream_parsers_mut())
+            .map_err(ClientError::Other)?;
+    }
+    let mut tx_status = io.flush(&mut conn)?;
 
     while !conn.is_closed() {
         let now = Instant::now();

@@ -162,6 +162,18 @@ impl SyncIo {
         Ok(())
     }
 
+    /// Generate the ClientHello without transmitting it. This initializes TLS
+    /// early-data state before the application queues its first flight.
+    pub(super) fn stage_initial(
+        &mut self, conn: &mut quiche::Connection,
+    ) -> Result<(), ClientError> {
+        self.tx.packet =
+            Some(conn.send(&mut self.tx.buffer).map_err(|error| {
+                ClientError::Other(format!("generate ClientHello: {error}"))
+            })?);
+        Ok(())
+    }
+
     /// Drain an existing packet first, then ask quiche for another one.
     /// The send budget bounds each iteration even under continuous traffic.
     pub(super) fn flush(

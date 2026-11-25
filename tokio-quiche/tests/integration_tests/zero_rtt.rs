@@ -65,9 +65,8 @@ use tokio_quiche::ServerH3Connection;
 
 #[derive(Debug, Default, Clone)]
 struct TestContext {
-    did_recv_early_data_request: bool,
     requests_handled_count: usize,
-    hosts_seen: Vec<String>,
+    requests_seen: Vec<(String, bool)>,
 }
 
 #[tokio::test]
@@ -99,10 +98,11 @@ async fn handle_0_rtt_request() {
 
         {
             let context = context.lock().unwrap();
-            assert_eq!(context.hosts_seen.len(), 1);
-            assert!(context.hosts_seen.contains(&"test.com".to_string()));
+            assert_eq!(context.requests_seen, vec![(
+                "test.com".to_owned(),
+                false
+            )]);
             assert_eq!(context.requests_handled_count, 1);
-            assert!(!context.did_recv_early_data_request);
         }
 
         // Get Session data from this connection to resume the 0-RTT connection.
@@ -134,10 +134,15 @@ async fn handle_0_rtt_request() {
 
         {
             let context = context.lock().unwrap();
-            assert_eq!(context.hosts_seen.len(), 2);
-            assert_eq!(context.hosts_seen, vec!["early.test.com", "test.com"]);
+            // QUIC does not order requests across independent streams. Check
+            // the encryption phase of each request, not delivery order.
+            let mut requests = context.requests_seen.clone();
+            requests.sort_unstable();
+            assert_eq!(requests, vec![
+                ("early.test.com".to_owned(), true),
+                ("test.com".to_owned(), false)
+            ]);
             assert_eq!(context.requests_handled_count, 2);
-            assert!(context.did_recv_early_data_request);
         }
     }
 }
@@ -217,11 +222,10 @@ fn helper_server_handler(
                     {
                         let mut context = context.lock().unwrap();
                         context.requests_handled_count += 1;
-                        context.did_recv_early_data_request |= *is_in_early_data;
                         let host = std::str::from_utf8(authority.value())
                             .unwrap()
                             .to_string();
-                        context.hosts_seen.push(host);
+                        context.requests_seen.push((host, *is_in_early_data));
                     }
 
                     // Send headers.
