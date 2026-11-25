@@ -57,7 +57,7 @@ async fn assert_client_handshake_timeout<Tx, Rx>(
 ) -> tokio_quiche::QuicResult<()>
 where
     Tx: datagram_socket::DatagramSocketSend + Send + 'static,
-    Rx: datagram_socket::DatagramSocketRecv + Send + 'static,
+    Rx: datagram_socket::DatagramSocketRecv + Unpin + 'static,
 {
     let mut settings = QuicSettings::default();
     settings.handshake_timeout = Some(Duration::from_millis(100));
