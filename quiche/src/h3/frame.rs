@@ -382,6 +382,7 @@ impl Frame {
     ///
     /// # Errors
     /// Returns an error for invalid wire values or failed allocation.
+    #[cfg(any(feature = "internal", test))]
     pub fn to_vec(&self) -> Result<Vec<u8>> {
         let plan = self.encoding_plan()?;
         let mut bytes = Vec::new();
