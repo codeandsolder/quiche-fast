@@ -429,13 +429,11 @@ pub struct Datastore {
     pub local_initial_stream_limits: InitialStreamLimits,
     pub peer_initial_stream_limits: InitialStreamLimits,
 
-    pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, i32)>>,
+    /// Credit granted to the peer by locally sent WINDOW_UPDATE frames.
+    pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, u64)>>,
 
-    // Balance against incoming data to make it easier to plot in some cases
+    // Local send credit changes: received grants minus transmitted DATA.
     pub h2_send_window_updates_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
-
-    // Just store raw updates for clear absolute values
-    pub h2_send_window_updates_absolute: BTreeMap<u32, Vec<(f64, u64)>>,
 
     pub netlog_quic_server_window_blocked: BTreeMap<i64, Vec<f64>>,
     pub netlog_quic_client_side_window_updates: BTreeMap<i64, Vec<(f64, u64)>>,
@@ -1022,10 +1020,18 @@ impl Datastore {
             Some(u64::from(size)),
             event_time,
         )?;
+        // Each DATA frame consumes both stream and connection credit.
+        // Stream zero is reserved for connection updates, not DATA.
         self.h2_send_window_updates_balanced
             .entry(stream_id)
             .or_default()
             .push((event_time, -i64::from(size)));
+        if stream_id != 0 {
+            self.h2_send_window_updates_balanced
+                .entry(0)
+                .or_default()
+                .push((event_time, -i64::from(size)));
+        }
         Ok(())
     }
 
@@ -1105,16 +1111,12 @@ impl Datastore {
                     .entry(stream_id)
                     .or_default()
                     .push((event_time, i64::from(delta)));
-                self.h2_send_window_updates_absolute
-                    .entry(stream_id)
-                    .or_default()
-                    .push((event_time, increment));
             },
             NetlogH2Direction::Sent => {
                 self.h2_recv_window_updates
                     .entry(stream_id)
                     .or_default()
-                    .push((event_time, delta));
+                    .push((event_time, increment));
             },
         }
     }
@@ -2235,6 +2237,10 @@ mod netlog_tests {
             (5.0, -9),
             (8.0, 0)
         ]);
+        assert_eq!(
+            datastore.h2_send_window_updates_balanced[&0],
+            datastore.h2_send_window_updates_balanced[&5]
+        );
         let request = &datastore.http_requests[&5];
         assert_eq!(request.sent_data.first_time(), Some(1.0));
         assert_eq!(request.sent_data.last_time(), Some(8.0));
@@ -2977,13 +2983,7 @@ mod netlog_tests {
         assert_eq!(datastore.h2_send_window_updates_balanced[&1], vec![(
             1.0, 50
         )]);
-        assert_eq!(datastore.h2_send_window_updates_absolute[&1], vec![(
-            1.0, 50
-        )]);
         assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
-            3.0, 8
-        )]);
-        assert_eq!(datastore.h2_send_window_updates_absolute[&3], vec![(
             3.0, 8
         )]);
         assert_eq!(datastore.h2_recv_window_updates[&1], vec![(2.0, 7)]);
@@ -3023,11 +3023,52 @@ mod netlog_tests {
         assert_eq!(datastore.h2_send_window_updates_balanced[&3], vec![(
             10.0, 10
         )]);
-        assert_eq!(datastore.h2_send_window_updates_absolute[&3], vec![(
-            10.0, 10
-        )]);
         assert_eq!(datastore.h2_recv_window_updates[&3], vec![(20.0, 20)]);
         assert_eq!(datastore.h2_send_window_updates_balanced[&3].len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn h2_connection_credit_uses_locally_sent_grants_and_all_outbound_data(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut datastore = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
+        for (time, event) in [
+            (101, h2_sent(1, 7)),
+            (102, h2_window_received(0, 100)),
+            (103, h2_sent(3, 11)),
+            (104, h2_received(1, 13)),
+            (105, h2_window_sent(3, 90)),
+            (106, h2_window_sent(0, 20)),
+            (107, h2_received(3, 17)),
+        ] {
+            consume(&constants, &mut datastore, time, &event)?;
+        }
+        assert_eq!(datastore.h2_send_window_updates_balanced[&0], [
+            (1.0, -7),
+            (2.0, 100),
+            (3.0, -11)
+        ]);
+        let series = crate::seriesstore::SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(series.h2_connection_receive_credit, [
+            (0.0, 65535),
+            (6.0, 65535),
+            (6.0, 65555),
+            (7.0, 65555)
+        ]);
+        assert_eq!(
+            series
+                .netlog_h2_stream_received_connection_cumulative
+                .last(),
+            Some(&(7.0, 30))
+        );
+        assert_eq!(
+            series.h2_send_window_series_balanced[&0].last(),
+            Some(&(3.0, 65617))
+        );
         Ok(())
     }
 

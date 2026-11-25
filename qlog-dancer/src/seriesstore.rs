@@ -143,7 +143,9 @@ pub struct SeriesStore {
     pub sent_data_frames_series: BTreeMap<u64, Vec<QlogPointu64>>,
 
     pub h2_send_window_series_balanced: BTreeMap<u32, Vec<(f64, i64)>>,
-    pub h2_send_window_series_absolute: BTreeMap<u32, Vec<(f64, u64)>>,
+    /// Cumulative connection credit we granted to the peer, including the
+    /// default.
+    pub h2_connection_receive_credit: Vec<QlogPointu64>,
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
     pub netlog_quic_stream_received_connection_cumulative: Vec<QlogPointu64>,
@@ -666,34 +668,67 @@ impl SeriesStore {
         self.h2_send_window_series_balanced = Self::build_h2_windows(
             &data_store.h2_send_window_updates_balanced,
             data_store,
-            i64::checked_add,
-            "h2_fc_balanced",
             &mut self.sent_x_max,
         )?;
-        self.h2_send_window_series_absolute = Self::build_h2_windows(
-            &data_store.h2_send_window_updates_absolute,
-            data_store,
-            u64::checked_add,
-            "h2_fc_absolute",
-            &mut self.sent_x_max,
-        )?;
+        self.h2_connection_receive_credit = Self::h2_receive_credit(data_store)?;
+        for &(time, _) in &self.h2_connection_receive_credit {
+            self.received_x_min = self.received_x_min.min(time);
+            self.received_x_max = self.received_x_max.max(time);
+        }
         Ok(())
     }
 
-    fn build_h2_windows<T: Copy + From<u32>>(
-        source: &BTreeMap<u32, Vec<(f64, T)>>, data_store: &Datastore,
-        checked_add: fn(T, T) -> Option<T>, name: &'static str, x_max: &mut f64,
-    ) -> SeriesResult<BTreeMap<u32, Vec<(f64, T)>>> {
+    /// Connection-level receive credit starts at 65,535, unaffected by
+    /// SETTINGS_INITIAL_WINDOW_SIZE. Compare only grants sent locally with
+    /// inbound DATA; peer WINDOW_UPDATE events concern our outbound data.
+    fn h2_receive_credit(
+        data_store: &Datastore,
+    ) -> SeriesResult<Vec<QlogPointu64>> {
+        let mut updates = data_store
+            .h2_recv_window_updates
+            .get(&0)
+            .cloned()
+            .unwrap_or_default();
+        let data = &data_store.netlog_h2_stream_received_connection_cumulative;
+        if updates.is_empty() && data.is_empty() {
+            return Ok(Vec::new());
+        }
+        updates.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let (start, end) = updates
+            .iter()
+            .chain(data)
+            .fold((0.0_f64, 0.0_f64), |(start, end), &(time, _)| {
+                (start.min(time), end.max(time))
+            });
+        let mut value = u64::from(H2_DEFAULT_WINDOW_SIZE);
+        let mut series = vec![(start, value)];
+        for (time, increment) in updates {
+            value = value.checked_add(increment).ok_or(SeriesBuildError {
+                stream_id: 0,
+                series: "h2_connection_receive_credit",
+            })?;
+            push_interp(&mut series, (time, value));
+        }
+        if series.last().is_some_and(|point| point.0 < end) {
+            series.push((end, value));
+        }
+        Ok(series)
+    }
+
+    fn build_h2_windows(
+        source: &BTreeMap<u32, Vec<(f64, i64)>>, data_store: &Datastore,
+        x_max: &mut f64,
+    ) -> SeriesResult<BTreeMap<u32, Vec<(f64, i64)>>> {
         let mut output = BTreeMap::new();
         for (&stream, points) in source {
             let series = cumulative_series(
                 points,
-                T::from(Self::initial_h2_fc_value(stream, data_store)),
-                checked_add,
+                i64::from(Self::initial_h2_fc_value(stream, data_store)),
+                i64::checked_add,
                 SeriesShape::Steps,
                 SeriesBuildError {
                     stream_id: u64::from(stream),
-                    series: name,
+                    series: "h2_fc_balanced",
                 },
             )?;
             if series.is_empty() {
@@ -1033,14 +1068,32 @@ mod tests {
     }
 
     #[test]
+    fn h2_receive_credit_without_updates_spans_observed_data(
+    ) -> Result<(), super::SeriesBuildError> {
+        let datastore = Datastore {
+            netlog_h2_stream_received_connection_cumulative: vec![
+                (-2.0, 8),
+                (7.0, 12),
+            ],
+            ..Datastore::default()
+        };
+        let series = SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(series.h2_connection_receive_credit, [
+            (-2.0, 65535),
+            (7.0, 65535)
+        ]);
+        assert_eq!(series.received_x_min, -2.0);
+        assert_eq!(series.received_x_max, 7.0);
+        Ok(())
+    }
+
+    #[test]
     fn h2_windows_keep_initial_limit_and_reject_overflow() {
         let mut datastore = Datastore::default();
         datastore
             .h2_send_window_updates_balanced
             .insert(1, vec![(1.0, -5)]);
-        datastore
-            .h2_send_window_updates_absolute
-            .insert(0, vec![(1.0, 7)]);
+        datastore.h2_recv_window_updates.insert(0, vec![(1.0, 7)]);
         let result = SeriesStore::from_datastore(&datastore);
         assert!(result.is_ok());
         if let Ok(series) = result {
@@ -1051,13 +1104,11 @@ mod tests {
                     .map(Vec::as_slice),
                 Some([(1.0, 65535), (1.0, 65535), (1.0, 65530)].as_slice())
             );
-            assert_eq!(
-                series
-                    .h2_send_window_series_absolute
-                    .get(&0)
-                    .map(Vec::as_slice),
-                Some([(1.0, 65535), (1.0, 65535), (1.0, 65542)].as_slice())
-            );
+            assert_eq!(series.h2_connection_receive_credit, [
+                (0.0, 65535),
+                (1.0, 65535),
+                (1.0, 65542)
+            ]);
         }
 
         let mut datastore = Datastore::default();
@@ -1071,12 +1122,11 @@ mod tests {
 
         let mut datastore = Datastore::default();
         datastore
-            .h2_send_window_updates_absolute
+            .h2_recv_window_updates
             .insert(0, vec![(1.0, u64::MAX)]);
         let result = SeriesStore::from_datastore(&datastore);
-        assert!(result.is_err_and(
-            |error| error.stream_id == 0 && error.series == "h2_fc_absolute"
-        ));
+        assert!(result.is_err_and(|error| error.stream_id == 0 &&
+            error.series == "h2_connection_receive_credit"));
 
         let mut datastore = Datastore::default();
         datastore.h2_server_settings.initial_window_size = Some(u32::MAX);
