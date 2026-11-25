@@ -28,7 +28,6 @@
 
 use crate::quiche;
 use inquire::error::InquireResult;
-use inquire::validator::Validation;
 use inquire::Text;
 use quiche::h3::frame::Frame;
 
@@ -36,45 +35,24 @@ use crate::encode_header_block;
 use crate::prompts::h3;
 use crate::StreamIdAllocator;
 
-use super::squish_suggester;
+use super::stream::autopick_stream_id;
 use super::stream::prompt_fin_stream;
-use super::SuggestionResult;
-use super::AUTO_PICK;
-use super::EMPTY_PICKS;
+use super::suggestions;
 use super::ESC_TO_RET;
 use super::PUSH_ID_PROMPT;
-use super::STREAM_ID_PROMPT;
 use crate::actions::h3::Action;
+use crate::actions::h3::ExpectedStreamSendResult;
 
 pub fn prompt_headers(
-    sid_alloc: &mut StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
+    sid_alloc: &StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
 ) -> InquireResult<Action> {
-    let stream_id = Text::new(STREAM_ID_PROMPT)
-        .with_placeholder(EMPTY_PICKS)
-        .with_help_message(ESC_TO_RET)
-        .with_validator(validate_stream_id)
-        .prompt()?;
-
-    let stream_id = match stream_id.as_str() {
-        "" => {
-            let id = sid_alloc.peek_next_id();
-            println!("{AUTO_PICK}={id}");
-            id
-        },
-
-        _ => stream_id.parse::<u64>().unwrap(),
+    let stream_id = autopick_stream_id(sid_alloc)?;
+    let mut headers = if raw {
+        Vec::new()
+    } else {
+        pseudo_headers(host_port)?
     };
-
-    let mut headers = vec![];
-
-    if !raw {
-        headers.extend_from_slice(&pseudo_headers(host_port)?);
-    }
-
-    headers.extend_from_slice(&headers_read_loop()?);
-
-    sid_alloc.take_next_id();
-
+    headers.extend(headers_read_loop()?);
     let fin_stream = prompt_fin_stream()?;
 
     let action = Action::SendHeadersFrame {
@@ -82,7 +60,7 @@ pub fn prompt_headers(
         fin_stream,
         headers,
         literal_headers: literal,
-        expected_result: Default::default(),
+        expected_result: ExpectedStreamSendResult::default(),
     };
 
     Ok(action)
@@ -109,7 +87,7 @@ pub fn prompt_push_promise() -> InquireResult<Action> {
             push_id,
             header_block,
         },
-        expected_result: Default::default(),
+        expected_result: ExpectedStreamSendResult::default(),
     };
 
     Ok(action)
@@ -117,12 +95,14 @@ pub fn prompt_push_promise() -> InquireResult<Action> {
 
 fn pseudo_headers(host_port: &str) -> InquireResult<Vec<quiche::h3::Header>> {
     let method = Text::new("method:")
-        .with_autocomplete(&method_suggester)
+        .with_autocomplete(&|input: &str| {
+            Ok(suggestions(["GET", "POST", "PUT", "DELETE"], input))
+        })
         .with_default("GET")
         .with_help_message(ESC_TO_RET)
         .prompt()?;
 
-    let help = format!("Press enter/return for default ({host_port}");
+    let help = format!("Press enter/return for default ({host_port})");
     let authority = Text::new("authority:")
         .with_default(host_port)
         .with_help_message(&help)
@@ -164,18 +144,4 @@ fn headers_read_loop() -> InquireResult<Vec<quiche::h3::Header>> {
     }
 
     Ok(headers)
-}
-
-fn method_suggester(val: &str) -> SuggestionResult<Vec<String>> {
-    let suggestions = ["GET", "POST", "PUT", "DELETE"];
-
-    squish_suggester(&suggestions, val)
-}
-
-fn validate_stream_id(id: &str) -> SuggestionResult<Validation> {
-    if id.is_empty() {
-        return Ok(Validation::Valid);
-    }
-
-    h3::validate_varint(id)
 }

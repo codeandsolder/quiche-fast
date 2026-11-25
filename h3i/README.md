@@ -52,7 +52,9 @@ and then sent to the server in sequence. The available options are
 - `wait` - specify a client-side wait, in order to provide some delay between action emits
 - `quit` - quit without opening a connection
 
-To send two HTTP/3 requests, would require the sequence `headers` and `commit`:
+Only `commit` sends queued actions (an empty commit opens a connection without sending actions). Escape inside a prompt cancels that action; Escape at the action menu or `quit` discards the entire queue. Interruptions and terminal errors never commit a partial queue. Automatic stream IDs advance only after an action is queued, independently for bidirectional and unidirectional streams.
+
+To send an HTTP/3 request, use `headers` and `commit`:
 
 ![h3i-demo](h3i-demo.gif)
 

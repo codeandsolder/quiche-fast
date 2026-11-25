@@ -29,67 +29,72 @@ use inquire::validator::Validation;
 use inquire::Text;
 
 use crate::actions::h3::Action;
+use crate::actions::h3::ExpectedStreamSendResult;
 use crate::prompts::h3;
 use crate::prompts::h3::errors::prompt_transport_or_app_error;
 use crate::prompts::h3::prompt_yes_no;
 use crate::StreamIdAllocator;
 
-use super::squish_suggester;
-use super::SuggestionResult;
+use super::parse_named_varint;
+use super::parse_varint;
+use super::suggest_named_varint;
+use super::validate_named_varint;
 use super::AUTO_PICK;
 use super::EMPTY_PICKS;
 use super::ESC_TO_RET;
 use super::STREAM_ID_PROMPT;
 
-const CONTROL_STREAM: &str = "Control Stream";
-const PUSH_STREAM: &str = "Push Stream";
-const QPACK_ENCODER: &str = "QPACK Encoder Stream";
-const QPACK_DECODER: &str = "QPACK Decoder Stream";
+const STREAM_TYPES: &[(&str, u64)] = &[
+    ("Control Stream", crate::HTTP3_CONTROL_STREAM_TYPE_ID),
+    ("Push Stream", crate::HTTP3_PUSH_STREAM_TYPE_ID),
+    ("QPACK Encoder Stream", crate::QPACK_ENCODER_STREAM_TYPE_ID),
+    ("QPACK Decoder Stream", crate::QPACK_DECODER_STREAM_TYPE_ID),
+];
 
-fn validate_stream_id(id: &str) -> SuggestionResult<Validation> {
+fn validate_stream_id(id: &str) -> Validation {
     if id.is_empty() {
-        return Ok(Validation::Valid);
+        return Validation::Valid;
     }
 
     h3::validate_varint(id)
 }
 
-pub fn autopick_stream_id(
-    sid_alloc: &mut StreamIdAllocator,
+pub(super) fn autopick_stream_id(
+    sid_alloc: &StreamIdAllocator,
 ) -> InquireResult<u64> {
     let stream_id = Text::new(STREAM_ID_PROMPT)
         .with_placeholder(EMPTY_PICKS)
         .with_help_message(ESC_TO_RET)
-        .with_validator(validate_stream_id)
+        .with_validator(|input: &str| Ok(validate_stream_id(input)))
         .prompt()?;
 
     Ok(match stream_id.as_str() {
         "" => {
-            let id = sid_alloc.take_next_id();
+            let id = sid_alloc.next_id().ok_or_else(|| {
+                inquire::InquireError::Custom("stream ID space exhausted".into())
+            })?;
             println!("{AUTO_PICK}={id}");
             id
         },
 
-        _ => stream_id.parse::<u64>().unwrap(),
+        _ => parse_varint(&stream_id)?,
     })
 }
 
 pub fn prompt_open_uni_stream(
-    sid_alloc: &mut StreamIdAllocator,
+    sid_alloc: &StreamIdAllocator,
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
     let stream_type = Text::new("stream type:")
-        .with_validator(validate_stream_type)
-        .with_autocomplete(&stream_type_suggestor)
+        .with_validator(|input: &str| {
+            Ok(validate_named_varint(input, STREAM_TYPES))
+        })
+        .with_autocomplete(&|input: &str| {
+            Ok(suggest_named_varint(input, STREAM_TYPES))
+        })
         .prompt()?;
 
-    let ty = match stream_type.as_str() {
-        CONTROL_STREAM => 0x0,
-        PUSH_STREAM => 0x1,
-        QPACK_ENCODER => 0x2,
-        QPACK_DECODER => 0x3,
-        _ => stream_type.parse::<u64>().unwrap(),
-    };
+    let ty = parse_named_varint(&stream_type, STREAM_TYPES)?;
 
     let fin_stream = prompt_fin_stream()?;
 
@@ -97,25 +102,8 @@ pub fn prompt_open_uni_stream(
         stream_id,
         fin_stream,
         stream_type: ty,
-        expected_result: Default::default(),
+        expected_result: ExpectedStreamSendResult::default(),
     })
-}
-
-fn validate_stream_type(id: &str) -> SuggestionResult<Validation> {
-    if matches!(
-        id,
-        CONTROL_STREAM | PUSH_STREAM | QPACK_ENCODER | QPACK_DECODER
-    ) {
-        return Ok(Validation::Valid);
-    }
-
-    h3::validate_varint(id)
-}
-
-fn stream_type_suggestor(val: &str) -> SuggestionResult<Vec<String>> {
-    let suggestions = [CONTROL_STREAM, PUSH_STREAM, QPACK_ENCODER, QPACK_DECODER];
-
-    squish_suggester(&suggestions, val)
 }
 
 pub fn prompt_fin_stream() -> InquireResult<bool> {

@@ -68,7 +68,10 @@ fn main() -> Result<(), ClientError> {
 
     let actions = match &config.qlog_input {
         Some(v) => read_qlog(v, config.host_override.as_deref())?,
-        None => prompt_frames(&config)?,
+        None => match prompt_frames(&config)? {
+            Some(actions) => actions,
+            None => return Ok(()),
+        },
     };
 
     #[cfg(not(feature = "async"))]
@@ -330,9 +333,14 @@ fn read_qlog(
     Ok(actions)
 }
 
-fn prompt_frames(config: &Config) -> Result<Vec<Action>, ClientError> {
+fn prompt_frames(config: &Config) -> Result<Option<Vec<Action>>, ClientError> {
     let mut prompter = Prompter::with_config(&config.library_config);
-    let actions = prompter.prompt();
+    let Some(actions) = prompter.prompt().map_err(|error| {
+        ClientError::Other(format!("interactive prompt: {error}"))
+    })?
+    else {
+        return Ok(None);
+    };
 
     if !actions.is_empty() && config.qlog_actions_output {
         let writer = make_qlog_writer()?;
@@ -350,7 +358,7 @@ fn prompt_frames(config: &Config) -> Result<Vec<Action>, ClientError> {
         })?;
     }
 
-    Ok(actions)
+    Ok(Some(actions))
 }
 
 fn make_qlog_writer() -> Result<std::io::BufWriter<std::fs::File>, ClientError> {
