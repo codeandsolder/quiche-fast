@@ -111,7 +111,7 @@ impl QuicConnectionStats {
         }
     }
 
-    fn startup_exit_to_socket_stats(
+    const fn startup_exit_to_socket_stats(
         value: quiche::StartupExit,
     ) -> datagram_socket::StartupExit {
         let reason = match value.reason {
@@ -133,44 +133,15 @@ impl QuicConnectionStats {
     }
 }
 
+/// The socket statistics interface represents microseconds in a signed field;
+/// clamp extreme durations instead of wrapping them into negative values.
+fn rtt_micros(value: Duration) -> i64 {
+    i64::try_from(value.as_micros()).unwrap_or(i64::MAX)
+}
+
 impl AsSocketStats for QuicConnectionStats {
     fn as_socket_stats(&self) -> SocketStats {
-        SocketStats {
-            pmtu: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.pmtu as u16)
-                .unwrap_or_default(),
-            rtt_us: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.rtt.as_micros() as i64)
-                .unwrap_or_default(),
-            min_rtt_us: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.min_rtt.map(|x| x.as_micros() as i64))
-                .unwrap_or_default(),
-            max_rtt_us: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.max_rtt.map(|x| x.as_micros() as i64))
-                .unwrap_or_default(),
-            rtt_var_us: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.rttvar.as_micros() as i64)
-                .unwrap_or_default(),
-            cwnd: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.cwnd as u64)
-                .unwrap_or_default(),
-            total_pto_count: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.total_pto_count as u64)
-                .unwrap_or_default(),
+        let mut socket = SocketStats {
             packets_sent: self.stats.sent as u64,
             packets_recvd: self.stats.recv as u64,
             packets_lost: self.stats.lost as u64,
@@ -180,24 +151,57 @@ impl AsSocketStats for QuicConnectionStats {
             bytes_recvd: self.stats.recv_bytes,
             bytes_lost: self.stats.lost_bytes,
             bytes_retrans: self.stats.stream_retrans_bytes,
-            bytes_unsent: 0, /* not implemented yet, kept for compatibility
-                              * with TCP */
-            delivery_rate: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.delivery_rate)
-                .unwrap_or_default(),
-            max_bandwidth: self.path_stats.as_ref().and_then(|p| p.max_bandwidth),
-            startup_exit: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.startup_exit)
-                .map(QuicConnectionStats::startup_exit_to_socket_stats),
-            bytes_in_flight_duration_us: self
-                .stats
-                .bytes_in_flight_duration
-                .as_micros() as u64,
+            bytes_in_flight_duration_us: u64::try_from(
+                self.stats.bytes_in_flight_duration.as_micros(),
+            )
+            .unwrap_or(u64::MAX),
+            ..SocketStats::default()
+        };
+
+        if let Some(path) = &self.path_stats {
+            socket.pmtu = u16::try_from(path.pmtu).unwrap_or(u16::MAX);
+            socket.rtt_us = rtt_micros(path.rtt);
+            socket.min_rtt_us = path.min_rtt.map_or(0, rtt_micros);
+            socket.max_rtt_us = path.max_rtt.map_or(0, rtt_micros);
+            socket.rtt_var_us = rtt_micros(path.rttvar);
+            socket.cwnd = path.cwnd as u64;
+            socket.total_pto_count = path.total_pto_count as u64;
+            socket.delivery_rate = path.delivery_rate;
+            socket.max_bandwidth = path.max_bandwidth;
+            socket.startup_exit =
+                path.startup_exit.map(Self::startup_exit_to_socket_stats);
         }
+        socket
+    }
+}
+
+#[cfg(test)]
+mod socket_stats_tests {
+    use super::*;
+
+    #[test]
+    fn missing_path_preserves_aggregate_stats_and_saturates_duration() {
+        let mut stats = quiche::Stats::default();
+        stats.sent = 3;
+        stats.recv_bytes = 1234;
+        stats.bytes_in_flight_duration = Duration::MAX;
+        let socket = QuicConnectionStats {
+            stats,
+            path_stats: None,
+        }
+        .as_socket_stats();
+        assert_eq!(socket.packets_sent, 3);
+        assert_eq!(socket.bytes_recvd, 1234);
+        assert_eq!(socket.bytes_in_flight_duration_us, u64::MAX);
+        assert_eq!(socket.pmtu, 0);
+        assert_eq!(socket.max_bandwidth, None);
+    }
+
+    #[test]
+    fn rtt_conversion_does_not_wrap() {
+        assert_eq!(rtt_micros(Duration::from_nanos(999)), 0);
+        assert_eq!(rtt_micros(Duration::from_micros(17)), 17);
+        assert_eq!(rtt_micros(Duration::MAX), i64::MAX);
     }
 }
 
@@ -283,12 +287,14 @@ where
     }
 
     /// The local address this connection listens on.
-    pub fn local_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the local endpoint"]
+    pub const fn local_addr(&self) -> SocketAddr {
         self.params.local_addr
     }
 
     /// The remote address for this connection.
-    pub fn peer_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the remote endpoint"]
+    pub const fn peer_addr(&self) -> SocketAddr {
         self.params.peer_addr
     }
 
@@ -304,7 +310,7 @@ where
     /// Clone it before starting the handshake to update the worker's marking
     /// from a certificate-selection callback. Until then the handle has no
     /// per-packet override, so packets inherit the UDP socket's TOS/TClass.
-    pub fn dscp_handle(&self) -> Option<&DscpHandle> {
+    pub const fn dscp_handle(&self) -> Option<&DscpHandle> {
         self.params.dscp_handle.as_ref()
     }
 
@@ -326,7 +332,8 @@ where
     /// was created. They are updated when the connection is closed, so this
     /// getter exists primarily to grab a handle early on.
     #[inline]
-    pub fn stats(&self) -> &QuicConnectionStatsShared {
+    #[must_use = "the handle provides access to the connection statistics"]
+    pub const fn stats(&self) -> &QuicConnectionStatsShared {
         &self.stats
     }
 
@@ -416,6 +423,9 @@ where
     /// [`InitialQuicConnection::resume`]. This two-step process
     /// allows callers to collect telemetry and run code before serving their
     /// [`ApplicationOverQuic`].
+    ///
+    /// # Errors
+    /// Returns an I/O error if the handshake or its worker task fails.
     pub async fn handshake<A: ApplicationOverQuic>(
         self, app: A,
     ) -> io::Result<(QuicConnection, Running<Arc<Tx>, M, A>)> {
@@ -547,13 +557,15 @@ pub struct QuicConnection {
 impl QuicConnection {
     /// The local address this connection listens on.
     #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the local endpoint"]
+    pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// The remote address for this connection.
     #[inline]
-    pub fn peer_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the remote endpoint"]
+    pub const fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
@@ -564,7 +576,8 @@ impl QuicConnection {
     /// The getter exists to grab a handle early on, which can then
     /// be stowed away and read out after the connection has closed.
     #[inline]
-    pub fn audit_log_stats(&self) -> &Arc<QuicAuditStats> {
+    #[must_use = "the handle provides access to the connection audit record"]
+    pub const fn audit_log_stats(&self) -> &Arc<QuicAuditStats> {
         &self.audit_log_stats
     }
 
@@ -575,13 +588,15 @@ impl QuicConnection {
     /// was created. They are updated when the connection is closed, so this
     /// getter exists primarily to grab a handle early on.
     #[inline]
-    pub fn stats(&self) -> &QuicConnectionStatsShared {
+    #[must_use = "the handle provides access to the connection statistics"]
+    pub const fn stats(&self) -> &QuicConnectionStatsShared {
         &self.stats
     }
 
     /// The QUIC source connection ID used by this connection.
     #[inline]
-    pub fn scid(&self) -> &ConnectionId<'static> {
+    #[must_use = "the ID identifies the source connection"]
+    pub const fn scid(&self) -> &ConnectionId<'static> {
         &self.scid
     }
 }
@@ -657,7 +672,9 @@ pub struct HandshakeInfo {
 }
 
 impl HandshakeInfo {
-    pub(crate) fn new(start_time: Instant, timeout: Option<Duration>) -> Self {
+    pub(crate) const fn new(
+        start_time: Instant, timeout: Option<Duration>,
+    ) -> Self {
         Self {
             start_time,
             timeout,
@@ -667,19 +684,21 @@ impl HandshakeInfo {
 
     /// The time at which the connection was created.
     #[inline]
-    pub fn start_time(&self) -> Instant {
+    #[must_use = "the start time anchors handshake deadlines"]
+    pub const fn start_time(&self) -> Instant {
         self.start_time
     }
 
     /// How long the handshake took to complete.
     #[inline]
+    #[must_use = "the returned duration records handshake latency"]
     pub fn elapsed(&self) -> Duration {
         self.time_handshake.unwrap_or_default()
     }
 
     pub(crate) fn set_elapsed(&mut self) {
         let elapsed = self.start_time.elapsed();
-        self.time_handshake = Some(elapsed)
+        self.time_handshake = Some(elapsed);
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {

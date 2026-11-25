@@ -886,13 +886,13 @@ mod client_side_driver {
         });
         helper.work_loop_iter().unwrap();
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 10);
@@ -956,13 +956,13 @@ mod client_side_driver {
         helper.advance_and_run_loop().unwrap();
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 10);
@@ -1052,7 +1052,7 @@ mod client_side_driver {
         helper.work_loop_iter().unwrap();
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
         helper.advance_and_run_loop().unwrap();
 
@@ -1066,13 +1066,13 @@ mod client_side_driver {
         helper.advance_and_run_loop().unwrap();
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
     }
@@ -1143,10 +1143,10 @@ mod client_side_driver {
         assert!(fin);
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 1);
@@ -1464,7 +1464,7 @@ mod server_side_driver {
             .unwrap();
 
         assert!(to_client.is_closed());
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), Some(4242));
 
         let ctx = helper.driver.stream_map.get(&stream_id).unwrap();
         assert!(ctx.queued_frame.is_none());
@@ -1502,13 +1502,13 @@ mod server_side_driver {
         assert!(fin);
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), 4242);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), Some(4242));
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         // technically quiche will automatically respond to a STOP_SENDING
         // frame with a STREAM_RESET echoing the error code, but the user
         // didn't *actively* send a STREAM_RESET.
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 3);
@@ -1559,12 +1559,15 @@ mod server_side_driver {
             });
         helper.advance_and_run_loop()?;
         assert!(!helper.driver.stream_map.contains_key(&stream_id));
-        assert_eq!(req.h3_audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(
+            req.h3_audit_stats.recvd_stop_sending_error_code(),
+            Some(4242)
+        );
         assert_eq!(
             req.h3_audit_stats.sent_stop_sending_error_code(),
-            code as i64
+            Some(code)
         );
-        assert_eq!(req.h3_audit_stats.sent_reset_stream_error_code(), -1);
+        assert_eq!(req.h3_audit_stats.sent_reset_stream_error_code(), None);
         assert_eq!(
             helper.peer_client_send_body(stream_id, b"body", false),
             Err(h3::Error::Transport(quiche::Error::StreamStopped(code)))
@@ -1688,7 +1691,7 @@ mod server_side_driver {
             );
             assert_eq!(
                 audit_stats.recvd_stop_sending_error_code(),
-                4242,
+                Some(4242),
                 "request={request_state:?}, response={response_state:?}"
             );
         }
@@ -1749,7 +1752,10 @@ mod server_side_driver {
         );
 
         assert!(req.send.get_ref().unwrap().is_closed());
-        assert_eq!(req.h3_audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(
+            req.h3_audit_stats.recvd_stop_sending_error_code(),
+            Some(4242)
+        );
 
         assert_matches!(
             helper.driver_recv_core_event().unwrap(),
@@ -1798,7 +1804,7 @@ mod server_side_driver {
         helper.advance_and_run_loop().unwrap();
 
         assert!(to_client.is_closed());
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), Some(4242));
     }
 
     /// A request body and FIN delivered with STOP_SENDING must close the
@@ -1859,7 +1865,7 @@ mod server_side_driver {
             .unwrap();
 
         assert!(to_client.is_closed());
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), Some(4242));
 
         // Only now let the RESET_STREAM reach the client, and the
         // client's ack come back to the server.
@@ -1873,7 +1879,7 @@ mod server_side_driver {
             .unwrap();
 
         assert!(to_client.is_closed());
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), Some(4242));
     }
 
     #[test]
@@ -1987,7 +1993,7 @@ mod server_side_driver {
 
         // The channel is closed because the peer send us the reset.
         assert!(from_client.is_closed());
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
         assert_matches!(
             helper.driver_recv_core_event(),
             Ok(H3Event::ResetStream { stream_id: 0 })
@@ -2011,10 +2017,10 @@ mod server_side_driver {
         );
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 0);
@@ -2083,10 +2089,10 @@ mod server_side_driver {
         );
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 0);
@@ -2203,7 +2209,7 @@ mod server_side_driver {
 
         // The channel is closed because the peer send us the reset.
         assert!(from_client.is_closed());
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
         assert_matches!(
             helper.driver_recv_core_event(),
             Ok(H3Event::ResetStream { stream_id: 0 })
@@ -2223,10 +2229,10 @@ mod server_side_driver {
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
@@ -2308,7 +2314,7 @@ mod server_side_driver {
 
         // The channel is closed because the peer send us the reset.
         assert!(from_client.is_closed());
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
         assert_matches!(
             helper.driver_recv_core_event(),
             Ok(H3Event::ResetStream { stream_id: 0 })
@@ -2332,10 +2338,10 @@ mod server_side_driver {
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), 4242);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
@@ -2429,12 +2435,12 @@ mod server_side_driver {
         );
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_stop_sending_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
@@ -2505,10 +2511,10 @@ mod server_side_driver {
         );
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
@@ -2589,12 +2595,12 @@ mod server_side_driver {
         );
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), -1);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), -1);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_stop_sending_error_code(),
-            REQUEST_CANCELED_ERR as i64
+            Some(REQUEST_CANCELED_ERR)
         );
         assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
@@ -2758,9 +2764,9 @@ mod server_side_driver {
         // Verify stats
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            CUSTOM_ERROR_CODE as i64
+            Some(CUSTOM_ERROR_CODE)
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), -1);
+        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
         assert!(helper.driver.stream_map.contains_key(&stream_id));
         helper
             .peer_client_send_body(stream_id, b"still readable", true)
@@ -2816,10 +2822,10 @@ mod server_side_driver {
         );
 
         // Verify stats
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), -1);
+        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
         assert_eq!(
             audit_stats.sent_stop_sending_error_code(),
-            CUSTOM_ERROR_CODE as i64
+            Some(CUSTOM_ERROR_CODE)
         );
         assert!(helper.driver.stream_map.contains_key(&stream_id));
         let to_client = req.send.get_ref().unwrap();
@@ -2893,11 +2899,11 @@ mod server_side_driver {
         // Verify stats
         assert_eq!(
             audit_stats.sent_reset_stream_error_code(),
-            WRITE_ERROR_CODE as i64
+            Some(WRITE_ERROR_CODE)
         );
         assert_eq!(
             audit_stats.sent_stop_sending_error_code(),
-            READ_ERROR_CODE as i64
+            Some(READ_ERROR_CODE)
         );
     }
 

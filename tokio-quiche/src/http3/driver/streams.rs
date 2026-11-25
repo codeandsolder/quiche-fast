@@ -130,7 +130,7 @@ impl StreamCtx {
     pub(super) fn handle_recvd_stop_sending(&mut self, wire_err_code: u64) {
         // Update stats even if the stream is already closing.
         self.audit_stats
-            .set_recvd_stop_sending_error_code(wire_err_code as i64);
+            .set_recvd_stop_sending_error_code(wire_err_code);
 
         if self.fin_or_reset_sent {
             // It is valid to receive STOP_SENDING after we already sent fin
@@ -151,19 +151,19 @@ impl StreamCtx {
         // but not the write direction. If the peer wants to shut down write,
         // it must also send STOP_SENDING
         self.audit_stats
-            .set_recvd_reset_stream_error_code(wire_err_code as i64);
+            .set_recvd_reset_stream_error_code(wire_err_code);
         self.close_read();
     }
 
     pub(super) fn handle_sent_reset(&mut self, wire_err_code: u64) {
         self.audit_stats
-            .set_sent_reset_stream_error_code(wire_err_code as i64);
+            .set_sent_reset_stream_error_code(wire_err_code);
         self.close_write();
     }
 
     pub(super) fn handle_sent_stop_sending(&mut self, wire_err_code: u64) {
         self.audit_stats
-            .set_sent_stop_sending_error_code(wire_err_code as i64);
+            .set_sent_stop_sending_error_code(wire_err_code);
         // The peer must still send
         // FIN or RESET_STREAM with its final size, but `quiche` handles
         // that without an application read.

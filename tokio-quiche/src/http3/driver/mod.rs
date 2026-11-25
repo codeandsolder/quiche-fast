@@ -711,7 +711,7 @@ impl<H: DriverHooks> H3Driver<H> {
             let _ = qconn.stream_capacity(stream_id);
             return Ok(());
         };
-        if ctx.audit_stats.recvd_reset_stream_error_code() != -1 {
+        if ctx.audit_stats.recvd_reset_stream_error_code().is_some() {
             return Ok(());
         }
         ctx.handle_recvd_reset(code);
