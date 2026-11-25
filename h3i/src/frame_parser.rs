@@ -320,13 +320,13 @@ mod tests {
                 let mut parser = FrameParser::new(0);
                 let mut first = &bytes[..split];
                 assert_eq!(read_chunk(&mut parser, &mut first, false), Err(DONE));
-                assert_eq!(first, []);
+                assert_eq!(first, &[] as &[u8]);
                 let mut second = &bytes[split..];
                 assert_eq!(
                     read_chunk(&mut parser, &mut second, true)?,
                     parsed(frame.clone(), true)
                 );
-                assert_eq!(second, []);
+                assert_eq!(second, &[] as &[u8]);
             }
             // Every byte is delivered in its own I/O cycle.
             let mut parser = FrameParser::new(0);
@@ -407,7 +407,7 @@ mod tests {
                 parsed(frame, index == 2)
             );
         }
-        assert_eq!(input, []);
+        assert_eq!(input, &[] as &[u8]);
         Ok(())
     }
 
