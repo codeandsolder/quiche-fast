@@ -53,6 +53,7 @@ struct Server {
     process: Process,
     directory: TempDir,
     address: SocketAddr,
+    next_request: usize,
 }
 
 struct Captured {
@@ -72,6 +73,23 @@ impl Captured {
                 String::from_utf8_lossy(&self.stderr)
             )))
         }
+    }
+}
+
+struct PendingRequest {
+    process: Process,
+    stdout: PathBuf,
+    stderr: PathBuf,
+}
+
+impl PendingRequest {
+    fn capture(mut self) -> io::Result<Captured> {
+        let status = self.process.wait()?;
+        Ok(Captured {
+            status,
+            stdout: fs::read(&self.stdout)?,
+            stderr: fs::read(&self.stderr)?,
+        })
     }
 }
 
@@ -102,6 +120,7 @@ impl Server {
             process,
             directory,
             address,
+            next_request: 0,
         })
     }
 
@@ -110,12 +129,26 @@ impl Server {
     }
 
     fn request(&mut self, path: &str, options: &[&str]) -> io::Result<Captured> {
+        self.start_request(path, options)?.capture()
+    }
+
+    fn start_request(
+        &mut self, path: &str, options: &[&str],
+    ) -> io::Result<PendingRequest> {
         if let Some(status) = self.process.0.try_wait()? {
             return Err(io::Error::other(format!("server exited {status}")));
         }
-        let stdout = self.directory.path().join("client.stdout");
-        let stderr = self.directory.path().join("client.stderr");
-        let mut client = Process(
+        let sequence = self.next_request;
+        self.next_request += 1;
+        let stdout = self
+            .directory
+            .path()
+            .join(format!("client-{sequence}.stdout"));
+        let stderr = self
+            .directory
+            .path()
+            .join(format!("client-{sequence}.stderr"));
+        let process = Process(
             Command::new(env!("CARGO_BIN_EXE_quiche-client"))
                 .args([
                     "--no-verify",
@@ -131,11 +164,10 @@ impl Server {
                 .stderr(Stdio::from(File::create(&stderr)?))
                 .spawn()?,
         );
-        let status = client.wait()?;
-        Ok(Captured {
-            status,
-            stdout: fs::read(stdout)?,
-            stderr: fs::read(stderr)?,
+        Ok(PendingRequest {
+            process,
+            stdout,
+            stderr,
         })
     }
 }
@@ -297,6 +329,40 @@ fn http3_session_file_and_early_data_reuse(
             .successful()?;
         assert_response(&output, "200", &[0x57; 257])?;
         assert!(fs::metadata(&session)?.len() > 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn concurrent_connections_deliver_complete_responses(
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut server = Server::start(&["--disable-gso", "--disable-pacing"])?;
+    let large = b"0123456789abcdef".repeat(32_768);
+    fs::write(server.root().join("large"), &large)?;
+    let mut requests = Vec::new();
+    for _ in 0..4 {
+        requests
+            .push(server.start_request("/large", &["--http-version=HTTP/0.9"])?);
+    }
+    let mut small = Vec::new();
+    for count in [1, 17, 4097, 65_537] {
+        let path = format!("/stream-bytes/{count}");
+        let request = server.start_request(&path, &[
+            "--http-version=HTTP/3",
+            "--dump-json",
+            "--max-json-payload=65537",
+        ])?;
+        small.push((request, count));
+    }
+    // Do not wait for the large responses before examining the smaller ones.
+    for (request, count) in small {
+        assert_response(&request.capture()?.successful()?, "200", &vec![
+            0x57;
+            count
+        ])?;
+    }
+    for request in requests {
+        assert_eq!(request.capture()?.successful()?, large);
     }
     Ok(())
 }
