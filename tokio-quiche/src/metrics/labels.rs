@@ -58,6 +58,7 @@ pub enum QuicWriteError {
     Partial,
     WouldBlock,
     DeadlineExpired,
+    QueueFull,
 }
 
 /// Category of error that caused the QUIC handshake to fail.

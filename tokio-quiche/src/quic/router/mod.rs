@@ -822,6 +822,7 @@ mod tests {
         let acceptor = ConnectionAcceptor::new(
             ConnectionAcceptorConfig {
                 disable_client_ip_validation: config.disable_client_ip_validation,
+                reply_backlog: config.listen_backlog,
                 enable_per_connection_dscp: params.enable_per_connection_dscp,
                 qlog_dir: config.qlog_dir.clone(),
                 qlog_compression: config.qlog_compression,
