@@ -316,6 +316,7 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
 enum StreamPlotDirection {
     Send,
     Receive,
