@@ -68,8 +68,8 @@ where
     /// Sender for inbound packets on the connection.
     pub incoming_tx: mpsc::Sender<Incoming>,
     /// Receiver for `connection closed` notifications. This fires
-    /// after a `CONNECTION_CLOSE` frame has been sent on the connection,
-    /// but before `worker_shutdown_rx`.
+    /// after the worker attempts its final `CONNECTION_CLOSE` flight,
+    /// but before `worker_shutdown_rx`. Delivery is best effort.
     pub conn_close_rx: ConnCloseReceiver,
     /// Receiver which fires only when its associated sender is dropped.
     /// This happens when the connection's IO task exits.

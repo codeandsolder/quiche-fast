@@ -52,14 +52,13 @@ use url::Url;
 use crate::fixtures::h3i_fixtures::*;
 use crate::fixtures::*;
 
-#[tokio::test]
-async fn native_client_handshake_timeout_includes_initial_packet_flight(
-) -> tokio_quiche::QuicResult<()> {
-    use tokio_quiche::socket::Socket;
-    let silent_peer = UdpSocket::bind("127.0.0.1:0").await?;
-    let socket = UdpSocket::bind("127.0.0.1:0").await?;
-    socket.connect(silent_peer.local_addr()?).await?;
-    let socket = Socket::try_from(socket)?;
+async fn assert_client_handshake_timeout<Tx, Rx>(
+    socket: tokio_quiche::socket::Socket<Tx, Rx>,
+) -> tokio_quiche::QuicResult<()>
+where
+    Tx: datagram_socket::DatagramSocketSend + Send + 'static,
+    Rx: datagram_socket::DatagramSocketRecv + Send + 'static,
+{
     let mut settings = QuicSettings::default();
     settings.handshake_timeout = Some(Duration::from_millis(100));
     settings.max_idle_timeout = Some(Duration::from_secs(10));
@@ -89,11 +88,61 @@ async fn native_client_handshake_timeout_includes_initial_packet_flight(
             .map(std::io::Error::kind),
         Some(std::io::ErrorKind::TimedOut)
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn native_client_handshake_timeout_includes_initial_packet_flight(
+) -> tokio_quiche::QuicResult<()> {
+    use tokio_quiche::socket::Socket;
+    let silent_peer = UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(silent_peer.local_addr()?).await?;
+    assert_client_handshake_timeout(Socket::try_from(socket)?).await?;
     let mut initial = [0; 1500];
     let (length, _) =
         timeout(Duration::from_secs(1), silent_peer.recv_from(&mut initial))
             .await??;
     assert!(length >= quiche::MIN_CLIENT_INITIAL_LEN);
+    Ok(())
+}
+
+struct BlockedSender(Arc<AtomicUsize>);
+
+impl datagram_socket::DatagramSocketSend for BlockedSender {
+    fn poll_send(
+        &self, _cx: &mut std::task::Context<'_>, _buffer: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.0.fetch_add(1, Ordering::Relaxed);
+        std::task::Poll::Pending
+    }
+
+    fn poll_send_to(
+        &self, cx: &mut std::task::Context<'_>, buffer: &[u8],
+        _addr: std::net::SocketAddr,
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        self.poll_send(cx, buffer)
+    }
+}
+
+#[tokio::test]
+async fn native_client_handshake_deadline_survives_permanently_blocked_send(
+) -> tokio_quiche::QuicResult<()> {
+    use tokio_quiche::socket::Socket;
+    let silent_peer = UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(silent_peer.local_addr()?).await?;
+    let socket = Socket::try_from(socket)?;
+    let send_polls = Arc::new(AtomicUsize::new(0));
+    assert_client_handshake_timeout(Socket {
+        send: BlockedSender(Arc::clone(&send_polls)),
+        recv: socket.recv,
+        local_addr: socket.local_addr,
+        peer_addr: socket.peer_addr,
+        capabilities: socket.capabilities,
+    })
+    .await?;
+    assert!(send_polls.load(Ordering::Relaxed) > 0);
     Ok(())
 }
 

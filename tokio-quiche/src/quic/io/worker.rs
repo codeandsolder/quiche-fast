@@ -77,6 +77,13 @@ pub(crate) const INCOMING_QUEUE_SIZE: usize = 2048;
 // of sent packets
 pub(crate) const CHECK_INCOMING_QUEUE_RATIO: usize = INCOMING_QUEUE_SIZE / 16;
 
+// Only used when the core has no armed timer (e.g. idle timeout disabled).
+// A permanently blocked custom transport must not retain an egress buffer
+// forever.
+const MAX_UNTIMED_SEND_WAIT: Duration = Duration::from_secs(60);
+/// Final close notification is best effort; never hold the route indefinitely.
+const CLOSE_SEND_WAIT: Duration = Duration::from_secs(1);
+
 const RELEASE_TIMER_THRESHOLD: Duration = Duration::from_micros(250);
 
 /// Stop queuing GSO packets, if packet size is below this threshold.
@@ -410,20 +417,31 @@ where
             // egress buffer. Stays `None` when a persistent buffer is used.
             let mut pooled_send_buf: Option<PooledSendBuf> = None;
 
-            while self.write_state.has_pending_data {
+            while self.write_state.has_pending_data ||
+                !ctx.incoming_pkt_receiver.is_empty() ||
+                ctx.in_pkt.is_some()
+            {
+                self.service_connection_timers(qconn)?;
+                if qconn.is_closed() {
+                    return Ok(());
+                }
                 let mut packets_sent = 0;
 
                 // Drain received packets periodically because they contain ACKs
                 // and the bounded receive queue stalls new packets when full.
                 let mut did_recv = false;
-                while let Some(pkt) = ctx
-                    .in_pkt
-                    .take()
-                    .or_else(|| ctx.incoming_pkt_receiver.try_recv().ok())
-                {
+                for _ in 0..CHECK_INCOMING_QUEUE_RATIO {
+                    let Some(pkt) = ctx
+                        .in_pkt
+                        .take()
+                        .or_else(|| ctx.incoming_pkt_receiver.try_recv().ok())
+                    else {
+                        break;
+                    };
                     self.process_incoming(qconn, pkt)?;
                     did_recv = true;
                 }
+                self.write_state.has_pending_data |= did_recv;
 
                 // Deliver transport-generated events before the application can
                 // consume them.
@@ -439,7 +457,7 @@ where
                     None => true,
                     Some(next_release) =>
                         next_release
-                            .checked_duration_since(now)
+                            .checked_duration_since(Instant::now())
                             .unwrap_or_default() <
                             RELEASE_TIMER_THRESHOLD,
                 };
@@ -463,6 +481,10 @@ where
                                 .get_or_insert_with(PooledSendBuf::acquire)[..]
                         };
 
+                    self.service_connection_timers(qconn)?;
+                    if qconn.is_closed() {
+                        return Ok(());
+                    }
                     self.gather_data_from_quiche_conn(qconn, send_buf, false)?;
 
                     // Break if the connection is closed
@@ -473,7 +495,10 @@ where
                     let mut flush_operation_token =
                         TrackMidHandshakeFlush::new(self.metrics.clone());
 
-                    self.flush_buffer_to_socket(&send_buf[..]).await?;
+                    self.flush_active(qconn, send_buf).await?;
+                    if qconn.is_closed() {
+                        return Ok(());
+                    }
 
                     flush_operation_token.mark_complete();
 
@@ -484,6 +509,13 @@ where
                     {
                         return reason;
                     }
+                }
+                // Bound each uninterrupted receive/send burst even when the
+                // transport and application always make immediate progress.
+                if self.write_state.has_pending_data ||
+                    !ctx.incoming_pkt_receiver.is_empty()
+                {
+                    tokio::task::yield_now().await;
                 }
             }
 
@@ -541,9 +573,9 @@ where
                         WaitForDataOrHandshakeDirective::Flush(send_buf) => {
                             // The handshake data was gathered into this
                             // on-demand buffer; flush it here (outside the
-                            // select! so the flush cannot be cancelled), then
-                            // return it to the pool or drop it.
-                            self.flush_buffer_to_socket(send_buf.as_ref()).await?;
+                            // select!, but with an explicit protocol deadline).
+                            // Return it to the pool or drop it after completion.
+                            self.flush_active(qconn, send_buf.as_ref()).await?;
                         }
                         WaitForDataOrHandshakeDirective::Noop => {}
                     }
@@ -845,14 +877,19 @@ where
     }
 
     async fn flush_buffer_to_socket(
-        &mut self, send_buf: &[u8],
-    ) -> QuicResult<()> {
+        &mut self, send_buf: &[u8], deadline: Instant,
+    ) -> std::io::Result<SendOutcome> {
         if self.write_state.bytes_written == 0 {
-            return Ok(());
+            return Ok(SendOutcome::Sent);
         }
         let current_send_buf = send_buf
             .get(..self.write_state.bytes_written)
-            .ok_or("gathered packet length exceeds send buffer")?;
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "gathered packet length exceeds send buffer",
+                )
+            })?;
         let (from, to) = self.write_state.selected_path.unzip();
         let packet = PacketSend {
             to: to.unwrap_or(self.cfg.peer_addr),
@@ -862,20 +899,54 @@ where
             tx_time: self.write_state.tx_time,
             dscp: self.dscp_handle.as_ref().and_then(DscpHandle::get),
         };
-        let result =
-            send_packets(&self.socket, current_send_buf, packet, &self.metrics)
-                .await;
+        let result = send_packets_before(
+            &self.socket,
+            current_send_buf,
+            packet,
+            &self.metrics,
+            deadline,
+        )
+        .await;
 
         #[cfg(feature = "perf-quic-listener-metrics")]
-        if result.is_ok() {
+        if matches!(result, Ok(SendOutcome::Sent)) {
             self.measure_complete_handshake_time();
         }
+        result
+    }
 
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) if recoverable_send_error(&error) => Ok(()),
-            Err(error) => Err(error.into()),
+    async fn flush_active(
+        &mut self, qconn: &mut QuicheConnection, send_buf: &[u8],
+    ) -> QuicResult<()> {
+        self.enforce_handshake_deadline(qconn)?;
+        let deadline =
+            min_of_some(qconn.timeout_instant(), self.handshake_deadline(qconn))
+                .unwrap_or_else(|| Instant::now() + MAX_UNTIMED_SEND_WAIT);
+        match self.flush_buffer_to_socket(send_buf, deadline).await {
+            Ok(SendOutcome::Sent) => (),
+            Ok(SendOutcome::DeadlineExpired) => {
+                // The core already assigned packet numbers. Do not replay the
+                // buffer; recovery will generate new packets as needed.
+                self.write_state.next_release_time = None;
+            },
+            Err(error) if recoverable_send_error(&error) => (),
+            Err(error) => return Err(error.into()),
         }
+        self.service_connection_timers(qconn)
+    }
+
+    fn service_connection_timers(
+        &mut self, qconn: &mut QuicheConnection,
+    ) -> QuicResult<()> {
+        self.enforce_handshake_deadline(qconn)?;
+        if qconn
+            .timeout_instant()
+            .is_some_and(|deadline| deadline <= Instant::now())
+        {
+            qconn.on_timeout();
+            self.write_state.next_release_time = None;
+        }
+        Ok(())
     }
 
     /// The deadline before which the handshake must complete, if it hasn't
@@ -1260,20 +1331,40 @@ where
             notify_path_events(ctx.connection_hook.as_deref(), qconn);
         }
 
-        // TODO: this assumes that the tidy_up operation can be completed in one
-        // send (ignoring flow/congestion control constraints). We should
-        // guarantee that it gets sent by doublechecking the
-        // gathered/flushed byte totals and retry if they don't match.
-        //
-        // This runs once per connection at close and sends a single
-        // CONNECTION_CLOSE datagram, so acquire a buffer only for this send.
+        // The application may select its own close code. Otherwise turn a
+        // local worker failure into a transport close, rather than generating
+        // more ordinary application data from an abandoned connection.
+        if self.conn_stage.work_loop_result.is_err() &&
+            qconn.local_error().is_none() &&
+            !qconn.is_closed() &&
+            !qconn.is_draining()
+        {
+            let _ = qconn.close(
+                false,
+                quiche::WireErrorCode::InternalError as u64,
+                &[],
+            );
+        }
+
+        // Best-effort final CONNECTION_CLOSE flight. Waiting for a broken
+        // socket must not retain the connection's routes or resources.
         let mut send_buf = TransientSendBuf::acquire(self.cfg.pool_send_buffer);
-        let close_result = match self.gather_data_from_quiche_conn(
-            qconn,
-            send_buf.as_mut(),
-            false,
-        ) {
-            Ok(_) => self.flush_buffer_to_socket(send_buf.as_ref()).await,
+        let close_deadline = Instant::now() + CLOSE_SEND_WAIT;
+        let close_result: QuicResult<()> = match self
+            .gather_data_from_quiche_conn(qconn, send_buf.as_mut(), false)
+        {
+            Ok(_) => match self
+                .flush_buffer_to_socket(send_buf.as_ref(), close_deadline)
+                .await
+            {
+                Ok(SendOutcome::Sent) => Ok(()),
+                Ok(SendOutcome::DeadlineExpired) => Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "final QUIC send deadline expired",
+                )
+                .into()),
+                Err(error) => Err(error.into()),
+            },
             Err(error) => Err(error),
         };
         // The first failure remains the authoritative close reason.
