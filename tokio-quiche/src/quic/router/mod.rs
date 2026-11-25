@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout() {
+    async fn test_timeout() -> crate::QuicResult<()> {
         // Configure a short idle timeout to speed up connection reclamation as
         // quiche doesn't support time mocking
         let quic_settings = QuicSettings {
@@ -979,10 +979,10 @@ mod tests {
             Hooks::default(),
         );
         params.enable_per_connection_dscp = true;
-        let config = Config::new(&params, SocketCapabilities::default()).unwrap();
+        let config = Config::new(&params, SocketCapabilities::default())?;
 
-        let socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let local_addr = socket.local_addr().unwrap();
+        let socket = UdpSocket::bind("127.0.0.1:0").await?;
+        let local_addr = socket.local_addr()?;
         let host_port = local_addr.to_string();
         let socket_tx = Arc::new(socket);
         let socket_rx = Arc::clone(&socket_tx);
@@ -1001,10 +1001,9 @@ mod tests {
                 with_pktinfo: false,
             },
             Arc::clone(&socket_tx),
-            Default::default(),
             Arc::new(SimpleConnectionIdGenerator),
             DefaultMetrics,
-        );
+        )?;
 
         let (socket_driver, mut incoming) = InboundPacketRouter::new(
             config,
@@ -1023,11 +1022,15 @@ mod tests {
         time::pause();
 
         let (h3_driver, _) = ServerH3Driver::new(Http3Settings::default());
-        let conn = incoming.recv().await.unwrap().unwrap();
-        let dscp_handle = conn.dscp_handle().unwrap().clone();
+        let conn = incoming.recv().await.ok_or("listener closed")??;
+        let dscp_handle =
+            conn.dscp_handle().ok_or("missing DSCP handle")?.clone();
         assert_eq!(dscp_handle.get(), None);
         dscp_handle.set(Dscp::new(0));
-        assert_eq!(conn.dscp_handle().unwrap().get(), Dscp::new(0));
+        assert_eq!(
+            conn.dscp_handle().ok_or("missing DSCP handle")?.get(),
+            Dscp::new(0)
+        );
         let drop_check = conn.incoming_ev_sender.clone();
         let _conn = conn.start(h3_driver);
 
@@ -1038,6 +1041,7 @@ mod tests {
         // This is a smoke test. A failure leaves `notified()` unresolved and
         // hangs the test.
         drop_check.closed().await;
+        Ok(())
     }
 
     #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
@@ -1221,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_poll_packet_always_ready() {
+    fn test_poll_packet_always_ready() -> crate::QuicResult<()> {
         let (cert, private_key) = test_credentials();
         let tls_cert_settings = TlsCertificatePaths {
             cert,
@@ -1234,7 +1238,7 @@ mod tests {
             Hooks::default(),
         );
 
-        let config = Config::new(&params, SocketCapabilities::default()).unwrap();
+        let config = Config::new(&params, SocketCapabilities::default())?;
         let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
         let (mut ipr, accept_stream) = InboundPacketRouter::new(
@@ -1260,10 +1264,10 @@ mod tests {
 
         // Fill the `conn_map_cmd` channel with some messages to process
         for _ in 0..20 {
-            let random_cid = SimpleConnectionIdGenerator.new_connection_id();
+            let random_cid = SimpleConnectionIdGenerator.new_connection_id()?;
             conn_map_cmd_tx
                 .send(ConnectionMapCommand::UnmapCid(random_cid))
-                .unwrap();
+                .map_err(|_| "router command channel closed")?;
         }
         // Give the IPR some time to process the ConnectionMapCommands
         std::thread::sleep(Duration::from_secs(1));
@@ -1280,7 +1284,8 @@ mod tests {
 
         // Check that the ConnectionMapCommands we added above were actually
         // processed
-        let ipr = ipr.join().unwrap();
+        let ipr = ipr.join().map_err(|_| "router thread panicked")?;
         assert!(ipr.conn_map_cmd_rx.is_empty());
+        Ok(())
     }
 }
