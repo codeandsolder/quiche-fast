@@ -115,7 +115,6 @@ use self::connection::ConnectionIdGenerator as _;
 use self::connection::QuicConnection;
 use self::router::acceptor::ConnectionAcceptor;
 use self::router::acceptor::ConnectionAcceptorConfig;
-use self::router::connector::ClientConnector;
 use self::router::InboundPacketRouter;
 
 pub use self::connection::ConnectionShutdownBehaviour;
@@ -231,8 +230,7 @@ where
         })?;
     }
 
-    // Set the qlog writer here instead of in the `ClientConnector` to avoid
-    // missing logs from early in the connection
+    // Attach tracing before the worker sends its first handshake packet.
     if let Some(qlog_dir) = &client_config.qlog_dir {
         log::info!("setting up qlogs"; "qlog_dir"=>qlog_dir);
         let id = format!("{:?}", scid);
@@ -260,14 +258,15 @@ where
     let socket_tx = Arc::new(socket.send);
     let socket_rx = socket.recv;
 
-    let (router, mut quic_connection_stream) = InboundPacketRouter::new(
+    let (router, initial_connection) = InboundPacketRouter::new_client(
         client_config,
         Arc::clone(&socket_tx),
         socket_rx,
         socket.local_addr,
-        ClientConnector::new(socket_tx, Box::new(quiche_conn)),
+        socket.peer_addr,
+        Box::new(quiche_conn),
         DefaultMetrics,
-    );
+    )?;
 
     // drive the packet router:
     tokio::spawn(async move {
@@ -281,11 +280,9 @@ where
         }
     });
 
-    Ok(quic_connection_stream
-        .recv()
-        .await
-        .ok_or("unable to establish connection")??
-        .start(app))
+    let (connection, running) = initial_connection.handshake(app).await?;
+    crate::quic::connection::InitialQuicConnection::resume(running);
+    Ok(connection)
 }
 
 pub(crate) fn start_listener<M>(

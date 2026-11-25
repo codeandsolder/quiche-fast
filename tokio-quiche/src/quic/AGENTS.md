@@ -27,7 +27,6 @@ io/
 router/
   mod.rs                      # InboundPacketRouter: Future, demux by DCID, ConnectionMapCommand
   acceptor.rs                 # ConnectionAcceptor: server-side InitialPacketHandler (RETRY flow)
-  connector.rs                # ClientConnector: client-side InitialPacketHandler (handshake FSM)
 ```
 
 ## WHERE TO LOOK
@@ -41,7 +40,7 @@ router/
 | Packet routing/demux | `router/mod.rs` | `InboundPacketRouter::on_incoming()` (~:229) |
 | CID management | `io/worker.rs` | `fill_available_scids()`, `refresh_connection_ids()` |
 | Server accept flow | `router/acceptor.rs` | `ConnectionAcceptor::handle_initials()` |
-| Client connect flow | `router/connector.rs` | `ClientConnector::on_incoming()` |
+| Client connect flow | `quic/mod.rs`, `router/mod.rs` | `connect_with_config()`, `InboundPacketRouter::new_client()` |
 | Connection spawn path | `connection/mod.rs` | `InitialQuicConnection::start()` / `handshake()` / `resume()` |
 | CID-to-connection map | `connection/map.rs` | `ConnectionMap` (optimized `CidOwned` for v1 CIDs) |
 | Raw/manual connections | `raw.rs` | `wrap_quiche_conn()`, `ConnCloseReceiver` |

@@ -25,7 +25,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 pub(crate) mod acceptor;
-pub(crate) mod connector;
 #[cfg(target_os = "linux")]
 mod linux_recv;
 
@@ -263,6 +262,46 @@ where
             SystemTime,
         >,
     ) -> io::Result<()> {
+        if self.shutdown_tx.is_none() {
+            return Ok(());
+        }
+        // Own the permit so the shared registration path can mutably borrow
+        // the router without a borrow of accept_sink.
+        let Ok(send_permit) = self.accept_sink.clone().try_reserve_owned() else {
+            return Err(
+                labels::QuicInvalidInitialPacketError::AcceptQueueOverflow.into(),
+            );
+        };
+        let conn = self.register_connection(
+            new_connection,
+            local_addr,
+            peer_addr,
+            #[cfg(feature = "perf-quic-listener-metrics")]
+            init_rx_time,
+            true,
+        )?;
+        self.metrics.accepted_initial_packet_count().inc();
+        if self.config.enable_expensive_packet_count_metrics {
+            if let Some(peer_ip) =
+                quic_expensive_metrics_ip_reduce(conn.peer_addr().ip())
+            {
+                self.metrics
+                    .expensive_accepted_initial_packet_count(peer_ip)
+                    .inc();
+            }
+        }
+        send_permit.send(Ok(conn));
+        Ok(())
+    }
+
+    fn register_connection(
+        &mut self, new_connection: NewConnection, local_addr: SocketAddr,
+        peer_addr: SocketAddr,
+        #[cfg(feature = "perf-quic-listener-metrics")] init_rx_time: Option<
+            SystemTime,
+        >,
+        allow_early_data: bool,
+    ) -> io::Result<InitialQuicConnection<Tx, M>> {
         let NewConnection {
             conn,
             pending_cid,
@@ -272,17 +311,16 @@ where
             enable_per_connection_dscp,
         } = new_connection;
 
-        let Some(ref shutdown_tx) = self.shutdown_tx else {
-            // Do not create new connections while shutting down.
-            return Ok(());
-        };
-        let Ok(send_permit) = self.accept_sink.try_reserve() else {
-            // Drop the connection when the backlog is full. The client retries.
-            return Err(
-                labels::QuicInvalidInitialPacketError::AcceptQueueOverflow.into(),
-            );
-        };
-
+        let shutdown_tx = self
+            .shutdown_tx
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "router is shutting down",
+                )
+            })?
+            .clone();
         let scid = conn.source_id().clone();
         let pending_cid = pending_cid.filter(|cid| cid != &scid);
         let owner = self.conns.allocate_owner()?;
@@ -309,7 +347,7 @@ where
             writer_cfg,
             initial_pkt,
             dscp_handle: enable_per_connection_dscp.then(DscpHandle::new),
-            shutdown_tx: shutdown_tx.clone(),
+            shutdown_tx,
             route_lease: RouteLease::new(owner, self.conn_map_cmd_tx.clone()),
             scid: scid.clone(),
             cid_generator,
@@ -318,6 +356,7 @@ where
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time,
             handshake_info,
+            allow_early_data,
             quiche_conn: conn,
             socket: Arc::clone(&self.socket_tx),
             local_addr,
@@ -335,19 +374,55 @@ where
             pending_cid.as_ref(),
         )?;
 
-        self.metrics.accepted_initial_packet_count().inc();
-        if self.config.enable_expensive_packet_count_metrics {
-            if let Some(peer_ip) =
-                quic_expensive_metrics_ip_reduce(conn.peer_addr().ip())
-            {
-                self.metrics
-                    .expensive_accepted_initial_packet_count(peer_ip)
-                    .inc();
-            }
-        }
+        Ok(conn)
+    }
+}
 
-        send_permit.send(Ok(conn));
-        Ok(())
+/// A client socket has a single pre-registered connection and no accept path.
+pub(super) struct ClientOnly;
+
+impl InitialPacketHandler for ClientOnly {
+    fn handle_initials(
+        &mut self, _incoming: Incoming, _hdr: Header<'static>,
+        _config: &mut quiche::Config,
+    ) -> io::Result<Option<NewConnection>> {
+        Ok(None)
+    }
+}
+
+impl<Tx, Rx, M> InboundPacketRouter<Tx, Rx, M, ClientOnly>
+where
+    Tx: DatagramSocketSend + Send + 'static,
+    Rx: DatagramSocketRecv,
+    M: Metrics,
+{
+    pub(super) fn new_client(
+        config: Config, socket_tx: Arc<Tx>, socket_rx: Rx,
+        local_addr: SocketAddr, peer_addr: SocketAddr,
+        conn: Box<QuicheConnection>, metrics: M,
+    ) -> io::Result<(Self, InitialQuicConnection<Tx, M>)> {
+        let (mut router, accepts) = Self::new(
+            config, socket_tx, socket_rx, local_addr, ClientOnly, metrics,
+        );
+        let connection = router.register_connection(
+            NewConnection {
+                conn,
+                pending_cid: None,
+                initial_pkt: None,
+                enable_per_connection_dscp: false,
+                cid_generator: None,
+                handshake_start_time: Instant::now(),
+            },
+            local_addr,
+            peer_addr,
+            #[cfg(feature = "perf-quic-listener-metrics")]
+            None,
+            false,
+        )?;
+        // This also makes shutdown follow the lifetime of the registered
+        // worker.
+        drop(accepts);
+        Ok((router, connection))
     }
 }
 

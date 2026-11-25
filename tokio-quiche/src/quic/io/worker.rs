@@ -401,6 +401,7 @@ where
             (!self.cfg.pool_send_buffer).then(alloc_send_buffer);
 
         loop {
+            self.enforce_handshake_deadline(qconn)?;
             let now = Instant::now();
 
             self.write_state.has_pending_data = true;
@@ -1154,7 +1155,7 @@ where
                 RunningOrClosing::Closing(Closing {
                     params: self.into(),
                     context: ctx,
-                    work_loop_result,
+                    work_loop_result: Err(e),
                     qconn,
                 })
             },

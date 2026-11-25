@@ -359,7 +359,9 @@ where
             stats: Arc::clone(&self.stats),
             connection_hook: self.params.connection_hook,
         };
-        let conn_stage = Handshake;
+        let conn_stage = Handshake {
+            allow_early_data: self.params.allow_early_data,
+        };
         let params = IoWorkerParams {
             socket: MaybeConnectedSocket::new(self.params.socket),
             shutdown_tx: self.params.shutdown_tx,
@@ -509,6 +511,7 @@ where
     #[cfg(feature = "perf-quic-listener-metrics")]
     pub init_rx_time: Option<SystemTime>,
     pub handshake_info: HandshakeInfo,
+    pub allow_early_data: bool,
     /// Boxed because this value is moved by-value through several nested
     /// async state machines. Inlining a [`QuicheConnection`] here would
     /// duplicate its payload across the future state slots that hold it
@@ -676,7 +679,8 @@ impl HandshakeInfo {
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.timeout.map(|timeout| self.start_time + timeout)
+        self.timeout
+            .and_then(|timeout| self.start_time.checked_add(timeout))
     }
 
     pub(crate) fn is_expired(&self) -> bool {

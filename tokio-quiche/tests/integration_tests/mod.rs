@@ -233,6 +233,57 @@ async fn test_ioworker_state_machine_pause() {
 }
 
 #[tokio::test]
+async fn native_client_handshakes_and_exchanges_http3_request(
+) -> tokio_quiche::QuicResult<()> {
+    use tokio_quiche::http3::driver::ClientH3Event;
+    use tokio_quiche::http3::driver::H3Event;
+    use tokio_quiche::http3::driver::NewClientRequest;
+    use tokio_quiche::quiche::h3::NameValue;
+    let (url, _hook, _audit) = start_server();
+    let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(extract_host_ipv4(&url)).await?;
+    let (connection, mut controller) = timeout(
+        Duration::from_secs(5),
+        tokio_quiche::quic::connect(socket, Some("test.com")),
+    )
+    .await??;
+    assert!(
+        connection
+            .audit_log_stats()
+            .transport_handshake_duration_us() >=
+            0
+    );
+    controller
+        .request_sender()
+        .send(NewClientRequest {
+            request_id: 17,
+            headers: h3i_fixtures::default_headers(),
+            body_writer: None,
+        })
+        .map_err(|_| "client request queue closed")?;
+    timeout(Duration::from_secs(5), async {
+        loop {
+            match controller.event_receiver_mut().recv().await {
+                Some(ClientH3Event::Core(H3Event::IncomingHeaders(headers))) => {
+                    assert!(headers
+                        .headers
+                        .iter()
+                        .any(|header| header.name() == b":status" &&
+                            header.value() == b"200"));
+                    return Ok::<(), Box<dyn std::error::Error + Send + Sync>>(());
+                },
+                Some(ClientH3Event::Core(H3Event::ConnectionShutdown(_))) |
+                None =>
+                    return Err("client connection closed before response".into()),
+                _ => (),
+            }
+        }
+    })
+    .await??;
+    Ok(())
+}
+
+#[tokio::test]
 #[cfg(feature = "custom-client-dcid")]
 async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
     use tokio_quiche::http3::settings::Http3Settings;
