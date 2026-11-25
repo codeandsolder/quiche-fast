@@ -1028,9 +1028,58 @@ impl Datastore {
     /// roles. Validate arithmetic before mutating frame history or request
     /// metadata.
     fn record_http_data(
+        &mut self, direction: HttpDataDirection, stream_id: u64,
+        length: Option<u64>, time: f64,
+    ) -> Result<(), DatastoreError> {
+        let cumulative = length
+            .map(|length| {
+                self.record_known_http_data(direction, stream_id, length, time)
+            })
+            .transpose()?;
+        let client_data = direction.is_client_data(self.vantage_point);
+        let req = self.get_or_insert_http_req(stream_id);
+        let (first, last, samples) = match direction {
+            HttpDataDirection::Sent => (
+                &mut req.time_first_data_tx,
+                &mut req.time_last_data_tx,
+                &mut req.time_data_tx_set,
+            ),
+            HttpDataDirection::Received => (
+                &mut req.time_first_data_rx,
+                &mut req.time_last_data_rx,
+                &mut req.time_data_rx_set,
+            ),
+        };
+        *first = Some(first.map_or(time, |value| value.min(time)));
+        *last = Some(last.map_or(time, |value| value.max(time)));
+        if let Some(length) = length {
+            samples.push((time, length));
+        }
+        let (observed, incomplete) = if client_data {
+            (
+                &mut req.client_observed_data_bytes,
+                &mut req.client_data_lengths_incomplete,
+            )
+        } else {
+            (
+                &mut req.server_observed_data_bytes,
+                &mut req.server_data_lengths_incomplete,
+            )
+        };
+        if let Some(cumulative) = cumulative {
+            *observed = NaOption::new(Some(cumulative));
+        } else {
+            *incomplete = true;
+        }
+        Ok(())
+    }
+
+    /// Apply a known length to directional series only after validating
+    /// the new aggregate.
+    fn record_known_http_data(
         &mut self, direction: HttpDataDirection, stream_id: u64, length: u64,
         time: f64,
-    ) -> Result<(), DatastoreError> {
+    ) -> Result<u64, DatastoreError> {
         let mut history = match direction {
             HttpDataDirection::Sent => HttpDataHistoryMut {
                 frames: &mut self.sent_data_frames,
@@ -1053,32 +1102,7 @@ impl Datastore {
                 cumulative_field: "received_data_cumulative",
             },
         };
-        let cumulative = history.record(stream_id, length, time)?;
-        let client_data = direction.is_client_data(self.vantage_point);
-        let req = self.get_or_insert_http_req(stream_id);
-        let (first, last, samples) = match direction {
-            HttpDataDirection::Sent => (
-                &mut req.time_first_data_tx,
-                &mut req.time_last_data_tx,
-                &mut req.time_data_tx_set,
-            ),
-            HttpDataDirection::Received => (
-                &mut req.time_first_data_rx,
-                &mut req.time_last_data_rx,
-                &mut req.time_data_rx_set,
-            ),
-        };
-        *first = Some(first.map_or(time, |value| value.min(time)));
-        *last = Some(last.map_or(time, |value| value.max(time)));
-        samples.push((time, length));
-        let transferred = if client_data {
-            &mut req.client_transferred_bytes
-        } else {
-            &mut req.server_transferred_bytes
-        };
-        *transferred =
-            std::cmp::max(*transferred, NaOption::new(Some(cumulative)));
-        Ok(())
+        history.record(stream_id, length, time)
     }
 
     /// Chrome HTTP/2 additionally records a connection-wide DATA total.
@@ -1097,7 +1121,7 @@ impl Datastore {
         self.record_http_data(
             HttpDataDirection::Received,
             stream_id,
-            length,
+            Some(length),
             event_time,
         )?;
         if let Some(total) = connection_total {
@@ -1114,7 +1138,7 @@ impl Datastore {
         self.record_http_data(
             HttpDataDirection::Sent,
             u64::from(stream_id),
-            u64::from(size),
+            Some(u64::from(size)),
             event_time,
         )?;
         self.h2_send_window_updates_balanced
@@ -1846,26 +1870,23 @@ impl Datastore {
             },
 
             Http3Frame::Data { raw } => {
-                // DATA length is the declared payload size, not proof that
-                // every byte has been delivered. Missing lengths must not
-                // fabricate a zero-byte measurement.
-                if let Some(length) = length
-                    .or_else(|| raw.as_ref().and_then(|raw| raw.payload_length))
-                {
-                    self.record_http_data(direction, stream_id, length, ev_time)?;
-                }
+                // The frame declares a payload length, not necessarily
+                // delivery of its entire body. Unknown lengths still carry
+                // timing evidence but cannot contribute numeric bytes.
+                let length = length
+                    .or_else(|| raw.as_ref().and_then(|raw| raw.payload_length));
+                self.record_http_data(direction, stream_id, length, ev_time)?;
             },
 
             Http3Frame::PriorityUpdate {
                 stream_id: Some(priority_stream_id),
                 priority_field_value,
                 ..
-            } =>
-                if direction.is_client_data(self.vantage_point) {
-                    self.get_or_insert_http_req(*priority_stream_id)
-                        .priority_updates
-                        .push(priority_field_value.clone());
-                },
+            } if direction.is_client_data(self.vantage_point) => {
+                self.get_or_insert_http_req(*priority_stream_id)
+                    .priority_updates
+                    .push(priority_field_value.clone());
+            },
 
             _ => (),
         }
@@ -2315,7 +2336,7 @@ mod netlog_tests {
                 (4.0, 7),
                 (6.0, 0)
             ]);
-            assert_eq!(request.server_transferred_bytes.inner, Some(12));
+            assert_eq!(request.server_observed_data_bytes.inner, Some(12));
         }
 
         // Only HTTP/2 records connection-wide received DATA. HTTP/3 uses
@@ -2364,7 +2385,7 @@ mod netlog_tests {
         let request = &datastore.http_requests[&5];
         assert_eq!(request.time_first_data_tx, Some(1.0));
         assert_eq!(request.time_last_data_tx, Some(8.0));
-        assert_eq!(request.client_transferred_bytes.inner, Some(13));
+        assert_eq!(request.client_observed_data_bytes.inner, Some(13));
         assert_eq!(request.time_data_tx_set, vec![(1.0, 4), (5.0, 9), (8.0, 0)]);
         assert!(datastore.received_data_frames.is_empty());
         Ok(())
@@ -3412,8 +3433,8 @@ mod qlog_h3_direction_tests {
             );
             let (client_bytes, server_bytes) =
                 if request_created { (11, 17) } else { (17, 11) };
-            assert_eq!(req.client_transferred_bytes.inner, Some(client_bytes));
-            assert_eq!(req.server_transferred_bytes.inner, Some(server_bytes));
+            assert_eq!(req.client_observed_data_bytes.inner, Some(client_bytes));
+            assert_eq!(req.server_observed_data_bytes.inner, Some(server_bytes));
         }
         Ok(())
     }
@@ -3469,9 +3490,12 @@ mod qlog_h3_direction_tests {
         ] {
             let request = ds.http_requests.get(&8).ok_or("missing request")?;
             assert_eq!(request.time_first_data_tx, Some(2.0));
-            assert_eq!(request.time_last_data_tx, Some(5.0));
-            assert_eq!(request.client_transferred_bytes.inner, Some(4));
-            assert_eq!(request.server_transferred_bytes.inner, Some(15));
+            assert_eq!(request.time_last_data_tx, Some(7.0));
+            assert_eq!(request.client_observed_data_bytes.inner, Some(4));
+            assert!(request.client_data_lengths_incomplete);
+            assert!(request.avg_upload_rate.inner.is_none());
+            assert!(!request.server_data_lengths_incomplete);
+            assert_eq!(request.server_observed_data_bytes.inner, Some(15));
             assert_eq!(ds.total_sent_data_frame_count, 2);
             assert_eq!(ds.total_received_data_frame_count, 2);
             assert_eq!(
@@ -3511,14 +3535,14 @@ mod qlog_h3_direction_tests {
                     ds.total_sent_data_frame_count,
                     &ds.sent_data_frames,
                     request.time_last_data_tx,
-                    request.client_transferred_bytes.inner,
+                    request.client_observed_data_bytes.inner,
                 )
             } else {
                 (
                     ds.total_received_data_frame_count,
                     &ds.received_data_frames,
                     request.time_last_data_rx,
-                    request.server_transferred_bytes.inner,
+                    request.server_observed_data_bytes.inner,
                 )
             };
             assert_eq!(count, 1);

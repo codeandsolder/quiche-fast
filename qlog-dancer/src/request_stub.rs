@@ -37,7 +37,8 @@ use crate::datastore::RequestAtServerDeltas;
 use netlog::http::headers_to_map;
 
 pub const CLIENT_CONTENT_LENGTH: &str = "Request Content-Length";
-pub const CLIENT_TRANSFERRED: &str = "Request Transferred";
+pub const CLIENT_OBSERVED_DATA: &str = "Request Observed DATA (bytes)";
+pub const SERVER_OBSERVED_DATA: &str = "Response Observed DATA (bytes)";
 pub const UPLOAD_TIME: &str = "Upload duration (ms)";
 pub const UPLOAD_RATE: &str = "Upload rate (Mbps)";
 pub const SERVER_RX_HDR_TX_HDR: &str = "Server Rx Hdr, Tx Hdr";
@@ -109,8 +110,12 @@ pub struct HttpRequestStub {
     pub time_data_rx_set: Vec<(f64, u64)>,
     pub time_data_tx_set: Vec<(f64, u64)>,
 
-    pub client_transferred_bytes: NaOption<u64>,
-    pub server_transferred_bytes: NaOption<u64>,
+    pub client_observed_data_bytes: NaOption<u64>,
+    pub server_observed_data_bytes: NaOption<u64>,
+    /// A DATA observation omitted its payload length. The known-byte sum
+    /// must not be presented as a complete observed total in reports.
+    pub client_data_lengths_incomplete: bool,
+    pub server_data_lengths_incomplete: bool,
 
     pub avg_upload_rate: NaOption<f64>,
     pub avg_download_rate_d2d: NaOption<f64>,
@@ -191,7 +196,7 @@ const REQUEST_HEADERS: [&str; 31] = [
     "Path",
     "Status",
     "Response Content-Length (bytes)",
-    "Response Transferred (bytes)",
+    SERVER_OBSERVED_DATA,
     "Request Discovered Time",
     "Request Start Time",
     "Request End Time",
@@ -204,7 +209,7 @@ const REQUEST_HEADERS: [&str; 31] = [
     "Client Tx Hdr, Rx First Data",
     "Client Tx Hdr, Rx Last Data",
     CLIENT_CONTENT_LENGTH,
-    CLIENT_TRANSFERRED,
+    CLIENT_OBSERVED_DATA,
     UPLOAD_TIME,
     UPLOAD_RATE,
     SERVER_RX_HDR_TX_HDR,
@@ -282,7 +287,7 @@ impl tabled::Tabled for HttpRequestStub {
             path.into(),
             self.status.to_string().into(),
             self.server_content_length.to_string().into(),
-            self.server_transferred_bytes.to_string().into(),
+            self.complete_server_data_bytes().to_string().into(),
             NaOption::new(self.time_discovery).to_string().into(),
             req_start.to_string().into(),
             req_end.to_string().into(),
@@ -295,7 +300,7 @@ impl tabled::Tabled for HttpRequestStub {
             client_deltas.tx_hdr_rx_first_data.into(),
             client_deltas.tx_hdr_rx_last_data.into(),
             self.client_content_length.to_string().into(),
-            self.client_transferred_bytes.to_string().into(),
+            self.complete_client_data_bytes().to_string().into(),
             client_deltas.upload_time.into(),
             self.avg_upload_rate.to_string().into(),
             server_rx_hdr_tx_hdr.into(),
@@ -394,25 +399,41 @@ impl HttpRequestStub {
         NaOption::new(rate.is_finite().then_some(rate))
     }
 
+    const fn complete_client_data_bytes(&self) -> NaOption<u64> {
+        if self.client_data_lengths_incomplete {
+            NaOption::new(None)
+        } else {
+            self.client_observed_data_bytes
+        }
+    }
+
+    const fn complete_server_data_bytes(&self) -> NaOption<u64> {
+        if self.server_data_lengths_incomplete {
+            NaOption::new(None)
+        } else {
+            self.server_observed_data_bytes
+        }
+    }
+
     pub fn calculate_upload_download_rate(&mut self) {
         match self.request_actor {
             RequestActor::Client => {
                 self.avg_upload_rate = Self::maybe_megabits_per_second(
                     self.time_first_data_tx,
                     self.time_last_data_tx,
-                    self.client_transferred_bytes.inner,
+                    self.complete_client_data_bytes().inner,
                 );
 
                 self.avg_download_rate_d2d = Self::maybe_megabits_per_second(
                     self.time_first_data_rx,
                     self.time_last_data_rx,
-                    self.server_transferred_bytes.inner,
+                    self.complete_server_data_bytes().inner,
                 );
 
                 self.avg_download_rate_h2d = Self::maybe_megabits_per_second(
                     self.time_first_headers_tx,
                     self.time_last_data_rx,
-                    self.server_transferred_bytes.inner,
+                    self.complete_server_data_bytes().inner,
                 );
             },
 
@@ -420,13 +441,13 @@ impl HttpRequestStub {
                 self.avg_upload_rate = Self::maybe_megabits_per_second(
                     self.time_first_data_rx,
                     self.time_last_data_rx,
-                    self.client_transferred_bytes.inner,
+                    self.complete_client_data_bytes().inner,
                 );
 
                 self.avg_download_rate_d2d = Self::maybe_megabits_per_second(
                     self.time_first_data_tx,
                     self.time_last_data_tx,
-                    self.server_transferred_bytes.inner,
+                    self.complete_server_data_bytes().inner,
                 );
             },
         }
