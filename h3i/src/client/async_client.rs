@@ -191,7 +191,7 @@ impl BuildingConnectionSummary {
 }
 
 impl Future for BuildingConnectionSummary {
-    type Output = ConnectionSummary;
+    type Output = Result<ConnectionSummary, ClientError>;
 
     fn poll(
         mut self: Pin<&mut Self>, cx: &mut Context<'_>,
@@ -218,6 +218,8 @@ impl Future for BuildingConnectionSummary {
                 ConnectionRecord::ConnectionStats(s) => summary.stats = Some(s),
                 ConnectionRecord::PathStats(ps) => summary.path_stats = ps,
                 ConnectionRecord::Close(d) => summary.conn_close_details = d,
+                ConnectionRecord::ActionFailed(error) =>
+                    return Poll::Ready(Err(ClientError::Other(error))),
             };
         }
 
@@ -225,7 +227,7 @@ impl Future for BuildingConnectionSummary {
             // The sender drops when the Tokio-Quiche IOW finishes, so the
             // connection is done and we're safe to yield the summary.
             let summary = self.summary.take().expect("summary already taken");
-            Poll::Ready(summary)
+            Poll::Ready(Ok(summary))
         } else {
             Poll::Pending
         }
@@ -316,9 +318,9 @@ impl Client for H3iDriver {
     fn handle_response_frame(
         &mut self, stream_id: u64, frame: crate::frame::H3iFrame,
     ) {
-        self.record_tx
-            .send(ConnectionRecord::StreamedFrame { stream_id, frame })
-            .expect("H3iDriver task dropped")
+        let _ = self
+            .record_tx
+            .send(ConnectionRecord::StreamedFrame { stream_id, frame });
     }
 }
 
@@ -365,8 +367,7 @@ impl ApplicationOverQuic for H3iDriver {
             return Ok(());
         }
 
-        // Re-create the iterator so we can mutably borrow the stream parser map
-        let iter = self.actions.clone().into_iter().skip(self.actions_executed);
+        let iter = self.actions.iter().skip(self.actions_executed);
 
         for action in iter {
             match action {
@@ -383,7 +384,16 @@ impl ApplicationOverQuic for H3iDriver {
                         // still fire.
                         self.next_fire_time = Instant::now();
 
-                        execute_action(&action, qconn, self.stream_parsers_mut());
+                        if let Err(error) = execute_action(
+                            action,
+                            qconn,
+                            &mut self.stream_parsers,
+                        ) {
+                            let _ = self.record_tx.send(
+                                ConnectionRecord::ActionFailed(error.clone()),
+                            );
+                            return Err(error.into());
+                        }
                         self.actions_executed += 1;
                     } else {
                         break;
@@ -454,6 +464,7 @@ impl ApplicationOverQuic for H3iDriver {
 }
 
 pub enum ConnectionRecord {
+    ActionFailed(String),
     StreamedFrame { stream_id: u64, frame: H3iFrame },
     Close(ConnectionCloseDetails),
     PathStats(Vec<PathStats>),

@@ -24,13 +24,12 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Actions specific to HTTP/3 and QUIC
+//! Actions for HTTP/3 and QUIC.
 //!
-//! Actions are small operations such as sending HTTP/3 frames or managing QUIC
-//! streams. Each independent use case for h3i requires its own collection of
-//! Actions, that h3i iterates over in sequence and executes.
+//! The client executes a sequence of actions to send frames and manage streams.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::time::Duration;
 
 use crate::quiche;
@@ -41,10 +40,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_with::serde_as;
 
-use crate::encode_header_block;
-use crate::encode_header_block_literal;
-
-/// Expected result from a stream_send operation.
+/// Expected result from a `stream_send` operation.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum ExpectedStreamSendResult {
     /// Expect success with any number of bytes written.
@@ -64,7 +60,7 @@ pub enum ExpectedStreamSendResult {
 /// action.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
-    /// Send a [quiche::h3::frame::Frame] over a stream.
+    /// Send a [`quiche::h3::frame::Frame`] over a stream.
     SendFrame {
         stream_id: u64,
         fin_stream: bool,
@@ -78,7 +74,6 @@ pub enum Action {
         fin_stream: bool,
         literal_headers: bool,
         headers: Vec<Header>,
-        frame: Frame,
         expected_result: ExpectedStreamSendResult,
     },
 
@@ -122,7 +117,7 @@ pub enum Action {
 
     FlushPackets,
 
-    /// Wait for an event. See [WaitType] for the events.
+    /// Wait for an event. See [`WaitType`] for the events.
     Wait {
         wait_type: WaitType,
     },
@@ -167,7 +162,7 @@ impl From<WaitType> for Action {
 /// A response event, received over a stream, which will terminate the wait
 /// period.
 ///
-/// See [StreamEventType] for the types of events.
+/// See [`StreamEventType`] for the types of events.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename = "snake_case")]
 pub struct StreamEvent {
@@ -202,145 +197,176 @@ pub enum StreamEventType {
 
 #[derive(Debug, Default)]
 pub(crate) struct WaitingFor {
-    stream_events: HashMap<u64, Vec<StreamEvent>>,
-    required_stream_quota: Option<RequiredStreamsQuota>,
+    stream_events: HashMap<u64, HashSet<StreamEventType>>,
+    required_bidi: Option<u64>,
+    required_uni: Option<u64>,
 }
 
 impl WaitingFor {
     pub(crate) fn is_empty(&self) -> bool {
-        self.stream_events.values().all(|v| v.is_empty()) &&
-            self.required_stream_quota.is_none()
+        self.stream_events.is_empty() &&
+            self.required_bidi.is_none() &&
+            self.required_uni.is_none()
     }
 
     pub(crate) fn add_wait(&mut self, stream_event: &StreamEvent) {
         self.stream_events
             .entry(stream_event.stream_id)
             .or_default()
-            .push(*stream_event);
+            .insert(stream_event.event_type);
     }
 
     pub(crate) fn set_required_stream_quota(
         &mut self, required: RequiredStreamsQuota,
     ) {
-        self.required_stream_quota = Some(required);
+        let quota = if required.bidi {
+            &mut self.required_bidi
+        } else {
+            &mut self.required_uni
+        };
+        *quota = Some(quota.unwrap_or_default().max(required.num));
     }
 
-    /// Check and clear the [`WaitType::CanOpenNumStreams`] condition if
-    /// `conn` now reports enough available streams.
+    /// Check and clear the stream quota conditions independently.
     pub(crate) fn check_can_open_num_streams<F: quiche::BufFactory>(
         &mut self, conn: &quiche::Connection<F>,
     ) {
-        if let Some(streams_required) = self.required_stream_quota {
-            let available_streams = if streams_required.bidi {
-                conn.peer_streams_left_bidi()
-            } else {
-                conn.peer_streams_left_uni()
-            };
-            if available_streams >= streams_required.num {
-                log::info!(
-                    "required_stream_quota condition met \
-                     (needed={}, available={}, bidi={})",
-                    streams_required.num,
-                    available_streams,
-                    streams_required.bidi,
-                );
-                self.required_stream_quota = None;
+        self.check_quotas(
+            conn.peer_streams_left_bidi(),
+            conn.peer_streams_left_uni(),
+        );
+    }
+
+    fn check_quotas(&mut self, bidi: u64, uni: u64) {
+        for (quota, available) in [
+            (&mut self.required_bidi, bidi),
+            (&mut self.required_uni, uni),
+        ] {
+            if quota.is_some_and(|required| available >= required) {
+                *quota = None;
             }
         }
     }
 
     pub(crate) fn remove_wait(&mut self, stream_event: StreamEvent) {
+        if stream_event.event_type == StreamEventType::Finished {
+            self.stream_events.remove(&stream_event.stream_id);
+            return;
+        }
         if let Some(waits) = self.stream_events.get_mut(&stream_event.stream_id) {
-            let old_len = waits.len();
-            waits.retain(|wait| wait != &stream_event);
-            let new_len = waits.len();
-
-            if old_len != new_len {
-                log::info!("No longer waiting for {stream_event:?}");
-            }
-        }
-    }
-
-    pub(crate) fn clear_waits_on_stream(&mut self, stream_id: u64) {
-        if let Some(waits) = self.stream_events.get_mut(&stream_id) {
-            if !waits.is_empty() {
-                log::info!("Clearing all waits for stream {stream_id}");
-                waits.clear();
+            waits.remove(&stream_event.event_type);
+            if waits.is_empty() {
+                self.stream_events.remove(&stream_event.stream_id);
             }
         }
     }
 }
 
-/// Convenience to convert between header-related data and a
-/// [Action::SendHeadersFrame].
-pub fn send_headers_frame(
+/// Constructs a header action with ordinary QPACK encoding.
+#[must_use = "the returned action must be executed by the client"]
+pub const fn send_headers_frame(
     stream_id: u64, fin_stream: bool, headers: Vec<Header>,
 ) -> Action {
-    let header_block = encode_header_block(&headers).unwrap();
+    send_headers_frame_with_expected_result(
+        stream_id,
+        fin_stream,
+        headers,
+        ExpectedStreamSendResult::Ok,
+    )
+}
 
+/// Constructs a header action with an explicit expected send result.
+#[must_use = "the returned action must be executed by the client"]
+pub const fn send_headers_frame_with_expected_result(
+    stream_id: u64, fin_stream: bool, headers: Vec<Header>,
+    expected_result: ExpectedStreamSendResult,
+) -> Action {
     Action::SendHeadersFrame {
         stream_id,
         fin_stream,
         headers,
         literal_headers: false,
-        frame: Frame::Headers { header_block },
-        expected_result: ExpectedStreamSendResult::Ok,
-    }
-}
-
-/// Convenience to convert between header-related data and a
-/// [Action::SendHeadersFrame].
-pub fn send_headers_frame_with_expected_result(
-    stream_id: u64, fin_stream: bool, headers: Vec<Header>,
-    expected_result: ExpectedStreamSendResult,
-) -> Action {
-    let header_block = encode_header_block(&headers).unwrap();
-
-    Action::SendHeadersFrame {
-        stream_id,
-        fin_stream,
-        headers,
-        literal_headers: false,
-        frame: Frame::Headers { header_block },
         expected_result,
     }
 }
 
-/// Convenience to convert between header-related data and a
-/// [Action::SendHeadersFrame]. Unlike [`send_headers_frame`],
-/// this version encodes the headers literally as they are provided,
-/// not converting the header names to lower-case.
-pub fn send_headers_frame_literal(
+/// Constructs a header action with literal encoding that preserves names.
+#[must_use = "the returned action must be executed by the client"]
+pub const fn send_headers_frame_literal(
     stream_id: u64, fin_stream: bool, headers: Vec<Header>,
 ) -> Action {
-    let header_block = encode_header_block_literal(&headers).unwrap();
+    send_headers_frame_literal_with_expected_result(
+        stream_id,
+        fin_stream,
+        headers,
+        ExpectedStreamSendResult::Ok,
+    )
+}
 
+/// Constructs a literal header action with an explicit expected send result.
+#[must_use = "the returned action must be executed by the client"]
+pub const fn send_headers_frame_literal_with_expected_result(
+    stream_id: u64, fin_stream: bool, headers: Vec<Header>,
+    expected_result: ExpectedStreamSendResult,
+) -> Action {
     Action::SendHeadersFrame {
         stream_id,
         fin_stream,
         headers,
         literal_headers: true,
-        frame: Frame::Headers { header_block },
-        expected_result: ExpectedStreamSendResult::Ok,
+        expected_result,
     }
 }
 
-/// Convenience to convert between header-related data and a
-/// [Action::SendHeadersFrame]. Unlike [`send_headers_frame`],
-/// this version encodes the headers literally as they are provided,
-/// not converting the header names to lower-case.
-pub fn send_headers_frame_literal_with_expected_result(
-    stream_id: u64, fin_stream: bool, headers: Vec<Header>,
-    expected_result: ExpectedStreamSendResult,
-) -> Action {
-    let header_block = encode_header_block_literal(&headers).unwrap();
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    Action::SendHeadersFrame {
-        stream_id,
-        fin_stream,
-        headers,
-        literal_headers: true,
-        frame: Frame::Headers { header_block },
-        expected_result,
+    #[test]
+    fn waits_clear_per_stream_and_direction() {
+        let mut waits = WaitingFor::default();
+        for event_type in [
+            StreamEventType::Headers,
+            StreamEventType::Data,
+            StreamEventType::Finished,
+        ] {
+            waits.add_wait(&StreamEvent {
+                stream_id: 0,
+                event_type,
+            });
+            waits.add_wait(&StreamEvent {
+                stream_id: 4,
+                event_type,
+            });
+        }
+        waits.remove_wait(StreamEvent {
+            stream_id: 0,
+            event_type: StreamEventType::Finished,
+        });
+        assert_eq!(waits.stream_events.len(), 1);
+        for (num, bidi) in [(4, true), (2, false), (1, true)] {
+            waits.set_required_stream_quota(RequiredStreamsQuota { num, bidi });
+        }
+        waits.remove_wait(StreamEvent {
+            stream_id: 4,
+            event_type: StreamEventType::Finished,
+        });
+        waits.check_quotas(3, 2);
+        assert!(!waits.is_empty());
+        waits.check_quotas(4, 2);
+        assert!(waits.is_empty());
+    }
+
+    #[test]
+    fn repeated_waits_are_idempotent() {
+        let mut waits = WaitingFor::default();
+        let event = StreamEvent {
+            stream_id: 0,
+            event_type: StreamEventType::Headers,
+        };
+        waits.add_wait(&event);
+        waits.add_wait(&event);
+        waits.remove_wait(event);
+        assert!(waits.is_empty());
     }
 }

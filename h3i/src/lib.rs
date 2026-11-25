@@ -73,14 +73,12 @@
 //!        Header::new(b"content-length", b"5"),
 //!    ];
 //!
-//!    let header_block = encode_header_block(&headers).unwrap();
 //!
 //!    let actions = vec![
 //!        Action::SendHeadersFrame {
 //!            stream_id: STREAM_ID,
 //!            fin_stream: false,
 //!            headers,
-//!            frame: Frame::Headers { header_block },
 //!            literal_headers: false,
 //!            expected_result: Default::default(),
 //!        },
@@ -119,15 +117,6 @@
 //!        "=== received connection summary! ===\n\n{}",
 //!        serde_json::to_string_pretty(&summary).unwrap_or_else(|e| e.to_string())
 //!    );
-//! }
-//!
-//! // SendHeadersFrame requires a QPACK-encoded header block. h3i provides a
-//! // `send_headers_frame` helper function to abstract this, but for clarity, we do
-//! // it here.
-//! fn encode_header_block(
-//!     headers: &[quiche::h3::Header],
-//! ) -> std::result::Result<Vec<u8>, String> {
-//!     quiche::h3::qpack::encode(headers).map_err(|e| e.to_string())
 //! }
 //! ```
 

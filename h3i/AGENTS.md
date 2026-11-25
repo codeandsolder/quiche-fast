@@ -10,7 +10,7 @@ Low-level HTTP/3 testing client. Sends arbitrary/malformed H3 frames to probe se
 src/
   lib.rs              # Crate root: quiche re-export, QPACK encoding, stream type constants
   main.rs             # CLI binary: clap arg parsing, qlog I/O, dispatches to sync/async client
-  config.rs           # Config struct (QUIC transport params, TLS, host/port) + builder
+  config.rs           # Typed endpoint, TLS, QUIC flow control, and datagram settings
   frame.rs            # H3iFrame enum (Headers/QuicheH3/ResetStream), EnrichedHeaders, CloseTriggerFrame
   frame_parser.rs     # Per-stream incremental frame parser (FrameParser, FrameParseResult)
   actions/
@@ -34,8 +34,8 @@ src/
 | Define new action type | `actions/h3.rs` | Add variant to `Action` enum |
 | Modify frame parsing | `frame_parser.rs` | `FrameParser::try_parse_frame` |
 | Change connection output | `client/connection_summary.rs` | `ConnectionSummary`, `StreamMap` (640 lines) |
-| Add CLI flags | `main.rs` | `config_from_clap()` uses clap v3 |
-| Library config | `config.rs` | `Config` struct + builder pattern |
+| Add CLI flags | `main.rs` | `config_from_clap()` uses clap v4 |
+| Library config | `config.rs` | `Config` with typed endpoint/TLS/flow settings |
 | Custom frame types | `frame.rs` | `H3iFrame` enum wraps quiche frames |
 | qlog record/replay | `recordreplay/qlog.rs` | Bidirectional: Action->qlog and qlog->Action |
 | Use as library | `lib.rs` doc example | `sync_client::connect(config, actions, close_triggers)` |
@@ -45,7 +45,7 @@ src/
 - **Feature gate**: `async` feature swaps sync mio client for tokio-quiche async client. Also changes quiche re-export path (`quiche` vs `tokio_quiche::quiche`).
 - **quiche `internal` feature**: always enabled -- accesses `quiche::h3::frame::Frame` internals for raw frame construction.
 - **Stream type constants**: `HTTP3_CONTROL_STREAM_TYPE_ID` (0x0), `QPACK_ENCODER_STREAM_TYPE_ID` (0x2), `QPACK_DECODER_STREAM_TYPE_ID` (0x3) in `lib.rs`.
-- **Action execution**: `client/mod.rs::execute_action()` matches on `Action` variants, writes directly to `quiche::Connection` streams -- no H3 connection layer.
-- **ConnectionSummary**: returned from both sync/async `connect()`. Contains per-stream frame maps, QUIC stats, path stats, close reason. Custom `Serialize` impl truncates binary at 16KB.
+- **Action execution**: `client/mod.rs::execute_action()` matches on `Action` variants, writes directly to `quiche::Connection` streams, encoding header actions only when executed. Raw frames retain arbitrary wire contents; executor errors propagate to callers.
+- **ConnectionSummary**: returned from sync `connect()` and the async summary future, both as fallible results. Contains per-stream frame maps, QUIC stats, path stats, close reason. Custom `Serialize` impl truncates binary at 16KB.
 - **Literal header encoding**: `encode_header_block_literal()` bypasses Huffman + lowercase normalization for testing malformed headers.
 - **Close triggers**: optional `CloseTriggerFrame` list causes automatic connection close when matching frame received.

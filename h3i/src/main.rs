@@ -289,7 +289,7 @@ fn async_client(
             None,
         )
         .await?;
-        Ok(summary.await)
+        summary.await
     })
 }
 

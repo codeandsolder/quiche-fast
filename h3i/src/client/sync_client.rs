@@ -37,7 +37,6 @@ use crate::frame::H3iFrame;
 use crate::quiche;
 
 use crate::actions::h3::Action;
-use crate::actions::h3::StreamEventType;
 use crate::actions::h3::WaitType;
 use crate::actions::h3::WaitingFor;
 use crate::client::execute_action;
@@ -230,18 +229,16 @@ pub fn connect_with_early_data(
     if conn.is_in_early_data() {
         if let Some(early_actions) = early_actions {
             let mut early_action_iter = early_actions.iter();
-            let mut wait_duration = None;
-            let mut wait_instant = None;
+            let mut wait_deadline = None;
             let mut waiting_for = WaitingFor::default();
 
             check_duration_and_do_actions(
-                &mut wait_duration,
-                &mut wait_instant,
+                &mut wait_deadline,
                 &mut early_action_iter,
                 &mut conn,
                 &mut waiting_for,
                 client.stream_parsers_mut(),
-            );
+            )?;
         }
     }
 
@@ -261,35 +258,20 @@ pub fn connect_with_early_data(
     let app_data_start = std::time::Instant::now();
 
     let mut action_iter = actions.iter();
-    let mut wait_duration = None;
-    let mut wait_instant = None;
+    let mut wait_deadline = None;
 
     let mut waiting_for = WaitingFor::default();
 
     loop {
-        let actual_sleep = match (wait_duration, conn.timeout()) {
-            (Some(wait), Some(timeout)) => {
-                #[expect(
-                    clippy::comparison_chain,
-                    reason = "Explicit branch ordering keeps timeout handling readable"
-                )]
-                if timeout < wait {
-                    // shave some off the wait time so it doesn't go longer
-                    // than user really wanted.
-                    let new = wait - timeout;
-                    wait_duration = Some(new);
-                    Some(timeout)
-                } else if wait < timeout {
-                    Some(wait)
-                } else {
-                    // same, so picking either doesn't matter
-                    Some(timeout)
-                }
-            },
-            (None, Some(timeout)) => Some(timeout),
-            (Some(wait), None) => Some(wait),
-            _ => None,
-        };
+        let actual_sleep = [
+            wait_deadline.map(|deadline: Instant| {
+                deadline.saturating_duration_since(Instant::now())
+            }),
+            conn.timeout(),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
 
         log::debug!("actual sleep is {actual_sleep:?}");
         poll.poll(&mut events, actual_sleep).unwrap();
@@ -379,24 +361,16 @@ pub fn connect_with_early_data(
 
         if app_proto_selected {
             check_duration_and_do_actions(
-                &mut wait_duration,
-                &mut wait_instant,
+                &mut wait_deadline,
                 &mut action_iter,
                 &mut conn,
                 &mut waiting_for,
                 client.stream_parsers_mut(),
-            );
+            )?;
 
             let mut wait_cleared = false;
             for response in parse_streams(&mut conn, &mut client) {
-                let stream_id = response.stream_id;
-
-                if let StreamEventType::Finished = response.event_type {
-                    waiting_for.clear_waits_on_stream(stream_id);
-                } else {
-                    waiting_for.remove_wait(response);
-                }
-
+                waiting_for.remove_wait(response);
                 wait_cleared = true;
             }
 
@@ -413,13 +387,12 @@ pub fn connect_with_early_data(
 
             if wait_cleared {
                 check_duration_and_do_actions(
-                    &mut wait_duration,
-                    &mut wait_instant,
+                    &mut wait_deadline,
                     &mut action_iter,
                     &mut conn,
                     &mut waiting_for,
                     client.stream_parsers_mut(),
-                );
+                )?;
             }
         }
 
@@ -510,48 +483,22 @@ pub fn connect_with_early_data(
 }
 
 fn check_duration_and_do_actions(
-    wait_duration: &mut Option<Duration>, wait_instant: &mut Option<Instant>,
-    action_iter: &mut Iter<Action>, conn: &mut quiche::Connection,
-    waiting_for: &mut WaitingFor, stream_parsers: &mut StreamParserMap,
-) {
-    match wait_duration.as_ref() {
-        None => {
-            if let Some(idle_wait) =
-                handle_actions(action_iter, conn, waiting_for, stream_parsers)
-            {
-                *wait_duration = Some(idle_wait);
-                *wait_instant = Some(Instant::now());
-
-                // TODO: the wait period could still be larger than the
-                // negotiated idle timeout.
-                // We could in theory check quiche's idle_timeout value if
-                // it was public.
-                log::info!(
-                    "waiting for {idle_wait:?} before executing more actions"
-                );
-            }
-        },
-
-        Some(period) => {
-            let now = Instant::now();
-            let then = wait_instant.unwrap();
-            log::debug!(
-                "checking if actions wait period elapsed {:?} > {:?}",
-                now.duration_since(then),
-                wait_duration
-            );
-            if now.duration_since(then) >= *period {
-                log::debug!("yup!");
-                *wait_duration = None;
-
-                if let Some(idle_wait) =
-                    handle_actions(action_iter, conn, waiting_for, stream_parsers)
-                {
-                    *wait_duration = Some(idle_wait);
-                }
-            }
-        },
+    wait_deadline: &mut Option<Instant>, action_iter: &mut Iter<Action>,
+    conn: &mut quiche::Connection, waiting_for: &mut WaitingFor,
+    stream_parsers: &mut StreamParserMap,
+) -> Result<(), ClientError> {
+    if wait_deadline.is_some_and(|deadline| Instant::now() < deadline) {
+        return Ok(());
     }
+    *wait_deadline =
+        handle_actions(action_iter, conn, waiting_for, stream_parsers)?
+            .map(|duration| {
+                Instant::now().checked_add(duration).ok_or_else(|| {
+                    ClientError::Other("wait duration exceeds clock range".into())
+                })
+            })
+            .transpose()?;
+    Ok(())
 }
 
 /// Generate a new pair of Source Connection ID and reset token.
@@ -575,7 +522,7 @@ pub fn generate_cid_and_reset_token(
 fn handle_actions<'a, I>(
     iter: &mut I, conn: &mut quiche::Connection, waiting_for: &mut WaitingFor,
     stream_parsers: &mut StreamParserMap,
-) -> Option<Duration>
+) -> Result<Option<Duration>, ClientError>
 where
     I: Iterator<Item = &'a Action>,
 {
@@ -583,33 +530,34 @@ where
         log::debug!(
             "won't fire an action due to waiting for responses: {waiting_for:?}"
         );
-        return None;
+        return Ok(None);
     }
 
     // Send actions
     for action in iter {
         match action {
-            Action::FlushPackets => return None,
+            Action::FlushPackets => return Ok(None),
             Action::Wait { wait_type } => match wait_type {
-                WaitType::WaitDuration(period) => return Some(*period),
+                WaitType::WaitDuration(period) => return Ok(Some(*period)),
                 WaitType::StreamEvent(response) => {
                     log::info!(
                         "waiting for {response:?} before executing more actions"
                     );
                     waiting_for.add_wait(response);
-                    return None;
+                    return Ok(None);
                 },
                 WaitType::CanOpenNumStreams(required_streams) => {
                     log::info!(
                         "h3i: waiting for peer_streams_left_bidi >= {required_streams:?}"
                     );
                     waiting_for.set_required_stream_quota(*required_streams);
-                    return None;
+                    return Ok(None);
                 },
             },
-            action => execute_action(action, conn, stream_parsers),
+            action => execute_action(action, conn, stream_parsers)
+                .map_err(ClientError::Other)?,
         }
     }
 
-    None
+    Ok(None)
 }
