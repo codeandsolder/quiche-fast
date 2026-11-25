@@ -28,6 +28,7 @@ use std::collections::BTreeMap;
 
 use crate::datastore::Datastore;
 use crate::push_interp;
+use crate::trackers::StreamBufferTracker;
 use crate::QlogPointRtt;
 use crate::QlogPointu64;
 use netlog::h2::H2_DEFAULT_WINDOW_SIZE;
@@ -282,7 +283,7 @@ impl SeriesStore {
     }
 
     fn sum_sent_stream_max_data(&mut self, data_store: &Datastore) {
-        for point in &data_store.sent_stream_max_data_tracker.sum_series {
+        for point in data_store.sent_stream_max_data_tracker.sum_series() {
             self.update_sent_x_axis_max(point.0);
             self.update_stream_recv_y_axis_max(point.1);
 
@@ -395,9 +396,9 @@ impl SeriesStore {
     }
 
     fn sent_stream_max_data(&mut self, data_store: &Datastore) {
-        for (stream, points) in
-            &data_store.sent_stream_max_data_tracker.per_stream
+        for (stream, points) in data_store.sent_stream_max_data_tracker.streams()
         {
+            let points = points.points();
             let mut series_points = vec![];
 
             for point in points {
@@ -413,8 +414,9 @@ impl SeriesStore {
 
     fn received_stream_max_data(&mut self, data_store: &Datastore) {
         for (stream, points) in
-            &data_store.received_stream_max_data_tracker.per_stream
+            data_store.received_stream_max_data_tracker.streams()
         {
+            let points = points.points();
             let mut series_points = vec![];
 
             for point in points {
@@ -428,114 +430,71 @@ impl SeriesStore {
         }
     }
 
-    fn stream_buffer_reads(
-        &mut self, data_store: &Datastore,
-    ) -> SeriesResult<()> {
-        for (stream, points) in &data_store.stream_buffer_reads_tracker.per_stream
-        {
-            let mut series_points = vec![];
-
-            for point in points {
-                let y = point.1.offset.checked_add(point.1.length).ok_or(
-                    SeriesBuildError {
-                        stream_id: *stream,
-                        series: "stream_buffer_reads",
-                    },
-                )?;
-
-                self.update_sent_x_axis_max(point.0);
-                self.update_stream_recv_y_axis_max(y);
-
-                push_interp(&mut series_points, (point.0, y));
-            }
-
-            self.stream_buffer_reads.insert(*stream, series_points);
+    fn stream_buffers(&mut self, data_store: &Datastore) -> SeriesResult<()> {
+        for (tracker, series, output, sum_output, is_receive) in [
+            (
+                &data_store.stream_buffer_reads_tracker,
+                "stream_buffer_reads",
+                &mut self.stream_buffer_reads,
+                &mut self.sum_stream_buffer_reads,
+                true,
+            ),
+            (
+                &data_store.stream_buffer_writes_tracker,
+                "stream_buffer_writes",
+                &mut self.stream_buffer_writes,
+                &mut self.sum_stream_buffer_writes,
+                false,
+            ),
+            (
+                &data_store.stream_buffer_dropped_tracker,
+                "stream_buffer_dropped",
+                &mut self.stream_buffer_dropped,
+                &mut self.sum_stream_buffer_dropped,
+                false,
+            ),
+        ] {
+            let y_max = if is_receive {
+                &mut self.y_max_stream_recv_plot
+            } else {
+                &mut self.y_max_stream_send_plot
+            };
+            Self::build_buffer_series(
+                tracker,
+                series,
+                output,
+                sum_output,
+                &mut self.sent_x_max,
+                y_max,
+            )?;
         }
         Ok(())
     }
 
-    fn sum_stream_buffer_reads(&mut self, data_store: &Datastore) {
-        for point in &data_store.stream_buffer_reads_tracker.sum_series {
-            push_interp(&mut self.sum_stream_buffer_reads, *point);
-        }
-    }
-
-    fn stream_buffer_writes(
-        &mut self, data_store: &Datastore,
+    fn build_buffer_series(
+        tracker: &StreamBufferTracker, series: &'static str,
+        output: &mut BTreeMap<u64, Vec<QlogPointu64>>,
+        sum_output: &mut Vec<QlogPointu64>, x_max: &mut f64, y_max: &mut u64,
     ) -> SeriesResult<()> {
-        for (stream, points) in
-            &data_store.stream_buffer_writes_tracker.per_stream
-        {
-            let mut series_points = vec![];
-
-            for point in points {
-                let y = point.1.offset.checked_add(point.1.length).ok_or(
-                    SeriesBuildError {
-                        stream_id: *stream,
-                        series: "stream_buffer_writes",
-                    },
-                )?;
-
-                self.update_sent_x_axis_max(point.0);
-                self.update_stream_send_y_axis_max(y);
-
-                push_interp(&mut series_points, (point.0, y));
+        for (&stream_id, history) in tracker.streams() {
+            let mut points = Vec::new();
+            for (time, access) in history.points() {
+                let end = access
+                    .offset
+                    .checked_add(access.length)
+                    .ok_or(SeriesBuildError { stream_id, series })?;
+                *x_max = x_max.max(*time);
+                *y_max = (*y_max).max(end);
+                push_interp(&mut points, (*time, end));
             }
-
-            self.stream_buffer_writes.insert(*stream, series_points);
+            output.insert(stream_id, points);
         }
+        for &point in tracker.sum_series() {
+            push_interp(sum_output, point);
+        }
+        // The aggregate may exceed any individual stream's extent.
+        *y_max = (*y_max).max(tracker.current_sum());
         Ok(())
-    }
-
-    fn sum_stream_buffer_writes(&mut self, data_store: &Datastore) {
-        for point in &data_store.stream_buffer_writes_tracker.sum_series {
-            push_interp(&mut self.sum_stream_buffer_writes, *point);
-        }
-
-        if let Some((_, y)) =
-            data_store.stream_buffer_writes_tracker.sum_series.last()
-        {
-            self.update_stream_send_y_axis_max(*y);
-        }
-    }
-
-    fn stream_buffer_dropped(
-        &mut self, data_store: &Datastore,
-    ) -> SeriesResult<()> {
-        for (stream, points) in
-            &data_store.stream_buffer_dropped_tracker.per_stream
-        {
-            let mut series_points = vec![];
-
-            for point in points {
-                let y = point.1.offset.checked_add(point.1.length).ok_or(
-                    SeriesBuildError {
-                        stream_id: *stream,
-                        series: "stream_buffer_dropped",
-                    },
-                )?;
-
-                self.update_sent_x_axis_max(point.0);
-                self.update_stream_send_y_axis_max(y);
-
-                push_interp(&mut series_points, (point.0, y));
-            }
-
-            self.stream_buffer_dropped.insert(*stream, series_points);
-        }
-        Ok(())
-    }
-
-    fn sum_stream_buffer_dropped(&mut self, data_store: &Datastore) {
-        for point in &data_store.stream_buffer_dropped_tracker.sum_series {
-            push_interp(&mut self.sum_stream_buffer_dropped, *point);
-        }
-
-        if let Some((_, y)) =
-            data_store.stream_buffer_dropped_tracker.sum_series.last()
-        {
-            self.update_stream_send_y_axis_max(*y);
-        }
     }
 
     fn sent_stream_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
@@ -803,7 +762,7 @@ impl SeriesStore {
     }
 
     fn sum_received_stream_max_data(&mut self, data_store: &Datastore) {
-        for point in &data_store.received_stream_max_data_tracker.sum_series {
+        for point in data_store.received_stream_max_data_tracker.sum_series() {
             push_interp(&mut self.sum_received_stream_max_data, *point);
         }
     }
@@ -832,14 +791,7 @@ impl SeriesStore {
         self.sent_stream_max_data(data_store);
         self.received_stream_max_data(data_store);
 
-        self.stream_buffer_reads(data_store)?;
-        self.sum_stream_buffer_reads(data_store);
-
-        self.stream_buffer_writes(data_store)?;
-        self.sum_stream_buffer_writes(data_store);
-
-        self.stream_buffer_dropped(data_store)?;
-        self.sum_stream_buffer_dropped(data_store);
+        self.stream_buffers(data_store)?;
 
         self.sent_stream_frames(data_store)?;
         self.received_stream_frames(data_store)?;

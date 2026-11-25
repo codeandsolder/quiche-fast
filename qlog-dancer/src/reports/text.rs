@@ -193,18 +193,18 @@ fn print_rx_max_stream_data_frames(data_store: &Datastore) {
     println!("### received MAX_STREAM_DATA frames ###");
     if data_store
         .received_stream_max_data_tracker
-        .per_stream
+        .streams()
         .is_empty()
     {
         println!("    None")
     } else {
-        for entry in &data_store.received_stream_max_data_tracker.per_stream {
+        for entry in data_store.received_stream_max_data_tracker.streams() {
             println!(
                 "    stream={}, total_count={}, first={:?}, last={}",
                 entry.0,
-                entry.1.len(),
-                entry.1.first(),
-                stringify_last(entry.1)
+                entry.1.points().len(),
+                entry.1.points().first(),
+                stringify_last(entry.1.points())
             );
         }
     }
@@ -212,20 +212,16 @@ fn print_rx_max_stream_data_frames(data_store: &Datastore) {
 
 fn print_tx_max_stream_data_frames(data_store: &Datastore) {
     println!("### sent MAX_STREAM_DATA frames ###");
-    if data_store
-        .sent_stream_max_data_tracker
-        .per_stream
-        .is_empty()
-    {
+    if data_store.sent_stream_max_data_tracker.streams().is_empty() {
         println!("    None")
     } else {
-        for entry in &data_store.sent_stream_max_data_tracker.per_stream {
+        for entry in data_store.sent_stream_max_data_tracker.streams() {
             println!(
                 "    stream={}, total_count={}, first={:?}, last={:?}",
                 entry.0,
-                entry.1.len(),
-                entry.1.first(),
-                entry.1.last()
+                entry.1.points().len(),
+                entry.1.points().first(),
+                entry.1.points().last()
             );
         }
     }
@@ -269,11 +265,12 @@ fn print_stream_buffer(
     label: &str, tracker: &crate::trackers::StreamBufferTracker,
 ) {
     println!("### {label} ###");
-    if tracker.per_stream.is_empty() {
+    if tracker.streams().is_empty() {
         println!("    None");
         return;
     }
-    for (stream_id, accesses) in &tracker.per_stream {
+    for (stream_id, history) in tracker.streams() {
+        let accesses = history.points();
         match (accesses.first(), accesses.last()) {
             (Some((_, first)), Some((_, last))) => {
                 println!(
@@ -283,7 +280,7 @@ fn print_stream_buffer(
                     first.length,
                     last.offset,
                     last.length,
-                    tracker.get_stream_max(*stream_id).map_or_else(|| "n/a".to_string(), |maximum| maximum.to_string()),
+                    history.maximum(),
                 );
             },
             _ => println!("    stream={stream_id}, total_count=0, max_end=n/a"),
