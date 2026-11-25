@@ -368,6 +368,12 @@ pub fn print_flow_control(data: &[LogFileData]) {
                 .unwrap_or(0)
         );
 
+        println!("  Connection flow control updates");
+        println!("    Time, Value");
+        for (time, value) in &lf.datastore.sent_max_data {
+            println!("    {time},{value}");
+        }
+
         for (stream_id, points) in
             &lf.datastore.netlog_quic_client_side_window_updates
         {

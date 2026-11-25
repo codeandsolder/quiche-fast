@@ -154,9 +154,7 @@ pub struct SeriesStore {
     pub h2_connection_receive_credit: Vec<QlogPointu64>,
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
-    pub netlog_quic_stream_received_connection_cumulative: Vec<QlogPointu64>,
-
-    pub netlog_quic_client_side_window_updates: BTreeMap<i64, Vec<(f64, u64)>>,
+    pub quic_receive_credit_consumed: Vec<QlogPointu64>,
 
     pub sum_received_stream_max_data: Vec<QlogPointu64>,
     pub sum_sent_stream_max_data: Vec<QlogPointu64>,
@@ -311,11 +309,16 @@ impl SeriesStore {
     }
 
     fn sent_max_data(&mut self, data_store: &Datastore) {
-        for point in &data_store.sent_max_data {
-            self.update_sent_x_axis_max(point.0);
-            self.update_stream_recv_y_axis_max(point.1);
-
-            push_interp(&mut self.sent_max_data, *point);
+        // Old MAX_DATA frames may be retransmitted after a larger grant.
+        // Flow control only increases; the advertised limit cannot regress.
+        let mut points = data_store.sent_max_data.clone();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut maximum = 0;
+        for (time, value) in points {
+            maximum = maximum.max(value);
+            self.update_sent_x_axis_max(time);
+            self.update_stream_recv_y_axis_max(maximum);
+            push_interp(&mut self.sent_max_data, (time, maximum));
         }
     }
 
@@ -574,30 +577,23 @@ impl SeriesStore {
         Ok(())
     }
 
-    fn received_stream_frames(
-        &mut self, data_store: &Datastore,
-    ) -> SeriesResult<()> {
-        for (stream, points) in &data_store.received_stream_frames {
-            let mut series_points = vec![];
-
-            for point in points {
-                let y = point.1.offset.checked_add(point.1.length).ok_or(
-                    SeriesBuildError {
-                        stream_id: *stream,
-                        series: "received_stream_frames",
-                    },
-                )?;
-
-                self.received_x_max = self.received_x_max.max(point.0);
-                self.update_stream_recv_y_axis_max(y);
-
-                series_points.push((point.0, y));
+    fn received_stream_frames(&mut self, data_store: &Datastore) {
+        for (&stream_id, history) in data_store.received_quic_streams.streams() {
+            let mut points = Vec::new();
+            for &(time, observation) in history.points() {
+                let Some(end) = observation.frame_end() else {
+                    continue;
+                };
+                self.received_x_min = self.received_x_min.min(time);
+                self.update_received_x_axis_max(time);
+                self.update_stream_recv_y_axis_max(end);
+                points.push((time, end));
             }
-
-            self.received_stream_frames_series
-                .insert(*stream, series_points);
+            if !points.is_empty() {
+                points.sort_by(|a, b| a.0.total_cmp(&b.0));
+                self.received_stream_frames_series.insert(stream_id, points);
+            }
         }
-        Ok(())
     }
 
     fn data_frames(&mut self, data_store: &Datastore) -> SeriesResult<()> {
@@ -732,20 +728,6 @@ impl SeriesStore {
         Ok(output)
     }
 
-    fn netlog_quic_client_side_window_updates(&mut self, data_store: &Datastore) {
-        for (stream, points) in &data_store.netlog_quic_client_side_window_updates
-        {
-            let s = self
-                .netlog_quic_client_side_window_updates
-                .entry(*stream)
-                .or_default();
-
-            for point in points {
-                push_interp(s, *point);
-            }
-        }
-    }
-
     fn netlog_h2_stream_received_connection_cumulative(
         &mut self, data_store: &Datastore,
     ) {
@@ -757,16 +739,32 @@ impl SeriesStore {
         }
     }
 
-    fn netlog_quic_stream_received_connection_cumulative(
+    fn quic_receive_credit(
         &mut self, data_store: &Datastore,
-    ) {
-        for point in &data_store.netlog_quic_stream_received_connection_cumulative
-        {
-            push_interp(
-                &mut self.netlog_quic_stream_received_connection_cumulative,
-                *point,
-            );
+    ) -> SeriesResult<()> {
+        let points = data_store
+            .received_quic_streams
+            .chronological_sum_series()
+            .map_err(|error| {
+                let stream_id = match error {
+                    crate::trackers::TrackerError::StreamEndOverflow {
+                        stream_id,
+                        ..
+                    } |
+                    crate::trackers::TrackerError::RunningSumOverflow {
+                        stream_id,
+                        ..
+                    } => stream_id,
+                };
+                SeriesBuildError {
+                    stream_id,
+                    series: "quic_receive_credit_consumed",
+                }
+            })?;
+        for &point in points.as_ref() {
+            push_interp(&mut self.quic_receive_credit_consumed, point);
         }
+        Ok(())
     }
 
     fn received_max_data(&mut self, data_store: &Datastore) {
@@ -808,14 +806,13 @@ impl SeriesStore {
         self.stream_buffers(data_store)?;
 
         self.sent_stream_frames(data_store)?;
-        self.received_stream_frames(data_store)?;
+        self.received_stream_frames(data_store);
 
         self.data_frames(data_store)?;
         self.h2_window_series(data_store)?;
 
         self.netlog_h2_stream_received_connection_cumulative(data_store);
-        self.netlog_quic_stream_received_connection_cumulative(data_store);
-        self.netlog_quic_client_side_window_updates(data_store);
+        self.quic_receive_credit(data_store)?;
 
         self.received_max_data(data_store);
         self.sum_received_stream_max_data(data_store);
@@ -828,12 +825,9 @@ mod tests {
     use super::SeriesStore;
     use crate::datastore::Datastore;
     use crate::datastore::PacketInfoStub;
-    use crate::datastore::StreamDatapoint;
     use crate::request_stub::HttpDataHistory;
     use crate::request_stub::HttpRequestStub;
     use crate::PacketType;
-    use qlog::events::quic::QuicFrame;
-    use qlog::events::RawInfo;
 
     #[test]
     fn packet_ack_counts_do_not_equate_unknown_status_with_loss_or_delivery() {
@@ -1026,35 +1020,48 @@ mod tests {
     }
 
     #[test]
-    fn overflowing_stream_offsets_are_rejected() {
+    fn receive_credit_plots_only_known_stream_endpoints(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::trackers::QuicReceiveObservation;
         let mut datastore = Datastore::default();
-        datastore.received_stream_frames.insert(9, vec![(
-            1.0,
-            StreamDatapoint {
-                offset: u64::MAX,
-                length: 1,
-            },
-        )]);
-        let result = SeriesStore::from_datastore(&datastore);
-        assert!(result.is_err_and(|error| error.stream_id == 9 &&
-            error.series == "received_stream_frames"));
-
-        let mut datastore = Datastore::default();
-        datastore
-            .sent_stream_frames
-            .insert(11, vec![(1.0, QuicFrame::Stream {
-                stream_id: 11,
-                offset: Some(u64::MAX),
+        let observations = [
+            (5.0, QuicReceiveObservation::Frame {
+                offset: Some(10),
+                length: Some(20),
                 fin: None,
-                raw: Some(Box::new(RawInfo {
-                    payload_length: Some(1),
-                    ..RawInfo::default()
-                })),
-            })]);
-        let result = SeriesStore::from_datastore(&datastore);
-        assert!(result
-            .is_err_and(|error| error.stream_id == 11 &&
-                error.series == "sent_stream_frames"));
+            }),
+            (1.0, QuicReceiveObservation::Frame {
+                offset: Some(0),
+                length: Some(5),
+                fin: None,
+            }),
+            (6.0, QuicReceiveObservation::Frame {
+                offset: Some(40),
+                length: None,
+                fin: None,
+            }),
+            (7.0, QuicReceiveObservation::Reset { final_size: 50 }),
+        ];
+        for (time, observation) in observations {
+            datastore
+                .received_quic_streams
+                .observe(9, observation, time)?;
+        }
+        let series = SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(series.received_stream_frames_series[&9], [
+            (1.0, 5),
+            (5.0, 30)
+        ]);
+        assert_eq!(series.quic_receive_credit_consumed, [
+            (1.0, 5),
+            (5.0, 5),
+            (5.0, 30),
+            (6.0, 30),
+            (6.0, 40),
+            (7.0, 40),
+            (7.0, 50),
+        ]);
+        Ok(())
     }
 
     #[test]
