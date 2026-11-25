@@ -58,7 +58,6 @@ use crate::QuicResult;
 
 use btls::ssl::SslRef;
 use datagram_socket::DatagramSocketSend;
-use datagram_socket::DatagramSocketSendExt;
 use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
 use foundations::telemetry::log;
@@ -476,7 +475,7 @@ where
                     let mut flush_operation_token =
                         TrackMidHandshakeFlush::new(self.metrics.clone());
 
-                    self.flush_buffer_to_socket(&send_buf[..]).await;
+                    self.flush_buffer_to_socket(&send_buf[..]).await?;
 
                     flush_operation_token.mark_complete();
 
@@ -547,7 +546,7 @@ where
                             // on-demand buffer; flush it here (outside the
                             // select! so the flush cannot be cancelled), then
                             // return it to the pool or drop it.
-                            self.flush_buffer_to_socket(send_buf.as_ref()).await;
+                            self.flush_buffer_to_socket(send_buf.as_ref()).await?;
                         }
                         WaitForDataOrHandshakeDirective::Noop => {}
                     }
@@ -848,66 +847,37 @@ where
         }
     }
 
-    async fn flush_buffer_to_socket(&mut self, send_buf: &[u8]) {
-        if self.write_state.bytes_written > 0 {
-            let current_send_buf = &send_buf[..self.write_state.bytes_written];
+    async fn flush_buffer_to_socket(
+        &mut self, send_buf: &[u8],
+    ) -> QuicResult<()> {
+        if self.write_state.bytes_written == 0 {
+            return Ok(());
+        }
+        let current_send_buf = send_buf
+            .get(..self.write_state.bytes_written)
+            .ok_or("gathered packet length exceeds send buffer")?;
+        let (from, to) = self.write_state.selected_path.unzip();
+        let packet = PacketSend {
+            to: to.unwrap_or(self.cfg.peer_addr),
+            from: from.filter(|_| self.cfg.with_pktinfo),
+            segment_size: (self.cfg.with_gso && self.write_state.num_pkts > 1)
+                .then_some(self.write_state.segment_size),
+            tx_time: self.write_state.tx_time,
+            dscp: self.dscp_handle.as_ref().and_then(DscpHandle::get),
+        };
+        let result =
+            send_packets(&self.socket, current_send_buf, packet, &self.metrics)
+                .await;
 
-            let (from, to) = self.write_state.selected_path.unzip();
-
-            let to = to.unwrap_or(self.cfg.peer_addr);
-            let from = from.filter(|_| self.cfg.with_pktinfo);
-
-            let dscp = self.dscp_handle.as_ref().and_then(DscpHandle::get);
-            // Don't bypass the socket wrapper when DSCP cannot be applied.
-            let needs_dscp_cmsg =
-                cfg!(all(target_os = "linux", not(feature = "fuzzing"))) &&
-                    dscp.is_some();
-
-            let send_res = if let (Some(udp_socket), true) = (
-                self.socket.as_udp_socket(),
-                self.cfg.with_gso || needs_dscp_cmsg,
-            ) {
-                // Only UDP supports GSO and per-packet DSCP control messages.
-                let (segment_size, tx_time) = if self.cfg.with_gso {
-                    (
-                        Some(self.write_state.segment_size),
-                        self.write_state.tx_time,
-                    )
-                } else {
-                    (None, None)
-                };
-                send_to(
-                    udp_socket,
-                    to,
-                    from,
-                    current_send_buf,
-                    segment_size,
-                    tx_time,
-                    dscp,
-                    self.metrics
-                        .write_errors(labels::QuicWriteError::WouldBlock),
-                    self.metrics.send_to_wouldblock_duration_s(),
-                )
-                .await
-            } else {
-                self.socket.send_to(current_send_buf, to).await
-            };
-
-            #[cfg(feature = "perf-quic-listener-metrics")]
+        #[cfg(feature = "perf-quic-listener-metrics")]
+        if result.is_ok() {
             self.measure_complete_handshake_time();
+        }
 
-            match send_res {
-                Ok(n) =>
-                    if n < self.write_state.bytes_written {
-                        self.metrics
-                            .write_errors(labels::QuicWriteError::Partial)
-                            .inc();
-                    },
-
-                Err(_) => {
-                    self.metrics.write_errors(labels::QuicWriteError::Err).inc();
-                },
-            }
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if recoverable_send_error(&error) => Ok(()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -1044,7 +1014,7 @@ where
                         Poll::Ready(Ok(send_buf))
                     }
                 },
-                _ => Poll::Ready(Err(quiche::Error::TlsFail)),
+                Err(error) => Poll::Ready(Err(error)),
             }
         })
         .await?;
@@ -1295,9 +1265,18 @@ where
         // This runs once per connection at close and sends a single
         // CONNECTION_CLOSE datagram, so acquire a buffer only for this send.
         let mut send_buf = TransientSendBuf::acquire(self.cfg.pool_send_buffer);
-        let _ =
-            self.gather_data_from_quiche_conn(qconn, send_buf.as_mut(), false);
-        self.flush_buffer_to_socket(send_buf.as_ref()).await;
+        let close_result = match self.gather_data_from_quiche_conn(
+            qconn,
+            send_buf.as_mut(),
+            false,
+        ) {
+            Ok(_) => self.flush_buffer_to_socket(send_buf.as_ref()).await,
+            Err(error) => Err(error),
+        };
+        // The first failure remains the authoritative close reason.
+        if self.conn_stage.work_loop_result.is_ok() {
+            self.conn_stage.work_loop_result = close_result;
+        }
 
         replace_shared_stats(&ctx.stats, QuicConnectionStats::from_conn(qconn));
 

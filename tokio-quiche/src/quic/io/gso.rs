@@ -28,10 +28,11 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::Instant;
 
+use crate::metrics::labels::QuicWriteError;
+use crate::metrics::Metrics;
 use crate::quic::Dscp;
-
-use foundations::telemetry::metrics::Counter;
-use foundations::telemetry::metrics::TimeHistogram;
+use datagram_socket::DatagramSocketSend;
+use datagram_socket::DatagramSocketSendExt;
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 mod linux_imports {
@@ -47,6 +48,127 @@ mod linux_imports {
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
 use self::linux_imports::*;
+
+/// Metadata for one UDP datagram or one equal-sized GSO batch.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PacketSend {
+    pub(crate) to: SocketAddr,
+    pub(crate) from: Option<SocketAddr>,
+    pub(crate) segment_size: Option<usize>,
+    pub(crate) tx_time: Option<Instant>,
+    pub(crate) dscp: Option<Dscp>,
+}
+
+impl PacketSend {
+    const fn has_control(self) -> bool {
+        self.from.is_some() ||
+            self.segment_size.is_some() ||
+            self.tx_time.is_some() ||
+            self.dscp.is_some()
+    }
+}
+
+/// Preserve UDP datagram boundaries even on a non-UDP transport wrapper.
+/// Ancillary options are independent of segmentation: a source address,
+/// pacing deadline or DSCP alone is sufficient to use sendmsg on Linux.
+pub(crate) async fn send_packets<S: DatagramSocketSend + ?Sized, M: Metrics>(
+    socket: &S, buffer: &[u8], packet: PacketSend, metrics: &M,
+) -> io::Result<()> {
+    let segment_size = match checked_segment_size(packet.segment_size) {
+        Ok(size) => size,
+        Err(error) => {
+            metrics.write_errors(QuicWriteError::Err).inc();
+            return Err(error);
+        },
+    };
+    if let (true, Some(udp)) = (
+        cfg!(all(target_os = "linux", not(feature = "fuzzing"))) &&
+            packet.has_control(),
+        socket.as_udp_socket(),
+    ) {
+        return check_datagram_send(
+            send_to(udp, buffer, packet, metrics).await,
+            buffer.len(),
+            metrics,
+        );
+    }
+    if let Some(deadline) = packet.tx_time {
+        tokio::time::sleep_until(deadline.into()).await;
+    }
+    if let Some(size) = segment_size {
+        for datagram in buffer.chunks(usize::from(size)) {
+            check_datagram_send(
+                socket.send_to(datagram, packet.to).await,
+                datagram.len(),
+                metrics,
+            )?;
+        }
+        Ok(())
+    } else {
+        check_datagram_send(
+            socket.send_to(buffer, packet.to).await,
+            buffer.len(),
+            metrics,
+        )
+    }
+}
+
+fn checked_segment_size(size: Option<usize>) -> io::Result<Option<u16>> {
+    size.map(|size| {
+        u16::try_from(size)
+            .ok()
+            .filter(|size| *size != 0)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "UDP GSO segment size must be in 1..=65535",
+                )
+            })
+    })
+    .transpose()
+}
+
+fn check_datagram_send<M: Metrics>(
+    result: io::Result<usize>, expected: usize, metrics: &M,
+) -> io::Result<()> {
+    match result {
+        Ok(written) if written == expected => Ok(()),
+        Ok(written) => {
+            metrics.write_errors(QuicWriteError::Partial).inc();
+            Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                format!("datagram send reported {written} of {expected} bytes"),
+            ))
+        },
+        Err(error) => {
+            metrics.write_errors(QuicWriteError::Err).inc();
+            Err(error)
+        },
+    }
+}
+
+/// QUIC has already accounted for generated packets as transmitted. A
+/// path-local or temporary network failure is therefore recoverable as
+/// ordinary loss. Local transport contract/configuration errors must not be
+/// silently converted into endless retransmission.
+pub(crate) fn recoverable_send_error(error: &io::Error) -> bool {
+    #[cfg(target_os = "linux")]
+    if matches!(error.raw_os_error(), Some(libc::EMSGSIZE | libc::ENOBUFS)) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        io::ErrorKind::Interrupted |
+            io::ErrorKind::WouldBlock |
+            io::ErrorKind::ConnectionRefused |
+            io::ErrorKind::ConnectionReset |
+            io::ErrorKind::HostUnreachable |
+            io::ErrorKind::NetworkUnreachable |
+            io::ErrorKind::NetworkDown |
+            io::ErrorKind::TimedOut |
+            io::ErrorKind::AddrNotAvailable
+    )
+}
 
 // Maximum number of packets can be sent in UDP GSO.
 pub(crate) const UDP_MAX_SEGMENT_COUNT: usize = 64;
@@ -107,7 +229,7 @@ impl PktInfo {
                 })
             },
             SocketAddr::V6(ipv6) => Self::V6(libc::in6_pktinfo {
-                ipi6_ifindex: 0,
+                ipi6_ifindex: ipv6.scope_id(),
                 ipi6_addr: libc::in6_addr {
                     s6_addr: ipv6.ip().octets(),
                 },
@@ -181,32 +303,21 @@ fn monotonic_tx_time(deadline: Instant) -> io::Result<u64> {
 }
 
 #[cfg(all(target_os = "linux", not(feature = "fuzzing")))]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The signature mirrors protocol state and grouping would obscure call sites"
-)]
-pub async fn send_to(
-    socket: &tokio::net::UdpSocket, to: SocketAddr, from: Option<SocketAddr>,
-    send_buf: &[u8], segment_size: Option<usize>, tx_time: Option<Instant>,
-    dscp: Option<Dscp>, would_block_metric: Counter,
-    send_to_wouldblock_duration_s: TimeHistogram,
+async fn send_to<M: Metrics>(
+    socket: &tokio::net::UdpSocket, send_buf: &[u8], packet: PacketSend,
+    metrics: &M,
 ) -> io::Result<usize> {
+    let PacketSend {
+        to,
+        from,
+        segment_size,
+        tx_time,
+        dscp,
+    } = packet;
     let raw_time = tx_time.map(monotonic_tx_time).transpose()?.unwrap_or(0);
     // UDP_SEGMENT is a nonzero u16 on the wire. Truncating a usize here
     // silently changes the segment size and can even turn it into zero.
-    let segment_size_u16 = segment_size
-        .map(|size| {
-            u16::try_from(size)
-                .ok()
-                .filter(|size| *size != 0)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "UDP GSO segment size must be in 1..=65535",
-                    )
-                })
-        })
-        .transpose()?;
+    let segment_size_u16 = checked_segment_size(segment_size)?;
 
     let mut sendmsg_retry_timer = None;
     loop {
@@ -258,10 +369,11 @@ pub async fn send_to(
             // Wait for the socket to become writable and try again
             Err(e) if e.kind() == ErrorKind::WouldBlock => {
                 if sendmsg_retry_timer.is_none() {
-                    sendmsg_retry_timer =
-                        Some(send_to_wouldblock_duration_s.start_timer());
+                    sendmsg_retry_timer = Some(
+                        metrics.send_to_wouldblock_duration_s().start_timer(),
+                    );
                 }
-                would_block_metric.inc();
+                metrics.write_errors(QuicWriteError::WouldBlock).inc();
                 socket.writable().await?
             },
             res => return res,
@@ -270,25 +382,17 @@ pub async fn send_to(
 }
 
 #[cfg(any(not(target_os = "linux"), feature = "fuzzing"))]
-#[expect(
-    clippy::too_many_arguments,
-    reason = "The signature mirrors protocol state and grouping would obscure call sites"
-)]
-pub(crate) async fn send_to(
-    socket: &tokio::net::UdpSocket, to: SocketAddr, _from: Option<SocketAddr>,
-    send_buf: &[u8], _segment_size: Option<usize>, _tx_time: Option<Instant>,
-    _dscp: Option<Dscp>, _would_block_metric: Counter,
-    _send_to_wouldblock_duration_s: TimeHistogram,
+async fn send_to<M: Metrics>(
+    _socket: &tokio::net::UdpSocket, _send_buf: &[u8], _packet: PacketSend,
+    _metrics: &M,
 ) -> io::Result<usize> {
-    socket.send_to(send_buf, to).await
+    Err(io::ErrorKind::Unsupported.into())
 }
 
 #[cfg(all(target_os = "linux", test, not(feature = "fuzzing")))]
 pub(crate) mod test {
     use super::*;
-    use crate::metrics::labels::QuicWriteError;
     use crate::metrics::DefaultMetrics;
-    use crate::metrics::Metrics;
     use crate::quic::DscpHandle;
     use nix::sys::socket::recvmsg;
     use nix::sys::socket::setsockopt;
@@ -359,14 +463,15 @@ pub(crate) mod test {
         let metrics = DefaultMetrics;
         let bytes = send_to(
             sender,
-            receiver.local_addr().unwrap(),
-            from,
             buf,
-            segment_size,
-            None,
-            dscp,
-            metrics.write_errors(QuicWriteError::WouldBlock),
-            metrics.send_to_wouldblock_duration_s(),
+            PacketSend {
+                to: receiver.local_addr().unwrap(),
+                from,
+                segment_size,
+                tx_time: None,
+                dscp,
+            },
+            &metrics,
         )
         .await
         .unwrap();
@@ -491,14 +596,15 @@ pub(crate) mod test {
         for from in [None, Some(mapped_source)] {
             send_to(
                 &sender,
-                mapped,
-                from,
                 b"mapped",
-                None,
-                None,
-                Some(TEST_DSCP),
-                metrics.write_errors(QuicWriteError::WouldBlock),
-                metrics.send_to_wouldblock_duration_s(),
+                PacketSend {
+                    to: mapped,
+                    from,
+                    segment_size: None,
+                    tx_time: None,
+                    dscp: Some(TEST_DSCP),
+                },
+                &metrics,
             )
             .await
             .unwrap();
@@ -573,14 +679,15 @@ pub(crate) mod test {
         for size in [0, usize::from(u16::MAX) + 1, usize::MAX] {
             let err = send_to(
                 &sender,
-                receiver.local_addr().unwrap(),
-                None,
                 b"segment",
-                Some(size),
-                None,
-                None,
-                metrics.write_errors(QuicWriteError::WouldBlock),
-                metrics.send_to_wouldblock_duration_s(),
+                PacketSend {
+                    to: receiver.local_addr().unwrap(),
+                    from: None,
+                    segment_size: Some(size),
+                    tx_time: None,
+                    dscp: None,
+                },
+                &metrics,
             )
             .await
             .unwrap_err();
@@ -601,17 +708,132 @@ pub(crate) mod test {
         let metrics = DefaultMetrics;
         let sent = send_to(
             &sender,
-            receiver.local_addr().unwrap(),
-            None,
             b"deadline",
-            None,
-            Some(Instant::now() + Duration::from_millis(100)),
-            None,
-            metrics.write_errors(QuicWriteError::WouldBlock),
-            metrics.send_to_wouldblock_duration_s(),
+            PacketSend {
+                to: receiver.local_addr().unwrap(),
+                from: None,
+                segment_size: None,
+                tx_time: Some(Instant::now() + Duration::from_millis(100)),
+                dscp: None,
+            },
+            &metrics,
         )
         .await
         .unwrap();
         assert_eq!(sent, b"deadline".len());
+    }
+}
+
+#[cfg(test)]
+mod send_tests {
+    use super::recoverable_send_error;
+    use super::send_packets;
+    use super::PacketSend;
+    use crate::metrics::DefaultMetrics;
+    use datagram_socket::DatagramSocketSend;
+    use std::io;
+    use std::net::SocketAddr;
+    use std::sync::Mutex;
+    use std::task::Context;
+    use std::task::Poll;
+
+    #[derive(Default)]
+    struct RecordingSocket {
+        datagrams: Mutex<Vec<Vec<u8>>>,
+        partial: bool,
+    }
+    impl DatagramSocketSend for RecordingSocket {
+        fn poll_send(
+            &self, _cx: &mut Context<'_>, buffer: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            match self.datagrams.lock() {
+                Ok(mut datagrams) => {
+                    datagrams.push(buffer.to_vec());
+                    Poll::Ready(Ok(if self.partial {
+                        buffer.len().saturating_sub(1)
+                    } else {
+                        buffer.len()
+                    }))
+                },
+                Err(_) => Poll::Ready(Err(io::Error::other(
+                    "recording socket poisoned",
+                ))),
+            }
+        }
+
+        fn poll_send_to(
+            &self, cx: &mut Context<'_>, buffer: &[u8], _addr: SocketAddr,
+        ) -> Poll<io::Result<usize>> {
+            self.poll_send(cx, buffer)
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_wrapper_preserves_gso_datagram_boundaries(
+    ) -> crate::QuicResult<()> {
+        let socket = RecordingSocket::default();
+        let packet = PacketSend {
+            to: "127.0.0.1:1234".parse()?,
+            from: None,
+            segment_size: Some(3),
+            tx_time: None,
+            dscp: None,
+        };
+        send_packets(&socket, b"abcdefg", packet, &DefaultMetrics).await?;
+        let datagrams = socket
+            .datagrams
+            .lock()
+            .map_err(|_| "recording socket poisoned")?;
+        assert_eq!(datagrams.as_slice(), &[
+            b"abc".to_vec(),
+            b"def".to_vec(),
+            b"g".to_vec()
+        ]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn partial_datagram_is_a_fatal_transport_contract_error(
+    ) -> crate::QuicResult<()> {
+        let socket = RecordingSocket {
+            partial: true,
+            ..RecordingSocket::default()
+        };
+        let packet = PacketSend {
+            to: "127.0.0.1:1234".parse()?,
+            from: None,
+            segment_size: None,
+            tx_time: None,
+            dscp: None,
+        };
+        let error = send_packets(&socket, b"abcdefg", packet, &DefaultMetrics)
+            .await
+            .err()
+            .ok_or("partial send was accepted")?;
+        assert_eq!(error.kind(), io::ErrorKind::WriteZero);
+        assert!(!recoverable_send_error(&error));
+        Ok(())
+    }
+
+    #[test]
+    fn temporary_network_failures_are_not_fatal_to_the_connection() {
+        for kind in [
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::TimedOut,
+        ] {
+            assert!(recoverable_send_error(&kind.into()));
+        }
+        for kind in [
+            io::ErrorKind::InvalidInput,
+            io::ErrorKind::PermissionDenied,
+            io::ErrorKind::BrokenPipe,
+        ] {
+            assert!(!recoverable_send_error(&kind.into()));
+        }
+        #[cfg(target_os = "linux")]
+        for errno in [libc::EMSGSIZE, libc::ENOBUFS] {
+            assert!(recoverable_send_error(&io::Error::from_raw_os_error(errno)));
+        }
     }
 }
