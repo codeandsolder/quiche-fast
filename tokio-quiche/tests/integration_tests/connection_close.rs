@@ -82,7 +82,7 @@ async fn test_requests_per_connection_limit() -> QuicResult<()> {
             "request {i} didn't have a status code OK",
         );
     }
-    assert!(summary.stream_map.stream(MAX_REQS * 4).is_empty());
+    assert_eq!(summary.stream_map.stream(MAX_REQS * 4), []);
 
     let error = summary
         .conn_close_details
@@ -129,7 +129,7 @@ async fn test_max_header_list_size_limit() -> QuicResult<()> {
     let summary = summarize_connection(h3i, actions).await?;
 
     assert!(received_status_code_on_stream(&summary, 0, 200));
-    assert!(summary.stream_map.stream(4).is_empty());
+    assert_eq!(summary.stream_map.stream(4), []);
 
     let error = summary
         .conn_close_details

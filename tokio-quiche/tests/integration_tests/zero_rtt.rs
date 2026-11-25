@@ -198,6 +198,7 @@ pub async fn helper_connect_with_early_data(
 fn helper_reset_test(context: &Arc<Mutex<TestContext>>) -> QuicResult<()> {
     let mut context = context.lock().map_err(|_| "test context poisoned")?;
     *context = TestContext::default();
+    drop(context);
     Ok(())
 }
 

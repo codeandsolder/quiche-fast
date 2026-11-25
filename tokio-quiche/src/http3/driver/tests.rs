@@ -359,10 +359,10 @@ mod client_side_driver {
             body.len()
         );
         helper.advance_and_run_loop()?;
-        let (received, received_fin, _) =
+        let (actual_body, actual_fin, _) =
             helper.driver_try_recv_body(receiver)?;
-        assert_eq!(received, body);
-        assert_eq!(received_fin, fin);
+        assert_eq!(actual_body, body);
+        assert_eq!(actual_fin, fin);
         Ok(())
     }
 
@@ -1408,10 +1408,10 @@ mod server_side_driver {
             Ok(body.len())
         );
         helper.advance_and_run_loop()?;
-        let (received, received_fin, _) =
+        let (actual_body, actual_fin, _) =
             helper.driver_try_recv_body(receiver)?;
-        assert_eq!(received, body);
-        assert_eq!(received_fin, fin);
+        assert_eq!(actual_body, body);
+        assert_eq!(actual_fin, fin);
         Ok(())
     }
 

@@ -159,11 +159,10 @@ pub async fn serve_connection_details(
                 match event {
                     ServerH3Event::Core(event) => {
                         match event {
-                            H3Event::IncomingSettings {..} | H3Event::BodyBytesReceived { .. } | H3Event::StreamClosed { .. } | H3Event::IncomingHeaders(..) => {},
+                            H3Event::IncomingSettings {..} | H3Event::BodyBytesReceived { .. } | H3Event::StreamClosed { .. } | H3Event::IncomingHeaders(..) | H3Event::ResetStream { .. } | H3Event::GoAway { .. } => {},
                             H3Event::ConnectionError(err) => { break Err(err.into()); }
                             H3Event::ConnectionShutdown(Some(err)) => { break Err(err.into()); }
                             H3Event::ConnectionShutdown(None) => { break Ok(()); }
-                            H3Event::ResetStream { .. } | H3Event::GoAway { .. } => {},
                             H3Event::NewFlow { .. } => { break Err("unexpected datagram flow in HTTP fixture".into()); }
                         }
                     }
@@ -185,11 +184,9 @@ pub async fn serve_connection_details(
 }
 
 pub async fn handle_connection(mut connection: ServerH3Connection) {
-    let _ = serve_connection_details(
-        &mut connection.h3_controller,
-        Default::default(),
-    )
-    .await;
+    let _ =
+        serve_connection_details(&mut connection.h3_controller, Arc::default())
+            .await;
 }
 
 pub async fn handle_forwarded_headers_frame(

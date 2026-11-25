@@ -88,8 +88,8 @@ async fn assert_server_emits_suffix(
     assert_eq!(
         entries.len(),
         1,
-        "expected 1 qlog file under {:?}, got {entries:?}",
-        dir.path()
+        "expected 1 qlog file under {}, got {entries:?}",
+        dir.path().display()
     );
     let name = entries[0]
         .file_name()

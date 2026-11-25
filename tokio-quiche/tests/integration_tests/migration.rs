@@ -104,7 +104,7 @@ async fn test_active_migration() -> tokio_quiche::QuicResult<()> {
 ///
 /// This requires using "plain" quiche as a client to properly control when and
 /// where packets are sent to, which is not possible using h3i.
-pub(crate) async fn run_migration_test(
+pub(super) async fn run_migration_test(
     active: bool, base_port: u16,
 ) -> tokio_quiche::QuicResult<(Vec<quiche::PathEvent>, SocketAddr, SocketAddr)> {
     let mut quic_settings = QuicSettings::default();

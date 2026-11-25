@@ -219,9 +219,8 @@ async fn test_handshake_duration_ioworker() -> QuicResult<()> {
 
 #[tokio::test]
 async fn test_handshake_timeout_with_one_client_flight() -> QuicResult<()> {
-    let hook = TestConnectionHook::new();
-
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
+    let hook = TestConnectionHook::new();
     let mut quic_settings = QuicSettings::default();
     quic_settings.handshake_timeout = Some(HANDSHAKE_TIMEOUT);
 
