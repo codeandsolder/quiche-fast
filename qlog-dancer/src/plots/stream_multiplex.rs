@@ -38,8 +38,12 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::io;
+use std::ops::Range;
 
+use plotters::coord::Shift;
+use plotters::drawing::DrawingArea;
 use plotters::prelude::ChartBuilder;
+use plotters::prelude::DrawingBackend;
 use plotters::prelude::PathElement;
 use plotters::prelude::RGBColor;
 use plotters::prelude::TriangleMarker;
@@ -62,6 +66,7 @@ use crate::datastore::Datastore;
 use crate::request_stub::HttpRequestStub;
 use crate::seriesstore::SeriesStore;
 
+#[derive(Clone)]
 pub struct MultiplexPlotsParams {
     pub clamp: ClampParams,
     pub bidi_only: bool,
@@ -229,8 +234,261 @@ fn colors_for_visible_streams(
         .collect()
 }
 
+/// Borrowed observations for one stream. A stream may have received frames
+/// even if the capture omitted its request headers.
+struct MultiplexLane<'a> {
+    color: RGBColor,
+    data: &'a [QlogPointu64],
+    frames: &'a [QlogPointu64],
+    headers: [Option<f64>; 2],
+}
+
+struct MultiplexModel<'a> {
+    lanes: BTreeMap<u64, MultiplexLane<'a>>,
+    layout: MultiplexLayout,
+    x_range: Range<f64>,
+    max_data: u64,
+}
+
+impl<'a> MultiplexModel<'a> {
+    fn new(
+        params: &MultiplexPlotsParams, ss: &'a SeriesStore, ds: &'a Datastore,
+    ) -> io::Result<Self> {
+        use crate::datastore::ApplicationProto;
+        let frame_series = match (ds.application_proto, ds.vantage_point) {
+            (ApplicationProto::Http2, VantagePoint::Client) =>
+                &ss.received_data_frames_series,
+            (ApplicationProto::Http2, VantagePoint::Server) =>
+                &ss.sent_data_frames_series,
+            (ApplicationProto::Http3, VantagePoint::Client) =>
+                &ss.received_stream_frames_series,
+            (ApplicationProto::Http3, VantagePoint::Server) =>
+                &ss.sent_stream_frames_series,
+        };
+        let colors = colors_for_visible_streams(params, ds, frame_series);
+        let lanes = colors
+            .into_iter()
+            .map(|(id, color)| {
+                let request = ds.http_requests.get(&id);
+                let data = request.map_or(&[][..], |request| {
+                    request_data_frames(request, ds.vantage_point)
+                });
+                let frames = frame_series.get(&id).map_or(&[][..], Vec::as_slice);
+                let headers = request.map_or([None, None], |request| {
+                    [request.time_first_headers_rx, request.time_first_headers_tx]
+                });
+                (id, MultiplexLane {
+                    color,
+                    data,
+                    frames,
+                    headers,
+                })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let (mut start, mut end) = match ds.vantage_point {
+            VantagePoint::Client => (ss.received_x_min, ss.received_x_max),
+            VantagePoint::Server => (ss.sent_x_min, ss.sent_x_max),
+        };
+        if !start.is_finite() || !end.is_finite() {
+            return Err(invalid_chart(
+                "multiplex source time bounds must be finite",
+            ));
+        }
+        let mut max_data = 1;
+        for lane in lanes.values() {
+            for &(_, length) in lane.data {
+                max_data = max_data.max(length);
+            }
+            for time in lane
+                .data
+                .iter()
+                .chain(lane.frames)
+                .map(|point| point.0)
+                .chain(lane.headers.into_iter().flatten())
+            {
+                if !time.is_finite() {
+                    return Err(invalid_chart(
+                        "multiplex event timestamps must be finite",
+                    ));
+                }
+                start = start.min(time);
+                end = end.max(time);
+            }
+        }
+        let layout = MultiplexLayout::new(params, lanes.len())?;
+        let x_range = checked_time_range(start, end, &params.clamp)?;
+        Ok(Self {
+            lanes,
+            layout,
+            x_range,
+            max_data,
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FrameKind {
+    Data,
+    Stream,
+}
+
+impl FrameKind {
+    const fn caption(self) -> &'static str {
+        match self {
+            Self::Data => "DATA frame events",
+            Self::Stream => "STREAM frame events",
+        }
+    }
+
+    const fn points<'a>(self, lane: &MultiplexLane<'a>) -> &'a [QlogPointu64] {
+        match self {
+            Self::Data => lane.data,
+            Self::Stream => lane.frames,
+        }
+    }
+}
+
+fn draw_combined<DB: DrawingBackend>(
+    area: &DrawingArea<DB, Shift>, params: &MultiplexPlotsParams,
+    model: &MultiplexModel<'_>, kind: FrameKind,
+) -> Result<(), Box<dyn Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let mut chart = ChartBuilder::on(area)
+        .caption(kind.caption(), chart_title_style(&params.colors.caption))
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y)
+        .build_cartesian_2d(model.x_range.clone(), 0..2)?;
+    chart
+        .configure_mesh()
+        .disable_mesh()
+        .axis_style(params.colors.axis)
+        .label_style(chart_label_style(&params.colors.caption))
+        .draw()?;
+    for lane in model.lanes.values() {
+        chart.draw_series(kind.points(lane).iter().map(|(time, _)| {
+            PathElement::new([(*time, 2), (*time, 0)], lane.color)
+        }))?;
+    }
+    Ok(())
+}
+
+fn draw_frame_lane<DB: DrawingBackend>(
+    area: &DrawingArea<DB, Shift>, params: &MultiplexPlotsParams,
+    range: &Range<f64>, lane: &MultiplexLane<'_>, kind: FrameKind,
+) -> Result<(), Box<dyn Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let mut chart = ChartBuilder::on(area)
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y)
+        .build_cartesian_2d(range.clone(), 0..4)?;
+    chart
+        .configure_mesh()
+        .disable_y_mesh()
+        .disable_y_axis()
+        .axis_style(params.colors.axis)
+        .draw()?;
+    chart.draw_series(
+        lane.headers
+            .into_iter()
+            .flatten()
+            .map(|time| TriangleMarker::new((time, 2), 5, lane.color)),
+    )?;
+    chart.draw_series(kind.points(lane).iter().map(|(time, _)| {
+        PathElement::new([(*time, 2), (*time, 0)], lane.color)
+    }))?;
+    Ok(())
+}
+
+fn draw_length_lane<DB: DrawingBackend>(
+    area: &DrawingArea<DB, Shift>, params: &MultiplexPlotsParams,
+    model: &MultiplexModel<'_>, lane: &MultiplexLane<'_>,
+) -> Result<(), Box<dyn Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let mut chart = ChartBuilder::on(area)
+        .x_label_area_size(params.area_margin.x)
+        .y_label_area_size(params.area_margin.y)
+        .build_cartesian_2d(model.x_range.clone(), 0..model.max_data)?;
+    chart
+        .configure_mesh()
+        .disable_y_mesh()
+        .disable_y_axis()
+        .axis_style(params.colors.axis)
+        .draw()?;
+    chart.draw_series(lane.data.iter().map(|(time, length)| {
+        PathElement::new([(*time, 0), (*time, *length)], lane.color)
+    }))?;
+    Ok(())
+}
+
+fn draw_multiplex<DB: DrawingBackend>(
+    root: &DrawingArea<DB, Shift>, params: &MultiplexPlotsParams,
+    model: &MultiplexModel<'_>,
+) -> Result<(), Box<dyn Error>>
+where
+    DB::ErrorType: 'static,
+{
+    let layout = &model.layout;
+    let combined = [
+        (0, FrameKind::Data),
+        (
+            checked_pixel(u64::from(layout.stream_combined_y))?,
+            FrameKind::Stream,
+        ),
+    ];
+    for (y, kind) in combined {
+        let area = root
+            .clone()
+            .shrink((0, y), (layout.chart_width, params.combined_plot_height));
+        draw_combined(&area, params, model, kind)?;
+    }
+    for (row, lane) in model.lanes.values().enumerate() {
+        let frames = [
+            (layout.data_mini_y, FrameKind::Data),
+            (layout.stream_mini_y, FrameKind::Stream),
+        ];
+        for (offset, kind) in frames {
+            let y = MultiplexLayout::row_y(offset, layout.frame_step, row)?;
+            let area = root.clone().shrink(
+                (0, y),
+                (layout.chart_width, params.frame_swimlane_height),
+            );
+            draw_frame_lane(&area, params, &model.x_range, lane, kind)?;
+        }
+        let y =
+            MultiplexLayout::row_y(layout.bubbles_y, layout.bubble_step, row)?;
+        let area = root
+            .clone()
+            .shrink((0, y), (layout.chart_width, params.bubbles_swimlane_height));
+        draw_length_lane(&area, params, model, lane)?;
+    }
+    root.present()?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn multiplex_canvas(
+    ty: &ChartOutputType,
+) -> io::Result<web_sys::HtmlCanvasElement> {
+    use wasm_bindgen::JsCast;
+    let ChartOutputType::Canvas { canvas_id } = ty else {
+        return Err(invalid_chart(
+            "browser multiplex chart requires canvas output",
+        ));
+    };
+    web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(canvas_id))
+        .and_then(|element| element.dyn_into().ok())
+        .ok_or_else(|| invalid_chart("multiplex canvas not found"))
+}
+
 /// Draw per-stream DATA and STREAM events across combined and individual lanes.
-///
 /// # Errors
 /// Returns invalid layout, nonfinite times, output filesystem/canvas, and
 /// backend/drawing failures as errors rather than panicking.
@@ -238,65 +496,17 @@ pub fn plot_stream_multiplexing(
     params: &MultiplexPlotsParams, filename: &str, ss: &SeriesStore,
     ds: &Datastore, ty: &ChartOutputType,
 ) -> Result<(), Box<dyn Error>> {
-    let requests = ds.http_requests.iter().filter(|(stream_id, _)| {
-        visible_stream(params, ds.application_proto, **stream_id)
-    });
-    let layout = MultiplexLayout::new(params, requests.clone().count())?;
-
-    let stream_frame_series = match (ds.application_proto, ds.vantage_point) {
-        (crate::datastore::ApplicationProto::Http2, VantagePoint::Client) =>
-            &ss.received_data_frames_series,
-        (crate::datastore::ApplicationProto::Http2, VantagePoint::Server) =>
-            &ss.sent_data_frames_series,
-        (crate::datastore::ApplicationProto::Http3, VantagePoint::Client) =>
-            &ss.received_stream_frames_series,
-        (crate::datastore::ApplicationProto::Http3, VantagePoint::Server) =>
-            &ss.sent_stream_frames_series,
+    #[cfg(target_arch = "wasm32")]
+    let canvas = multiplex_canvas(ty)?;
+    #[cfg(target_arch = "wasm32")]
+    let browser_params = MultiplexPlotsParams {
+        width: canvas.width(),
+        ..params.clone()
     };
-    let (mut start, mut end) = match ds.vantage_point {
-        VantagePoint::Client => (ss.received_x_min, ss.received_x_max),
-        VantagePoint::Server => (ss.sent_x_min, ss.sent_x_max),
-    };
-    if !start.is_finite() || !end.is_finite() {
-        return Err(
-            invalid_chart("multiplex source time bounds must be finite").into()
-        );
-    }
-    for time in requests
-        .clone()
-        .flat_map(|(_, request)| {
-            request_data_frames(request, ds.vantage_point)
-                .iter()
-                .map(|point| point.0)
-        })
-        .chain(
-            stream_frame_series
-                .iter()
-                .filter(|(id, _)| {
-                    visible_stream(params, ds.application_proto, **id)
-                })
-                .flat_map(|(_, points)| points.iter().map(|point| point.0)),
-        )
-        .chain(
-            requests
-                .clone()
-                .flat_map(|(_, request)| {
-                    [request.time_first_headers_rx, request.time_first_headers_tx]
-                })
-                .flatten(),
-        )
-    {
-        if !time.is_finite() {
-            return Err(invalid_chart(
-                "multiplex event timestamps must be finite",
-            )
-            .into());
-        }
-        start = start.min(time);
-        end = end.max(time);
-    }
-    let x_range = checked_time_range(start, end, &params.clamp)?;
+    #[cfg(target_arch = "wasm32")]
+    let params = &browser_params;
 
+    let model = MultiplexModel::new(params, ss, ds)?;
     let config =
         ChartConfig::new("stream-multiplexing", filename, &params.clamp, ds, ty);
     let margin = ChartMargin {
@@ -318,13 +528,18 @@ pub fn plot_stream_multiplexing(
     let root = bitmap_area(
         &chart_path,
         ChartSize {
-            width: layout.width,
-            height: layout.height,
+            width: model.layout.width,
+            height: model.layout.height,
         },
         params.colors,
         margin,
     )?;
 
+    // Keep the actual browser canvas extent in sync with the same checked
+    // layout used by the native bitmap renderer. In particular, do not clip
+    // stream rows to the initial HTML canvas height.
+    #[cfg(target_arch = "wasm32")]
+    canvas.set_height(model.layout.height);
     #[cfg(target_arch = "wasm32")]
     let canvas_id = config.canvas_id().ok_or_else(|| {
         invalid_chart("browser multiplex chart requires canvas output")
@@ -332,159 +547,7 @@ pub fn plot_stream_multiplexing(
     #[cfg(target_arch = "wasm32")]
     let root = canvas_area(&canvas_id, params.colors, margin)?;
 
-    let stream_colors =
-        colors_for_visible_streams(params, ds, stream_frame_series);
-    let combined_data_area = root
-        .clone()
-        .shrink((0, 0), (layout.chart_width, params.combined_plot_height));
-    let mut combined_data = ChartBuilder::on(&combined_data_area)
-        .caption(
-            "DATA frame events",
-            chart_title_style(&params.colors.caption),
-        )
-        .x_label_area_size(params.area_margin.x)
-        .y_label_area_size(params.area_margin.y)
-        .build_cartesian_2d(x_range.clone(), 0..2)?;
-    combined_data
-        .configure_mesh()
-        .disable_mesh()
-        .axis_style(params.colors.axis)
-        .label_style(chart_label_style(&params.colors.caption))
-        .draw()?;
-    for (stream_id, request) in requests.clone() {
-        let points = request_data_frames(request, ds.vantage_point);
-        let color = stream_colors[stream_id];
-        combined_data.draw_series(points.iter().map(|(time, _)| {
-            PathElement::new([(*time, 2), (*time, 0)], color)
-        }))?;
-    }
-
-    let combined_stream_area = root.clone().shrink(
-        (0, checked_pixel(u64::from(layout.stream_combined_y))?),
-        (layout.chart_width, params.combined_plot_height),
-    );
-    let mut combined_stream = ChartBuilder::on(&combined_stream_area)
-        .caption(
-            "STREAM frame events",
-            chart_title_style(&params.colors.caption),
-        )
-        .x_label_area_size(params.area_margin.x)
-        .y_label_area_size(params.area_margin.y)
-        .build_cartesian_2d(x_range.clone(), 0..2)?;
-    combined_stream
-        .configure_mesh()
-        .disable_mesh()
-        .axis_style(params.colors.axis)
-        .label_style(chart_label_style(&params.colors.caption))
-        .draw()?;
-    for (stream_id, points) in stream_frame_series
-        .iter()
-        .filter(|(id, _)| visible_stream(params, ds.application_proto, **id))
-    {
-        let color = stream_colors[stream_id];
-        combined_stream.draw_series(points.iter().map(|(time, _)| {
-            PathElement::new([(*time, 2), (*time, 0)], color)
-        }))?;
-    }
-
-    let max_data = requests
-        .clone()
-        .flat_map(|(_, request)| {
-            request_data_frames(request, ds.vantage_point)
-                .iter()
-                .map(|point| point.1)
-        })
-        .max()
-        .unwrap_or(0)
-        .max(1);
-    for (row, (stream_id, request)) in requests.enumerate() {
-        let points = request_data_frames(request, ds.vantage_point);
-        let color = stream_colors[stream_id];
-        let frame_y =
-            MultiplexLayout::row_y(layout.data_mini_y, layout.frame_step, row)?;
-        let stream_y =
-            MultiplexLayout::row_y(layout.stream_mini_y, layout.frame_step, row)?;
-        let bubble_y =
-            MultiplexLayout::row_y(layout.bubbles_y, layout.bubble_step, row)?;
-        let data_area = root.clone().shrink(
-            (0, frame_y),
-            (layout.chart_width, params.frame_swimlane_height),
-        );
-        let stream_area = root.clone().shrink(
-            (0, stream_y),
-            (layout.chart_width, params.frame_swimlane_height),
-        );
-        let bubble_area = root.clone().shrink(
-            (0, bubble_y),
-            (layout.chart_width, params.bubbles_swimlane_height),
-        );
-
-        let mut data_chart = ChartBuilder::on(&data_area)
-            .x_label_area_size(params.area_margin.x)
-            .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(x_range.clone(), 0..4)?;
-        data_chart
-            .configure_mesh()
-            .disable_y_mesh()
-            .disable_y_axis()
-            .axis_style(params.colors.axis)
-            .draw()?;
-        let mut stream_chart = ChartBuilder::on(&stream_area)
-            .x_label_area_size(params.area_margin.x)
-            .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(x_range.clone(), 0..4)?;
-        stream_chart
-            .configure_mesh()
-            .disable_y_mesh()
-            .disable_y_axis()
-            .axis_style(params.colors.axis)
-            .draw()?;
-
-        for time in [
-            match ds.vantage_point {
-                VantagePoint::Client => request.time_first_headers_tx,
-                VantagePoint::Server => request.time_first_headers_rx,
-            },
-            match ds.vantage_point {
-                VantagePoint::Client => request.time_first_headers_rx,
-                VantagePoint::Server => request.time_first_headers_tx,
-            },
-        ]
-        .into_iter()
-        .flatten()
-        {
-            data_chart.draw_series([TriangleMarker::new((time, 2), 5, color)])?;
-            stream_chart.draw_series([TriangleMarker::new(
-                (time, 2),
-                5,
-                color,
-            )])?;
-        }
-        data_chart.draw_series(points.iter().map(|(time, _)| {
-            PathElement::new([(*time, 2), (*time, 0)], color)
-        }))?;
-        if let Some(stream_frames) = stream_frame_series.get(stream_id) {
-            stream_chart.draw_series(stream_frames.iter().map(|(time, _)| {
-                PathElement::new([(*time, 2), (*time, 0)], color)
-            }))?;
-        }
-
-        let mut length_chart = ChartBuilder::on(&bubble_area)
-            .x_label_area_size(params.area_margin.x)
-            .y_label_area_size(params.area_margin.y)
-            .build_cartesian_2d(x_range.clone(), 0..max_data)?;
-        length_chart
-            .configure_mesh()
-            .disable_y_mesh()
-            .disable_y_axis()
-            .axis_style(params.colors.axis)
-            .draw()?;
-        length_chart.draw_series(points.iter().map(|(time, length)| {
-            PathElement::new([(*time, 0), (*time, *length)], color)
-        }))?;
-    }
-    root.present()?;
-    Ok(())
+    draw_multiplex(&root, params, &model)
 }
 
 #[cfg(test)]
@@ -550,6 +613,37 @@ mod tests {
         ds.application_proto = ApplicationProto::Http2;
         let h2 = colors_for_visible_streams(&params, &ds, &frame_series);
         assert_eq!(h2.keys().copied().collect::<Vec<_>>(), vec![1, 2, 5, 6, 9]);
+    }
+
+    #[test]
+    fn frame_only_streams_receive_lanes_and_extend_time_bounds() -> io::Result<()>
+    {
+        let params = test_params();
+        let mut ds = Datastore {
+            application_proto: ApplicationProto::Http3,
+            vantage_point: VantagePoint::Client,
+            ..Datastore::default()
+        };
+        ds.http_requests.insert(5, HttpRequestStub {
+            time_data_rx_set: vec![(3.0, 30)],
+            time_first_headers_rx: Some(2.0),
+            ..HttpRequestStub::default()
+        });
+        let ss = SeriesStore {
+            received_stream_frames_series: BTreeMap::from([
+                (1, vec![(9.0, 7)]),
+                (2, vec![(1000.0, 1)]),
+            ]),
+            ..SeriesStore::default()
+        };
+        let model = MultiplexModel::new(&params, &ss, &ds)?;
+        assert_eq!(model.lanes.keys().copied().collect::<Vec<_>>(), [1, 5]);
+        assert_eq!(model.lanes[&1].frames, [(9.0, 7)]);
+        assert!(model.lanes[&1].data.is_empty());
+        assert_eq!(model.x_range, 0.0..9.0);
+        assert_eq!(model.max_data, 30);
+        assert_eq!(model.layout, MultiplexLayout::new(&params, 2)?);
+        Ok(())
     }
 
     #[test]
