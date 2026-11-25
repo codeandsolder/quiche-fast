@@ -314,7 +314,9 @@ fn read_qlog(
     let mut actions = vec![];
 
     for event in qlog_reader {
-        match event {
+        match event.map_err(|error| {
+            ClientError::Other(format!("read qlog event: {error}"))
+        })? {
             qlog::reader::Event::Qlog(ev) => {
                 let ac: H3Actions = actions_from_qlog(ev, host_override)?;
                 actions.extend(ac.0);

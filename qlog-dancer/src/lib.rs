@@ -285,7 +285,7 @@ fn parse_qlog_json_seq(
             .as_ref()
             .map_or(qlog::VantagePointType::Unknown, |vp| vp.ty.clone()),
     };
-    let events: Vec<qlog::reader::Event> = qlog_reader.into_iter().collect();
+    let events = qlog_reader.collect::<std::io::Result<Vec<_>>>()?;
     let events = if let Some(filter) = &config.qlog_wirefilter {
         filter_sqlog_events(events, filter)?
     } else {

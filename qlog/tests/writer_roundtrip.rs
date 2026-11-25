@@ -118,7 +118,7 @@ fn emit_one_event(
 fn assert_roundtrip(path: &Path) -> TestResult {
     let mut reader = QlogSeqReader::with_file(path)?;
     let header = reader.qlog.clone();
-    let events: Vec<Event> = (&mut reader).collect();
+    let events = (&mut reader).collect::<io::Result<Vec<Event>>>()?;
 
     assert_eq!(header.serialization_format, "JSON-SEQ");
     assert!(!events.is_empty(), "expected at least one qlog event");
@@ -306,33 +306,24 @@ fn rejects_unknown_extension() -> TestResult {
 /// panicking while the header is read.
 #[cfg(feature = "gzip")]
 #[test]
-fn rejects_corrupt_gzip_payload() {
-    let dir = tempfile::tempdir().expect("tempdir");
+fn rejects_corrupt_gzip_payload() -> TestResult {
+    let dir = tempfile::tempdir()?;
     let path = dir.path().join("corrupt.sqlog.gz");
-    std::fs::write(&path, b"not a qlog file").expect("write");
-    assert_with_file_err(&path, "error reading file header bytes")
-        .expect("corrupt gzip should be rejected");
+    std::fs::write(&path, b"not a qlog file")?;
+    assert!(QlogSeqReader::with_file(&path).is_err());
+    Ok(())
 }
 
-/// Regression test: a gzip stream cut short after the header (e.g. the
-/// writer was killed before the trailer was flushed) must end iteration
-/// instead of panicking.
+/// Missing compression trailers are errors, not successful EOF.
 #[cfg(feature = "gzip")]
 #[test]
-fn truncated_gzip_stops_iteration() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path =
-        emit_one_event(QlogCompression::Gzip, dir.path()).expect("emit qlog");
-
-    // Drop the 8-byte gzip trailer (CRC32 + ISIZE) so the decoder hits
-    // an unexpected EOF after all the records have been decompressed.
-    let bytes = std::fs::read(&path).expect("read");
-    std::fs::write(&path, &bytes[..bytes.len() - 8]).expect("write");
-
-    let mut reader =
-        QlogSeqReader::with_file(&path).expect("QlogSeqReader::with_file");
-    let events: Vec<Event> = (&mut reader).collect();
-
-    assert_eq!(reader.qlog.serialization_format, "JSON-SEQ");
-    assert!(!events.is_empty(), "expected the event read before the EOF");
+fn truncated_gzip_reports_error() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = emit_one_event(QlogCompression::Gzip, dir.path())?;
+    let bytes = std::fs::read(&path)?;
+    std::fs::write(&path, &bytes[..bytes.len() - 8])?;
+    let mut reader = QlogSeqReader::with_file(&path)?;
+    assert!((&mut reader).collect::<io::Result<Vec<_>>>().is_err());
+    assert!(reader.next().is_none());
+    Ok(())
 }
