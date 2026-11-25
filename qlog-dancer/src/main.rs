@@ -136,13 +136,15 @@ fn chart_identity(
     // Per-entry identity prevents different traces/sessions overwriting one
     // another.
     let chart_filename = if multiple {
-        if let Some(trace) = &data.trace {
-            format!("{filename}-trace-{:04}", trace.index + 1)
-        } else if let Some(session) = data.datastore.session_id {
-            format!("{filename}-session-{session}")
-        } else {
-            filename.to_owned()
-        }
+        data.trace.as_ref().map_or_else(
+            || {
+                data.datastore.session_id.map_or_else(
+                    || filename.to_owned(),
+                    |session| format!("{filename}-session-{session}"),
+                )
+            },
+            |trace| format!("{filename}-trace-{:04}", trace.index + 1),
+        )
     } else {
         filename.to_owned()
     };
