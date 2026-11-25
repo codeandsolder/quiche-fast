@@ -57,7 +57,8 @@ pub struct NaOption<T> {
 }
 
 impl<T> NaOption<T> {
-    pub fn new(value: Option<T>) -> Self {
+    #[must_use = "constructs a displayable optional value"]
+    pub const fn new(value: Option<T>) -> Self {
         Self { inner: value }
     }
 
@@ -72,7 +73,7 @@ impl<T> NaOption<T> {
 impl<T: std::fmt::Display> Display for NaOption<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.inner.as_ref() {
-            Some(v) => write!(f, "{}", v),
+            Some(v) => write!(f, "{v}"),
             None => write!(f, "n/a"),
         }
     }
@@ -156,8 +157,8 @@ impl Default for ClientDeltaStrings {
 
 impl HttpRequestStub {
     fn client_deltas(&self) -> ClientDeltaStrings {
-        match self.at_client_deltas {
-            Some(d) => ClientDeltaStrings {
+        self.at_client_deltas
+            .map_or_else(ClientDeltaStrings::default, |d| ClientDeltaStrings {
                 discovery_tx_hdr: d.discover_tx_hdr.to_string(),
                 tx_hdr_rx_hdr: d.tx_hdr_rx_hdr.to_string(),
                 tx_hdr_rx_first_data: d.tx_hdr_rx_first_data.to_string(),
@@ -165,42 +166,66 @@ impl HttpRequestStub {
                 download_time_d2d: d.rx_first_data_rx_last_data.to_string(),
                 download_time_h2d: d.tx_hdr_rx_last_data.to_string(),
                 upload_time: d.tx_first_data_tx_last_data.to_string(),
-            },
-
-            None => ClientDeltaStrings::default(),
-        }
+            })
     }
 
     fn server_deltas(&self) -> (String, String, String, String) {
-        match self.at_server_deltas {
-            Some(d) => (
-                d.rx_hdr_tx_hdr.to_string(),
-                d.rx_hdr_tx_first_data.to_string(),
-                d.rx_hdr_tx_last_data.to_string(),
-                d.tx_first_data_tx_last_data.to_string(),
-            ),
-
-            None => {
-                let na = NaOption::<u8>::new(None);
+        self.at_server_deltas.map_or_else(
+            || ("n/a".into(), "n/a".into(), "n/a".into(), "n/a".into()),
+            |d| {
                 (
-                    na.to_string(),
-                    na.to_string(),
-                    na.to_string(),
-                    na.to_string(),
+                    d.rx_hdr_tx_hdr.to_string(),
+                    d.rx_hdr_tx_first_data.to_string(),
+                    d.rx_hdr_tx_last_data.to_string(),
+                    d.tx_first_data_tx_last_data.to_string(),
                 )
             },
-        }
+        )
     }
 }
 
+const REQUEST_HEADERS: [&str; 31] = [
+    "ID",
+    "Method",
+    "Host",
+    "Path",
+    "Status",
+    "Response Content-Length (bytes)",
+    "Response Transferred (bytes)",
+    "Request Discovered Time",
+    "Request Start Time",
+    "Request End Time",
+    "Stalled duration (ms)",
+    "Download duration (h2d) (ms)",
+    "Download rate (h2d) (Mbps)",
+    "Download duration (d2d) (ms)",
+    "Download rate (d2d) (Mbps)",
+    "Client Tx Hdr, Rx Hdr",
+    "Client Tx Hdr, Rx First Data",
+    "Client Tx Hdr, Rx Last Data",
+    CLIENT_CONTENT_LENGTH,
+    CLIENT_TRANSFERRED,
+    UPLOAD_TIME,
+    UPLOAD_RATE,
+    SERVER_RX_HDR_TX_HDR,
+    SERVER_TX_HDR_TX_FIRST_HDR,
+    SERVER_TX_HDR_TX_LAST_HDR,
+    SERVER_TX_FIRST_DATA_TX_LAST_DATA,
+    CLIENT_PRI,
+    SERVER_PRI,
+    "Reset Stream Sent",
+    "Reset Stream Received",
+    "Stop Sending Sent",
+];
+
 impl tabled::Tabled for HttpRequestStub {
-    const LENGTH: usize = 28;
+    const LENGTH: usize = REQUEST_HEADERS.len();
 
     fn fields(&self) -> Vec<Cow<'_, str>> {
         // truncate long paths for
         let mut path = self.path.to_string();
         if path.len() > MAX_PATH_LENGTH {
-            path.truncate(MAX_PATH_LENGTH);
+            path.truncate(path.floor_char_boundary(MAX_PATH_LENGTH));
             path.push_str("<snip>");
         }
 
@@ -210,21 +235,12 @@ impl tabled::Tabled for HttpRequestStub {
         };
         let req_start = NaOption::new(req_start);
 
-        // This one is tricky, we might never receive anything, so do a few
-        // checks.
+        // A response without a body ends at the response headers.
         let req_end = match self.request_actor {
             RequestActor::Client =>
-                if self.time_last_data_rx.is_some() {
-                    self.time_last_data_rx
-                } else {
-                    self.time_first_headers_rx
-                },
+                self.time_last_data_rx.or(self.time_first_headers_rx),
             RequestActor::Server =>
-                if self.time_last_data_tx.is_some() {
-                    self.time_first_data_tx
-                } else {
-                    self.time_first_headers_tx
-                },
+                self.time_last_data_tx.or(self.time_first_headers_tx),
         };
 
         let req_end = NaOption::new(req_end);
@@ -254,10 +270,10 @@ impl tabled::Tabled for HttpRequestStub {
             _ => NaOption::<u8>::new(None).to_string(),
         };
 
-        let stop_sending_sent = match &self.quic_stream_stop_sending_sent {
-            Some(v) => v.to_string(),
-            None => NaOption::<u8>::new(None).to_string(),
-        };
+        let stop_sending_sent = self
+            .quic_stream_stop_sending_sent
+            .as_ref()
+            .map_or_else(|| "n/a".to_owned(), ToString::to_string);
 
         vec![
             self.stream_id.to_string().into(),
@@ -295,42 +311,11 @@ impl tabled::Tabled for HttpRequestStub {
     }
 
     fn headers() -> Vec<Cow<'static, str>> {
-        vec![
-            "ID".into(),
-            "Method".into(),
-            "Host".into(),
-            "Path".into(),
-            "Status".into(),
-            "Response Content-Length (bytes)".into(),
-            "Response Transferred (bytes)".into(),
-            "Request Discovered Time".into(),
-            "Request Start Time".into(),
-            "Request End Time".into(),
-            "Stalled duration (ms)".into(),
-            "Download duration (h2d) (ms)".into(),
-            "Download rate (h2d) (Mbps)".into(),
-            "Download duration (d2d) (ms)".into(),
-            "Download rate (d2d) (Mbps)".into(),
-            "Client Tx Hdr, Rx Hdr".into(),
-            "Client Tx Hdr, Rx First Data".into(),
-            "Client Tx Hdr, Rx Last Data".into(),
-            CLIENT_CONTENT_LENGTH.into(),
-            CLIENT_TRANSFERRED.into(),
-            UPLOAD_TIME.into(),
-            UPLOAD_RATE.into(),
-            SERVER_RX_HDR_TX_HDR.into(),
-            SERVER_TX_HDR_TX_FIRST_HDR.into(),
-            SERVER_TX_HDR_TX_LAST_HDR.into(),
-            SERVER_TX_FIRST_DATA_TX_LAST_DATA.into(),
-            CLIENT_PRI.into(),
-            SERVER_PRI.into(),
-            "Reset Stream Sent".into(),
-            "Reset Stream Received".into(),
-            "Stop Sending Sent".into(),
-        ]
+        REQUEST_HEADERS.iter().copied().map(Cow::Borrowed).collect()
     }
 }
 
+#[must_use = "returns the first matching header value"]
 pub fn find_header_value(hdrs: &[HttpHeader], name: &str) -> Option<String> {
     hdrs.iter()
         .find(|&h| h.name.as_deref() == Some(name))
@@ -387,30 +372,26 @@ impl HttpRequestStub {
             .update_if_present(find_header_value(hdrs, "content-length"));
     }
 
-    // input times in milliseconds
+    // Input times in milliseconds. Convert the byte count before scaling to
+    // avoid integer overflow, including for very large cumulative traces.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "A throughput estimate is floating point; round the byte count once before scaling."
+    )]
     fn maybe_megabits_per_second(
         start: Option<f64>, end: Option<f64>, bytes: Option<u64>,
     ) -> NaOption<f64> {
-        match (end, start, bytes) {
-            (Some(end), Some(start), Some(bytes)) => {
-                let mut total_time = end - start;
-                // there might be only one frame, or it was sent super quick,
-                // clamp to 1ms
-                if total_time == 0.0 {
-                    total_time = 1.0
-                };
-
-                // convert to seconds
-                total_time /= 1000.0;
-
-                let megabits = (bytes * 8) as f64 / 1000000.0;
-                let avg_rate = megabits / total_time;
-
-                NaOption::new(Some(avg_rate))
-            },
-
-            _ => NaOption::<f64>::new(None),
+        let (Some(start), Some(end), Some(bytes)) = (start, end, bytes) else {
+            return NaOption::new(None);
+        };
+        let elapsed = end - start;
+        if !elapsed.is_finite() || elapsed < 0.0 {
+            return NaOption::new(None);
         }
+        // Preserve the one-millisecond convention for a single timestamp.
+        let elapsed = if elapsed == 0.0 { 1.0 } else { elapsed };
+        let rate = (bytes as f64 * 0.008) / elapsed;
+        NaOption::new(rate.is_finite().then_some(rate))
     }
 
     pub fn calculate_upload_download_rate(&mut self) {
@@ -509,38 +490,22 @@ impl HttpRequestStub {
             },
 
             RequestActor::Server => {
-                let rx_hdr_tx_hdr = match (
-                    self.time_first_headers_tx,
+                let rx_hdr_tx_hdr = Self::maybe_time_delta(
                     self.time_first_headers_rx,
-                ) {
-                    (Some(end), Some(start)) => NaOption::new(Some(end - start)),
-
-                    _ => NaOption::<f64>::new(None),
-                };
-
-                let rx_hdr_tx_first_data =
-                    match (self.time_first_data_tx, self.time_first_headers_rx) {
-                        (Some(end), Some(start)) =>
-                            NaOption::new(Some(end - start)),
-
-                        _ => NaOption::<f64>::new(None),
-                    };
-
-                let rx_hdr_tx_last_data =
-                    match (self.time_last_data_tx, self.time_first_headers_rx) {
-                        (Some(end), Some(start)) =>
-                            NaOption::new(Some(end - start)),
-
-                        _ => NaOption::<f64>::new(None),
-                    };
-
-                let tx_first_data_tx_last_data =
-                    match (self.time_last_data_tx, self.time_first_data_tx) {
-                        (Some(end), Some(start)) =>
-                            NaOption::new(Some(end - start)),
-
-                        _ => NaOption::<f64>::new(None),
-                    };
+                    self.time_first_headers_tx,
+                );
+                let rx_hdr_tx_first_data = Self::maybe_time_delta(
+                    self.time_first_headers_rx,
+                    self.time_first_data_tx,
+                );
+                let rx_hdr_tx_last_data = Self::maybe_time_delta(
+                    self.time_first_headers_rx,
+                    self.time_last_data_tx,
+                );
+                let tx_first_data_tx_last_data = Self::maybe_time_delta(
+                    self.time_first_data_tx,
+                    self.time_last_data_tx,
+                );
 
                 self.at_server_deltas = Some(RequestAtServerDeltas {
                     rx_hdr_tx_hdr,
@@ -641,6 +606,52 @@ mod header_metadata_tests {
                 NaOption::new(Some(String::new()))
             );
             assert_eq!(response.status.inner.as_deref(), Some("200"));
+        }
+    }
+}
+
+#[cfg(test)]
+mod report_tests {
+    use super::HttpRequestStub;
+    use super::NaOption;
+    use crate::datastore::RequestActor;
+    use tabled::Tabled;
+
+    #[test]
+    fn report_fields_match_headers_and_use_last_response_timestamp() {
+        for actor in [RequestActor::Client, RequestActor::Server] {
+            let request = HttpRequestStub {
+                request_actor: actor,
+                time_first_headers_rx: Some(1.0),
+                time_first_headers_tx: Some(2.0),
+                time_first_data_rx: Some(3.0),
+                time_first_data_tx: Some(4.0),
+                time_last_data_rx: Some(5.0),
+                time_last_data_tx: Some(6.0),
+                path: NaOption::new(Some(format!("/{}", "é".repeat(50)))),
+                ..HttpRequestStub::default()
+            };
+            let fields = request.fields();
+            assert_eq!(fields.len(), HttpRequestStub::LENGTH);
+            assert_eq!(HttpRequestStub::headers().len(), HttpRequestStub::LENGTH);
+            assert_eq!(fields[3], format!("/{}<snip>", "é".repeat(39)));
+            assert_eq!(fields[9], match request.request_actor {
+                RequestActor::Client => "5",
+                RequestActor::Server => "6",
+            });
+        }
+    }
+
+    #[test]
+    fn throughput_is_finite_and_handles_large_counters() {
+        let rate = HttpRequestStub::maybe_megabits_per_second;
+        assert_eq!(rate(Some(1.0), Some(2.0), Some(1000)).inner, Some(8.0));
+        assert_eq!(rate(Some(1.0), Some(1.0), Some(1000)).inner, Some(8.0));
+        assert!(rate(Some(1.0), Some(2.0), Some(u64::MAX))
+            .inner
+            .is_some_and(f64::is_finite));
+        for end in [None, Some(0.0), Some(f64::NAN), Some(f64::INFINITY)] {
+            assert_eq!(rate(Some(1.0), end, Some(1000)).inner, None);
         }
     }
 }
