@@ -16,10 +16,11 @@ jobs:
   strict-rust:
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
     with:
-      # The smaller packages already enforce all-target strict policy.
-      # The quiche package enforces all targets in its own feature matrix.
-      # #52/#55 track the remaining workspace packages.
-      cargo-args: "--all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch --features qlog/nightly-clippy-expects,buffer-pool/nightly-clippy-expects,netlog/nightly-clippy-expects"
+      # Gate the shared support crates and tokio-quiche together rather than
+      # adding another independent CI job. Enable RPK for the same transport
+      # feature set used by the workspace integration tests.
+      # The quiche core and CLI/analysis tools have their own existing gates.
+      cargo-args: "--locked --all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch -p tokio-quiche --features qlog/nightly-clippy-expects,buffer-pool/nightly-clippy-expects,netlog/nightly-clippy-expects,tokio-quiche/rpk"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
       ban-python-outside-ci: true
 
