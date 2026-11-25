@@ -48,8 +48,6 @@ use response::ResponseBody;
 
 use ring::rand::SecureRandom;
 
-use quiche::ConnectionId;
-
 use quiche::h3::NameValue;
 use quiche::h3::Priority;
 
@@ -76,29 +74,6 @@ pub struct PartialResponse {
     headers: Option<(Vec<quiche::h3::Header>, Priority)>,
     body: ResponseBody,
 }
-
-pub type ClientId = u64;
-
-pub struct ServerClient {
-    pub conn: quiche::Connection,
-
-    pub http_conn: Option<Box<dyn HttpConn>>,
-
-    pub id: ClientId,
-
-    pub app_proto_selected: bool,
-
-    pub partial_requests: std::collections::HashMap<u64, PartialRequest>,
-
-    pub partial_responses: std::collections::HashMap<u64, PartialResponse>,
-
-    pub loss_rate: f64,
-
-    pub max_send_burst: usize,
-}
-
-pub type ClientIdMap = HashMap<ConnectionId<'static>, ClientId>;
-pub type ClientMap = HashMap<ClientId, ServerClient>;
 
 /// Open the output file for a response, propagating filesystem errors.
 fn make_resource_writer(
