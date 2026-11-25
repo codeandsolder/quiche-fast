@@ -278,7 +278,8 @@ impl<'a> QlogSeqReader<'a> {
     /// error with a message pointing at the feature that is needed.
     ///
     /// This is the intended single entry point for reading a qlog
-    /// file regardless of compression.
+    /// file regardless of compression. Concatenated compression members are
+    /// decoded as one byte stream, and corrupt trailing members are errors.
     ///
     /// # Errors
     /// Returns an error if opening, decompression, or qlog header parsing
@@ -286,21 +287,20 @@ impl<'a> QlogSeqReader<'a> {
     pub fn with_file(path: impl AsRef<Path>) -> io::Result<Self> {
         let path = path.as_ref();
         let file = File::open(path)?;
-        let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        let name = path.file_name().unwrap_or_default();
+        let suffix = name.as_encoded_bytes();
 
-        // Order matters: `.sqlog.gz` and `.sqlog.zst` must be tested
-        // before `.sqlog` (every compressed suffix also ends with
-        // `.sqlog` if you only look at the last extension).
-        //
+        // Match complete ASCII suffixes, including on non-UTF-8 filenames.
         // Each compound suffix is matched exactly once. The
         // `#[cfg(feature = "...")]` lives inside the `if` body so the
         // disabled-feature path can return a helpful error rather
         // than falling through to the unknown-extension branch.
-        if name.ends_with(SQLOG_GZ_EXT) {
+        if suffix.ends_with(SQLOG_GZ_EXT.as_bytes()) {
             #[cfg(feature = "gzip")]
             {
-                let reader: Box<dyn std::io::BufRead + Send + Sync> =
-                    Box::new(BufReader::new(flate2::read::GzDecoder::new(file)));
+                let reader: Box<dyn std::io::BufRead + Send + Sync> = Box::new(
+                    BufReader::new(flate2::read::MultiGzDecoder::new(file)),
+                );
                 return Self::new(reader);
             }
             #[cfg(not(feature = "gzip"))]
@@ -312,7 +312,7 @@ impl<'a> QlogSeqReader<'a> {
                 ),
             ));
         }
-        if name.ends_with(SQLOG_ZST_EXT) {
+        if suffix.ends_with(SQLOG_ZST_EXT.as_bytes()) {
             #[cfg(feature = "zstd")]
             {
                 let decoder = zstd::Decoder::new(file)?;
@@ -329,7 +329,7 @@ impl<'a> QlogSeqReader<'a> {
                 ),
             ));
         }
-        if name.ends_with(SQLOG_EXT) {
+        if suffix.ends_with(SQLOG_EXT.as_bytes()) {
             let reader: Box<dyn std::io::BufRead + Send + Sync> =
                 Box::new(BufReader::new(file));
             return Self::new(reader);
