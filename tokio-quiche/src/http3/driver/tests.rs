@@ -10,6 +10,37 @@ use crate::http3::driver::server::ServerHooks;
 use super::test_utils::*;
 use super::*;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct StreamTermination {
+    stop_sending: Option<u64>,
+    reset: Option<u64>,
+    fin: StreamClosureKind,
+}
+
+#[track_caller]
+fn assert_stream_termination(
+    audit: &H3AuditStats, received: StreamTermination, sent: StreamTermination,
+) {
+    assert_eq!(
+        StreamTermination {
+            stop_sending: audit.recvd_stop_sending_error_code(),
+            reset: audit.recvd_reset_stream_error_code(),
+            fin: audit.recvd_stream_fin(),
+        },
+        received,
+        "received stream termination"
+    );
+    assert_eq!(
+        StreamTermination {
+            stop_sending: audit.sent_stop_sending_error_code(),
+            reset: audit.sent_reset_stream_error_code(),
+            fin: audit.sent_stream_fin(),
+        },
+        sent,
+        "sent stream termination"
+    );
+}
+
 #[test]
 fn wrapped_http3_and_quic_errors_expose_their_sources() -> TestResult {
     use std::error::Error as _;
@@ -317,6 +348,36 @@ mod conn_close_metrics {
 mod client_side_driver {
     use super::*;
 
+    fn receive_response_chunk(
+        helper: &mut DriverTestHelper<ClientHooks>,
+        receiver: &mut InboundFrameStream, stream_id: u64, body: &[u8],
+        fin: bool,
+    ) -> TestResult {
+        assert_eq!(
+            helper.peer_server_send_body(stream_id, body, fin)?,
+            body.len()
+        );
+        helper.advance_and_run_loop()?;
+        let (received, received_fin, _) =
+            helper.driver_try_recv_body(receiver)?;
+        assert_eq!(received, body);
+        assert_eq!(received_fin, fin);
+        Ok(())
+    }
+
+    fn receive_request_reset(
+        helper: &mut DriverTestHelper<ClientHooks>, stream_id: u64, code: u64,
+    ) -> TestResult {
+        helper.advance_and_run_loop()?;
+        assert_eq!(
+            helper.peer_server_poll(),
+            Ok((stream_id, h3::Event::Reset(code)))
+        );
+        assert_eq!(helper.peer_server_poll(), Err(h3::Error::Done));
+        helper.advance_and_run_loop()?;
+        Ok(())
+    }
+
     fn single_stream_client() -> anyhow::Result<DriverTestHelper<ClientHooks>> {
         let mut config = default_quiche_config()?;
         config.set_initial_max_streams_bidi(1);
@@ -610,35 +671,31 @@ mod client_side_driver {
         // Set the buffer size.
         helper.driver_set_body_buf_size(30);
         // The server sends an initial 10-byte body.
-        helper.peer_server_send_body(0, &[2; 10], false)?;
-        helper.advance_and_run_loop()?;
-        // The client receives the server body.
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            2;
-            10
-        ]);
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[2; 10],
+            false,
+        )?;
         // Receive another ten bytes.
-        helper.peer_server_send_body(0, &[3; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            3;
-            10
-        ]);
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[3; 10],
+            false,
+        )?;
         // Receive another ten bytes using the initial buffer.
-        helper.peer_server_send_body(0, &[4; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            4;
-            10
-        ]);
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[4; 10],
+            false,
+        )?;
         // Receive another ten bytes using a new buffer transparently.
-        helper.peer_server_send_body(0, &[5; 10], true)?;
-        helper.advance_and_run_loop()?;
-
-        let (body, fin, _) = helper.driver_try_recv_body(&mut from_server)?;
-        assert_eq!(body, vec![5; 10]);
-        // The client receives the server FIN.
-        assert!(fin);
+        receive_response_chunk(&mut helper, &mut from_server, 0, &[5; 10], true)?;
         // The client should clean up the stream after both directions close.
         assert_eq!(helper.driver.stream_map.len(), 0);
         Ok(())
@@ -779,33 +836,32 @@ mod client_side_driver {
         helper.driver_set_body_buf_size(20);
 
         // Send 40 bytes across four chunks, reallocating on the way.
-        helper.peer_server_send_body(0, &[1; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            1;
-            10
-        ]);
-        helper.peer_server_send_body(0, &[2; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            2;
-            10
-        ]);
-        helper.peer_server_send_body(0, &[3; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            3;
-            10
-        ]);
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[1; 10],
+            false,
+        )?;
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[2; 10],
+            false,
+        )?;
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[3; 10],
+            false,
+        )?;
         // Buffer remains allocated across reallocation.
         assert!(helper.driver.body_recv_buf.is_some());
 
         // Final chunk with fin.
-        helper.peer_server_send_body(0, &[4; 10], true)?;
-        helper.advance_and_run_loop()?;
-        let (body, fin, _) = helper.driver_try_recv_body(&mut from_server)?;
-        assert_eq!(body, vec![4; 10]);
-        assert!(fin);
+        receive_response_chunk(&mut helper, &mut from_server, 0, &[4; 10], true)?;
 
         // Stream cleaned up, buffer released.
         assert_eq!(helper.driver.stream_map.len(), 0);
@@ -859,19 +915,16 @@ mod client_side_driver {
         assert!(helper.driver.body_recv_buf.is_none());
 
         // The next body chunk allocates a fresh buffer.
-        helper.peer_server_send_body(0, &[2; 10], false)?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.driver_try_recv_body(&mut from_server)?.0, vec![
-            2;
-            10
-        ]);
+        receive_response_chunk(
+            &mut helper,
+            &mut from_server,
+            0,
+            &[2; 10],
+            false,
+        )?;
         assert!(helper.driver.body_recv_buf.is_some());
 
-        helper.peer_server_send_body(0, &[3; 10], true)?;
-        helper.advance_and_run_loop()?;
-        let (body, fin, _) = helper.driver_try_recv_body(&mut from_server)?;
-        assert_eq!(body, vec![3; 10]);
-        assert!(fin);
+        receive_response_chunk(&mut helper, &mut from_server, 0, &[3; 10], true)?;
         assert_eq!(helper.driver.stream_map.len(), 0);
         assert!(helper.driver.body_recv_buf.is_none());
         Ok(())
@@ -940,15 +993,19 @@ mod client_side_driver {
         });
         helper.work_loop_iter()?;
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(
-            audit_stats.sent_reset_stream_error_code(),
-            Some(REQUEST_CANCELED_ERR)
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(REQUEST_CANCELED_ERR),
+                fin: StreamClosureKind::None,
+            },
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 10);
         assert_eq!(audit_stats.downstream_bytes_sent(), 0);
         Ok(())
@@ -999,27 +1056,22 @@ mod client_side_driver {
         // clsoe the channel.
         resp.send.close();
 
-        helper.advance_and_run_loop()?;
-
-        // server receives the reset
-        assert_eq!(
-            helper.peer_server_poll(),
-            Ok((0, h3::Event::Reset(REQUEST_CANCELED_ERR)))
-        );
-        assert_eq!(helper.peer_server_poll(), Err(h3::Error::Done));
-
-        helper.advance_and_run_loop()?;
+        receive_request_reset(&mut helper, 0, REQUEST_CANCELED_ERR)?;
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(
-            audit_stats.sent_reset_stream_error_code(),
-            Some(REQUEST_CANCELED_ERR)
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(REQUEST_CANCELED_ERR),
+                fin: StreamClosureKind::None,
+            },
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 10);
         assert_eq!(audit_stats.downstream_bytes_sent(), 0);
         Ok(())
@@ -1113,27 +1165,22 @@ mod client_side_driver {
             audit_stats.sent_reset_stream_error_code(),
             Some(REQUEST_CANCELED_ERR)
         );
-        helper.advance_and_run_loop()?;
-
-        // server receives the reset
-        assert_eq!(
-            helper.peer_server_poll(),
-            Ok((0, h3::Event::Reset(REQUEST_CANCELED_ERR)))
-        );
-        assert_eq!(helper.peer_server_poll(), Err(h3::Error::Done));
-
-        helper.advance_and_run_loop()?;
+        receive_request_reset(&mut helper, 0, REQUEST_CANCELED_ERR)?;
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(
-            audit_stats.sent_reset_stream_error_code(),
-            Some(REQUEST_CANCELED_ERR)
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(REQUEST_CANCELED_ERR),
+                fin: StreamClosureKind::None,
+            },
         );
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::None);
         Ok(())
     }
 
@@ -1199,12 +1246,19 @@ mod client_side_driver {
         assert!(fin);
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 1);
         assert_eq!(audit_stats.downstream_bytes_sent(), 0);
         Ok(())
@@ -1304,6 +1358,93 @@ mod server_side_driver {
 
     use super::*;
 
+    struct OpenServerResponse {
+        helper: DriverTestHelper<ServerHooks>,
+        request: IncomingH3Headers,
+        sender: mpsc::Sender<OutboundFrame>,
+    }
+
+    // Queue response headers without running the work loop: individual tests
+    // choose when transport writes, reads and termination events are processed.
+    fn open_server_response(
+        headers: Vec<h3::Header>, request_fin: bool,
+    ) -> crate::QuicResult<OpenServerResponse> {
+        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
+        let stream_id = helper.peer_client_send_request(headers, request_fin)?;
+        helper.advance_and_run_loop()?;
+        let request = assert_matches!(
+            helper.driver_recv_server_event()?,
+            ServerH3Event::Headers { incoming_headers, .. } => incoming_headers
+        );
+        assert_eq!(request.stream_id, stream_id);
+        assert_eq!(request.read_fin, request_fin);
+        let sender = request
+            .send
+            .get_ref()
+            .ok_or("missing outbound stream sender")?
+            .clone();
+        sender.try_send(OutboundFrame::Headers(make_response_headers(), None))?;
+        Ok(OpenServerResponse {
+            helper,
+            request,
+            sender,
+        })
+    }
+
+    fn read_response_headers(
+        helper: &mut DriverTestHelper<ServerHooks>, stream_id: u64,
+    ) -> TestResult {
+        helper.advance_and_run_loop()?;
+        assert_matches!(
+            helper.peer_client_poll(),
+            Ok((id, h3::Event::Headers { .. })) if id == stream_id
+        );
+        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
+        Ok(())
+    }
+
+    fn receive_request_chunk(
+        helper: &mut DriverTestHelper<ServerHooks>,
+        receiver: &mut InboundFrameStream, stream_id: u64, body: &[u8],
+        fin: bool,
+    ) -> TestResult {
+        assert_eq!(
+            helper.peer_client_send_body(stream_id, body, fin),
+            Ok(body.len())
+        );
+        helper.advance_and_run_loop()?;
+        let (received, received_fin, _) =
+            helper.driver_try_recv_body(receiver)?;
+        assert_eq!(received, body);
+        assert_eq!(received_fin, fin);
+        Ok(())
+    }
+
+    fn send_final_response_body(
+        helper: &mut DriverTestHelper<ServerHooks>,
+        sender: &mpsc::Sender<OutboundFrame>, stream_id: u64, body: &[u8],
+    ) -> TestResult {
+        sender
+            .try_send(OutboundFrame::Body(Bytes::copy_from_slice(body), true))?;
+        helper.advance_and_run_loop()?;
+        assert_eq!(helper.peer_client_poll(), Ok((stream_id, h3::Event::Data)));
+        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
+        let read_size = body.len().max(1024);
+        assert_eq!(
+            helper.peer_client_recv_body_vec(stream_id, read_size),
+            Ok(body.to_vec())
+        );
+        assert_eq!(
+            helper.peer_client_recv_body_vec(stream_id, read_size),
+            Err(h3::Error::Done)
+        );
+        assert_eq!(
+            helper.peer_client_poll(),
+            Ok((stream_id, h3::Event::Finished))
+        );
+        Ok(())
+    }
+
     /// Server-side equivalent of
     /// [`client_side_driver::client_body_recv_buf_not_allocated_when_idle`]:
     /// `body_recv_buf` is `H3Driver` state shared by both `ClientHooks` and
@@ -1364,56 +1505,19 @@ mod server_side_driver {
 
     #[test]
     fn client_fin_before_server_body() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let mut from_client = req.recv;
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client reads response and sends body and fin
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_send_body(0, &[1; 5], true), Ok(5));
-        helper.advance_and_run_loop()?;
-
-        // server receives body
-        let (body, fin, _err) = helper.driver_try_recv_body(&mut from_client)?;
-        assert_eq!(body, vec![1; 5]);
-        assert!(fin);
+        read_response_headers(&mut helper, 0)?;
+        receive_request_chunk(&mut helper, &mut from_client, 0, &[1; 5], true)?;
 
         // server sends body and fin
-        to_client
-            .try_send(OutboundFrame::Body(Bytes::copy_from_slice(&[42]), true))?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Data)));
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_recv_body_vec(0, 1024), Ok(vec![42]));
-        assert_eq!(
-            helper.peer_client_recv_body_vec(0, 1024),
-            Err(h3::Error::Done)
-        );
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
+        send_final_response_body(&mut helper, &to_client, 0, &[42])?;
 
         assert_eq!(helper.driver.stream_map.len(), 0);
         Ok(())
@@ -1466,38 +1570,17 @@ mod server_side_driver {
     /// Test the case where the client sends a STOP_SENDING quiche frame.
     #[test]
     fn client_sends_stop_sending() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let mut from_client = req.recv;
         let audit_stats = req.h3_audit_stats;
-
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
+        let stream_id = req.stream_id;
 
         // client sends a STOP_SENDING
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
+        read_response_headers(&mut helper, 0)?;
         assert_eq!(
             helper
                 .pipe
@@ -1992,30 +2075,13 @@ mod server_side_driver {
     /// The peer sends its reset before we send a fin
     #[test]
     fn client_sends_reset_stream_before_server_fin() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client (peer) sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let from_client = req.recv;
         let audit_stats = req.h3_audit_stats;
-
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client sends a RESET_STREAM frame
         helper.advance_and_run_loop()?;
@@ -2063,12 +2129,19 @@ mod server_side_driver {
         );
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(4242),
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 0);
         assert_eq!(audit_stats.downstream_bytes_sent(), 8);
         Ok(())
@@ -2078,31 +2151,13 @@ mod server_side_driver {
     /// We send a fin before the client sends reset
     #[test]
     fn client_sends_reset_stream_after_server_fin() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client (peer) sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let from_client = req.recv;
         let audit_stats = req.h3_audit_stats;
-
-        // Send response, body, and fin to client
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
         helper.work_loop_iter()?;
         to_client.try_send(OutboundFrame::Body(
             Bytes::copy_from_slice(b"foobar 42"),
@@ -2134,12 +2189,19 @@ mod server_side_driver {
         );
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(4242),
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 0);
         assert_eq!(
             audit_stats.downstream_bytes_sent(),
@@ -2157,30 +2219,13 @@ mod server_side_driver {
     /// `Transport(StreamReset(code))`
     #[test]
     fn client_sends_reset_stream_while_reading_wait_for_data() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client (peer) sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers and some body bytes
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let mut from_client = req.recv;
         let audit_stats = req.h3_audit_stats;
-
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
         helper.work_loop_iter()?;
         to_client.try_send(OutboundFrame::Body(
             Bytes::copy_from_slice(&[1, 2, 3, 4]),
@@ -2273,12 +2318,19 @@ mod server_side_driver {
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(4242),
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
         assert_eq!(audit_stats.downstream_bytes_sent(), 8);
         Ok(())
@@ -2290,30 +2342,13 @@ mod server_side_driver {
     /// `upstream_ready()`.
     #[test]
     fn server_sends_reset_stream_while_reading_process_reads() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client (peer) sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let mut from_client = req.recv;
         let audit_stats = req.h3_audit_stats;
-
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
         helper.advance_and_run_loop()?;
 
         // client sends data
@@ -2381,12 +2416,19 @@ mod server_side_driver {
         assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
 
         assert_eq!(helper.driver.stream_map.len(), 0);
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), Some(4242));
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: Some(4242),
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
         assert_eq!(audit_stats.downstream_bytes_sent(), 0);
         Ok(())
@@ -2396,44 +2438,17 @@ mod server_side_driver {
     fn server_driver_send_stop_sending_after_channel_drop() -> TestResult {
         const REQUEST_CANCELED_ERR: u64 =
             h3::WireErrorCode::RequestCancelled as u64;
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let audit_stats = req.h3_audit_stats.clone();
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
         let mut from_client = req.recv;
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client reads response and sends body without fin
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_send_body(0, &[1; 5], false), Ok(5));
-        helper.advance_and_run_loop()?;
-
-        // server receives body
-        let (body, fin, _err) = helper.driver_try_recv_body(&mut from_client)?;
-        assert_eq!(body, vec![1; 5]);
-        assert!(!fin);
+        read_response_headers(&mut helper, 0)?;
+        receive_request_chunk(&mut helper, &mut from_client, 0, &[1; 5], false)?;
 
         // peer (client) sends more data
         assert_eq!(helper.peer_client_send_body(0, &[1; 6], false), Ok(6));
@@ -2466,27 +2481,21 @@ mod server_side_driver {
         helper.advance_and_run_loop()?;
 
         // we still need to send a fin
-        to_client
-            .try_send(OutboundFrame::Body(Bytes::copy_from_slice(&[42]), true))?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Data)));
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_recv_body_vec(0, 1024), Ok(vec![42]));
-        assert_eq!(
-            helper.peer_client_recv_body_vec(0, 1024),
-            Err(h3::Error::Done)
-        );
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
+        send_final_response_body(&mut helper, &to_client, 0, &[42])?;
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(
-            audit_stats.sent_stop_sending_error_code(),
-            Some(REQUEST_CANCELED_ERR)
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: Some(REQUEST_CANCELED_ERR),
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
         );
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
         assert_eq!(audit_stats.downstream_bytes_sent(), 1);
         assert_eq!(helper.driver.stream_map.len(), 0);
@@ -2497,44 +2506,17 @@ mod server_side_driver {
     // fin
     #[test]
     fn server_driver_drop_channel_after_fin() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let audit_stats = req.h3_audit_stats.clone();
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
         let mut from_client = req.recv;
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client reads response and sends body WITH fin
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_send_body(0, &[1; 5], true), Ok(5));
-        helper.advance_and_run_loop()?;
-
-        // server receives body
-        let (body, fin, _err) = helper.driver_try_recv_body(&mut from_client)?;
-        assert_eq!(body, vec![1; 5]);
-        assert!(fin);
+        read_response_headers(&mut helper, 0)?;
+        receive_request_chunk(&mut helper, &mut from_client, 0, &[1; 5], true)?;
 
         helper.advance_and_run_loop()?;
         // we drop the channel.
@@ -2542,24 +2524,21 @@ mod server_side_driver {
         helper.advance_and_run_loop()?;
 
         // we still need to send a fin
-        to_client
-            .try_send(OutboundFrame::Body(Bytes::copy_from_slice(&[42]), true))?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Data)));
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_recv_body_vec(0, 1024), Ok(vec![42]));
-        assert_eq!(
-            helper.peer_client_recv_body_vec(0, 1024),
-            Err(h3::Error::Done)
-        );
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
+        send_final_response_body(&mut helper, &to_client, 0, &[42])?;
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::Explicit);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
+        );
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
         assert_eq!(audit_stats.downstream_bytes_sent(), 1);
         assert_eq!(helper.driver.stream_map.len(), 0);
@@ -2572,36 +2551,15 @@ mod server_side_driver {
     fn server_driver_drop_channel_after_fin_2() -> TestResult {
         const REQUEST_CANCELED_ERR: u64 =
             h3::WireErrorCode::RequestCancelled as u64;
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let audit_stats = req.h3_audit_stats.clone();
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client reads response and sends body without fin
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
+        read_response_headers(&mut helper, 0)?;
         assert_eq!(helper.peer_client_send_body(0, &[1; 5], false), Ok(5));
         helper.advance_and_run_loop()?;
 
@@ -2626,27 +2584,21 @@ mod server_side_driver {
         );
 
         // we still need to send a fin
-        to_client
-            .try_send(OutboundFrame::Body(Bytes::copy_from_slice(&[42]), true))?;
-        helper.advance_and_run_loop()?;
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Data)));
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_recv_body_vec(0, 1024), Ok(vec![42]));
-        assert_eq!(
-            helper.peer_client_recv_body_vec(0, 1024),
-            Err(h3::Error::Done)
-        );
-        assert_eq!(helper.peer_client_poll(), Ok((0, h3::Event::Finished)));
+        send_final_response_body(&mut helper, &to_client, 0, &[42])?;
 
-        assert_eq!(audit_stats.recvd_stop_sending_error_code(), None);
-        assert_eq!(audit_stats.recvd_reset_stream_error_code(), None);
-        assert_eq!(audit_stats.sent_reset_stream_error_code(), None);
-        assert_eq!(
-            audit_stats.sent_stop_sending_error_code(),
-            Some(REQUEST_CANCELED_ERR)
+        assert_stream_termination(
+            &audit_stats,
+            StreamTermination {
+                stop_sending: None,
+                reset: None,
+                fin: StreamClosureKind::None,
+            },
+            StreamTermination {
+                stop_sending: Some(REQUEST_CANCELED_ERR),
+                reset: None,
+                fin: StreamClosureKind::Explicit,
+            },
         );
-        assert_eq!(audit_stats.recvd_stream_fin(), StreamClosureKind::None);
-        assert_eq!(audit_stats.sent_stream_fin(), StreamClosureKind::Explicit);
         assert_eq!(audit_stats.downstream_bytes_recvd(), 5);
         assert_eq!(audit_stats.downstream_bytes_sent(), 1);
         assert_eq!(helper.driver.stream_map.len(), 0);
@@ -2655,43 +2607,16 @@ mod server_side_driver {
 
     #[test]
     fn server_send_trailers() -> TestResult {
-        let mut helper = DriverTestHelper::<ServerHooks>::ready()?;
-
-        // client sends a request
-        let stream_id = helper
-            .peer_client_send_request(make_request_headers("GET"), false)?;
-
-        // servers reads request and sends response headers
-        helper.advance_and_run_loop()?;
-        let req = assert_matches!(
-            helper.driver_recv_server_event()?,
-            ServerH3Event::Headers{incoming_headers, ..} => { incoming_headers }
-        );
-        assert_eq!(req.stream_id, stream_id);
-        assert!(!req.read_fin);
-        let to_client = req
-            .send
-            .get_ref()
-            .ok_or("missing outbound stream sender")?
-            .clone();
+        let OpenServerResponse {
+            mut helper,
+            request: req,
+            sender: to_client,
+        } = open_server_response(make_request_headers("GET"), false)?;
         let mut from_client = req.recv;
-        to_client
-            .try_send(OutboundFrame::Headers(make_response_headers(), None))?;
 
         // client reads response and sends body and fin
-        helper.advance_and_run_loop()?;
-        assert_matches!(
-            helper.peer_client_poll(),
-            Ok((0, h3::Event::Headers { .. }))
-        );
-        assert_eq!(helper.peer_client_poll(), Err(h3::Error::Done));
-        assert_eq!(helper.peer_client_send_body(0, &[1; 5], true), Ok(5));
-        helper.advance_and_run_loop()?;
-
-        // server receives body
-        let (body, fin, _err) = helper.driver_try_recv_body(&mut from_client)?;
-        assert_eq!(body, vec![1; 5]);
-        assert!(fin);
+        read_response_headers(&mut helper, 0)?;
+        receive_request_chunk(&mut helper, &mut from_client, 0, &[1; 5], true)?;
 
         // server sends body
         to_client.try_send(OutboundFrame::Body(
