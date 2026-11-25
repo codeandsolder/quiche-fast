@@ -256,7 +256,7 @@ mod tests {
     use std::time::SystemTime;
 
     #[test]
-    fn rejects_invalid_gro_lengths() -> std::io::Result<()> {
+    fn rejects_invalid_gro_lengths() -> crate::QuicResult<()> {
         for size in [i32::MIN, -1, 0, 65536, i32::MAX] {
             assert!(Ancillary::decode([ControlMessageOwned::UdpGroSegments(
                 size
