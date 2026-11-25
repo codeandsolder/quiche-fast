@@ -1071,10 +1071,15 @@ impl Datastore {
                     rel_event_time,
                 )?,
 
-            // Decoded headers are handled above; outbound DATA still lacks
-            // complete accounting in the datastore.
-            h3::Event::Http3HeadersReceived(_) | h3::Event::Http3DataSent(_) =>
-                (),
+            h3::Event::Http3DataSent(e) => self.record_http_data(
+                HttpDataDirection::Sent,
+                e.params.stream_id,
+                Some(e.params.payload_length),
+                rel_event_time,
+            )?,
+
+            // Decoded headers are handled above.
+            h3::Event::Http3HeadersReceived(_) => (),
         }
         Ok(())
     }
@@ -2170,6 +2175,32 @@ mod netlog_tests {
                 },
             },
         ))
+    }
+
+    #[test]
+    fn netlog_h3_sent_data_reaches_upload_plot_without_h2_credit(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut datastore = Datastore::default();
+        for (time, length) in [(101, 4), (105, 9), (108, 0)] {
+            let event = netlog::Event::H3(h3::Event::Http3DataSent(
+                h3::Http3DataSentEvent {
+                    params: h3::Http3DataSentParams {
+                        stream_id: 5,
+                        payload_length: length,
+                    },
+                },
+            ));
+            consume(&constants, &mut datastore, time, &event)?;
+        }
+        let series = crate::seriesstore::SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(
+            series.sent_data_frames_series.get(&5).map(Vec::as_slice),
+            Some([(1.0, 0), (1.0, 4), (5.0, 13), (8.0, 13)].as_slice())
+        );
+        assert_eq!(series.received_data_frames_series.get(&5), None);
+        assert_eq!(series.h2_send_window_series_balanced.get(&5), None);
+        Ok(())
     }
 
     #[test]
