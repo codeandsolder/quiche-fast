@@ -1616,41 +1616,44 @@ mod tests {
                 .flatten()
                 .collect::<Vec<_>>()
         };
-        let client_dl = entries(
-            TransmissionType::Download,
-            VantagePoint::Client,
-            ApplicationProto::Http3,
-        );
-        assert_eq!(client_dl.len(), 6);
-        assert_eq!(client_dl[0], ("Stream data read", PURPLE_500));
-        assert_eq!(client_dl[2], ("Max stream data sent", MUSTARD));
-        assert_eq!(client_dl[4], ("First data frame read", ORANGE));
-        assert_eq!(client_dl[5], ("Last data frame read", BROWN));
-
-        let server_dl = entries(
-            TransmissionType::Download,
-            VantagePoint::Server,
-            ApplicationProto::Http3,
-        );
-        assert_eq!(server_dl[2], ("Max stream data received", MUSTARD));
-        assert_eq!(server_dl[4], ("First data frame sent", ORANGE));
-        assert_eq!(server_dl[5], ("Last data frame sent", BROWN));
-
-        let client_ul = entries(
-            TransmissionType::Upload,
-            VantagePoint::Client,
-            ApplicationProto::Http3,
-        );
-        assert_eq!(client_ul, [
-            ("Stream data sent", PURPLE_500),
-            ("Max stream data received", MUSTARD),
-        ]);
-        let server_ul = entries(
-            TransmissionType::Upload,
-            VantagePoint::Server,
-            ApplicationProto::Http3,
-        );
-        assert_eq!(server_ul[1], ("Max stream data sent", MUSTARD));
+        for (vantage, limit, first_data, last_data) in [
+            (
+                VantagePoint::Client,
+                "Max stream data sent",
+                "First data frame read",
+                "Last data frame read",
+            ),
+            (
+                VantagePoint::Server,
+                "Max stream data received",
+                "First data frame sent",
+                "Last data frame sent",
+            ),
+        ] {
+            let download = entries(
+                TransmissionType::Download,
+                vantage,
+                ApplicationProto::Http3,
+            );
+            assert_eq!(download.len(), 6);
+            assert_eq!(download[0], ("Stream data read", PURPLE_500));
+            assert_eq!(download[2], (limit, MUSTARD));
+            assert_eq!(download[4], (first_data, ORANGE));
+            assert_eq!(download[5], (last_data, BROWN));
+        }
+        for (vantage, limit) in [
+            (VantagePoint::Client, "Max stream data received"),
+            (VantagePoint::Server, "Max stream data sent"),
+        ] {
+            assert_eq!(
+                entries(
+                    TransmissionType::Upload,
+                    vantage,
+                    ApplicationProto::Http3
+                ),
+                [("Stream data sent", PURPLE_500), (limit, MUSTARD)]
+            );
+        }
         let http2_upload = entries(
             TransmissionType::Upload,
             VantagePoint::Client,

@@ -86,32 +86,17 @@ impl XYMinMax {
     }
 
     fn y_max(ss: &SeriesStore, proto: ApplicationProto) -> u64 {
-        let max_series = match proto {
-            ApplicationProto::Http2 => ss
-                .netlog_h2_stream_received_connection_cumulative
-                .iter()
-                .map(|(_, count)| *count)
-                .max()
-                .unwrap_or(0),
-            ApplicationProto::Http3 => ss
-                .netlog_quic_stream_received_connection_cumulative
-                .iter()
-                .map(|(_, count)| *count)
-                .max()
-                .unwrap_or(0),
-        };
-        let max_window = match proto {
-            ApplicationProto::Http2 =>
-                ss.h2_send_window_absolute_max.get(&0).copied().unwrap_or(0),
-            ApplicationProto::Http3 => ss
-                .netlog_quic_client_side_window_updates
-                .get(&-1)
-                .into_iter()
-                .flatten()
-                .map(|(_, maximum)| *maximum)
-                .max()
-                .unwrap_or(0),
-        };
+        let max_series = received_series(ss, proto)
+            .iter()
+            .map(|point| point.1)
+            .max()
+            .unwrap_or(0);
+        let max_window = window_series(ss, proto)
+            .into_iter()
+            .flatten()
+            .map(|point| point.1)
+            .max()
+            .unwrap_or(0);
         let max_value = max_series.max(max_window);
         max_value.saturating_add(max_value.div_ceil(5)).max(1)
     }
@@ -456,14 +441,18 @@ mod tests {
             netlog_quic_stream_received_connection_cumulative: vec![(1.0, 400)],
             ..SeriesStore::default()
         };
-        series.h2_send_window_absolute_max.insert(0, 250);
+        series
+            .h2_send_window_series_absolute
+            .insert(0, vec![(0.0, 250), (1.0, 50)]);
         series
             .netlog_quic_client_side_window_updates
             .insert(-1, vec![(0.0, 500), (2.0, 20)]);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 300);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
 
-        series.h2_send_window_absolute_max.insert(0, 1_000);
+        series
+            .h2_send_window_series_absolute
+            .insert(0, vec![(0.0, 1_000)]);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 1_200);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
     }

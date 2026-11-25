@@ -61,6 +61,7 @@ impl std::fmt::Display for TrackerError {
 impl std::error::Error for TrackerError {}
 
 /// Per-stream histories with monotonic observed maxima and a checked aggregate.
+///
 /// A zero-valued observation is recorded even though it does not increase the
 /// aggregate. The optional synthetic starting point is only a plotting
 /// baseline.
@@ -441,7 +442,7 @@ mod tests {
         assert_eq!(tracker.get_stream_max(7), None);
         assert_eq!(tracker.current_sum(), 0);
         assert!(tracker.streams().is_empty());
-        assert!(tracker.sum_series().is_empty());
+        assert_eq!(tracker.sum_series(), []);
         assert_eq!(
             tracker.update(
                 7,
