@@ -24,42 +24,50 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::cmp;
-
 use std::io;
+use std::ops::Range;
 
-/// A contiguous sequence of UDP datagrams with one route and GSO stride.
+use mio::net::UdpSocket;
+use mio::Interest;
+use mio::Registry;
+use mio::Token;
+
+/// Contiguous datagrams with a compatible route, deadline and GSO stride.
 /// Every segment except the last must have exactly that stride.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DatagramBatch {
-    bytes: std::ops::Range<usize>,
+    bytes: Range<usize>,
     segment_size: usize,
     info: quiche::SendInfo,
+    pacing: bool,
 }
 
 impl DatagramBatch {
-    /// Group a generated datagram with the previous batch when representable
-    /// by a single GSO operation (or by the same segmentation in fallback).
+    /// Append a generated datagram, combining compatible neighbors.
     pub fn push(
-        batches: &mut Vec<Self>, bytes: std::ops::Range<usize>,
-        info: quiche::SendInfo,
+        batches: &mut Vec<Self>, bytes: Range<usize>, info: quiche::SendInfo,
+        pacing: bool,
     ) {
         if bytes.is_empty() {
             return;
         }
         let len = bytes.len();
         if let Some(batch) = batches.last_mut() {
-            // Linux supports at least 64 segments per UDP GSO submission.
-            // A shorter tail terminates the batch. A larger datagram needs a
-            // new stride. Never join packets for different paths.
             if batch.info.from == info.from &&
                 batch.info.to == info.to &&
+                batch.pacing == pacing &&
+                (!pacing ||
+                    batch.info.at == info.at ||
+                    batch.info.at.max(info.at) <= std::time::Instant::now()) &&
                 batch.bytes.end == bytes.start &&
                 batch.bytes.len().is_multiple_of(batch.segment_size) &&
                 batch.bytes.len() / batch.segment_size < 64 &&
                 len <= batch.segment_size
             {
                 batch.bytes.end = bytes.end;
+                // Distinct deadlines may share a GSO operation only when both
+                // are already due. Retain the later deadline for submission.
+                batch.info.at = batch.info.at.max(info.at);
                 return;
             }
         }
@@ -67,25 +75,138 @@ impl DatagramBatch {
             bytes,
             segment_size: len,
             info,
+            pacing,
         });
     }
+}
 
-    /// Send all datagrams in this batch using their actual boundaries.
-    pub fn send(
-        &self, socket: &mio::net::UdpSocket, output: &[u8], pacing: bool,
-        enable_gso: bool,
-    ) -> io::Result<usize> {
-        let buf = output
-            .get(self.bytes.clone())
-            .ok_or(io::ErrorKind::InvalidInput)?;
-        send_to(
-            socket,
-            buf,
-            &self.info,
-            self.segment_size,
-            pacing,
-            enable_gso,
-        )
+/// Owns at most one generated burst per UDP socket.
+///
+/// Swapping the scratch buffer transfers ownership without copying packet
+/// payloads. Backpressure
+/// preserves the unsent datagrams, without replaying accepted datagrams.
+pub struct DatagramQueue {
+    buffer: Vec<u8>,
+    batches: Vec<DatagramBatch>,
+    next: usize,
+    writable_interest: bool,
+    gso: bool,
+}
+
+impl DatagramQueue {
+    /// Allocate a reusable buffer with the same size as the producer's scratch
+    /// buffer.
+    #[must_use = "the queue owns generated datagrams until the socket accepts them"]
+    pub fn new(buffer_size: usize, gso: bool) -> Self {
+        Self {
+            buffer: vec![0; buffer_size],
+            batches: Vec::new(),
+            next: 0,
+            writable_interest: false,
+            gso: gso && cfg!(target_os = "linux"),
+        }
+    }
+
+    /// Whether generated datagrams remain unsent.
+    #[must_use = "pending packets must be drained before generating another burst"]
+    pub const fn is_pending(&self) -> bool {
+        self.next < self.batches.len()
+    }
+
+    /// Transfer a complete generated burst into an empty queue.
+    ///
+    /// # Errors
+    /// Returns an error if a burst is already pending, or ranges are invalid.
+    pub fn stage(
+        &mut self, output: &mut Vec<u8>, batches: &mut Vec<DatagramBatch>,
+    ) -> io::Result<()> {
+        if self.is_pending() ||
+            batches.iter().any(|batch| {
+                batch.bytes.end > output.len() || batch.bytes.is_empty()
+            })
+        {
+            return Err(io::ErrorKind::InvalidInput.into());
+        }
+        self.batches.clear();
+        self.next = 0;
+        std::mem::swap(&mut self.buffer, output);
+        std::mem::swap(&mut self.batches, batches);
+        Ok(())
+    }
+
+    /// Attempt to flush the queued burst, updating writable readiness interest.
+    ///
+    /// # Errors
+    /// Returns socket or registration errors, or an invalid datagram write.
+    /// `WouldBlock` is reported by returning false, with the unsent suffix
+    /// retained.
+    pub fn flush(
+        &mut self, socket: &mut UdpSocket, registry: &Registry, token: Token,
+    ) -> io::Result<bool> {
+        let drained = self.flush_with(|bytes, info, stride, pacing| {
+            transmit(socket, bytes, info, stride, pacing)
+        })?;
+        let need_writable = !drained;
+        if self.writable_interest != need_writable {
+            let interest = if need_writable {
+                Interest::READABLE | Interest::WRITABLE
+            } else {
+                Interest::READABLE
+            };
+            registry.reregister(socket, token, interest)?;
+            self.writable_interest = need_writable;
+        }
+        Ok(drained)
+    }
+
+    /// Transfer a generated burst and immediately attempt to transmit it.
+    ///
+    /// # Errors
+    /// Returns invalid range, socket or readiness registration errors.
+    pub fn submit(
+        &mut self, output: &mut Vec<u8>, batches: &mut Vec<DatagramBatch>,
+        socket: &mut UdpSocket, registry: &Registry, token: Token,
+    ) -> io::Result<bool> {
+        self.stage(output, batches)?;
+        self.flush(socket, registry, token)
+    }
+
+    fn flush_with(
+        &mut self,
+        mut send: impl FnMut(
+            &[u8],
+            &quiche::SendInfo,
+            Option<usize>,
+            bool,
+        ) -> io::Result<usize>,
+    ) -> io::Result<bool> {
+        while let Some(batch) = self.batches.get_mut(self.next) {
+            let remaining = batch.bytes.len();
+            let stride = (self.gso && remaining > batch.segment_size)
+                .then_some(batch.segment_size);
+            let len = if stride.is_some() {
+                remaining
+            } else {
+                remaining.min(batch.segment_size)
+            };
+            let end = batch.bytes.start + len;
+            let bytes = &self.buffer[batch.bytes.start..end];
+            match send(bytes, &batch.info, stride, batch.pacing) {
+                Ok(written) if written == len => batch.bytes.start = end,
+                Ok(_) => return Err(io::ErrorKind::WriteZero.into()),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted =>
+                    continue,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock =>
+                    return Ok(false),
+                Err(error) => return Err(error),
+            }
+            if batch.bytes.is_empty() {
+                self.next += 1;
+            }
+        }
+        self.batches.clear();
+        self.next = 0;
+        Ok(true)
     }
 }
 
@@ -124,11 +245,12 @@ pub fn detect_gso(_socket: &mio::net::UdpSocket, _segment_size: usize) -> bool {
     false
 }
 
-/// Send packets using sendmsg() with GSO.
+/// Transmit one UDP datagram or an atomic GSO batch. Pacing is independent
+/// of GSO: each operation carries its actual deadline when requested.
 #[cfg(target_os = "linux")]
-fn send_gso(
-    socket: &mio::net::UdpSocket, buf: &[u8], send_info: &quiche::SendInfo,
-    segment_size: usize, pacing: bool,
+fn transmit(
+    socket: &UdpSocket, buf: &[u8], info: &quiche::SendInfo,
+    stride: Option<usize>, pacing: bool,
 ) -> io::Result<usize> {
     use nix::sys::socket::sendmsg;
     use nix::sys::socket::ControlMessage;
@@ -137,71 +259,38 @@ fn send_gso(
     use std::io::IoSlice;
     use std::os::unix::io::AsRawFd;
 
+    if stride.is_none() && !pacing {
+        return socket.send_to(buf, info.to);
+    }
     let iov = [IoSlice::new(buf)];
-    let segment_size = valid_gso_segment_size(segment_size)?;
-    let dst = SockaddrStorage::from(send_info.to);
-    let sockfd = socket.as_raw_fd();
-
-    // GSO option.
-    let cmsg_gso = ControlMessage::UdpGsoSegments(&segment_size);
-
-    let send_time = pacing.then(|| std_time_to_u64(&send_info.at)).transpose()?;
-    let messages = [
-        cmsg_gso,
-        ControlMessage::TxTime(send_time.as_ref().unwrap_or(&0)),
-    ];
-    let count = if pacing { 2 } else { 1 };
-    match sendmsg(
-        sockfd,
+    let dst = SockaddrStorage::from(info.to);
+    let segment_size = stride.map(valid_gso_segment_size).transpose()?;
+    let send_time = pacing.then(|| std_time_to_u64(&info.at)).transpose()?;
+    let gso = ControlMessage::UdpGsoSegments(segment_size.as_ref().unwrap_or(&0));
+    let txtime = ControlMessage::TxTime(send_time.as_ref().unwrap_or(&0));
+    let messages = [gso, txtime];
+    let messages = match (segment_size.is_some(), send_time.is_some()) {
+        (true, true) => &messages[..],
+        (true, false) => &messages[..1],
+        (false, true) => &messages[1..],
+        (false, false) => &messages[..0],
+    };
+    sendmsg(
+        socket.as_raw_fd(),
         &iov,
-        &messages[..count],
+        messages,
         MsgFlags::empty(),
         Some(&dst),
-    ) {
-        Ok(v) => Ok(v),
-        Err(e) => Err(e.into()),
-    }
+    )
+    .map_err(Into::into)
 }
 
-/// A wrapper function of send_to().
-///
-/// When GSO is enabled, send with UDP_SEGMENT and optionally SO_TXTIME.
-/// Otherwise send individual UDP datagrams with the given stride.
-fn send_to(
-    socket: &mio::net::UdpSocket, buf: &[u8], send_info: &quiche::SendInfo,
-    segment_size: usize, pacing: bool, enable_gso: bool,
+#[cfg(not(target_os = "linux"))]
+fn transmit(
+    socket: &UdpSocket, buf: &[u8], info: &quiche::SendInfo,
+    _stride: Option<usize>, _pacing: bool,
 ) -> io::Result<usize> {
-    if segment_size == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "UDP segment size must be positive",
-        ));
-    }
-
-    #[cfg(target_os = "linux")]
-    if enable_gso {
-        return send_gso(socket, buf, send_info, segment_size, pacing);
-    }
-    #[cfg(not(target_os = "linux"))]
-    let _ = (pacing, enable_gso);
-
-    let mut off = 0;
-    let mut left = buf.len();
-    let mut written = 0;
-
-    while left > 0 {
-        let pkt_len = cmp::min(left, segment_size);
-
-        {
-            let v = socket.send_to(&buf[off..off + pkt_len], send_info.to)?;
-            written += v;
-        }
-
-        off += pkt_len;
-        left -= pkt_len;
-    }
-
-    Ok(written)
+    socket.send_to(buf, info.to)
 }
 
 #[cfg(target_os = "linux")]
@@ -240,8 +329,9 @@ fn deadline_from_anchor(
     .ok_or_else(|| io::ErrorKind::InvalidInput.into())
 }
 
-/// Convert Rust's opaque Instant into the CLOCK_MONOTONIC nanoseconds expected
-/// by Linux SCM_TXTIME, without depending on Instant's private layout.
+/// Convert Rust's opaque `Instant` into the `CLOCK_MONOTONIC` nanoseconds
+/// expected by Linux `SCM_TXTIME`, without depending on `Instant`'s private
+/// layout.
 #[cfg(target_os = "linux")]
 fn std_time_to_u64(deadline: &std::time::Instant) -> io::Result<u64> {
     // The socket is configured with CLOCK_MONOTONIC. Bracket the kernel clock
@@ -302,7 +392,7 @@ mod pacing_tests {
             to: b.local_addr()?,
             ..info
         };
-        let sender = mio::net::UdpSocket::from_std(sender);
+        let mut sender = mio::net::UdpSocket::from_std(sender);
 
         // A smaller tail, a larger PMTU probe, then a path change.
         let mut batches = Vec::new();
@@ -310,8 +400,11 @@ mod pacing_tests {
         let mut output = Vec::new();
         for (index, (len, route)) in datagrams.into_iter().enumerate() {
             let start = output.len();
-            output.resize(start + len, u8::try_from(index + 1).unwrap());
-            DatagramBatch::push(&mut batches, start..start + len, route);
+            output.resize(
+                start + len,
+                u8::try_from(index + 1).map_err(io::Error::other)?,
+            );
+            DatagramBatch::push(&mut batches, start..start + len, route, false);
         }
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].bytes, 0..10);
@@ -320,13 +413,16 @@ mod pacing_tests {
         assert_eq!(batches[1].segment_size, 7);
         assert_eq!(batches[2].info, other);
 
+        let poll = mio::Poll::new()?;
+        poll.registry()
+            .register(&mut sender, Token(0), Interest::READABLE)?;
         for gso in [false, true] {
             if gso && !detect_gso(&sender, 7) {
                 continue;
             }
-            for batch in &batches {
-                batch.send(&sender, &output, false, gso)?;
-            }
+            let mut queue = DatagramQueue::new(output.len(), gso);
+            queue.stage(&mut output.clone(), &mut batches.clone())?;
+            assert!(queue.flush(&mut sender, poll.registry(), Token(0))?);
 
             let mut received = [0; 32];
             for (receiver, len, marker) in
@@ -340,77 +436,198 @@ mod pacing_tests {
     }
 
     #[test]
-    fn zero_segment_is_rejected_instead_of_looping_forever() -> io::Result<()> {
-        let (sender, info) = addresses()?;
-        for (pacing, gso) in [(false, false), (true, true)] {
-            let error = send_to(&sender, b"payload", &info, 0, pacing, gso)
-                .expect_err("zero segment must be an error");
-            assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    fn blocked_fallback_keeps_only_unsent_datagrams() -> io::Result<()> {
+        let (_, info) = addresses()?;
+        let mut output = vec![1, 1, 2, 2, 3];
+        let mut batches = Vec::new();
+        for range in [0..2, 2..4, 4..5] {
+            DatagramBatch::push(&mut batches, range, info, false);
         }
+        let mut queue = DatagramQueue::new(output.len(), false);
+        queue.stage(&mut output, &mut batches)?;
+        let mut sent = Vec::new();
+        let mut attempts = 0;
+        assert!(!queue.flush_with(|bytes, route, stride, pacing| {
+            assert_eq!(*route, info);
+            assert_eq!(stride, None);
+            assert!(!pacing);
+            attempts += 1;
+            if attempts == 2 {
+                return Err(io::ErrorKind::WouldBlock.into());
+            }
+            sent.extend_from_slice(bytes);
+            Ok(bytes.len())
+        })?);
+        assert_eq!(sent, [1, 1]);
+        assert!(queue.is_pending());
+        assert!(queue.stage(&mut output, &mut batches).is_err());
+        assert!(queue.flush_with(|bytes, route, _, _| {
+            assert_eq!(*route, info);
+            sent.extend_from_slice(bytes);
+            Ok(bytes.len())
+        })?);
+        assert_eq!(sent, [1, 1, 2, 2, 3]);
+        assert!(!queue.is_pending());
+        Ok(())
+    }
+
+    #[test]
+    fn gso_combines_distinct_due_deadlines_but_not_future_deadlines(
+    ) -> io::Result<()> {
+        let (_, info) = addresses()?;
+        let earlier = quiche::SendInfo {
+            at: info
+                .at
+                .checked_sub(std::time::Duration::from_secs(1))
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            ..info
+        };
+        let future = quiche::SendInfo {
+            at: info
+                .at
+                .checked_add(std::time::Duration::from_secs(3600))
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            ..info
+        };
+        let mut batches = Vec::new();
+        for (range, route) in [(0..2, earlier), (2..4, info), (4..6, future)] {
+            DatagramBatch::push(&mut batches, range, route, true);
+        }
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].bytes, 0..4);
+        assert_eq!(batches[0].info.at, info.at);
+        assert_eq!(batches[1].bytes, 4..6);
+        assert_eq!(batches[1].info.at, future.at);
         Ok(())
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn monotonic_clock_conversion_is_checked_and_deterministic() {
-        use std::time::Duration;
-
-        let now = std::time::Instant::now();
-        let ahead = now.checked_add(Duration::from_nanos(5)).unwrap();
-        let behind = now.checked_sub(Duration::from_nanos(5)).unwrap();
-
-        assert_eq!(deadline_from_anchor(now, now, 42).unwrap(), 42);
-        assert_eq!(deadline_from_anchor(ahead, now, 42).unwrap(), 47);
-        assert_eq!(deadline_from_anchor(behind, now, 42).unwrap(), 37);
-        assert_eq!(
-            deadline_from_anchor(ahead, now, u64::MAX - 5).unwrap(),
-            u64::MAX
-        );
-        assert_eq!(deadline_from_anchor(behind, now, 5).unwrap(), 0);
-        assert_eq!(
-            deadline_from_anchor(ahead, now, u64::MAX - 4)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::InvalidInput
-        );
-        assert_eq!(
-            deadline_from_anchor(behind, now, 4).unwrap_err().kind(),
-            io::ErrorKind::InvalidInput
-        );
-
-        assert!(std_time_to_u64(&now).unwrap() > 0);
+    fn gso_preserves_routes_and_pacing_deadlines_across_blocking(
+    ) -> io::Result<()> {
+        let (_, info) = addresses()?;
+        let later = quiche::SendInfo {
+            at: info
+                .at
+                .checked_add(std::time::Duration::from_secs(3600))
+                .ok_or(io::ErrorKind::InvalidInput)?,
+            ..info
+        };
+        let other = quiche::SendInfo {
+            to: "127.0.0.1:12345".parse().map_err(io::Error::other)?,
+            ..later
+        };
+        let mut output = vec![1, 1, 2, 2, 3, 3, 4];
+        let mut batches = Vec::new();
+        for (range, route) in
+            [(0..2, info), (2..4, info), (4..6, later), (6..7, other)]
+        {
+            DatagramBatch::push(&mut batches, range, route, true);
+        }
+        assert_eq!(batches.len(), 3);
+        let mut queue = DatagramQueue::new(output.len(), true);
+        queue.stage(&mut output, &mut batches)?;
+        let mut sent = Vec::new();
+        let mut routes = Vec::new();
+        assert!(!queue.flush_with(|bytes, route, stride, pacing| {
+            assert!(pacing);
+            if routes.is_empty() {
+                assert_eq!(bytes, [1, 1, 2, 2]);
+                assert_eq!(*route, info);
+                assert_eq!(stride, Some(2));
+                routes.push(*route);
+                sent.extend_from_slice(bytes);
+                Ok(bytes.len())
+            } else {
+                assert_eq!(bytes, [3, 3]);
+                assert_eq!(*route, later);
+                assert_eq!(stride, None);
+                Err(io::ErrorKind::WouldBlock.into())
+            }
+        })?);
+        assert_eq!(sent, [1, 1, 2, 2]);
+        assert!(queue.flush_with(|bytes, route, stride, pacing| {
+            assert!(pacing);
+            assert_eq!(stride, None);
+            routes.push(*route);
+            sent.extend_from_slice(bytes);
+            Ok(bytes.len())
+        })?);
+        assert_eq!(routes, [info, later, other]);
+        assert_eq!(sent, [1, 1, 2, 2, 3, 3, 4]);
+        Ok(())
     }
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn kernel_timespec_and_gso_segment_bounds_are_validated() {
+    fn monotonic_clock_conversion_is_checked_and_deterministic() -> io::Result<()>
+    {
+        use std::time::Duration;
+
+        let now = std::time::Instant::now();
+        let ahead = now
+            .checked_add(Duration::from_nanos(5))
+            .ok_or(io::ErrorKind::InvalidInput)?;
+        let behind = now
+            .checked_sub(Duration::from_nanos(5))
+            .ok_or(io::ErrorKind::InvalidInput)?;
+
+        assert_eq!(deadline_from_anchor(now, now, 42)?, 42);
+        assert_eq!(deadline_from_anchor(ahead, now, 42)?, 47);
+        assert_eq!(deadline_from_anchor(behind, now, 42)?, 37);
+        assert_eq!(deadline_from_anchor(ahead, now, u64::MAX - 5)?, u64::MAX);
+        assert_eq!(deadline_from_anchor(behind, now, 5)?, 0);
+        assert_eq!(
+            deadline_from_anchor(ahead, now, u64::MAX - 4)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
+        assert_eq!(
+            deadline_from_anchor(behind, now, 4)
+                .err()
+                .map(|error| error.kind()),
+            Some(io::ErrorKind::InvalidInput)
+        );
+
+        assert!(std_time_to_u64(&now)? > 0);
+        Ok(())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn kernel_timespec_and_gso_segment_bounds_are_validated() -> io::Result<()> {
         let ts = |sec, nsec| libc::timespec {
             tv_sec: sec,
             tv_nsec: nsec,
         };
-        assert_eq!(
-            monotonic_timespec_ns(ts(1, 999_999_999)).unwrap(),
-            1_999_999_999
-        );
+        assert_eq!(monotonic_timespec_ns(ts(1, 999_999_999))?, 1_999_999_999);
         for invalid in [ts(-1, 0), ts(0, -1), ts(0, 1_000_000_000)] {
             assert_eq!(
-                monotonic_timespec_ns(invalid).unwrap_err().kind(),
-                io::ErrorKind::InvalidData
+                monotonic_timespec_ns(invalid)
+                    .err()
+                    .map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidData)
             );
         }
         if let Ok(secs) = libc::time_t::try_from(u64::MAX / 1_000_000_000 + 1) {
             assert_eq!(
-                monotonic_timespec_ns(ts(secs, 0)).unwrap_err().kind(),
-                io::ErrorKind::InvalidData
+                monotonic_timespec_ns(ts(secs, 0))
+                    .err()
+                    .map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidData)
             );
         }
-        assert_eq!(valid_gso_segment_size(1).unwrap(), 1);
-        assert_eq!(valid_gso_segment_size(u16::MAX as usize).unwrap(), u16::MAX);
+        assert_eq!(valid_gso_segment_size(1)?, 1);
+        assert_eq!(valid_gso_segment_size(u16::MAX as usize)?, u16::MAX);
         for invalid in [0, u16::MAX as usize + 1, usize::MAX] {
             assert_eq!(
-                valid_gso_segment_size(invalid).unwrap_err().kind(),
-                io::ErrorKind::InvalidInput
+                valid_gso_segment_size(invalid)
+                    .err()
+                    .map(|error| error.kind()),
+                Some(io::ErrorKind::InvalidInput)
             );
         }
+        Ok(())
     }
 }
