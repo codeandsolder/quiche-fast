@@ -247,7 +247,8 @@ pub struct QuicSettings {
     pub handshake_timeout: Option<Duration>,
 
     /// The maximum number of newly-created connections that will be queued for
-    /// the application to receive. Not applicable to client-side usage.
+    /// the application to receive. Must be nonzero and within Tokio channel
+    /// capacity. The client router also validates this setting.
     ///
     /// Defaults to 1024 connections.
     #[serde(default = "QuicSettings::default_listen_backlog")]

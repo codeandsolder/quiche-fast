@@ -52,6 +52,52 @@ use url::Url;
 use crate::fixtures::h3i_fixtures::*;
 use crate::fixtures::*;
 
+#[tokio::test]
+async fn native_client_handshake_timeout_includes_initial_packet_flight(
+) -> tokio_quiche::QuicResult<()> {
+    use tokio_quiche::socket::Socket;
+    let silent_peer = UdpSocket::bind("127.0.0.1:0").await?;
+    let socket = UdpSocket::bind("127.0.0.1:0").await?;
+    socket.connect(silent_peer.local_addr()?).await?;
+    let socket = Socket::try_from(socket)?;
+    let params = tokio_quiche::ConnectionParams::new_client(
+        QuicSettings {
+            handshake_timeout: Some(Duration::from_millis(100)),
+            max_idle_timeout: Some(Duration::from_secs(10)),
+            ..QuicSettings::default()
+        },
+        None,
+        tokio_quiche::settings::Hooks::default(),
+    );
+    let (app, _controller) =
+        tokio_quiche::ClientH3Driver::new(Http3Settings::default());
+    let result = timeout(
+        Duration::from_secs(3),
+        tokio_quiche::quic::connect_with_config(
+            socket,
+            Some("test.com"),
+            &params,
+            app,
+        ),
+    )
+    .await?;
+    let error = result
+        .err()
+        .ok_or("silent peer unexpectedly completed handshake")?;
+    assert_eq!(
+        error
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind),
+        Some(std::io::ErrorKind::TimedOut)
+    );
+    let mut initial = [0; 1500];
+    let (length, _) =
+        timeout(Duration::from_secs(1), silent_peer.recv_from(&mut initial))
+            .await??;
+    assert!(length >= quiche::MIN_CLIENT_INITIAL_LEN);
+    Ok(())
+}
+
 // TODO(erittenhouse): figure out a way to avoid all of this duplication
 #[tokio::test]
 async fn test_handshake_duration_ioworker() {

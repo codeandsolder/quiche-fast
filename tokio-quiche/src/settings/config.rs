@@ -73,6 +73,7 @@ impl Config {
         params: &ConnectionParams, socket_capabilities: SocketCapabilities,
     ) -> QuicResult<Self> {
         let quic_settings = &params.settings;
+        validate_runtime_settings(quic_settings)?;
         let keylog_path = match &quic_settings.keylog_file {
             Some(f) => Some(Cow::Borrowed(f.as_ref())),
             None => std::env::var_os("SSLKEYLOGFILE").map(Cow::from),
@@ -118,6 +119,31 @@ impl Config {
             connection_hook: params.hooks.connection_hook.clone(),
         })
     }
+}
+
+/// Validate values before constructing runtime queues or timers.
+fn validate_runtime_settings(
+    settings: &super::QuicSettings,
+) -> std::io::Result<()> {
+    use std::io::Error;
+    use std::io::ErrorKind;
+    if !(1..=tokio::sync::Semaphore::MAX_PERMITS)
+        .contains(&settings.listen_backlog)
+    {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "listen_backlog is outside the supported channel capacity",
+        ));
+    }
+    if settings.handshake_timeout.is_some_and(|timeout| {
+        std::time::Instant::now().checked_add(timeout).is_none()
+    }) {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "handshake_timeout exceeds the supported monotonic clock range",
+        ));
+    }
+    Ok(())
 }
 
 fn make_quiche_config(
@@ -290,6 +316,23 @@ mod tests {
     use super::*;
     use crate::settings::Hooks;
     use crate::settings::QuicSettings;
+
+    #[test]
+    fn invalid_runtime_limits_are_rejected_before_queue_creation() {
+        for listen_backlog in [0, tokio::sync::Semaphore::MAX_PERMITS + 1] {
+            let settings = QuicSettings {
+                listen_backlog,
+                ..QuicSettings::default()
+            };
+            assert!(validate_runtime_settings(&settings).is_err());
+        }
+        let settings = QuicSettings {
+            handshake_timeout: Some(Duration::MAX),
+            ..QuicSettings::default()
+        };
+        assert!(validate_runtime_settings(&settings).is_err());
+        assert!(validate_runtime_settings(&QuicSettings::default()).is_ok());
+    }
 
     #[test]
     fn invalid_alpn_is_reported_as_configuration_error() {

@@ -131,6 +131,7 @@ where
         #[cfg(feature = "perf-quic-listener-metrics")]
         init_rx_time: None,
         handshake_info: HandshakeInfo::new(Instant::now(), None),
+        allow_early_data: true,
         quiche_conn: Box::new(quiche_conn),
         socket,
         local_addr,
