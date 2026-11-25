@@ -245,9 +245,9 @@ pub fn requests(
                     <li><strong>Host</strong> - the request Host (or authority). Due to connection coalescing, this value can be different from the session SNI</li>
                     <li><strong>Path</strong> - the request Path</li>
                     <li><strong>Status</strong> - the response Status</li>
-                    <li><strong>Response Content-Length</strong> - for downloads; the value of the response Content-Length, if any. A response can omit this header. </li>
+                    <li><strong>Response Content-Length</strong> - for downloads; the Content-Length from the final response header block, if observed. A response can omit this header. </li>
                     <li><strong>Response Observed DATA</strong> - sum of known response DATA payload lengths. A missing length produces n/a. A qlog DATA frame may describe a declared payload before its body has been received, so matching Content-Length is not proof of completed delivery. HEAD, bodyless statuses and successful CONNECT are not ordinary Content-Length comparisons.</li>
-                    <li><strong>Last observed response activity</strong> - latest of first observed response HEADERS and last observed response DATA. This does not establish completion.</li>
+                    <li><strong>Last observed response activity</strong> - latest observed response HEADERS or DATA, including trailers. This does not establish completion.</li>
                     <li><strong>Download Duration (d2d) (ms)</strong> - the observed interval between first and last response DATA frames at the logged endpoint. Equal timestamps give zero duration.</li>
                     <li><strong>Download Rate (d2d) (Mbps)</strong> - the download rate, in megabits/s, between first and last DATA frames. This is an observed DATA-length rate, not confirmed delivered throughput. A zero, missing or reversed interval produces n/a; short positive durations can produce high values.</li>
                     <li><strong>Download Duration (h2d) (ms)</strong> - the observed interval between first response HEADERS and last response DATA at the logged endpoint.</li>

@@ -1166,14 +1166,13 @@ impl Datastore {
     ) -> &mut HttpRequestStub {
         let is_request = direction.is_client_data(self.vantage_point);
         let req = self.get_or_insert_http_req(stream_id);
-        req.observe_headers(time, matches!(direction, LocalDirection::Sent));
-        if is_request {
-            req.set_request_info_from_netlog(headers);
-        } else {
-            req.set_response_info_from_netlog(headers);
-            if end_stream {
-                req.record_response_terminal(time);
-            }
+        req.observe_netlog_headers(
+            time,
+            matches!(direction, LocalDirection::Sent),
+            headers,
+        );
+        if !is_request && end_stream {
+            req.record_response_terminal(time);
         }
         req
     }
@@ -1973,17 +1972,11 @@ impl Datastore {
     ) -> Result<(), DatastoreError> {
         match frame {
             Http3Frame::Headers { headers, .. } => {
-                let vantage = self.vantage_point;
-                let req = self.get_or_insert_http_req(stream_id);
-                req.observe_headers(
+                self.get_or_insert_http_req(stream_id).observe_qlog_headers(
                     ev_time,
                     matches!(direction, LocalDirection::Sent),
+                    headers,
                 );
-                if direction.is_client_data(vantage) {
-                    req.set_request_info_from_qlog(headers);
-                } else {
-                    req.set_response_info_from_qlog(headers);
-                }
             },
 
             Http3Frame::Data { raw } => {

@@ -62,13 +62,6 @@ impl<T> NaOption<T> {
     pub const fn new(value: Option<T>) -> Self {
         Self { inner: value }
     }
-
-    /// Preserve an earlier value when a later header block omits this field.
-    fn update_if_present(&mut self, value: Option<T>) {
-        if let Some(value) = value {
-            self.inner = Some(value);
-        }
-    }
 }
 
 impl<T: std::fmt::Display> Display for NaOption<T> {
@@ -204,6 +197,70 @@ impl HttpDataHistory {
     }
 }
 
+/// Header metadata is selected independently of ingestion order.
+#[derive(Debug, Default)]
+pub(crate) struct HeaderSelection {
+    request_time: Option<f64>,
+    response: Option<(ResponseStatusClass, f64)>,
+    request_priority_time: Option<f64>,
+    response_priority_time: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum ResponseStatusClass {
+    Invalid,
+    Informational,
+    Final,
+}
+
+impl ResponseStatusClass {
+    fn classify(status: &str) -> Self {
+        if status.len() != 3 || !status.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return Self::Invalid;
+        }
+        match status.parse::<u16>() {
+            Ok(100..=199) => Self::Informational,
+            Ok(200..=599) => Self::Final,
+            _ => Self::Invalid,
+        }
+    }
+}
+
+struct HeaderFields {
+    method: Option<String>,
+    host: Option<String>,
+    path: Option<String>,
+    status: Option<String>,
+    priority: Option<String>,
+    content_length: Option<String>,
+}
+
+impl HeaderFields {
+    fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        Self {
+            method: lookup(":method"),
+            host: lookup(":authority"),
+            path: lookup(":path"),
+            status: lookup(":status"),
+            priority: lookup("priority"),
+            content_length: lookup("content-length"),
+        }
+    }
+}
+
+fn record_priority(
+    priority: Option<String>, time: f64, selected: &mut NaOption<String>,
+    selected_time: &mut Option<f64>,
+) {
+    if let Some(priority) = priority {
+        if selected_time.is_none_or(|old| time >= old) {
+            *selected = NaOption::new(Some(priority));
+            *selected_time = Some(time);
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct HttpRequestStub {
     pub request_actor: RequestActor,
@@ -217,6 +274,7 @@ pub struct HttpRequestStub {
     pub client_pri_hdr: NaOption<String>,
     pub server_pri_hdr: NaOption<String>,
     pub priority_updates: Vec<String>,
+    pub(crate) header_selection: HeaderSelection,
 
     pub time_discovery: Option<f64>,
     pub time_first_headers_rx: Option<f64>,
@@ -300,8 +358,8 @@ const REQUEST_HEADERS: [&str; 31] = [
     "Request Start Time",
     "Last observed response activity",
     "Stalled duration (ms)",
-    "Download duration (h2d) (ms)",
-    "Download rate (h2d) (Mbps)",
+    "Final HEADERS to last DATA (ms)",
+    "Final HEADERS to last DATA (Mbps)",
     "Download duration (d2d) (ms)",
     "Download rate (d2d) (Mbps)",
     "Client Tx Hdr, Rx Hdr",
@@ -335,8 +393,9 @@ impl tabled::Tabled for HttpRequestStub {
 
         let req_start = NaOption::new(self.request_headers_time());
         let req_end = NaOption::new(self.last_response_activity());
-        let download_from_headers =
-            self.server_data().measurement(self.response_headers_time());
+        let download_from_headers = self
+            .server_data()
+            .measurement(self.final_response_headers_time());
         let download_from_data = self
             .server_data()
             .measurement(self.server_data().first_time());
@@ -424,53 +483,100 @@ pub fn find_header_value(hdrs: &[HttpHeader], name: &str) -> Option<String> {
 }
 
 impl HttpRequestStub {
-    pub fn set_request_info_from_netlog(&mut self, hdrs: &[String]) {
-        // TODO: case-sensitivity for HTTP/1.1
+    pub(crate) fn observe_netlog_headers(
+        &mut self, time: f64, sent: bool, hdrs: &[String],
+    ) {
         let headers = headers_to_map(hdrs);
-
-        self.method
-            .update_if_present(headers.get(":method").cloned());
-        self.host
-            .update_if_present(headers.get(":authority").cloned());
-        self.path.update_if_present(headers.get(":path").cloned());
-        self.client_pri_hdr
-            .update_if_present(headers.get("priority").cloned());
-        self.client_content_length
-            .update_if_present(headers.get("content-length").cloned());
+        self.record_header_block(
+            time,
+            sent,
+            HeaderFields::from_lookup(|name| headers.get(name).cloned()),
+        );
     }
 
-    pub fn set_response_info_from_netlog(&mut self, hdrs: &[String]) {
-        // TODO: case-sensitivity for HTTP/1.1
-        let headers = headers_to_map(hdrs);
-
-        self.status
-            .update_if_present(headers.get(":status").cloned());
-        self.server_pri_hdr
-            .update_if_present(headers.get("priority").cloned());
-        self.server_content_length
-            .update_if_present(headers.get("content-length").cloned());
+    pub(crate) fn observe_qlog_headers(
+        &mut self, time: f64, sent: bool, hdrs: &[HttpHeader],
+    ) {
+        self.record_header_block(
+            time,
+            sent,
+            HeaderFields::from_lookup(|name| find_header_value(hdrs, name)),
+        );
     }
 
-    pub fn set_request_info_from_qlog(&mut self, hdrs: &[HttpHeader]) {
-        self.method
-            .update_if_present(find_header_value(hdrs, ":method"));
-        self.host
-            .update_if_present(find_header_value(hdrs, ":authority"));
-        self.path
-            .update_if_present(find_header_value(hdrs, ":path"));
-        self.client_pri_hdr
-            .update_if_present(find_header_value(hdrs, "priority"));
-        self.client_content_length
-            .update_if_present(find_header_value(hdrs, "content-length"));
+    fn record_header_block(
+        &mut self, time: f64, sent: bool, fields: HeaderFields,
+    ) {
+        self.observe_headers(time, sent);
+        if matches!(
+            (&self.request_actor, sent),
+            (RequestActor::Client, true) | (RequestActor::Server, false)
+        ) {
+            self.record_request_metadata(time, fields);
+        } else {
+            self.record_response_metadata(time, fields);
+        }
     }
 
-    pub fn set_response_info_from_qlog(&mut self, hdrs: &[HttpHeader]) {
-        self.status
-            .update_if_present(find_header_value(hdrs, ":status"));
-        self.server_pri_hdr
-            .update_if_present(find_header_value(hdrs, "priority"));
-        self.server_content_length
-            .update_if_present(find_header_value(hdrs, "content-length"));
+    fn record_request_metadata(&mut self, time: f64, fields: HeaderFields) {
+        record_priority(
+            fields.priority,
+            time,
+            &mut self.client_pri_hdr,
+            &mut self.header_selection.request_priority_time,
+        );
+        // A statusless trailer must not become a request header block.
+        let has_pseudo_header = fields.method.is_some() ||
+            fields.host.is_some() ||
+            fields.path.is_some();
+        if has_pseudo_header &&
+            self.header_selection
+                .request_time
+                .is_none_or(|old| time < old)
+        {
+            self.method = NaOption::new(fields.method);
+            self.host = NaOption::new(fields.host);
+            self.path = NaOption::new(fields.path);
+            self.client_content_length = NaOption::new(fields.content_length);
+            self.header_selection.request_time = Some(time);
+        }
+    }
+
+    fn record_response_metadata(&mut self, time: f64, fields: HeaderFields) {
+        record_priority(
+            fields.priority,
+            time,
+            &mut self.server_pri_hdr,
+            &mut self.header_selection.response_priority_time,
+        );
+        let Some(status) = fields.status else {
+            return;
+        };
+        let class = ResponseStatusClass::classify(&status);
+        // Prefer the earliest final response to all informational or invalid
+        // status observations, even when input records arrive out of order.
+        if self
+            .header_selection
+            .response
+            .is_none_or(|(old_class, old_time)| {
+                class > old_class || (class == old_class && time < old_time)
+            })
+        {
+            self.status = NaOption::new(Some(status));
+            self.server_content_length =
+                NaOption::new(if class == ResponseStatusClass::Final {
+                    fields.content_length
+                } else {
+                    None
+                });
+            self.header_selection.response = Some((class, time));
+        }
+    }
+
+    fn final_response_headers_time(&self) -> Option<f64> {
+        self.header_selection.response.and_then(|(class, time)| {
+            (class == ResponseStatusClass::Final).then_some(time)
+        })
     }
 
     #[must_use = "the history describes client-originated DATA"]
@@ -624,91 +730,116 @@ impl HttpRequestStub {
 #[cfg(test)]
 mod header_metadata_tests {
     use super::HttpRequestStub;
-    use super::NaOption;
+    use crate::datastore::RequestActor;
     use qlog::events::http3::HttpHeader;
 
+    fn observe(
+        req: &mut HttpRequestStub, qlog: bool, time: f64, sent: bool,
+        fields: &[(&str, &str)],
+    ) {
+        if qlog {
+            let headers: Vec<_> = fields
+                .iter()
+                .map(|&(name, value)| HttpHeader {
+                    name: Some(name.into()),
+                    name_bytes: None,
+                    value: Some(value.into()),
+                    value_bytes: None,
+                })
+                .collect();
+            req.observe_qlog_headers(time, sent, &headers);
+        } else {
+            let headers: Vec<_> = fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {value}"))
+                .collect();
+            req.observe_netlog_headers(time, sent, &headers);
+        }
+    }
+
     #[test]
-    fn trailers_preserve_request_response_metadata_for_qlog_and_netlog() {
-        for qlog_format in [false, true] {
-            let apply = |req: &mut HttpRequestStub,
-                         request: bool,
-                         fields: &[(&str, &str)]| {
-                if qlog_format {
-                    let headers: Vec<_> = fields
-                        .iter()
-                        .map(|&(name, value)| HttpHeader {
-                            name: Some(name.into()),
-                            name_bytes: None,
-                            value: Some(value.into()),
-                            value_bytes: None,
-                        })
-                        .collect();
-                    if request {
-                        req.set_request_info_from_qlog(&headers);
-                    } else {
-                        req.set_response_info_from_qlog(&headers);
-                    }
-                } else {
-                    let headers: Vec<_> = fields
-                        .iter()
-                        .map(|(name, value)| format!("{name}: {value}"))
-                        .collect();
-                    if request {
-                        req.set_request_info_from_netlog(&headers);
-                    } else {
-                        req.set_response_info_from_netlog(&headers);
-                    }
-                }
-            };
+    fn final_response_metadata_beats_informational_and_trailer_observations() {
+        for qlog in [false, true] {
+            for actor in [RequestActor::Client, RequestActor::Server] {
+                let request_sent = matches!(actor, RequestActor::Client);
+                let mut req = HttpRequestStub {
+                    request_actor: actor,
+                    ..HttpRequestStub::default()
+                };
+                observe(&mut req, qlog, 2.0, request_sent, &[
+                    (":method", "POST"),
+                    (":authority", "example.test"),
+                    (":path", "/resource"),
+                    ("priority", "u=3"),
+                    ("content-length", "12"),
+                ]);
+                observe(&mut req, qlog, 4.0, request_sent, &[
+                    ("grpc-status", "0"),
+                    ("priority", "u=1"),
+                    ("content-length", "999"),
+                ]);
+                observe(&mut req, qlog, 3.0, request_sent, &[(
+                    "priority", "u=2",
+                )]);
+                assert_eq!(
+                    (
+                        req.method.inner.as_deref(),
+                        req.host.inner.as_deref(),
+                        req.path.inner.as_deref(),
+                        req.client_pri_hdr.inner.as_deref(),
+                        req.client_content_length.inner.as_deref(),
+                    ),
+                    (
+                        Some("POST"),
+                        Some("example.test"),
+                        Some("/resource"),
+                        Some("u=1"),
+                        Some("12")
+                    )
+                );
 
-            let mut req = HttpRequestStub::default();
-            apply(&mut req, true, &[
-                (":method", "POST"),
-                (":authority", "example.test"),
-                (":path", "/resource"),
-                ("priority", "u=3"),
-                ("content-length", "12"),
-            ]);
-            apply(&mut req, true, &[("grpc-status", "0")]);
-            assert_eq!(
-                (
-                    req.method.inner.as_deref(),
-                    req.host.inner.as_deref(),
-                    req.path.inner.as_deref(),
-                    req.client_pri_hdr.inner.as_deref(),
-                    req.client_content_length.inner.as_deref(),
-                ),
-                (
-                    Some("POST"),
-                    Some("example.test"),
-                    Some("/resource"),
-                    Some("u=3"),
-                    Some("12"),
-                )
-            );
-            apply(&mut req, true, &[("priority", "u=1")]);
-            assert_eq!(req.client_pri_hdr.inner.as_deref(), Some("u=1"));
-
-            let mut response = HttpRequestStub::default();
-            apply(&mut response, false, &[
-                (":status", "200"),
-                ("priority", "u=4"),
-                ("content-length", "120"),
-            ]);
-            apply(&mut response, false, &[("grpc-status", "0")]);
-            assert_eq!(response.status.inner.as_deref(), Some("200"));
-            assert_eq!(response.server_pri_hdr.inner.as_deref(), Some("u=4"));
-            assert_eq!(
-                response.server_content_length.inner.as_deref(),
-                Some("120")
-            );
-
-            apply(&mut response, false, &[("priority", "")]);
-            assert_eq!(
-                response.server_pri_hdr,
-                NaOption::new(Some(String::new()))
-            );
-            assert_eq!(response.status.inner.as_deref(), Some("200"));
+                observe(&mut req, qlog, 5.0, !request_sent, &[
+                    (":status", "103"),
+                    ("content-length", "999"),
+                ]);
+                assert_eq!(req.status.inner.as_deref(), Some("103"));
+                assert_eq!(req.final_response_headers_time(), None);
+                assert_eq!(req.server_content_length.inner, None);
+                observe(&mut req, qlog, 8.0, !request_sent, &[
+                    (":status", "200"),
+                    ("priority", "u=4"),
+                    ("content-length", "120"),
+                ]);
+                observe(&mut req, qlog, 6.0, !request_sent, &[
+                    (":status", "100"),
+                    ("content-length", "1"),
+                ]);
+                observe(&mut req, qlog, 12.0, !request_sent, &[
+                    ("grpc-status", "0"),
+                    ("content-length", "17"),
+                    ("priority", ""),
+                ]);
+                observe(&mut req, qlog, 11.0, !request_sent, &[(
+                    "priority", "u=2",
+                )]);
+                assert_eq!(req.status.inner.as_deref(), Some("200"));
+                assert_eq!(req.server_pri_hdr.inner.as_deref(), Some(""));
+                assert_eq!(
+                    req.server_content_length.inner.as_deref(),
+                    Some("120")
+                );
+                assert_eq!(req.final_response_headers_time(), Some(8.0));
+                assert_eq!(req.response_headers_time(), Some(5.0));
+                assert_eq!(req.last_response_activity(), Some(12.0));
+                // Earlier final metadata replaces the entire selected block,
+                // including removal of a Content-Length not present there.
+                observe(&mut req, qlog, 7.0, !request_sent, &[(
+                    ":status", "204",
+                )]);
+                assert_eq!(req.status.inner.as_deref(), Some("204"));
+                assert_eq!(req.server_content_length.inner, None);
+                assert_eq!(req.final_response_headers_time(), Some(7.0));
+            }
         }
     }
 }
@@ -833,6 +964,10 @@ mod report_tests {
                     ..HttpRequestStub::default()
                 },
             };
+            let response_sent = matches!(req.request_actor, RequestActor::Server);
+            req.observe_netlog_headers(10.0, response_sent, &[
+                ":status: 200".into()
+            ]);
             req.calculate_deltas();
             let fields = req.fields();
             assert_eq!(&fields[11..15], ["4", "4", "2", "8"]);
