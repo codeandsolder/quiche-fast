@@ -303,6 +303,7 @@ mod tests {
     use serde_json::Value;
     use std::collections::BTreeMap;
     use std::collections::HashSet;
+    use std::fmt::Write;
     use std::io::Cursor;
 
     fn binding(
@@ -367,14 +368,14 @@ mod tests {
     }
 
     fn record(id: i64, ty: i64, time: u64, params: Value) -> Value {
-        json!({"phase": 1, "source": {"id": id, "type": 1, "start_time": "0"},
-            "type": ty, "time": time.to_string(), "params": params})
+        let mut record = json!({"phase": 1, "source": {"id": id, "type": 1, "start_time": "0"},
+            "type": ty, "time": time.to_string()});
+        record["params"] = params;
+        record
     }
 
-    #[test]
-    fn filtered_session_reader_resolves_http2_and_http3_discovery(
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        let constants = json!({
+    fn fixture_constants() -> Value {
+        json!({
             "constants": {
                 "activeFieldTrialGroups": [], "addressFamily": {},
                 "certPathBuilderDigestPolicy": {}, "certStatusFlag": {},
@@ -392,7 +393,13 @@ mod tests {
                 "netError": {}, "quicError": {}, "quicRstStreamError": {},
                 "secureDnsMode": {}, "timeTickOffset": 0
             }
-        });
+        })
+    }
+
+    #[test]
+    fn filtered_session_reader_resolves_http2_and_http3_discovery(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = fixture_constants();
         let quic_session = |host| {
             json!({
                 "cert_verify_flags": 0, "connection_id": "", "host": host,
@@ -447,7 +454,6 @@ mod tests {
         ];
         let mut input = constants.to_string();
         input.pop();
-        use std::fmt::Write;
         write!(
             input,
             ",\n\"events\": [\n{}\n]\n}}",

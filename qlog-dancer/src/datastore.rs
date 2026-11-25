@@ -1653,21 +1653,14 @@ impl Datastore {
                     },
 
                     QuicFrame::DataBlocked { limit, .. } => {
-                        trace!(
-                            "todo DATA_BLOCKED t={} limit={}",
-                            event_time,
-                            limit
-                        );
+                        trace!("todo DATA_BLOCKED t={event_time} limit={limit}");
                     },
 
                     QuicFrame::StreamDataBlocked {
                         stream_id, limit, ..
                     } => {
                         trace!(
-                            "todo STREAM_DATA_BLOCKED t={} stream={} limit={}",
-                            event_time,
-                            stream_id,
-                            limit
+                            "todo STREAM_DATA_BLOCKED t={event_time} stream={stream_id} limit={limit}"
                         );
                     },
 
@@ -2173,6 +2166,7 @@ mod input_tests {
 mod netlog_tests {
     use super::*;
     use std::collections::HashSet;
+    use std::fmt::Write;
     use std::io::Cursor;
 
     fn constants() -> Result<netlog::constants::Constants, serde_json::Error> {
@@ -3250,7 +3244,6 @@ mod netlog_tests {
                 }),
             ),
         ];
-        use std::fmt::Write;
         write!(source, ",\n\"events\": [\n{}\n]\n}}", records.join(",\n"))?;
         let mut reader = Cursor::new(source.as_bytes());
         let parsed_constants = netlog::read_netlog_constants(&mut reader)?;
