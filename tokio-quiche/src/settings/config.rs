@@ -38,6 +38,7 @@ use crate::settings::CertificateKind;
 use crate::settings::ConnectionParams;
 use crate::settings::TlsCertificatePaths;
 use crate::socket::SocketCapabilities;
+use crate::socket::SocketCapability;
 
 /// Whether `--cfg capture_keylogs` was set at build time. We keep supporting
 /// the `capture_keylogs` feature for backward compatibility.
@@ -88,13 +89,13 @@ impl Config {
                 None
             });
 
-        let SocketCapabilities {
-            has_gso,
-            has_txtime: pacing_offload,
-            has_ippktinfo,
-            has_ipv6pktinfo,
-            ..
-        } = socket_capabilities;
+        let has_gso = socket_capabilities.contains(SocketCapability::Gso);
+        let pacing_offload =
+            socket_capabilities.contains(SocketCapability::TransmitTime);
+        let has_ippktinfo =
+            socket_capabilities.contains(SocketCapability::Ipv4PacketInfo);
+        let has_ipv6pktinfo =
+            socket_capabilities.contains(SocketCapability::Ipv6PacketInfo);
 
         #[cfg(feature = "gcongestion")]
         let pacing_offload = quic_settings.enable_pacing && pacing_offload;
