@@ -27,7 +27,6 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::convert::TryFrom;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -47,22 +46,21 @@ use crate::request_stub::NaOption;
 use crate::trackers::StreamBufferTracker;
 use crate::trackers::StreamMaxTracker;
 use crate::trackers::TrackerError;
-use crate::LogFileData;
 use crate::PacketType;
 use crate::QlogPointRtt;
 use crate::QlogPointu64;
-use crate::RawLogEvents::Netlog;
 use netlog;
 use netlog::h2;
-use netlog::h2::Event::*;
-use netlog::h2::*;
+use netlog::h2::Http2Settings;
 use netlog::h3;
-use netlog::h3::Event::*;
-use netlog::http;
 use netlog::quic;
-use netlog::quic::Event::*;
-use netlog::quic::*;
-use netlog::read_netlog_record;
+use netlog::quic::TransportParameters;
+
+mod netlog_reader;
+pub use netlog_reader::with_netlog_reader;
+pub use netlog_reader::NetlogSession;
+pub use netlog_reader::QuicRequestDiscovery;
+pub use netlog_reader::StreamBindingMap;
 
 pub type ParseResult<T> = Result<T, serde_json::Error>;
 #[derive(Debug, Clone)]
@@ -110,8 +108,8 @@ pub enum RequestActor {
 impl From<VantagePoint> for RequestActor {
     fn from(value: VantagePoint) -> Self {
         match value {
-            VantagePoint::Client => RequestActor::Client,
-            VantagePoint::Server => RequestActor::Server,
+            VantagePoint::Client => Self::Client,
+            VantagePoint::Server => Self::Server,
         }
     }
 }
@@ -218,11 +216,11 @@ impl Debug for ApplicationProto {
 impl Display for ApplicationProto {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let v = match self {
-            ApplicationProto::Http2 => "HTTP/2",
-            ApplicationProto::Http3 => "HTTP/3",
+            Self::Http2 => "HTTP/2",
+            Self::Http3 => "HTTP/3",
         };
 
-        write!(f, "{}", v)
+        write!(f, "{v}")
     }
 }
 
@@ -300,7 +298,7 @@ pub struct H2StreamReset {
 
 impl Display for H2StreamReset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "code={}, {}", self.error, self.description,)
+        write!(f, "code={}, {}", self.error, self.description)
     }
 }
 
@@ -514,8 +512,9 @@ fn cumulative_total(
     checked_netlog_sum(values.last().map_or(0, |value| value.1), length, field)
 }
 
-/// Initial receive limits are relative to the endpoint advertising them,
-/// not the vantage point of the log. For bidirectional streams bit zero
+/// Initial receive limits are relative to the endpoint advertising them.
+///
+/// For bidirectional streams bit zero
 /// selects the initiator; bit one identifies unidirectional streams.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct InitialStreamLimits {
@@ -651,7 +650,7 @@ impl Datastore {
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
         event: &netlog::Event, constants: &netlog::constants::Constants,
         stream_bind: &StreamBindingMap,
-        h3_session_requests: Option<&[ReqOverH3]>,
+        h3_session_requests: Option<&QuicRequestDiscovery>,
     ) -> Result<(), DatastoreError> {
         match event {
             // nothing to do for this type just now
@@ -858,34 +857,36 @@ impl Datastore {
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            QuicSessionStreamFrameReceived(e) => self
+            quic::Event::QuicSessionStreamFrameReceived(e) => self
                 .record_netlog_received_quic_stream_frame(
                     &e.params,
                     rel_event_time,
                 )?,
 
-            QuicSessionUnauthenticatedPacketHeaderReceived(e) => self
-                .record_netlog_received_packet_header(
+            quic::Event::QuicSessionUnauthenticatedPacketHeaderReceived(e) =>
+                self.record_netlog_received_packet_header(
                     &e.params,
                     rel_event_time,
                 )?,
 
-            QuicSessionPacketSent(e) =>
+            quic::Event::QuicSessionPacketSent(e) =>
                 self.record_netlog_sent_packet(&e.params, rel_event_time),
 
-            QuicSessionAckFrameSent(e) => self.record_netlog_ack_gaps(
-                NetlogAckDirection::Sent,
-                &e.params.missing_packets,
-                rel_event_time,
-            )?,
+            quic::Event::QuicSessionAckFrameSent(e) => self
+                .record_netlog_ack_gaps(
+                    NetlogAckDirection::Sent,
+                    &e.params.missing_packets,
+                    rel_event_time,
+                )?,
 
-            QuicSessionAckFrameReceived(e) => self.record_netlog_ack_gaps(
-                NetlogAckDirection::Received,
-                &e.params.missing_packets,
-                rel_event_time,
-            )?,
+            quic::Event::QuicSessionAckFrameReceived(e) => self
+                .record_netlog_ack_gaps(
+                    NetlogAckDirection::Received,
+                    &e.params.missing_packets,
+                    rel_event_time,
+                )?,
 
-            QuicSessionClosed(e) => {
+            quic::Event::QuicSessionClosed(e) => {
                 self.quic_session_close = Some(QuicSessionClose {
                     session_id: self.session_id.unwrap_or(-1),
                     sni: self
@@ -904,7 +905,7 @@ impl Datastore {
                 });
             },
 
-            QuicSessionRstStreamFrameReceived(e) => self
+            quic::Event::QuicSessionRstStreamFrameReceived(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -914,7 +915,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionRstStreamFrameSent(e) => self
+            quic::Event::QuicSessionRstStreamFrameSent(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -924,7 +925,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionStopSendingFrameSent(e) => self
+            quic::Event::QuicSessionStopSendingFrameSent(e) => self
                 .record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
@@ -932,7 +933,7 @@ impl Datastore {
                     constants,
                 ),
 
-            QuicSessionBlockedFrameReceived(e) => {
+            quic::Event::QuicSessionBlockedFrameReceived(e) => {
                 let s = self
                     .netlog_quic_server_window_blocked
                     .entry(e.params.stream_id)
@@ -940,7 +941,7 @@ impl Datastore {
                 s.push(rel_event_time);
             },
 
-            QuicSessionWindowUpdateFrameSent(e) => {
+            quic::Event::QuicSessionWindowUpdateFrameSent(e) => {
                 let s = self
                     .netlog_quic_client_side_window_updates
                     .entry(e.params.stream_id)
@@ -949,7 +950,7 @@ impl Datastore {
                 s.push((rel_event_time, e.params.byte_offset));
             },
 
-            QuicSessionTransportParametersSent(e) => {
+            quic::Event::QuicSessionTransportParametersSent(e) => {
                 self.client_quic_tps =
                     e.params.quic_transport_parameters.clone().into();
 
@@ -965,7 +966,8 @@ impl Datastore {
             },
 
             // ignore the other events for now
-            QuicSession(_) | QuicSessionTransportParametersReceived(_) => (),
+            quic::Event::QuicSession(_) |
+            quic::Event::QuicSessionTransportParametersReceived(_) => (),
         }
         Ok(())
     }
@@ -1097,61 +1099,50 @@ impl Datastore {
 
     fn consume_netlog_h3(
         &mut self, session_start_time: u64, ev_hdr: &netlog::EventHeader,
-        ev: &h3::Event, h3_session_requests: Option<&[ReqOverH3]>,
+        ev: &h3::Event, h3_session_requests: Option<&QuicRequestDiscovery>,
     ) -> Result<(), DatastoreError> {
         let rel_event_time =
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            Http3PriorityUpdateSent(e) => {
+            h3::Event::Http3PriorityUpdateSent(e) => {
                 let req =
                     self.get_or_insert_http_req(e.params.prioritized_element_id);
                 req.priority_updates
                     .push(e.params.priority_field_value.clone());
             },
 
-            Http3HeadersSent(e) => {
+            h3::Event::Http3HeadersSent(e) => {
                 let req = self.get_or_insert_http_req(e.params.stream_id);
                 req.time_first_headers_tx.get_or_insert(rel_event_time);
                 req.set_request_info_from_netlog(&e.params.headers);
 
-                if let Some(reqs) = h3_session_requests {
-                    for r in reqs {
-                        if let Some(stream_id) = r.quic_stream_id {
-                            if stream_id == e.params.stream_id {
-                                // Request discovery may precede session start.
-                                req.time_discovery = Some(netlog_relative_time(
-                                    r.discover_time,
-                                    session_start_time,
-                                ));
-                                break;
-                            }
-                        }
-                    }
+                if let Some(time) = h3_session_requests
+                    .and_then(|requests| requests.get(&e.params.stream_id))
+                {
+                    req.time_discovery =
+                        Some(netlog_relative_time(*time, session_start_time));
                 }
             },
 
-            // TODO: this is reception of headers frame, before the field
-            // section is decoded. Ignore for now and just use the decoded
-            // event.
-            Http3HeadersReceived(_) => (),
-
-            Http3HeadersDecoded(e) => {
+            h3::Event::Http3HeadersDecoded(e) => {
                 let req = self.get_or_insert_http_req(e.params.stream_id);
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http3DataFrameReceived(e) => self.record_netlog_received_data(
-                ApplicationProto::Http3,
-                e.params.stream_id,
-                e.params.payload_length,
-                rel_event_time,
-            )?,
+            h3::Event::Http3DataFrameReceived(e) => self
+                .record_netlog_received_data(
+                    ApplicationProto::Http3,
+                    e.params.stream_id,
+                    e.params.payload_length,
+                    rel_event_time,
+                )?,
 
-            // TODO: track outbound HTTP/3 DATA once netlog exposes the needed
-            // accounting.
-            Http3DataSent(_) => (),
+            // Decoded headers are handled above; outbound DATA still lacks
+            // complete accounting in the datastore.
+            h3::Event::Http3HeadersReceived(_) | h3::Event::Http3DataSent(_) =>
+                (),
         }
         Ok(())
     }
@@ -1245,22 +1236,21 @@ impl Datastore {
             netlog_relative_time(ev_hdr.time_num, session_start_time);
 
         match ev {
-            Http2SessionSendSettings(e) => {
+            h2::Event::Http2SessionSendSettings(e) =>
                 match Http2Settings::try_from(e.params.settings.as_slice()) {
                     Ok(v) => self.h2_client_settings = v,
 
-                    Err(e) => error!("{}", e),
-                }
-            },
+                    Err(e) => error!("{e}"),
+                },
 
-            Http2SessionRecvSetting(e) => {
+            h2::Event::Http2SessionRecvSetting(e) => {
                 if let Some(id) = h2::parse_recv_setting_id(&e.params.id) {
                     self.h2_server_settings.set_from_wire(id, e.params.value);
                 } else {
                     error!("parsing H2 setting {:?}", e.params);
                 }
             },
-            Http2SessionSendHeaders(e) => {
+            h2::Event::Http2SessionSendHeaders(e) => {
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_tx.get_or_insert(rel_event_time);
@@ -1269,34 +1259,34 @@ impl Datastore {
                 if let Some(sb) = stream_bind.get(&e.params.source_dependency.id)
                 {
                     // Discovery can precede the session's creation.
-                    req.time_discovery = Some(netlog_relative_time(
-                        sb.request_discovery_time,
-                        session_start_time,
-                    ));
+                    req.time_discovery =
+                        Some(netlog_relative_time(*sb, session_start_time));
                 }
             },
 
-            Http2SessionRecvHeaders(e) => {
+            h2::Event::Http2SessionRecvHeaders(e) => {
                 let req =
                     self.get_or_insert_http_req(u64::from(e.params.stream_id));
                 req.time_first_headers_rx.get_or_insert(rel_event_time);
                 req.set_response_info_from_netlog(&e.params.headers);
             },
 
-            Http2SessionRecvData(e) => self.record_netlog_received_data(
-                ApplicationProto::Http2,
-                u64::from(e.params.stream_id),
-                u64::from(e.params.size),
-                rel_event_time,
-            )?,
+            h2::Event::Http2SessionRecvData(e) => self
+                .record_netlog_received_data(
+                    ApplicationProto::Http2,
+                    u64::from(e.params.stream_id),
+                    u64::from(e.params.size),
+                    rel_event_time,
+                )?,
 
-            Http2SessionSendData(e) => self.record_netlog_sent_h2_data(
-                e.params.stream_id,
-                e.params.size,
-                rel_event_time,
-            )?,
+            h2::Event::Http2SessionSendData(e) => self
+                .record_netlog_sent_h2_data(
+                    e.params.stream_id,
+                    e.params.size,
+                    rel_event_time,
+                )?,
 
-            Http2SessionRecvWindowUpdate(e) => self
+            h2::Event::Http2SessionRecvWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
                     NetlogH2Direction::Received,
                     e.params.stream_id,
@@ -1304,7 +1294,7 @@ impl Datastore {
                     rel_event_time,
                 ),
 
-            Http2SessionSendWindowUpdate(e) => self
+            h2::Event::Http2SessionSendWindowUpdate(e) => self
                 .record_netlog_h2_window_update(
                     NetlogH2Direction::Sent,
                     e.params.stream_id,
@@ -1312,37 +1302,37 @@ impl Datastore {
                     rel_event_time,
                 ),
 
-            Http2SessionClose(e) =>
+            h2::Event::Http2SessionClose(e) =>
                 self.record_netlog_h2_session_close(&e.params, constants),
 
-            Http2SessionSendRstStream(e) => self.record_netlog_h2_stream_reset(
-                NetlogH2Direction::Sent,
-                e.params.stream_id,
-                &e.params.error_code,
-                Some(&e.params.description),
-            ),
+            h2::Event::Http2SessionSendRstStream(e) => self
+                .record_netlog_h2_stream_reset(
+                    NetlogH2Direction::Sent,
+                    e.params.stream_id,
+                    &e.params.error_code,
+                    Some(&e.params.description),
+                ),
 
-            Http2SessionRecvRstStream(e) => self.record_netlog_h2_stream_reset(
-                NetlogH2Direction::Received,
-                e.params.stream_id,
-                &e.params.error_code,
-                None,
-            ),
+            h2::Event::Http2SessionRecvRstStream(e) => self
+                .record_netlog_h2_stream_reset(
+                    NetlogH2Direction::Received,
+                    e.params.stream_id,
+                    &e.params.error_code,
+                    None,
+                ),
 
-            // ignore the other events for now
-            Http2Session(_) => (),
-            Http2SessionInitialized(_) => (),
-            Http2SessionUpdateRecvWindow(_) => (),
-            Http2SessionUpdateSendWindow(_) => (),
-            Http2SessionUpdateStreamsSendWindowSize(_) => (),
-            Http2SessionStalledMaxStreams(_) => (),
-
-            Http2StreamUpdateSendWindow(_) => (),
-            Http2StreamUpdateRecvWindow(_) => (),
-            Http2StreamStalledByStreamSendWindow(_) => (),
-            Http2SessionPing(_) => (),
-
-            Http2SessionRecvGoaway(_) => (),
+            // Recognized netlog events with no datastore series.
+            h2::Event::Http2Session(_) |
+            h2::Event::Http2SessionInitialized(_) |
+            h2::Event::Http2SessionUpdateRecvWindow(_) |
+            h2::Event::Http2SessionUpdateSendWindow(_) |
+            h2::Event::Http2SessionUpdateStreamsSendWindowSize(_) |
+            h2::Event::Http2SessionStalledMaxStreams(_) |
+            h2::Event::Http2StreamUpdateSendWindow(_) |
+            h2::Event::Http2StreamUpdateRecvWindow(_) |
+            h2::Event::Http2StreamStalledByStreamSendWindow(_) |
+            h2::Event::Http2SessionPing(_) |
+            h2::Event::Http2SessionRecvGoaway(_) => (),
         }
         Ok(())
     }
@@ -1412,7 +1402,7 @@ impl Datastore {
     ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
-        let mut ds = Datastore {
+        let mut ds = Self {
             vantage_point: vp,
             ..Default::default()
         };
@@ -1428,12 +1418,12 @@ impl Datastore {
     }
 
     pub fn finalize(&mut self) {
-        if let Some(last) = self.local_cwnd.last().cloned() {
+        if let Some(last) = self.local_cwnd.last().copied() {
             self.local_cwnd.push((self.last_event_time, last.1));
         }
 
-        if let Some(last) = self.local_pacing_rate.last().cloned() {
-            trace!("pushing last {:?}", last);
+        if let Some(last) = self.local_pacing_rate.last().copied() {
+            trace!("pushing last {last:?}");
             self.local_pacing_rate.push((self.last_event_time, last.1));
         }
     }
@@ -1755,19 +1745,26 @@ impl Datastore {
         }
 
         // Extract rate metrics from ex_data
-        if let Some(rate) =
-            mu.ex_data.get("cf_delivery_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_delivery_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_delivery_rate.push((ev_time, rate));
         }
 
-        if let Some(rate) =
-            mu.ex_data.get("cf_send_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_send_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_send_rate.push((ev_time, rate));
         }
 
-        if let Some(rate) = mu.ex_data.get("cf_ack_rate").and_then(|v| v.as_u64())
+        if let Some(rate) = mu
+            .ex_data
+            .get("cf_ack_rate")
+            .and_then(serde_json::Value::as_u64)
         {
             self.local_ack_rate.push((ev_time, rate));
         }
@@ -1845,7 +1842,7 @@ impl Datastore {
                         req.time_data_rx_set.push((ev_time, length));
                         self.largest_data_frame_rx_length_global =
                             self.largest_data_frame_rx_length_global.max(length);
-                        if let VantagePoint::Client = self.vantage_point {
+                        if matches!(self.vantage_point, VantagePoint::Client) {
                             self.received_data_frames
                                 .entry(stream_id)
                                 .or_default()
@@ -1886,7 +1883,7 @@ impl Datastore {
     ) -> Result<Self, DatastoreError> {
         let vp = VantagePoint::try_from(vantage_point)?;
 
-        let mut ds = Datastore {
+        let mut ds = Self {
             total_sent_stream_frame_count: 0,
             vantage_point: vp,
             ..Default::default()
@@ -1900,7 +1897,7 @@ impl Datastore {
 
                 qlog::reader::Event::Json(ev) => {
                     // Just swallow the failure and move on
-                    error!("unhandled Json event {:?}", ev);
+                    error!("unhandled Json event {ev:?}");
                 },
             }
         }
@@ -1910,284 +1907,6 @@ impl Datastore {
 
         Ok(ds)
     }
-}
-
-#[derive(Tabled)]
-pub struct NetlogSession {
-    #[tabled(rename = "ID")]
-    session_id: i64,
-    #[tabled(rename = "Protocol")]
-    application_proto: ApplicationProto,
-    #[tabled(rename = "SNI")]
-    host: String,
-    start_time: u64,
-}
-
-impl Debug for NetlogSession {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "app proto={:?}, host={}",
-            self.application_proto, self.host
-        )
-    }
-}
-
-pub struct RequestDiscovery {
-    pub time: u64,
-    pub stream_job_id: Option<i64>,
-}
-
-pub struct StreamBind {
-    pub time: u64,
-    pub request_discovery_id: i64,
-    pub request_discovery_time: u64,
-}
-
-pub type RequestDiscoveryMap = BTreeMap<i64, RequestDiscovery>;
-pub type StreamBindingMap = BTreeMap<i64, StreamBind>;
-
-#[derive(Debug)]
-pub struct ReqOverH3 {
-    pub id: i64,
-    pub discover_time: u64,
-    pub session_id: Option<i64>,
-    pub quic_stream_id: Option<u64>,
-}
-
-pub type RequestOverH3Map = BTreeMap<i64, Vec<ReqOverH3>>;
-
-/// Parse selected Chrome netlog sessions into independent datastores.
-///
-/// # Errors
-/// Returns arithmetic overflow instead of producing wrapped byte histories;
-/// callers discard the partially built session collection on failure.
-pub fn with_netlog_reader<R: std::io::BufRead, S: std::hash::BuildHasher>(
-    reader: &mut R, hostname_filter: &HashSet<String, S>,
-    constants: &netlog::constants::Constants,
-) -> Result<(Vec<LogFileData>, BTreeMap<i64, NetlogSession>), DatastoreError> {
-    // second line in a netlog is always `"events": [` so skip it
-    let _ = read_netlog_record(reader);
-
-    let mut sessions: BTreeMap<i64, NetlogSession> = BTreeMap::new();
-    let mut session_events: BTreeMap<
-        i64,
-        Vec<(netlog::EventHeader, netlog::Event)>,
-    > = BTreeMap::new();
-
-    let mut h3_session_requests: RequestOverH3Map = BTreeMap::new();
-
-    let mut req_id_to_session_id: BTreeMap<i64, i64> = BTreeMap::new();
-
-    let mut request_discovery: RequestDiscoveryMap = BTreeMap::new();
-    let mut stream_bind: StreamBindingMap = BTreeMap::new();
-
-    while let Some(event) = read_netlog_record(reader) {
-        let res: Result<netlog::EventHeader, serde_json::Error> =
-            serde_json::from_slice(&event);
-
-        match res {
-            Ok(mut event_hdr) => {
-                if let Err(error) = event_hdr.populate_strings(constants) {
-                    log::warn!(
-                        "Skipping netlog record with undefined event ID: {error}"
-                    );
-                    continue;
-                }
-                let Ok(time) = event_hdr.time.parse::<u64>() else {
-                    log::warn!(
-                        "Skipping netlog {} record with invalid timestamp {:?}",
-                        event_hdr.ty_string,
-                        event_hdr.time
-                    );
-                    continue;
-                };
-                event_hdr.time_num = time;
-
-                // If this is a session creation, store the session, so we can
-                // link events with it. The source ID of these events is the
-                // unique value that we will use to link things together.
-                // This assumes events belonging to a session do not occur
-                // before the session is created.
-                if event_hdr.phase_string == "PHASE_BEGIN" {
-                    match event_hdr.ty_string.as_str() {
-                        "QUIC_SESSION" => {
-                            let ev: QuicSessionEvent =
-                                match serde_json::from_slice(&event) {
-                                    Ok(value) => value,
-                                    Err(error) => {
-                                        log::warn!("Skipping malformed QUIC_SESSION: {error}");
-                                        continue;
-                                    },
-                                };
-
-                            // QUIC sessions split host and port, which
-                            // interferes with filter expression, so merge them
-                            let host =
-                                format!("{}:{}", ev.params.host, ev.params.port,);
-
-                            sessions.insert(event_hdr.source.id, NetlogSession {
-                                session_id: event_hdr.source.id,
-                                application_proto: ApplicationProto::Http3,
-                                host: host.clone(),
-                                start_time: event_hdr.time_num,
-                            });
-
-                            let do_insert = hostname_filter.is_empty() ||
-                                hostname_filter.contains(&host);
-
-                            if do_insert {
-                                session_events
-                                    .insert(event_hdr.source.id, Vec::new());
-
-                                h3_session_requests
-                                    .insert(event_hdr.source.id, Vec::new());
-                            }
-                        },
-
-                        "HTTP2_SESSION" => {
-                            let ev: Http2SessionEvent =
-                                match serde_json::from_slice(&event) {
-                                    Ok(value) => value,
-                                    Err(error) => {
-                                        log::warn!("Skipping malformed HTTP2_SESSION: {error}");
-                                        continue;
-                                    },
-                                };
-
-                            sessions.insert(event_hdr.source.id, NetlogSession {
-                                session_id: event_hdr.source.id,
-                                application_proto: ApplicationProto::Http2,
-                                host: ev.params.host.clone(),
-                                start_time: event_hdr.time_num,
-                            });
-
-                            let do_insert = hostname_filter.is_empty() ||
-                                hostname_filter.contains(&ev.params.host);
-
-                            if do_insert {
-                                session_events
-                                    .insert(event_hdr.source.id, Vec::new());
-                            }
-                        },
-
-                        "CORS_REQUEST" => {
-                            // Seems to be the earliest netlog event related to
-                            // any request.
-                            request_discovery.insert(
-                                event_hdr.source.id,
-                                RequestDiscovery {
-                                    time: event_hdr.time_num,
-                                    stream_job_id: None,
-                                },
-                            );
-                        },
-
-                        _ => (),
-                    }
-                }
-
-                if event_hdr.ty_string.starts_with("HTTP_") {
-                    let event = netlog::http::parse_event(&event_hdr, &event);
-
-                    if let Some(netlog::Event::Http(e)) = event {
-                        match e {
-                                http::Event::HttpStreamJobBoundToRequest(v)  => {
-                                    let request_discovery_id = v.params.source_dependency.id;
-                                    if let Some(rd) = request_discovery.get_mut(&request_discovery_id) {
-                                        stream_bind.insert(event_hdr.source.id, StreamBind{time: event_hdr.time_num, request_discovery_id, request_discovery_time: rd.time});
-                                        rd.stream_job_id = Some(event_hdr.source.id);
-                                    }
-                                },
-
-                                http::Event::HttpStreamRequestBoundToQuicSession(v) => {
-                                    let request_discovery_id = event_hdr.source.id;
-                                    if let Some(rd) = request_discovery.get(&request_discovery_id) {
-
-                                        if let Some(session_requests) = h3_session_requests.get_mut(&v.params.source_dependency.id) {
-                                            let req = ReqOverH3{id: event_hdr.source.id, discover_time: rd.time, session_id: Some(v.params.source_dependency.id), quic_stream_id: None };
-                                            session_requests.push(req);
-
-                                            // populate reverse mapping, each unique request ID has a session ID
-                                            req_id_to_session_id.insert(event_hdr.source.id, v.params.source_dependency.id);
-                                        }
-                                    }
-                                }
-
-                                http::Event::HttpTransactionQuicSendRequestHeaders(v) => {
-                                    let req_id = event_hdr.source.id;
-                                    if let Some(session_id) = req_id_to_session_id.get(&req_id) {
-                                        if let Some(reqs) = h3_session_requests.get_mut(session_id) {
-                                            // todo replace vec with map?
-                                            for req in reqs {
-                                                if req.id == req_id {
-                                                    req.quic_stream_id = Some(v.params.quic_stream_id);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-
-                            _ => (),
-                        }
-                    }
-                }
-
-                if let Some(session) =
-                    session_events.get_mut(&event_hdr.source.id)
-                {
-                    if let Some(ev) = netlog::parse_event(&event_hdr, &event) {
-                        session.push((event_hdr, ev));
-                    }
-                }
-            },
-
-            Err(e) => {
-                error!("Error deserializing: {}", e);
-                error!("input value {}", String::from_utf8_lossy(&event));
-
-                // Just swallow the failure and move on
-            },
-        }
-    }
-
-    println!("All sessions in this netlog = {:#?}", sessions);
-
-    let mut log_file_data = Vec::new();
-
-    for (session_id, details) in &sessions {
-        if let Some(events) = session_events.remove(session_id) {
-            let mut ds = Datastore {
-                session_id: Some(*session_id),
-                application_proto: details.application_proto,
-                host: Some(details.host.clone()),
-                total_sent_stream_frame_count: 0,
-                ..Default::default()
-            };
-
-            for (ev_hdr, event) in &events {
-                ds.consume_netlog_event(
-                    details.start_time,
-                    ev_hdr,
-                    event,
-                    constants,
-                    &stream_bind,
-                    h3_session_requests.get(session_id).map(Vec::as_slice),
-                )?;
-            }
-
-            ds.hydrate_http_requests();
-            ds.finalize();
-            log_file_data.push(LogFileData {
-                datastore: ds,
-                raw: Netlog { events },
-                trace: None,
-            });
-        }
-    }
-
-    Ok((log_file_data, sessions))
 }
 
 #[cfg(test)]
@@ -2453,6 +2172,7 @@ mod input_tests {
 #[cfg(test)]
 mod netlog_tests {
     use super::*;
+    use std::collections::HashSet;
     use std::io::Cursor;
 
     fn constants() -> netlog::constants::Constants {
