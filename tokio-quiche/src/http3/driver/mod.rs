@@ -381,7 +381,7 @@ pub struct H3Driver<H: DriverHooks> {
     /// in the constructor.
     h3_config: h3::Config,
     /// The underlying HTTP/3 connection. Initialized in
-    /// `ApplicationOverQuic::on_conn_established`.
+    /// `ApplicationOverQuic::on_application_ready`.
     conn: Option<h3::Connection>,
     /// State required by the client/server hooks.
     hooks: H,
@@ -1396,14 +1396,14 @@ impl<H: DriverHooks> H3Driver<H> {
 }
 
 impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
-    fn on_conn_established(
+    fn on_application_ready(
         &mut self, quiche_conn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> QuicResult<()> {
         let conn = h3::Connection::with_transport(quiche_conn, &self.h3_config)?;
         self.conn = Some(conn);
 
-        H::conn_established(self, quiche_conn, handshake_info)?;
+        H::application_ready(self, quiche_conn, handshake_info)?;
         Ok(())
     }
 

@@ -63,10 +63,10 @@ pub trait DriverHooks: Sized + Send + 'static {
     /// Initializes the storage for these hooks.
     fn new(settings: &Http3Settings) -> Self;
 
-    /// Called in `ApplicationOverQuic::on_conn_established` after [`H3Driver`]
+    /// Called in `ApplicationOverQuic::on_application_ready` after [`H3Driver`]
     /// has been initialized. Used to verify connection settings and set up
     /// post-accept state like timeouts.
-    fn conn_established(
+    fn application_ready(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()>;

@@ -149,8 +149,8 @@ async fn test_max_header_list_size_limit() -> QuicResult<()> {
     // The server sent the EXCESSIVE_LOAD error, so it should be recorded as a
     // sent application error code
     assert_eq!(
-        audit_stats.sent_conn_close_application_error_code(),
-        quiche::h3::WireErrorCode::ExcessiveLoad as i64,
+        audit_stats.local_close_code(),
+        Some(datagram_socket::QuicCloseCode::Application(quiche::h3::WireErrorCode::ExcessiveLoad as u64)),
         "QuicAuditStats should have recorded the sent H3_EXCESSIVE_LOAD error code"
     );
 

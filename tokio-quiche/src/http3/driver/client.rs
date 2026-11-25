@@ -347,7 +347,7 @@ impl DriverHooks for ClientHooks {
         }
     }
 
-    fn conn_established(
+    fn application_ready(
         _driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         _handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {

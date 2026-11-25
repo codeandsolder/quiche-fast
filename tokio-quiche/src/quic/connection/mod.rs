@@ -704,16 +704,20 @@ impl HandshakeInfo {
         self.start_time
     }
 
-    /// How long the handshake took to complete.
+    /// How long the handshake took to complete, or None if still in progress.
     #[inline]
     #[must_use = "the returned duration records handshake latency"]
-    pub fn elapsed(&self) -> Duration {
-        self.time_handshake.unwrap_or_default()
+    pub const fn duration(&self) -> Option<Duration> {
+        self.time_handshake
     }
 
-    pub(crate) fn set_elapsed(&mut self) {
+    pub(crate) fn complete(&mut self) -> Option<Duration> {
+        if self.time_handshake.is_some() {
+            return None;
+        }
         let elapsed = self.start_time.elapsed();
         self.time_handshake = Some(elapsed);
+        Some(elapsed)
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -741,13 +745,13 @@ impl HandshakeInfo {
 /// Implementors can interact with the underlying connection via the mutable
 /// reference passed to trait methods.
 pub trait ApplicationOverQuic: Send + 'static {
-    /// Callback to customize the [`ApplicationOverQuic`] after the QUIC
-    /// handshake completed successfully.
+    /// Called once when application keys are available. With server early data,
+    /// the transport handshake may still be in progress.
     ///
     /// # Errors
     /// Returning an error from this method immediately stops the worker loop
     /// and transitions to the connection closing stage.
-    fn on_conn_established(
+    fn on_application_ready(
         &mut self, qconn: &mut QuicheConnection, handshake_info: &HandshakeInfo,
     ) -> QuicResult<()>;
 
@@ -755,7 +759,7 @@ pub trait ApplicationOverQuic: Send + 'static {
     /// worker.
     ///
     /// The function is checked in each iteration of the worker loop. Only
-    /// `on_conn_established()` bypasses this check.
+    /// `on_application_ready()` bypasses this check.
     fn should_act(&self) -> bool;
 
     /// Waits for an event to trigger the next iteration of the worker loop.

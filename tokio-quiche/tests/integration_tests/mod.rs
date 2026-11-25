@@ -247,12 +247,10 @@ async fn native_client_handshakes_and_exchanges_http3_request(
         tokio_quiche::quic::connect(socket, Some("test.com")),
     )
     .await??;
-    assert!(
-        connection
-            .audit_log_stats()
-            .transport_handshake_duration_us() >=
-            0
-    );
+    assert!(connection
+        .audit_log_stats()
+        .transport_handshake_duration()
+        .is_some());
     controller
         .request_sender()
         .send(NewClientRequest {

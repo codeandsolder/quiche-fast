@@ -339,7 +339,8 @@ impl EarlyDataServer {
     /// handshake timeout, after the application was started.
     fn assert_handshake_timeout(&self, audit_stats: &QuicAuditStats) {
         let close_reason = audit_stats.connection_close_reason();
-        let close_reason = close_reason.as_ref().unwrap();
+        let close_reason = close_reason.unwrap();
+        assert_eq!(audit_stats.transport_handshake_duration(), None);
         assert!(matches!(
             close_reason.downcast_ref::<HandshakeError>(),
             Some(HandshakeError::Timeout)

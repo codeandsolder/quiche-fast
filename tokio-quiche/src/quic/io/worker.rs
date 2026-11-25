@@ -67,6 +67,7 @@ use btls::ssl::SslRef;
 use datagram_socket::DatagramSocketSend;
 use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
+use datagram_socket::QuicCloseCode;
 use foundations::telemetry::log;
 use foundations::telemetry::metrics::Gauge;
 use foundations::telemetry::metrics::GaugeGuard;
@@ -863,7 +864,9 @@ where
         // apply to the whole GSO buffer.
         let (from, to) = self.select_path(qconn).unzip();
 
-        match qconn.send_on_path(send_buf, from, to) {
+        let result = qconn.send_on_path(send_buf, from, to);
+        self.record_handshake_completion(qconn);
+        match result {
             Ok((packet_size, info)) => {
                 let _ = send_info.get_or_insert(info);
 
@@ -895,18 +898,13 @@ where
             },
 
             Err(e) => {
-                let error_code = if let Some(local_error) = qconn.local_error() {
-                    local_error.error_code
-                } else {
-                    let internal_error_code =
-                        quiche::WireErrorCode::InternalError as u64;
-                    let _ = qconn.close(false, internal_error_code, &[]);
-
-                    internal_error_code
-                };
-
-                self.audit_log_stats
-                    .set_sent_conn_close_transport_error_code(error_code as i64);
+                if qconn.local_error().is_none() {
+                    let _ = qconn.close(
+                        false,
+                        quiche::WireErrorCode::InternalError as u64,
+                        &[],
+                    );
+                }
 
                 Err(Box::new(e))
             },
@@ -972,9 +970,22 @@ where
         self.service_connection_timers(qconn)
     }
 
+    fn record_handshake_completion(&mut self, qconn: &QuicheConnection) {
+        if qconn.is_established() {
+            if let Some(duration) = self.handshake_info.complete() {
+                self.audit_log_stats
+                    .set_transport_handshake_duration(duration);
+                if let Some(cid) = self.cfg.pending_cid.take() {
+                    self.route_lease.retire(cid);
+                }
+            }
+        }
+    }
+
     fn service_connection_timers(
         &mut self, qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
+        self.record_handshake_completion(qconn);
         self.enforce_handshake_deadline(qconn)?;
         if qconn
             .timeout_instant()
@@ -1026,9 +1037,11 @@ where
         if let Some(gro) = pkt.gro {
             for dgram in pkt.buf.chunks_mut(gro.get()) {
                 qconn.recv(dgram, recv_info)?;
+                self.record_handshake_completion(qconn);
             }
         } else {
             qconn.recv(&mut pkt.buf, recv_info)?;
+            self.record_handshake_completion(qconn);
         }
 
         Ok(())
@@ -1212,11 +1225,11 @@ where
             });
         }
 
-        let on_conn_established_result =
-            self.on_conn_established(&mut qconn, &mut ctx.application);
+        let on_application_ready_result =
+            self.on_application_ready(&mut qconn, &mut ctx.application);
         notify_path_events(ctx.connection_hook.as_deref(), &mut qconn);
 
-        match on_conn_established_result {
+        match on_application_ready_result {
             Ok(()) => RunningOrClosing::Running(Running {
                 params: self.into(),
                 context: ctx,
@@ -1224,7 +1237,7 @@ where
             }),
             Err(e) => {
                 foundations::telemetry::log::warn!(
-                    "Handshake stage on_connection_established failed"; "error"=>%e
+                    "Application startup failed"; "error"=>%e
                 );
 
                 RunningOrClosing::Closing(Closing {
@@ -1237,27 +1250,11 @@ where
         }
     }
 
-    fn on_conn_established<App: ApplicationOverQuic>(
+    fn on_application_ready<App: ApplicationOverQuic>(
         &mut self, qconn: &mut QuicheConnection, driver: &mut App,
     ) -> QuicResult<()> {
-        // Only calculate the QUIC handshake duration and call the driver's
-        // on_conn_established hook if this is the first time
-        // is_established == true.
-        if self.audit_log_stats.transport_handshake_duration_us() == -1 {
-            self.handshake_info.set_elapsed();
-            let handshake_info = &self.handshake_info;
-
-            self.audit_log_stats
-                .set_transport_handshake_duration(handshake_info.elapsed());
-
-            driver.on_conn_established(qconn, handshake_info)?;
-        }
-
-        if let Some(cid) = self.cfg.pending_cid.take() {
-            self.route_lease.retire(cid);
-        }
-
-        Ok(())
+        self.record_handshake_completion(qconn);
+        driver.on_application_ready(qconn, &self.handshake_info)
     }
 }
 
@@ -1414,31 +1411,19 @@ where
         replace_shared_stats(&ctx.stats, QuicConnectionStats::from_conn(qconn));
 
         if let Some(err) = qconn.peer_error() {
-            if err.is_app {
-                self.audit_log_stats
-                    .set_recvd_conn_close_application_error_code(
-                        err.error_code as _,
-                    );
-            } else {
-                self.audit_log_stats
-                    .set_recvd_conn_close_transport_error_code(
-                        err.error_code as _,
-                    );
-            }
+            self.audit_log_stats
+                .set_peer_close_code(QuicCloseCode::from_parts(
+                    err.is_app,
+                    err.error_code,
+                ));
         }
 
         if let Some(err) = qconn.local_error() {
-            if err.is_app {
-                self.audit_log_stats
-                    .set_sent_conn_close_application_error_code(
-                        err.error_code as _,
-                    );
-            } else {
-                self.audit_log_stats
-                    .set_sent_conn_close_transport_error_code(
-                        err.error_code as _,
-                    );
-            }
+            self.audit_log_stats
+                .set_local_close_code(QuicCloseCode::from_parts(
+                    err.is_app,
+                    err.error_code,
+                ));
         }
 
         self.close_connection();

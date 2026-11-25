@@ -267,7 +267,7 @@ impl DriverHooks for ServerHooks {
         self.extended_connect_enabled
     }
 
-    fn conn_established(
+    fn application_ready(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {

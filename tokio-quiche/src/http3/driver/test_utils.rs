@@ -162,16 +162,16 @@ impl<H: DriverHooks + GetConnectionForHook> DriverTestHelper<H> {
         Ok(())
     }
 
-    /// call `on_conn_established()` on the driver and advance to pipe to
+    /// call `on_application_ready()` on the driver and advance to pipe to
     /// complete the H3 handshake
     pub fn complete_handshake(&mut self) -> anyhow::Result<()> {
         self.driver
-            .on_conn_established(
+            .on_application_ready(
                 H::qconn(&mut self.pipe),
                 &HandshakeInfo::new(Instant::now(), None),
             )
             .map_err(anyhow::Error::from_boxed)
-            .context("on_conn_established")?;
+            .context("on_application_ready")?;
         // advance pipe to complete H3 handshake
         self.pipe.advance().context("advance pipe")?;
         self.driver.settings_received_and_forwarded = true;
