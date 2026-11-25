@@ -43,6 +43,8 @@ use tabled::Tabled;
 
 use crate::request_stub::HttpRequestStub;
 use crate::request_stub::NaOption;
+use crate::trackers::QuicReceiveObservation;
+use crate::trackers::QuicReceiveTracker;
 use crate::trackers::StreamBufferTracker;
 use crate::trackers::StreamMaxTracker;
 use crate::trackers::TrackerError;
@@ -194,12 +196,6 @@ impl TryFrom<&qlog::VantagePointType> for VantagePoint {
             other => Err(UnsupportedVantagePoint(other.clone())),
         }
     }
-}
-
-#[derive(Debug, Default)]
-pub struct StreamDatapoint {
-    pub offset: u64,
-    pub length: u64,
 }
 
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -417,10 +413,8 @@ pub struct Datastore {
     pub received_reset_stream: BTreeMap<u64, Vec<QuicFrame>>,
     pub sent_reset_stream: BTreeMap<u64, Vec<QuicFrame>>,
 
-    pub received_stream_frames: BTreeMap<u64, Vec<(f64, StreamDatapoint)>>,
-    pub received_stream_frames_count_based:
-        BTreeMap<u64, Vec<(u64, StreamDatapoint)>>,
-    pub total_received_stream_frame_count: u64,
+    /// Authoritative inbound STREAM/RESET evidence and connection credit.
+    pub received_quic_streams: QuicReceiveTracker,
 
     pub sent_stream_frames: BTreeMap<u64, Vec<(f64, QuicFrame)>>,
     pub sent_stream_frames_count_based: BTreeMap<u64, Vec<(u64, QuicFrame)>>,
@@ -437,11 +431,10 @@ pub struct Datastore {
     // Local send credit changes: received grants minus transmitted DATA.
     pub h2_send_windows: H2SendWindows,
 
-    pub netlog_quic_server_window_blocked: BTreeMap<i64, Vec<f64>>,
+    pub quic_peer_window_blocked: BTreeMap<i64, Vec<f64>>,
     pub netlog_quic_client_side_window_updates: BTreeMap<i64, Vec<(f64, u64)>>,
 
     pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
-    pub netlog_quic_stream_received_connection_cumulative: Vec<QlogPointu64>,
 
     pub received_packets_netlog: Vec<(f64, PacketInfoStub)>,
     pub received_netlog_packet_numbers: NetlogPacketNumberProgress,
@@ -679,47 +672,32 @@ impl Datastore {
         &mut self, params: &quic::QuicSessionStreamFrameReceivedParams,
         event_time: f64,
     ) -> Result<(), DatastoreError> {
-        // Validate all counters before mutating any of this event's
-        // state.
-        let next_count = checked_counter_sum(
-            self.total_received_stream_frame_count,
-            1,
-            "total_received_stream_frame_count",
+        self.record_received_quic_stream(
+            params.stream_id,
+            QuicReceiveObservation::Frame {
+                offset: Some(params.offset),
+                length: Some(params.length),
+                fin: Some(params.fin),
+            },
+            event_time,
         )?;
-        let cumulative = cumulative_total(
-            &self.netlog_quic_stream_received_connection_cumulative,
-            params.length,
-            "netlog_quic_stream_received_connection_cumulative",
-        )?;
+        Ok(())
+    }
 
-        let s = self
-            .received_stream_frames
-            .entry(params.stream_id)
-            .or_default();
-        s.push((event_time, StreamDatapoint {
-            offset: params.offset,
-            length: params.length,
-        }));
-
-        let s = self
-            .received_stream_frames_count_based
-            .entry(params.stream_id)
-            .or_default();
-        s.push((self.total_received_stream_frame_count, StreamDatapoint {
-            offset: params.offset,
-            length: params.length,
-        }));
-
-        self.total_received_stream_frame_count = next_count;
-
-        if params.fin {
-            if let Some(req) = self.http_requests.get_mut(&params.stream_id) {
-                req.time_fin_rx = Some(event_time);
+    fn record_received_quic_stream(
+        &mut self, stream_id: u64, observation: QuicReceiveObservation, time: f64,
+    ) -> Result<(), TrackerError> {
+        self.received_quic_streams
+            .observe(stream_id, observation, time)?;
+        if matches!(observation, QuicReceiveObservation::Frame {
+            fin: Some(true),
+            ..
+        }) {
+            if let Some(request) = self.http_requests.get_mut(&stream_id) {
+                request.time_fin_rx =
+                    Some(request.time_fin_rx.map_or(time, |old| old.min(time)));
             }
         }
-
-        self.netlog_quic_stream_received_connection_cumulative
-            .push((event_time, cumulative));
         Ok(())
     }
 
@@ -901,15 +879,23 @@ impl Datastore {
                 });
             },
 
-            quic::Event::QuicSessionRstStreamFrameReceived(e) => self
-                .record_netlog_quic_stream_termination(
+            quic::Event::QuicSessionRstStreamFrameReceived(e) => {
+                self.received_quic_streams.observe(
+                    e.params.stream_id,
+                    QuicReceiveObservation::Reset {
+                        final_size: e.params.offset,
+                    },
+                    rel_event_time,
+                )?;
+                self.record_netlog_quic_stream_termination(
                     e.params.stream_id,
                     e.params.quic_rst_stream_error,
                     NetlogQuicTermination::ResetReceived {
                         offset: e.params.offset,
                     },
                     constants,
-                ),
+                );
+            },
 
             quic::Event::QuicSessionRstStreamFrameSent(e) => self
                 .record_netlog_quic_stream_termination(
@@ -931,34 +917,30 @@ impl Datastore {
 
             quic::Event::QuicSessionBlockedFrameReceived(e) => {
                 let s = self
-                    .netlog_quic_server_window_blocked
+                    .quic_peer_window_blocked
                     .entry(e.params.stream_id)
                     .or_default();
                 s.push(rel_event_time);
             },
 
             quic::Event::QuicSessionWindowUpdateFrameSent(e) => {
-                let s = self
-                    .netlog_quic_client_side_window_updates
-                    .entry(e.params.stream_id)
-                    .or_default();
-
-                s.push((rel_event_time, e.params.byte_offset));
+                if e.params.stream_id == -1 {
+                    self.sent_max_data
+                        .push((rel_event_time, e.params.byte_offset));
+                } else {
+                    self.netlog_quic_client_side_window_updates
+                        .entry(e.params.stream_id)
+                        .or_default()
+                        .push((rel_event_time, e.params.byte_offset));
+                }
             },
 
             quic::Event::QuicSessionTransportParametersSent(e) => {
                 self.client_quic_tps =
                     e.params.quic_transport_parameters.clone().into();
-
-                let s = self
-                    .netlog_quic_client_side_window_updates
-                    .entry(-1)
-                    .or_default();
-
-                s.push((
-                    rel_event_time,
-                    self.client_quic_tps.initial_max_data.unwrap_or_default(),
-                ));
+                if let Some(initial) = self.client_quic_tps.initial_max_data {
+                    self.sent_max_data.push((rel_event_time, initial));
+                }
             },
 
             // ignore the other events for now
@@ -1395,7 +1377,23 @@ impl Datastore {
     }
 
     pub fn hydrate_http_requests(&mut self) {
-        for req in self.http_requests.values_mut() {
+        for (&stream_id, req) in &mut self.http_requests {
+            if let Some(history) =
+                self.received_quic_streams.streams().get(&stream_id)
+            {
+                req.time_fin_rx = history
+                    .points()
+                    .iter()
+                    .filter_map(|(time, observation)| {
+                        matches!(observation, QuicReceiveObservation::Frame {
+                            fin: Some(true),
+                            ..
+                        })
+                        .then_some(*time)
+                    })
+                    .min_by(f64::total_cmp)
+                    .or(req.time_fin_rx);
+            }
             req.calculate_deltas();
             req.calculate_upload_download_rate();
         }
@@ -1497,46 +1495,48 @@ impl Datastore {
                             .update(*stream_id, *maximum, ev_time, init_val)?;
                     },
 
-                    QuicFrame::ResetStream { stream_id, .. } => {
-                        let s = self
-                            .received_reset_stream
+                    QuicFrame::ResetStream {
+                        stream_id,
+                        final_size,
+                        ..
+                    } => {
+                        self.received_quic_streams.observe(
+                            *stream_id,
+                            QuicReceiveObservation::Reset {
+                                final_size: *final_size,
+                            },
+                            ev_time,
+                        )?;
+                        self.received_reset_stream
                             .entry(*stream_id)
-                            .or_default();
-                        s.push(frame.clone());
+                            .or_default()
+                            .push(frame.clone());
                     },
 
                     QuicFrame::Stream {
                         stream_id,
                         offset,
+                        fin,
                         raw,
-                        ..
                     } => {
-                        let length = raw
-                            .as_ref()
-                            .and_then(|raw| raw.payload_length)
-                            .unwrap_or_default();
-                        let s = self
-                            .received_stream_frames
-                            .entry(*stream_id)
-                            .or_default();
-                        s.push((ev_time, StreamDatapoint {
-                            length,
-                            offset: offset.unwrap_or_default(),
-                        }));
-
-                        let s = self
-                            .received_stream_frames_count_based
-                            .entry(*stream_id)
-                            .or_default();
-                        s.push((
-                            self.total_received_stream_frame_count,
-                            StreamDatapoint {
-                                length,
-                                offset: offset.unwrap_or_default(),
+                        self.record_received_quic_stream(
+                            *stream_id,
+                            QuicReceiveObservation::Frame {
+                                offset: *offset,
+                                length: raw
+                                    .as_ref()
+                                    .and_then(|raw| raw.payload_length),
+                                fin: *fin,
                             },
-                        ));
+                            ev_time,
+                        )?;
+                    },
 
-                        self.total_received_stream_frame_count += 1;
+                    QuicFrame::DataBlocked { .. } => {
+                        self.quic_peer_window_blocked
+                            .entry(-1)
+                            .or_default()
+                            .push(ev_time);
                     },
 
                     _ => (),
@@ -2417,7 +2417,77 @@ mod netlog_tests {
     }
 
     #[test]
-    fn netlog_quic_stream_fin_only_updates_existing_request_after_validation(
+    fn netlog_quic_credit_uses_high_water_marks_and_received_final_sizes(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut datastore = Datastore::default();
+        let frame = |stream_id, offset, length| {
+            netlog::Event::Quic(quic::Event::QuicSessionStreamFrameReceived(
+                quic::QuicSessionStreamFrameReceivedEvent {
+                    params: quic::QuicSessionStreamFrameReceivedParams {
+                        stream_id,
+                        offset,
+                        length,
+                        fin: false,
+                    },
+                },
+            ))
+        };
+        let reset = || {
+            netlog::Event::Quic(quic::Event::QuicSessionRstStreamFrameReceived(
+                quic::QuicSessionRstStreamFrameReceivedEvent {
+                    params: quic::QuicSessionRstStreamFrameReceivedParams {
+                        stream_id: 11,
+                        offset: 100,
+                        quic_rst_stream_error: 42,
+                    },
+                },
+            ))
+        };
+        let grant = |byte_offset| {
+            netlog::Event::Quic(quic::Event::QuicSessionWindowUpdateFrameSent(
+                quic::QuicSessionWindowUpdateFrameSentEvent {
+                    params: quic::QuicSessionWindowUpdateFrameSentParams {
+                        byte_offset,
+                        stream_id: -1,
+                    },
+                },
+            ))
+        };
+        for (time, event) in [
+            (101, grant(500)),
+            (102, frame(7, 100, 50)),
+            (103, frame(11, 0, 20)),
+            (104, frame(7, 90, 30)),
+            (105, frame(7, 140, 20)),
+            (106, reset()),
+            (107, reset()),
+            (108, grant(600)),
+            (109, grant(500)),
+        ] {
+            consume(&constants, &mut datastore, time, &event)?;
+        }
+        assert!(datastore.http_requests.is_empty());
+        assert_eq!(datastore.received_quic_streams.sum_series(), [
+            (2.0, 150),
+            (3.0, 170),
+            (4.0, 170),
+            (5.0, 180),
+            (6.0, 260),
+            (7.0, 260)
+        ]);
+        let series = crate::seriesstore::SeriesStore::from_datastore(&datastore)?;
+        assert_eq!(series.sent_max_data.last(), Some(&(9.0, 600)));
+        assert_eq!(
+            series.quic_receive_credit_consumed.last(),
+            Some(&(7.0, 260))
+        );
+        assert_eq!(series.received_stream_frames_series[&11], [(3.0, 20)]);
+        Ok(())
+    }
+
+    #[test]
+    fn netlog_quic_stream_fin_preserves_final_size_without_inventing_requests(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;
         let mut datastore = Datastore::default();
@@ -2434,33 +2504,18 @@ mod netlog_tests {
             ));
         consume(&constants, &mut datastore, 111, &fin)?;
         assert!(datastore.http_requests.is_empty());
-        assert_eq!(datastore.total_received_stream_frame_count, 1);
         datastore.get_or_insert_http_req(7);
         consume(&constants, &mut datastore, 115, &fin)?;
-        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
-        assert_eq!(datastore.total_received_stream_frame_count, 2);
-        assert_eq!(datastore.received_stream_frames[&7].len(), 2);
+        datastore.hydrate_http_requests();
+        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(11.0));
         assert_eq!(
-            datastore.received_stream_frames_count_based[&7]
-                .iter()
-                .map(|(count, _)| *count)
-                .collect::<Vec<_>>(),
-            vec![0, 1]
+            datastore.received_quic_streams.streams()[&7].points().len(),
+            2
         );
-        assert_eq!(
-            datastore.netlog_quic_stream_received_connection_cumulative,
-            vec![(11.0, 0), (15.0, 0)]
-        );
-
-        datastore.total_received_stream_frame_count = u64::MAX;
-        assert!(matches!(
-            consume(&constants, &mut datastore, 120, &fin),
-            Err(DatastoreError::CounterOverflow {
-                field: "total_received_stream_frame_count"
-            })
-        ));
-        assert_eq!(datastore.http_requests[&7].time_fin_rx, Some(15.0));
-        assert_eq!(datastore.received_stream_frames[&7].len(), 2);
+        assert_eq!(datastore.received_quic_streams.sum_series(), [
+            (11.0, 10),
+            (15.0, 10)
+        ]);
         Ok(())
     }
 
@@ -2479,49 +2534,68 @@ mod netlog_tests {
         );
         let mut datastore = Datastore::default();
         assert!(consume(&constants, &mut datastore, 90, &quic_stream(1)).is_ok());
-        assert_eq!(datastore.received_stream_frames[&7][0].0, -10.0);
         assert_eq!(
-            datastore.netlog_quic_stream_received_connection_cumulative,
-            vec![(-10.0, 1)]
+            datastore.received_quic_streams.streams()[&7].points()[0].0,
+            -10.0
         );
+        assert_eq!(datastore.received_quic_streams.sum_series(), [(-10.0, 1)]);
         Ok(())
     }
 
     #[test]
-    fn netlog_quic_counter_overflow_is_reported_without_updating_any_event_fields(
+    fn netlog_quic_credit_overflow_is_reported_without_mutation(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;
         let mut datastore = Datastore::default();
-        datastore
-            .netlog_quic_stream_received_connection_cumulative
-            .push((0.0, u64::MAX));
+        datastore.received_quic_streams.observe(
+            8,
+            crate::trackers::QuicReceiveObservation::Reset {
+                final_size: u64::MAX,
+            },
+            0.0,
+        )?;
         let event = quic_stream(1);
         assert!(matches!(
             consume(&constants, &mut datastore, 120, &event),
-            Err(DatastoreError::CounterOverflow {
-                field: "netlog_quic_stream_received_connection_cumulative"
-            })
+            Err(DatastoreError::Tracker(
+                crate::trackers::TrackerError::RunningSumOverflow {
+                    stream_id: 7,
+                    total: u64::MAX,
+                    increment: 1
+                }
+            ))
         ));
-        assert_eq!(datastore.total_received_stream_frame_count, 0);
-        assert!(datastore.received_stream_frames.is_empty());
-        assert!(datastore.received_stream_frames_count_based.is_empty());
-        assert_eq!(
-            datastore
-                .netlog_quic_stream_received_connection_cumulative
-                .len(),
-            1
-        );
-        datastore
-            .netlog_quic_stream_received_connection_cumulative
-            .clear();
-        datastore.total_received_stream_frame_count = u64::MAX;
+        assert_eq!(datastore.received_quic_streams.sum_series(), [(
+            0.0,
+            u64::MAX
+        )]);
+        assert!(!datastore.received_quic_streams.streams().contains_key(&7));
+        let invalid =
+            netlog::Event::Quic(quic::Event::QuicSessionStreamFrameReceived(
+                quic::QuicSessionStreamFrameReceivedEvent {
+                    params: quic::QuicSessionStreamFrameReceivedParams {
+                        stream_id: 7,
+                        offset: u64::MAX,
+                        length: 1,
+                        fin: true,
+                    },
+                },
+            ));
         assert!(matches!(
-            consume(&constants, &mut datastore, 120, &event),
-            Err(DatastoreError::CounterOverflow {
-                field: "total_received_stream_frame_count"
-            })
+            consume(&constants, &mut datastore, 121, &invalid),
+            Err(DatastoreError::Tracker(
+                crate::trackers::TrackerError::StreamEndOverflow {
+                    stream_id: 7,
+                    offset: u64::MAX,
+                    length: 1
+                }
+            ))
         ));
-        assert!(datastore.received_stream_frames.is_empty());
+        assert_eq!(datastore.received_quic_streams.sum_series(), [(
+            0.0,
+            u64::MAX
+        )]);
+        assert!(!datastore.received_quic_streams.streams().contains_key(&7));
         Ok(())
     }
 
@@ -3264,7 +3338,7 @@ mod netlog_tests {
                 102,
                 106,
                 serde_json::json!({
-                    "stream_id": 7, "length": 1, "offset": 0, "fin": false
+                    "stream_id": 8, "length": 1, "offset": 0, "fin": false
                 }),
             ),
         ];
@@ -3275,9 +3349,13 @@ mod netlog_tests {
             with_netlog_reader(&mut reader, &HashSet::new(), &parsed_constants);
         assert!(matches!(
             result,
-            Err(DatastoreError::CounterOverflow {
-                field: "netlog_quic_stream_received_connection_cumulative"
-            })
+            Err(DatastoreError::Tracker(
+                crate::trackers::TrackerError::RunningSumOverflow {
+                    stream_id: 8,
+                    total: u64::MAX,
+                    increment: 1
+                }
+            ))
         ));
         Ok(())
     }
@@ -3594,6 +3672,113 @@ mod qlog_packet_history_tests {
                 ..PacketReceived::default()
             }),
         )
+    }
+
+    #[test]
+    fn qlog_receive_credit_uses_frame_end_and_reset_final_size(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        use qlog::events::ApplicationError;
+        let frame = |stream_id, offset, length: Option<u64>| QuicFrame::Stream {
+            stream_id,
+            offset,
+            fin: None,
+            raw: length.map(|payload_length| {
+                Box::new(RawInfo {
+                    payload_length: Some(payload_length),
+                    ..RawInfo::default()
+                })
+            }),
+        };
+        let grant = |time, maximum| {
+            Event::with_time(
+                time,
+                EventData::QuicPacketSent(PacketSent {
+                    header: header(WirePacketType::OneRtt, None),
+                    frames: Some(vec![QuicFrame::MaxData { maximum, raw: None }]),
+                    ..PacketSent::default()
+                }),
+            )
+        };
+        let events = vec![
+            grant(1.0, 500),
+            received(2.0, WirePacketType::OneRtt, None, vec![frame(
+                7,
+                Some(100),
+                Some(50),
+            )]),
+            received(3.0, WirePacketType::OneRtt, None, vec![frame(
+                11,
+                Some(0),
+                Some(20),
+            )]),
+            received(4.0, WirePacketType::OneRtt, None, vec![frame(
+                7,
+                Some(90),
+                Some(30),
+            )]),
+            received(5.0, WirePacketType::OneRtt, None, vec![frame(
+                7,
+                Some(140),
+                Some(20),
+            )]),
+            received(6.0, WirePacketType::OneRtt, None, vec![
+                QuicFrame::ResetStream {
+                    stream_id: 11,
+                    final_size: 100,
+                    error: ApplicationError::Unknown,
+                    error_code: Some(42),
+                    raw: None,
+                },
+            ]),
+            received(7.0, WirePacketType::OneRtt, None, vec![frame(
+                11,
+                Some(100),
+                None,
+            )]),
+            grant(8.0, 600),
+            grant(9.0, 500),
+            received(10.0, WirePacketType::OneRtt, None, vec![
+                QuicFrame::DataBlocked {
+                    limit: 600,
+                    raw: None,
+                },
+            ]),
+        ];
+        let sequential = events
+            .iter()
+            .cloned()
+            .map(qlog::reader::Event::Qlog)
+            .collect::<Vec<_>>();
+        for data in [
+            Datastore::with_qlog_events(
+                &events,
+                &qlog::VantagePointType::Server,
+                false,
+            )?,
+            Datastore::with_sqlog_reader_events(
+                &sequential,
+                &qlog::VantagePointType::Server,
+                false,
+            )?,
+        ] {
+            assert_eq!(data.received_quic_streams.sum_series(), [
+                (2.0, 150),
+                (3.0, 170),
+                (4.0, 170),
+                (5.0, 180),
+                (6.0, 260),
+                (7.0, 260)
+            ]);
+            let series = crate::seriesstore::SeriesStore::from_datastore(&data)?;
+            assert_eq!(
+                series.quic_receive_credit_consumed.last(),
+                Some(&(7.0, 260))
+            );
+            assert_eq!(series.sent_max_data.last(), Some(&(9.0, 600)));
+            assert_eq!(series.received_stream_frames_series[&11], [(3.0, 20)]);
+            assert_eq!(data.quic_peer_window_blocked[&-1], [10.0]);
+        }
+        Ok(())
     }
 
     #[test]

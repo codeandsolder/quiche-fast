@@ -94,6 +94,130 @@ impl<T> StreamHistory<T> {
 pub type StreamMaxTracker = StreamTracker<u64>;
 pub type StreamBufferTracker = StreamTracker<StreamAccess>;
 
+/// Receive-side QUIC STREAM or RESET_STREAM evidence. Optional fields in
+/// qlog are retained as unknown rather than replaced by zero-valued samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuicReceiveObservation {
+    Frame {
+        offset: Option<u64>,
+        length: Option<u64>,
+        fin: Option<bool>,
+    },
+    Reset {
+        final_size: u64,
+    },
+}
+
+impl QuicReceiveObservation {
+    fn lower_bound_end(self, stream_id: u64) -> Result<u64, TrackerError> {
+        match self {
+            Self::Frame { offset, length, .. } => {
+                let offset = offset.unwrap_or_default();
+                let length = length.unwrap_or_default();
+                offset.checked_add(length).ok_or(
+                    TrackerError::StreamEndOverflow {
+                        stream_id,
+                        offset,
+                        length,
+                    },
+                )
+            },
+            Self::Reset { final_size } => Ok(final_size),
+        }
+    }
+
+    /// An exact STREAM endpoint can be plotted only when both fields are
+    /// available. RESETs and incomplete records are not STREAM samples.
+    #[must_use = "the result is a known STREAM endpoint, not an inferred value"]
+    pub const fn frame_end(self) -> Option<u64> {
+        match self {
+            Self::Frame {
+                offset: Some(offset),
+                length: Some(length),
+                ..
+            } => offset.checked_add(length),
+            _ => None,
+        }
+    }
+}
+
+/// QUIC connection credit counts each stream's largest observed end offset
+/// (including holes and RESET_STREAM final sizes), not the sum of packet
+/// payload lengths. Incomplete trace metadata gives a lower bound.
+pub type QuicReceiveTracker = StreamTracker<QuicReceiveObservation>;
+
+impl QuicReceiveTracker {
+    /// Record receive evidence and advance the aggregate high-water mark.
+    ///
+    /// # Errors
+    /// Returns an error before changing state if the observed endpoint or
+    /// aggregate cannot be represented.
+    pub fn observe(
+        &mut self, stream_id: u64, observation: QuicReceiveObservation, time: f64,
+    ) -> Result<(), TrackerError> {
+        let end = observation.lower_bound_end(stream_id)?;
+        self.record(stream_id, time, observation, end, None)?;
+        Ok(())
+    }
+
+    /// The input log usually arrives in timestamp order. If it does not,
+    /// reconstruct the running maximum per stream in chronological order.
+    /// Merely sorting the precomputed totals would assign bytes to the
+    /// wrong observation time.
+    ///
+    /// # Errors
+    /// Returns an error if an endpoint or aggregate exceeds u64.
+    pub fn chronological_sum_series(
+        &self,
+    ) -> Result<std::borrow::Cow<'_, [(f64, u64)]>, TrackerError> {
+        if self
+            .sum_series
+            .windows(2)
+            .all(|pair| pair[0].0.total_cmp(&pair[1].0).is_le())
+        {
+            return Ok(std::borrow::Cow::Borrowed(&self.sum_series));
+        }
+        let mut events = self
+            .streams
+            .iter()
+            .flat_map(|(&id, history)| {
+                history
+                    .points
+                    .iter()
+                    .map(move |&(time, observation)| (time, id, observation))
+            })
+            .collect::<Vec<_>>();
+        events.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let mut maxima = BTreeMap::<u64, u64>::new();
+        let mut total = 0_u64;
+        let mut series = Vec::with_capacity(events.len());
+        for (time, id, observation) in events {
+            let end = observation.lower_bound_end(id)?;
+            let previous = maxima.entry(id).or_default();
+            let (maximum, sum) = checked_maximum(id, *previous, end, total)?;
+            *previous = maximum;
+            total = sum;
+            series.push((time, total));
+        }
+        Ok(std::borrow::Cow::Owned(series))
+    }
+}
+
+fn checked_maximum(
+    stream_id: u64, old_max: u64, observed_max: u64, running_sum: u64,
+) -> Result<(u64, u64), TrackerError> {
+    let new_max = old_max.max(observed_max);
+    let increment = new_max - old_max;
+    let total = running_sum.checked_add(increment).ok_or(
+        TrackerError::RunningSumOverflow {
+            stream_id,
+            total: running_sum,
+            increment,
+        },
+    )?;
+    Ok((new_max, total))
+}
+
 impl<T> Default for StreamTracker<T> {
     fn default() -> Self {
         Self {
@@ -135,15 +259,9 @@ impl<T> StreamTracker<T> {
             Entry::Occupied(entry) => entry.get().maximum,
             Entry::Vacant(_) => 0,
         };
-        let new_max = old_max.max(observed_max);
+        let (new_max, total) =
+            checked_maximum(stream_id, old_max, observed_max, self.running_sum)?;
         let increment = new_max - old_max;
-        let total = self.running_sum.checked_add(increment).ok_or(
-            TrackerError::RunningSumOverflow {
-                stream_id,
-                total: self.running_sum,
-                increment,
-            },
-        )?;
 
         let history = entry.or_insert_with(|| StreamHistory {
             points: initial.into_iter().map(|point| (0.0, point)).collect(),
@@ -252,6 +370,58 @@ mod tests {
         }
         assert_eq!(maxima.get_stream_max(999), None);
         assert_eq!(buffers.get_stream_max(999), None);
+        Ok(())
+    }
+
+    #[test]
+    fn quic_credit_counts_offsets_resets_and_not_retransmissions(
+    ) -> Result<(), TrackerError> {
+        use super::QuicReceiveObservation;
+        use super::QuicReceiveTracker;
+        let mut tracker = QuicReceiveTracker::default();
+        let frame = |offset, length| QuicReceiveObservation::Frame {
+            offset,
+            length,
+            fin: None,
+        };
+        for (id, time, observation, total) in [
+            (0, 5.0, frame(Some(100), Some(50)), 150),
+            (4, 2.0, frame(Some(0), Some(20)), 170),
+            (0, 6.0, frame(Some(90), Some(30)), 170),
+            (0, 7.0, frame(Some(140), Some(20)), 180),
+            (
+                4,
+                8.0,
+                QuicReceiveObservation::Reset { final_size: 100 },
+                260,
+            ),
+            (
+                4,
+                9.0,
+                QuicReceiveObservation::Reset { final_size: 100 },
+                260,
+            ),
+            (8, 10.0, frame(Some(30), None), 290),
+            (12, 11.0, frame(None, Some(5)), 295),
+            (12, 12.0, frame(None, None), 295),
+        ] {
+            tracker.observe(id, observation, time)?;
+            assert_eq!(tracker.current_sum(), total);
+        }
+        assert_eq!(tracker.chronological_sum_series()?.as_ref(), [
+            (2.0, 20),
+            (5.0, 170),
+            (6.0, 170),
+            (7.0, 180),
+            (8.0, 260),
+            (9.0, 260),
+            (10.0, 290),
+            (11.0, 295),
+            (12.0, 295),
+        ]);
+        assert_eq!(frame(Some(0), Some(0)).frame_end(), Some(0));
+        assert_eq!(frame(Some(0), None).frame_end(), None);
+        assert_eq!(frame(None, Some(0)).frame_end(), None);
         Ok(())
     }
 
