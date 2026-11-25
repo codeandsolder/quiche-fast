@@ -132,7 +132,7 @@ pub fn qlog_file_name(id: &str, compression: QlogCompression) -> String {
 /// Returns an I/O error if the selected compression backend cannot be
 /// initialized.
 #[cfg_attr(
-    feature = "nightly-clippy-expects",
+    all(feature = "nightly-clippy-expects", not(feature = "zstd")),
     expect(
         clippy::unnecessary_wraps,
         reason = "The zstd feature adds a fallible encoder initialization while default features have no fallible arm"

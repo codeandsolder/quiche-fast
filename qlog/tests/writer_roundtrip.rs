@@ -327,3 +327,75 @@ fn truncated_gzip_reports_error() -> TestResult {
     assert!(reader.next().is_none());
     Ok(())
 }
+
+#[cfg(any(feature = "gzip", feature = "zstd"))]
+fn assert_concatenated_members(
+    compression: QlogCompression, encode: impl Fn(&[u8]) -> io::Result<Vec<u8>>,
+) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let raw_path = emit_one_event(QlogCompression::None, dir.path())?;
+    let raw = std::fs::read(&raw_path)?;
+    let expected =
+        QlogSeqReader::with_file(raw_path)?.collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(expected.len(), 1);
+
+    // Compression member boundaries deliberately do not align to qlog records.
+    let mut compressed = Vec::new();
+    for chunk in raw.chunks(17) {
+        compressed.extend(encode(chunk)?);
+    }
+    let path = dir.path().join(qlog_file_name("members", compression));
+    std::fs::write(&path, &compressed)?;
+    let actual =
+        QlogSeqReader::with_file(&path)?.collect::<io::Result<Vec<_>>>()?;
+    assert_eq!(actual.len(), expected.len());
+    match (&actual[0], &expected[0]) {
+        (Event::Qlog(actual), Event::Qlog(expected)) =>
+            assert_eq!(actual, expected),
+        _ => return Err("expected native packet event".into()),
+    }
+
+    // The final member must be checked even after a valid event was produced.
+    compressed.extend(b"not a compression member");
+    std::fs::write(&path, &compressed)?;
+    assert!(QlogSeqReader::with_file(&path)
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
+        .is_err());
+    Ok(())
+}
+
+#[cfg(feature = "gzip")]
+#[test]
+fn reads_all_gzip_members_and_rejects_trailing_corruption() -> TestResult {
+    use std::io::Write;
+    assert_concatenated_members(QlogCompression::Gzip, |bytes| {
+        let mut encoder = flate2::write::GzEncoder::new(
+            Vec::new(),
+            flate2::Compression::default(),
+        );
+        encoder.write_all(bytes)?;
+        encoder.finish()
+    })
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn reads_all_zstd_frames_and_rejects_trailing_corruption() -> TestResult {
+    assert_concatenated_members(QlogCompression::Zstd, |bytes| {
+        zstd::stream::encode_all(bytes, 1)
+    })
+}
+
+#[cfg(feature = "zstd")]
+#[test]
+fn truncated_zstd_reports_error() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let path = emit_one_event(QlogCompression::Zstd, dir.path())?;
+    let mut bytes = std::fs::read(&path)?;
+    assert!(bytes.pop().is_some());
+    std::fs::write(&path, &bytes)?;
+    assert!(QlogSeqReader::with_file(&path)
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
+        .is_err());
+    Ok(())
+}
