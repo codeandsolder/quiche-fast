@@ -142,7 +142,13 @@ fn record_frame_action<F: quiche::BufFactory>(
     action: &Action, conn: &mut quiche::Connection<F>,
 ) {
     if let Some(s) = conn.qlog_streamer() {
-        let events: QlogEvents = action.into();
+        let events = match QlogEvents::try_from(action) {
+            Ok(events) => events,
+            Err(error) => {
+                log::warn!("cannot record action: {error}");
+                return;
+            },
+        };
         for event in events {
             match event {
                 QlogEvent::Event { data, ex_data } => {
