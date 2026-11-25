@@ -48,9 +48,11 @@ enum WindowEvent {
     InitialCredit(u32),
 }
 
-/// HTTP/2 send-side lifecycle and window observations. Replay in timestamp
+/// HTTP/2 send-side lifecycle and window observations.
+///
+/// Replay in timestamp
 /// order so a late log record cannot retroactively change an earlier window.
-/// Peer SETTINGS and WINDOW_UPDATE adjust credit; locally sent DATA consumes
+/// Peer SETTINGS and `WINDOW_UPDATE` adjust credit; locally sent DATA consumes
 /// it. Only observed open send sides receive subsequent SETTINGS changes.
 #[derive(Debug, Default)]
 pub struct H2SendWindows {
