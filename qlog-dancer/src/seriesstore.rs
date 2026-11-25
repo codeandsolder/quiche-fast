@@ -26,6 +26,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::datastore::ApplicationProto;
 use crate::datastore::Datastore;
 use crate::push_interp;
 use crate::trackers::QuicStreamTracker;
@@ -604,7 +605,12 @@ impl SeriesStore {
             &mut self.sent_x_min,
             &mut self.sent_x_max,
         )?;
-        self.h2_connection_receive_credit = Self::h2_receive_credit(data_store)?;
+        self.netlog_h2_stream_received_connection_cumulative =
+            Self::h2_connection_received_data(data_store)?;
+        self.h2_connection_receive_credit = Self::h2_receive_credit(
+            data_store,
+            &self.netlog_h2_stream_received_connection_cumulative,
+        )?;
         for &(time, _) in &self.h2_connection_receive_credit {
             self.received_x_min = self.received_x_min.min(time);
             self.received_x_max = self.received_x_max.max(time);
@@ -616,14 +622,13 @@ impl SeriesStore {
     /// `SETTINGS_INITIAL_WINDOW_SIZE`. Compare only grants sent locally with
     /// inbound DATA; peer `WINDOW_UPDATE` events concern our outbound data.
     fn h2_receive_credit(
-        data_store: &Datastore,
+        data_store: &Datastore, data: &[QlogPointu64],
     ) -> SeriesResult<Vec<QlogPointu64>> {
         let mut updates = data_store
             .h2_recv_window_updates
             .get(&0)
             .cloned()
             .unwrap_or_default();
-        let data = &data_store.netlog_h2_stream_received_connection_cumulative;
         if updates.is_empty() && data.is_empty() {
             return Ok(Vec::new());
         }
@@ -677,15 +682,35 @@ impl SeriesStore {
         Ok(output)
     }
 
-    fn netlog_h2_stream_received_connection_cumulative(
-        &mut self, data_store: &Datastore,
-    ) {
-        for point in &data_store.netlog_h2_stream_received_connection_cumulative {
-            push_interp(
-                &mut self.netlog_h2_stream_received_connection_cumulative,
-                *point,
-            );
+    fn h2_connection_received_data(
+        data_store: &Datastore,
+    ) -> SeriesResult<Vec<QlogPointu64>> {
+        if data_store.application_proto != ApplicationProto::Http2 {
+            return Ok(Vec::new());
         }
+        let mut points = data_store
+            .http_requests
+            .values()
+            .flat_map(|req| {
+                req.received_data.observations().iter().filter_map(
+                    |&(time, length)| length.map(|length| (time, length)),
+                )
+            })
+            .collect::<Vec<_>>();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let Some(first) = points.first() else {
+            return Ok(Vec::new());
+        };
+        cumulative_series(
+            &points,
+            0,
+            u64::checked_add,
+            SeriesShape::Steps { opened_at: first.0 },
+            SeriesBuildError {
+                stream_id: 0,
+                series: "h2_connection_received_data",
+            },
+        )
     }
 
     fn tracker_sum<T: StreamExtent>(
@@ -807,7 +832,6 @@ impl SeriesStore {
         self.data_frames(data_store)?;
         self.h2_window_series(data_store)?;
 
-        self.netlog_h2_stream_received_connection_cumulative(data_store);
         Self::tracker_sum(
             &data_store.received_quic_streams,
             &mut self.quic_receive_credit_consumed,
@@ -1135,14 +1159,18 @@ mod tests {
 
     #[test]
     fn h2_receive_credit_without_updates_spans_observed_data(
-    ) -> Result<(), super::SeriesBuildError> {
-        let datastore = Datastore {
-            netlog_h2_stream_received_connection_cumulative: vec![
-                (-2.0, 8),
-                (7.0, 12),
-            ],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut datastore = Datastore {
+            application_proto: crate::datastore::ApplicationProto::Http2,
             ..Datastore::default()
         };
+        datastore.http_requests.insert(1, HttpRequestStub {
+            received_data: HttpDataHistory::with_known_frames(&[
+                (-2.0, 8),
+                (7.0, 4),
+            ])?,
+            ..HttpRequestStub::default()
+        });
         let series = SeriesStore::from_datastore(&datastore)?;
         assert_eq!(series.h2_connection_receive_credit, [
             (-2.0, 65535),

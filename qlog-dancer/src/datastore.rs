@@ -430,7 +430,8 @@ pub struct Datastore {
 
     pub quic_peer_window_blocked: BTreeMap<i64, Vec<f64>>,
 
-    pub netlog_h2_stream_received_connection_cumulative: Vec<QlogPointu64>,
+    /// Checked sum of known H2 inbound DATA lengths, used during ingestion.
+    pub h2_received_data_total: u64,
 
     pub received_packets_netlog: Vec<(f64, PacketInfoStub)>,
     pub received_netlog_packet_numbers: NetlogPacketNumberProgress,
@@ -479,12 +480,6 @@ fn checked_counter_count(
     previous
         .checked_add(1)
         .ok_or(DatastoreError::CounterOverflow { field })
-}
-
-fn cumulative_total(
-    values: &[(f64, u64)], length: u64, field: &'static str,
-) -> Result<u64, DatastoreError> {
-    checked_counter_sum(values.last().map_or(0, |value| value.1), length, field)
 }
 
 /// Initial receive limits are relative to the endpoint advertising them.
@@ -1099,10 +1094,10 @@ impl Datastore {
         event_time: f64,
     ) -> Result<(), DatastoreError> {
         let connection_total = match proto {
-            ApplicationProto::Http2 => Some(cumulative_total(
-                &self.netlog_h2_stream_received_connection_cumulative,
+            ApplicationProto::Http2 => Some(checked_counter_sum(
+                self.h2_received_data_total,
                 length,
-                "netlog_h2_stream_received_connection_cumulative",
+                "h2_received_data_total",
             )?),
             ApplicationProto::Http3 => None,
         };
@@ -1113,8 +1108,7 @@ impl Datastore {
             event_time,
         )?;
         if let Some(total) = connection_total {
-            self.netlog_h2_stream_received_connection_cumulative
-                .push((event_time, total));
+            self.h2_received_data_total = total;
         }
         Ok(())
     }
@@ -2445,7 +2439,10 @@ mod netlog_tests {
     fn netlog_h2_h3_received_data_record_identical_per_stream_histories(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let constants = constants()?;
-        let mut h2 = Datastore::default();
+        let mut h2 = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
         let mut h3 = Datastore::default();
 
         for (time, length) in [(102, 5), (104, 7), (106, 0)] {
@@ -2481,12 +2478,22 @@ mod netlog_tests {
 
         // Only HTTP/2 records connection-wide received DATA. HTTP/3 uses
         // QUIC STREAM frames for its separate connection aggregate.
-        assert_eq!(h2.netlog_h2_stream_received_connection_cumulative, vec![
+        assert_eq!(h2.h2_received_data_total, 12);
+        assert_eq!(h3.h2_received_data_total, 0);
+        let h2_series = crate::seriesstore::SeriesStore::from_datastore(&h2)?;
+        assert_eq!(h2_series.netlog_h2_stream_received_connection_cumulative, [
+            (2.0, 0),
+            (2.0, 0),
             (2.0, 5),
+            (4.0, 5),
             (4.0, 12),
+            (6.0, 12),
             (6.0, 12)
         ]);
-        assert_eq!(h3.netlog_h2_stream_received_connection_cumulative, []);
+        let h3_series = crate::seriesstore::SeriesStore::from_datastore(&h3)?;
+        assert!(h3_series
+            .netlog_h2_stream_received_connection_cumulative
+            .is_empty());
         Ok(())
     }
 
@@ -3067,24 +3074,22 @@ mod netlog_tests {
             assert_eq!(history.observations(), [(0.0, Some(u64::MAX))]);
             assert_eq!(history.complete_bytes(), Some(u64::MAX));
             assert!(ds.h2_send_windows.histories().is_empty());
-            assert_eq!(ds.netlog_h2_stream_received_connection_cumulative, []
-                as [(f64, u64); 0]);
+            assert_eq!(ds.h2_received_data_total, 0);
         }
 
-        let mut h2 = Datastore::default();
-        h2.netlog_h2_stream_received_connection_cumulative
-            .push((0.0, u64::MAX));
+        let mut h2 = Datastore {
+            application_proto: ApplicationProto::Http2,
+            h2_received_data_total: u64::MAX,
+            ..Datastore::default()
+        };
         assert!(matches!(
             consume(&constants, &mut h2, 120, &h2_received(11, 1)),
             Err(DatastoreError::CounterOverflow {
-                field: "netlog_h2_stream_received_connection_cumulative"
+                field: "h2_received_data_total"
             })
         ));
         assert!(!h2.http_requests.contains_key(&11));
-        assert_eq!(h2.netlog_h2_stream_received_connection_cumulative, [(
-            0.0,
-            u64::MAX
-        )]);
+        assert_eq!(h2.h2_received_data_total, u64::MAX);
         Ok(())
     }
 
@@ -3702,6 +3707,39 @@ mod netlog_tests {
             series.h2_send_window_series_balanced[&3].last(),
             Some(&(13.0, 20))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn h2_connection_data_reconstructs_chronological_totals_across_streams(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let constants = constants()?;
+        let mut data = Datastore {
+            application_proto: ApplicationProto::Http2,
+            ..Datastore::default()
+        };
+        for (time, stream, length) in
+            [(108, 1, 30), (103, 3, 5), (99, 1, 10), (106, 3, 7)]
+        {
+            consume(&constants, &mut data, time, &h2_received(stream, length))?;
+        }
+        assert_eq!(data.h2_received_data_total, 52);
+        let series = crate::seriesstore::SeriesStore::from_datastore(&data)?;
+        assert_eq!(series.netlog_h2_stream_received_connection_cumulative, [
+            (-1.0, 0),
+            (-1.0, 0),
+            (-1.0, 10),
+            (3.0, 10),
+            (3.0, 15),
+            (6.0, 15),
+            (6.0, 22),
+            (8.0, 22),
+            (8.0, 52),
+        ]);
+        assert_eq!(series.h2_connection_receive_credit, [
+            (-1.0, 65535),
+            (8.0, 65535)
+        ]);
         Ok(())
     }
 
