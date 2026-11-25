@@ -1,4 +1,3 @@
-use std::future::Future;
 // Copyright (C) 2025, Cloudflare, Inc.
 // All rights reserved.
 //
@@ -25,6 +24,7 @@ use std::future::Future;
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::future::Future;
 use std::net::SocketAddr;
 use std::ops::ControlFlow;
 use std::sync::Arc;
@@ -992,11 +992,10 @@ where
             min_of_some(qconn.timeout_instant(), self.handshake_deadline(qconn))
                 .unwrap_or_else(|| Instant::now() + MAX_UNTIMED_SEND_WAIT);
         match self.flush_buffer_to_socket(send_buf, deadline).await {
-            Ok(SendOutcome::Sent) =>
-                #[cfg(feature = "perf-quic-listener-metrics")]
-                if self.write_state.bytes_written != 0 {
-                    self.measure_complete_handshake_time();
-                },
+            #[cfg(feature = "perf-quic-listener-metrics")]
+            Ok(SendOutcome::Sent) if self.write_state.bytes_written != 0 =>
+                self.measure_complete_handshake_time(),
+            Ok(SendOutcome::Sent) => (),
             Ok(SendOutcome::DeadlineExpired) => {
                 // The core already assigned packet numbers. Do not replay the
                 // buffer; recovery will generate new packets as needed.
