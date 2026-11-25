@@ -359,7 +359,7 @@ fn assert_concatenated_members(
     compressed.extend(b"not a compression member");
     std::fs::write(&path, &compressed)?;
     assert!(QlogSeqReader::with_file(&path)
-        .and_then(|reader| reader.collect::<io::Result<Vec<_>>>())
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
         .is_err());
     Ok(())
 }
@@ -395,7 +395,7 @@ fn truncated_zstd_reports_error() -> TestResult {
     assert!(bytes.pop().is_some());
     std::fs::write(&path, &bytes)?;
     assert!(QlogSeqReader::with_file(&path)
-        .and_then(|reader| reader.collect::<io::Result<Vec<_>>>())
+        .and_then(Iterator::collect::<io::Result<Vec<_>>>)
         .is_err());
     Ok(())
 }
