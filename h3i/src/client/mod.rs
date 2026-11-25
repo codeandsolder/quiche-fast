@@ -91,6 +91,9 @@ pub enum ClientError {
     HandshakeFail,
     /// An error during HTTP/3 exchanges.
     HttpFail,
+    /// An error from the UDP transport.
+    #[serde(serialize_with = "serialize_io_error")]
+    Io(std::io::Error),
     /// Some other type of error.
     Other(String),
 }
@@ -100,12 +103,32 @@ impl std::fmt::Display for ClientError {
         match self {
             Self::HandshakeFail => formatter.write_str("QUIC handshake failed"),
             Self::HttpFail => formatter.write_str("HTTP/3 exchange failed"),
+            Self::Io(error) => write!(formatter, "UDP I/O: {error}"),
             Self::Other(message) => formatter.write_str(message),
         }
     }
 }
 
-impl std::error::Error for ClientError {}
+fn serialize_io_error<S: serde::Serializer>(
+    error: &std::io::Error, serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.collect_str(error)
+}
+
+impl From<std::io::Error> for ClientError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::error::Error for ClientError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error),
+            _ => None,
+        }
+    }
+}
 
 pub(crate) type StreamParserMap = HashMap<u64, FrameParser>;
 

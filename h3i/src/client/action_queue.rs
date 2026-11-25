@@ -41,7 +41,7 @@ use super::StreamParserMap;
 /// stream/quota conditions must hold and the sum of duration waits must elapse.
 /// Explicit packet flushes yield to the transport before the next action.
 #[derive(Default)]
-pub(crate) struct ActionQueue {
+pub(super) struct ActionQueue {
     actions: Vec<Action>,
     next: usize,
     waiting: WaitingFor,
@@ -49,7 +49,7 @@ pub(crate) struct ActionQueue {
 }
 
 impl ActionQueue {
-    pub(crate) fn new(actions: Vec<Action>) -> Self {
+    pub(super) fn new(actions: Vec<Action>) -> Self {
         Self {
             actions,
             next: 0,
@@ -58,13 +58,13 @@ impl ActionQueue {
         }
     }
 
-    pub(crate) fn is_finished(&self) -> bool {
+    pub(super) fn is_finished(&self) -> bool {
         self.next == self.actions.len() &&
             self.deadline.is_none() &&
             self.waiting.is_empty()
     }
 
-    pub(crate) fn wakeup(&self, now: Instant) -> Option<Instant> {
+    pub(super) fn wakeup(&self, now: Instant) -> Option<Instant> {
         if !self.waiting.is_empty() {
             return None;
         }
@@ -114,7 +114,7 @@ impl ActionQueue {
 
     /// Register leading waits before reading so an already-received response in
     /// the current I/O iteration cannot race the barrier registration.
-    pub(crate) fn before_reads<F: quiche::BufFactory>(
+    pub(super) fn before_reads<F: quiche::BufFactory>(
         &mut self, now: Instant, conn: &quiche::Connection<F>,
     ) -> Result<(), String> {
         self.prepare_waits(
@@ -124,13 +124,13 @@ impl ActionQueue {
         )
     }
 
-    pub(crate) fn on_stream_event(&mut self, event: StreamEvent) {
+    pub(super) fn on_stream_event(&mut self, event: StreamEvent) {
         self.waiting.remove_wait(event);
     }
 
     /// Execute until blocked, exhausted, or an explicit flush is encountered.
     /// Each wait starts at the current clock after preceding actions execute.
-    pub(crate) fn advance<F: quiche::BufFactory>(
+    pub(super) fn advance<F: quiche::BufFactory>(
         &mut self, now: impl Fn() -> Instant, conn: &mut quiche::Connection<F>,
         parsers: &mut StreamParserMap,
     ) -> Result<(), String> {

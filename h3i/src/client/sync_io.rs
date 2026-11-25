@@ -121,13 +121,11 @@ pub(super) struct SyncIo {
 
 impl SyncIo {
     pub(super) fn bind(bind_addr: SocketAddr) -> Result<Self, ClientError> {
-        let poll = Poll::new().map_err(io_error)?;
-        let mut socket =
-            mio::net::UdpSocket::bind(bind_addr).map_err(io_error)?;
+        let poll = Poll::new()?;
+        let mut socket = mio::net::UdpSocket::bind(bind_addr)?;
         poll.registry()
-            .register(&mut socket, SOCKET, Interest::READABLE)
-            .map_err(io_error)?;
-        let local_addr = socket.local_addr().map_err(io_error)?;
+            .register(&mut socket, SOCKET, Interest::READABLE)?;
+        let local_addr = socket.local_addr()?;
         Ok(Self {
             poll,
             socket,
@@ -153,16 +151,17 @@ impl SyncIo {
             } else {
                 Interest::READABLE
             };
-            self.poll
-                .registry()
-                .reregister(&mut self.socket, SOCKET, interest)
-                .map_err(io_error)?;
+            self.poll.registry().reregister(
+                &mut self.socket,
+                SOCKET,
+                interest,
+            )?;
             self.writable_interest = enabled;
         }
         Ok(())
     }
 
-    /// Generate the ClientHello without transmitting it. This initializes TLS
+    /// Generate the `ClientHello` without transmitting it. This initializes TLS
     /// early-data state before the application queues its first flight.
     pub(super) fn stage_initial(
         &mut self, conn: &mut quiche::Connection,
@@ -201,10 +200,10 @@ impl SyncIo {
                 }
             }
             let socket = &self.socket;
-            if let Some(status) = self
-                .tx
-                .flush_with(Instant::now(), |bytes, to| socket.send_to(bytes, to))
-                .map_err(io_error)?
+            if let Some(status) =
+                self.tx.flush_with(Instant::now(), |bytes, to| {
+                    socket.send_to(bytes, to)
+                })?
             {
                 return Ok(status);
             }
@@ -226,7 +225,7 @@ impl SyncIo {
                     Ok(()) => break,
                     Err(error) if error.kind() == io::ErrorKind::Interrupted =>
                         (),
-                    Err(error) => return Err(io_error(error)),
+                    Err(error) => return Err(error.into()),
                 }
             }
             self.receive_pending = self
@@ -251,7 +250,7 @@ impl SyncIo {
                         continue,
                     Err(error) if error.kind() == io::ErrorKind::WouldBlock =>
                         return Ok(false),
-                    Err(error) => return Err(io_error(error)),
+                    Err(error) => return Err(error.into()),
                 };
             let recv_info = quiche::RecvInfo {
                 from,
@@ -265,10 +264,6 @@ impl SyncIo {
         }
         Ok(true)
     }
-}
-
-fn io_error(error: io::Error) -> ClientError {
-    ClientError::Other(format!("UDP I/O: {error}"))
 }
 
 #[cfg(test)]
@@ -332,12 +327,14 @@ mod tests {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let now = Instant::now();
         let addr = "127.0.0.1:4433".parse()?;
-        let mut pending = PendingDatagram::default();
-        pending.packet = Some((4, quiche::SendInfo {
-            from: addr,
-            to: addr,
-            at: now,
-        }));
+        let mut pending = PendingDatagram {
+            packet: Some((4, quiche::SendInfo {
+                from: addr,
+                to: addr,
+                at: now,
+            })),
+            ..PendingDatagram::default()
+        };
         let error = pending
             .flush_with(now, |_, _| Ok(3))
             .err()

@@ -142,27 +142,27 @@ impl Default for TlsSettings {
 /// Initial flow-control limits and receive window ceilings.
 #[derive(Clone)]
 pub struct FlowControl {
-    pub max_data: u64,
-    pub max_stream_data_bidi_local: u64,
-    pub max_stream_data_bidi_remote: u64,
-    pub max_stream_data_uni: u64,
-    pub max_streams_bidi: u64,
-    pub max_streams_uni: u64,
-    pub max_window: u64,
-    pub max_stream_window: u64,
+    pub data: u64,
+    pub stream_data_bidi_local: u64,
+    pub stream_data_bidi_remote: u64,
+    pub stream_data_uni: u64,
+    pub streams_bidi: u64,
+    pub streams_uni: u64,
+    pub window: u64,
+    pub stream_window: u64,
 }
 
 impl Default for FlowControl {
     fn default() -> Self {
         Self {
-            max_data: 10_000_000,
-            max_stream_data_bidi_local: 1_000_000,
-            max_stream_data_bidi_remote: 1_000_000,
-            max_stream_data_uni: 1_000_000,
-            max_streams_bidi: 100,
-            max_streams_uni: 100,
-            max_window: 25_165_824,
-            max_stream_window: 16_777_216,
+            data: 10_000_000,
+            stream_data_bidi_local: 1_000_000,
+            stream_data_bidi_remote: 1_000_000,
+            stream_data_uni: 1_000_000,
+            streams_bidi: 100,
+            streams_uni: 100,
+            window: 25_165_824,
+            stream_window: 16_777_216,
         }
     }
 }

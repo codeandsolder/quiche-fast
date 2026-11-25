@@ -44,7 +44,7 @@ use crate::actions::h3::Action;
 use crate::actions::h3::ExpectedStreamSendResult;
 
 pub(super) fn prompt_headers(
-    sid_alloc: &StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
+    sid_alloc: StreamIdAllocator, host_port: &str, raw: bool, literal: bool,
 ) -> InquireResult<Action> {
     let stream_id = autopick_stream_id(sid_alloc)?;
     let mut headers = if raw {

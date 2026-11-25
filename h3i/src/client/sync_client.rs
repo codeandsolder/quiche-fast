@@ -63,21 +63,20 @@ fn create_config(
     config.set_send_capacity_factor(args.send_capacity_factor);
     config.set_max_recv_udp_payload_size(MAX_DATAGRAM_SIZE);
     config.set_max_send_udp_payload_size(MAX_DATAGRAM_SIZE);
-    config.set_initial_max_data(args.flow.max_data);
-    config.set_initial_max_stream_data_bidi_local(
-        args.flow.max_stream_data_bidi_local,
-    );
+    config.set_initial_max_data(args.flow.data);
+    config
+        .set_initial_max_stream_data_bidi_local(args.flow.stream_data_bidi_local);
     config.set_initial_max_stream_data_bidi_remote(
-        args.flow.max_stream_data_bidi_remote,
+        args.flow.stream_data_bidi_remote,
     );
-    config.set_initial_max_stream_data_uni(args.flow.max_stream_data_uni);
-    config.set_initial_max_streams_bidi(args.flow.max_streams_bidi);
-    config.set_initial_max_streams_uni(args.flow.max_streams_uni);
+    config.set_initial_max_stream_data_uni(args.flow.stream_data_uni);
+    config.set_initial_max_streams_bidi(args.flow.streams_bidi);
+    config.set_initial_max_streams_uni(args.flow.streams_uni);
     config.set_disable_active_migration(true);
     config.set_active_connection_id_limit(0);
 
-    config.set_max_connection_window(args.flow.max_window);
-    config.set_max_stream_window(args.flow.max_stream_window);
+    config.set_max_connection_window(args.flow.window);
+    config.set_max_stream_window(args.flow.stream_window);
     config.set_enable_send_streams_blocked(true);
     config.grease(false);
 

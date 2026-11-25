@@ -234,26 +234,26 @@ fn config_from_matches(matches: &ArgMatches) -> Result<Config, String> {
         library_config.send_capacity_factor,
     );
     let flow = &mut library_config.flow;
-    flow.max_data = optional_number(matches, "max-data", flow.max_data);
-    flow.max_stream_data_bidi_local = optional_number(
+    flow.data = optional_number(matches, "max-data", flow.data);
+    flow.stream_data_bidi_local = optional_number(
         matches,
         "max-stream-data-bidi-local",
-        flow.max_stream_data_bidi_local,
+        flow.stream_data_bidi_local,
     );
-    flow.max_stream_data_bidi_remote = optional_number(
+    flow.stream_data_bidi_remote = optional_number(
         matches,
         "max-stream-data-bidi-remote",
-        flow.max_stream_data_bidi_remote,
+        flow.stream_data_bidi_remote,
     );
-    flow.max_stream_data_uni =
-        optional_number(matches, "max-stream-data-uni", flow.max_stream_data_uni);
-    flow.max_streams_bidi =
-        optional_number(matches, "max-streams-bidi", flow.max_streams_bidi);
-    flow.max_streams_uni =
-        optional_number(matches, "max-streams-uni", flow.max_streams_uni);
-    flow.max_window = optional_number(matches, "max-window", flow.max_window);
-    flow.max_stream_window =
-        optional_number(matches, "max-stream-window", flow.max_stream_window);
+    flow.stream_data_uni =
+        optional_number(matches, "max-stream-data-uni", flow.stream_data_uni);
+    flow.streams_bidi =
+        optional_number(matches, "max-streams-bidi", flow.streams_bidi);
+    flow.streams_uni =
+        optional_number(matches, "max-streams-uni", flow.streams_uni);
+    flow.window = optional_number(matches, "max-window", flow.window);
+    flow.stream_window =
+        optional_number(matches, "max-stream-window", flow.stream_window);
     if matches.get_flag("enable-dgram") {
         let defaults = DatagramQueues::default();
         library_config.datagrams = Some(DatagramQueues {
@@ -424,8 +424,8 @@ mod config_tests {
         let defaults = config_from_matches(
             &command().try_get_matches_from(["h3i", "example.org"])?,
         )?;
-        assert_eq!(defaults.library_config.flow.max_data, 10_000_000);
-        assert_eq!(defaults.library_config.flow.max_stream_data_uni, 1_000_000);
+        assert_eq!(defaults.library_config.flow.data, 10_000_000);
+        assert_eq!(defaults.library_config.flow.stream_data_uni, 1_000_000);
         assert!(defaults.library_config.datagrams.is_none());
         let matches = command().try_get_matches_from([
             "h3i",
@@ -454,8 +454,8 @@ mod config_tests {
                 library.tls.early_data &&
                 !library.tls.verify_peer
         );
-        assert_eq!(library.flow.max_data, 32);
-        assert_eq!(library.flow.max_stream_data_uni, 123);
+        assert_eq!(library.flow.data, 32);
+        assert_eq!(library.flow.stream_data_uni, 123);
         assert_eq!(
             library.datagrams.as_ref().map(|queues| queues.receive),
             Some(10)

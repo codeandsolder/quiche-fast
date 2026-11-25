@@ -47,8 +47,8 @@ pub fn h3i_config(url: &str) -> h3i::config::Config {
 
     let mut config = h3i::config::Config::new("test.com").unwrap();
     config.idle_timeout = 2000;
-    config.flow.max_data = 1_000_000;
-    config.flow.max_stream_data_uni = 100_000;
+    config.flow.data = 1_000_000;
+    config.flow.stream_data_uni = 100_000;
     config.endpoint.connect_to = Some(final_url.parse().unwrap());
     config.tls.verify_peer = false;
     config.datagrams = Some(h3i::config::DatagramQueues::default());

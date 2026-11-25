@@ -154,7 +154,7 @@ impl Prompter {
     ) -> InquireResult<PromptOutcome> {
         let action = match choice {
             ActionChoice::Headers { raw, literal } => headers::prompt_headers(
-                &self.bidi_sid_alloc,
+                self.bidi_sid_alloc,
                 &self.host_port,
                 raw,
                 literal,
@@ -162,7 +162,7 @@ impl Prompter {
             ActionChoice::Data => prompt_data()?,
             ActionChoice::Settings => settings::prompt_settings()?,
             ActionChoice::OpenUniStream =>
-                stream::prompt_open_uni_stream(&self.uni_sid_alloc)?,
+                stream::prompt_open_uni_stream(self.uni_sid_alloc)?,
             ActionChoice::ResetStream => stream::prompt_reset_stream()?,
             ActionChoice::StopSending => stream::prompt_stop_sending()?,
             ActionChoice::UnknownFrame { grease } =>
@@ -184,7 +184,7 @@ impl Prompter {
         Ok(PromptOutcome::Action(action))
     }
 
-    fn observe_action(&mut self, action: &Action) {
+    const fn observe_action(&mut self, action: &Action) {
         match action {
             Action::SendFrame { stream_id, .. } |
             Action::SendHeadersFrame { stream_id, .. } |
@@ -608,7 +608,7 @@ mod tests {
             ),
             Err(InquireError::OperationInterrupted)
         ));
-        let mut choices = [ActionChoice::Commit].into_iter();
+        let mut choices = std::iter::once(ActionChoice::Commit);
         assert_eq!(
             prompter.collect_actions(
                 || choices.next().ok_or(InquireError::OperationInterrupted),

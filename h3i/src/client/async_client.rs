@@ -52,7 +52,6 @@ use crate::client::ConnectionSummary;
 use crate::client::ParsedArgs;
 use crate::client::MAX_DATAGRAM_SIZE;
 use crate::config::Config as H3iConfig;
-use crate::quiche;
 
 use super::action_queue::ActionQueue;
 use super::ClientState;
@@ -88,13 +87,10 @@ pub async fn connect(
         .await
         .map_err(|error| ClientError::Other(error.to_string()))?;
 
-    log::info!(
-        "connecting to {:} from {:}",
-        peer_addr,
-        socket
-            .local_addr()
-            .map_err(|error| ClientError::Other(error.to_string()))?
-    );
+    let local_addr = socket
+        .local_addr()
+        .map_err(|error| ClientError::Other(error.to_string()))?;
+    log::info!("connecting to {peer_addr} from {local_addr}");
 
     let (h3i, conn_summary_fut) =
         H3iDriver::new(frame_actions, close_trigger_frames);
@@ -127,18 +123,18 @@ fn create_config(args: &H3iConfig) -> QuicSettings {
     quic_settings.send_capacity_factor = args.send_capacity_factor;
     quic_settings.max_recv_udp_payload_size = MAX_DATAGRAM_SIZE;
     quic_settings.max_send_udp_payload_size = MAX_DATAGRAM_SIZE;
-    quic_settings.initial_max_data = args.flow.max_data;
+    quic_settings.initial_max_data = args.flow.data;
     quic_settings.initial_max_stream_data_bidi_local =
-        args.flow.max_stream_data_bidi_local;
+        args.flow.stream_data_bidi_local;
     quic_settings.initial_max_stream_data_bidi_remote =
-        args.flow.max_stream_data_bidi_remote;
-    quic_settings.initial_max_stream_data_uni = args.flow.max_stream_data_uni;
-    quic_settings.initial_max_streams_bidi = args.flow.max_streams_bidi;
-    quic_settings.initial_max_streams_uni = args.flow.max_streams_uni;
+        args.flow.stream_data_bidi_remote;
+    quic_settings.initial_max_stream_data_uni = args.flow.stream_data_uni;
+    quic_settings.initial_max_streams_bidi = args.flow.streams_bidi;
+    quic_settings.initial_max_streams_uni = args.flow.streams_uni;
     quic_settings.disable_active_migration = true;
     quic_settings.active_connection_id_limit = 0;
-    quic_settings.max_connection_window = args.flow.max_window;
-    quic_settings.max_stream_window = args.flow.max_stream_window;
+    quic_settings.max_connection_window = args.flow.window;
+    quic_settings.max_stream_window = args.flow.stream_window;
     quic_settings.enable_send_streams_blocked = true;
     quic_settings.grease = false;
 

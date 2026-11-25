@@ -143,7 +143,7 @@ pub enum WaitType {
     /// - Limit the number of active streams to the configured limit.
     /// - Ensure that available quota is non-zero when number of active streams
     ///   is below the configured limit.
-    /// - Minimize the number of MAX_STREAM updates sent.
+    /// - Minimize the number of `MAX_STREAMS` updates sent.
     CanOpenNumStreams(RequiredStreamsQuota),
 }
 
