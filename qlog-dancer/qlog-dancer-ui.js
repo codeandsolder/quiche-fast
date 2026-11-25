@@ -196,7 +196,7 @@ function redrawByCanvasId(canvas_id) {
     } else if (canvas_id === PKT_RX_CANVAS) {
         drawPacketReceived(true);
     } else if (canvas_id === PKT_TX_CANVAS) {
-        qlog_dancer.draw_packet_sent_plot(PKT_TX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
+        qlog_dancer.draw_packet_timeline(PKT_TX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
     } else if (canvas_id === PKT_TX_COUNTS_CANVAS) {
         qlog_dancer.draw_packet_sent_ack_status_count_plot(PKT_TX_COUNTS_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
     }else if (canvas_id === PKT_TX_DELTA_CANVAS) {
@@ -255,7 +255,7 @@ function drawPacketReceived(resize) {
     if (resize || !window.packetReceivedDrawn) {
         let sub_start_draw = Date.now();
         const canvas = canvasMap.get(PKT_RX_CANVAS);
-        qlog_dancer.draw_packet_received(PKT_RX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
+        qlog_dancer.draw_packet_timeline(PKT_RX_CANVAS, canvas.show_legend, canvas.x_start, canvas.x_end);
         console.log(`packet received draw duration: ${Date.now() - sub_start_draw} ms`);
         window.packetReceivedDrawn = true;
         setupCanvasInteraction(PKT_RX_CANVAS);
@@ -268,7 +268,7 @@ function drawPacketSent(resize) {
     if (resize || !window.packetSentDrawn) {
         let sub_start_draw = Date.now();
         let pkt_sent_canvas = canvasMap.get(PKT_TX_CANVAS);
-        qlog_dancer.draw_packet_sent_plot(PKT_TX_CANVAS, pkt_sent_canvas.show_legend, pkt_sent_canvas.x_start, pkt_sent_canvas.x_end);
+        qlog_dancer.draw_packet_timeline(PKT_TX_CANVAS, pkt_sent_canvas.show_legend, pkt_sent_canvas.x_start, pkt_sent_canvas.x_end);
         let pkt_sent_counts_canvas = canvasMap.get(PKT_TX_COUNTS_CANVAS);
         qlog_dancer.draw_packet_sent_ack_status_count_plot(PKT_TX_COUNTS_CANVAS, pkt_sent_counts_canvas.show_legend, pkt_sent_counts_canvas.x_start, pkt_sent_counts_canvas.x_end);
         let pkt_sent_delta_canvas = canvasMap.get(PKT_TX_DELTA_CANVAS);

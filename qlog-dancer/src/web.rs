@@ -28,11 +28,10 @@ use crate::config::PlotTheme;
 use crate::plots::congestion_control::plot_cc_plot;
 use crate::plots::conn_flow_control::plot_conn_flow_control_canvas;
 use crate::plots::conn_overview::plot_main_plot;
-use crate::plots::packet_received::plot_packet_received_canvas;
 use crate::plots::packet_sent::plot_packet_sent_ack_status_count_plot;
 use crate::plots::packet_sent::plot_packet_sent_delta_plot_canvas;
 use crate::plots::packet_sent::plot_packet_sent_pacing_rate_plot_canvas;
-use crate::plots::packet_sent::plot_packet_sent_plot_canvas;
+use crate::plots::packet_sent::plot_packet_timeline_canvas;
 use crate::plots::pending::plot_pending;
 use crate::plots::pending::PendingPlotParams;
 use crate::plots::rtt::plot_rtt_plot;
@@ -533,34 +532,36 @@ impl QlogDancerWeb {
     }
 
     #[wasm_bindgen]
-    /// Draws the packet received plot into the provided canvas_id.
+    /// Draw the sent or received packet timeline according to the canvas ID.
     ///
     /// # Errors
-    /// Returns a JavaScript error if chart validation or rendering fails.
-    pub fn draw_packet_received(
+    /// Returns a JavaScript error for an unknown timeline canvas or drawing
+    /// failure.
+    pub fn draw_packet_timeline(
         &mut self, canvas_id: &str, display_legend: bool, x_start: Option<f64>,
         x_end: Option<f64>,
     ) -> Result<(), JsValue> {
-        let params = plot_parameters(
-            display_legend,
-            x_start,
-            x_end,
-            CHART_MARGIN,
-            AreaMargin { x: 40, y: 80 },
-        );
-        render_chart(
-            &mut self.charts.pkt_rx_chart_info,
-            self.ss.as_ref(),
-            &params,
-            |params, ss| {
-                plot_packet_received_canvas(
-                    params,
-                    &self.display_name,
-                    ss,
-                    canvas_id,
-                )
-            },
-        )
+        let (is_sent, slot, margin) = match canvas_id {
+            "pkt-tx-canvas" =>
+                (true, &mut self.charts.pkt_tx_chart_info, CHART_MARGIN_TIGHT),
+            "pkt-rx-canvas" =>
+                (false, &mut self.charts.pkt_rx_chart_info, CHART_MARGIN),
+            _ => return Err(JsValue::from_str("unknown packet timeline canvas")),
+        };
+        let params =
+            plot_parameters(display_legend, x_start, x_end, margin, AreaMargin {
+                x: 40,
+                y: 80,
+            });
+        render_chart(slot, self.ss.as_ref(), &params, |params, ss| {
+            plot_packet_timeline_canvas(
+                is_sent,
+                params,
+                &self.display_name,
+                ss,
+                canvas_id,
+            )
+        })
     }
 
     #[wasm_bindgen]
@@ -598,37 +599,6 @@ impl QlogDancerWeb {
             .map_err(|error| JsValue::from_str(&error.to_string()))?;
         }
         Ok(())
-    }
-
-    #[wasm_bindgen]
-    /// Draws the packet sent plot into the provided canvas_id.
-    ///
-    /// # Errors
-    /// Returns a JavaScript error if chart validation or rendering fails.
-    pub fn draw_packet_sent_plot(
-        &mut self, pkt_tx_canvas_id: &str, display_legend: bool,
-        x_start: Option<f64>, x_end: Option<f64>,
-    ) -> Result<(), JsValue> {
-        let params = plot_parameters(
-            display_legend,
-            x_start,
-            x_end,
-            CHART_MARGIN_TIGHT,
-            AreaMargin { x: 40, y: 80 },
-        );
-        render_chart(
-            &mut self.charts.pkt_tx_chart_info,
-            self.ss.as_ref(),
-            &params,
-            |params, ss| {
-                plot_packet_sent_plot_canvas(
-                    params,
-                    &self.display_name,
-                    ss,
-                    pkt_tx_canvas_id,
-                )
-            },
-        )
     }
 
     #[wasm_bindgen]
