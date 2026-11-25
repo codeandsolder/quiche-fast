@@ -93,7 +93,7 @@ impl RouteLease {
         }
     }
 
-    pub(crate) fn raw(
+    pub(crate) const fn raw(
         commands: mpsc::UnboundedSender<ConnectionMapCommand>,
     ) -> Self {
         Self::new(RouteOwner(0), commands)

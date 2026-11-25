@@ -407,7 +407,7 @@ where
 
     /// Cancellation covers the whole I/O loop, including blocked writes and
     /// CID registration. Egress generated before cancellation is never
-    /// replayed; close emits a fresh best-effort CONNECTION_CLOSE flight.
+    /// replayed; close emits a fresh best-effort `CONNECTION_CLOSE` flight.
     async fn work_loop<A: ApplicationOverQuic>(
         &mut self, qconn: &mut QuicheConnection,
         ctx: &mut ConnectionStageContext<A>,
@@ -712,15 +712,15 @@ where
             }
 
             #[cfg(not(feature = "gcongestion"))]
-            let max_send_size = if !gcongestion_enabled {
+            let max_send_size = if gcongestion_enabled {
+                usize::MAX
+            } else {
                 // Only call qconn.send_quantum when !gcongestion_enabled.
                 tune_max_send_size(
                     segment_size,
                     qconn.send_quantum(),
                     send_buf.len(),
                 )
-            } else {
-                usize::MAX
             };
 
             #[cfg(feature = "gcongestion")]
@@ -789,8 +789,7 @@ where
                     Duration::from_millis(1);
                 if time
                     .checked_duration_since(now)
-                    .map(|d| d > DEFAULT_MAX_INTO_FUTURE)
-                    .unwrap_or(false)
+                    .is_some_and(|d| d > DEFAULT_MAX_INTO_FUTURE)
                 {
                     self.write_state.next_release_time =
                         Some(now + DEFAULT_MAX_INTO_FUTURE.mul_f32(0.8));
@@ -832,7 +831,7 @@ where
     }
 
     #[cfg(not(feature = "gcongestion"))]
-    fn pacing_enabled(&self, qconn: &QuicheConnection) -> bool {
+    const fn pacing_enabled(&self, qconn: &QuicheConnection) -> bool {
         self.cfg.pacing_offload && qconn.pacing_enabled()
     }
 
@@ -1077,8 +1076,8 @@ where
 
     /// Check if Quiche has any packets to send
     ///
-    /// If yes: fills buffer and updates self.write_state.bytes_written
-    /// If no: Poll::Pending
+    /// If yes: fills buffer and updates `self.write_state.bytes_written`
+    /// If no: `Poll::Pending`
     ///
     /// # Example
     ///
@@ -1211,7 +1210,7 @@ where
                 work_loop_result,
                 qconn,
             });
-        };
+        }
 
         let on_conn_established_result =
             self.on_conn_established(&mut qconn, &mut ctx.application);
@@ -1464,7 +1463,7 @@ fn min_of_some<T: Ord>(v1: Option<T>, v2: Option<T>) -> Option<T> {
     }
 }
 
-/// A Token which increment the skipped_mid_handshake_flush_count metric on
+/// A Token which increment the `skipped_mid_handshake_flush_count` metric on
 /// `Drop` unless it is marked complete.
 struct TrackMidHandshakeFlush<M: Metrics> {
     complete: bool,
@@ -1472,14 +1471,14 @@ struct TrackMidHandshakeFlush<M: Metrics> {
 }
 
 impl<M: Metrics> TrackMidHandshakeFlush<M> {
-    fn new(metrics: M) -> Self {
+    const fn new(metrics: M) -> Self {
         Self {
             complete: false,
             metrics,
         }
     }
 
-    fn mark_complete(&mut self) {
+    const fn mark_complete(&mut self) {
         self.complete = true;
     }
 }

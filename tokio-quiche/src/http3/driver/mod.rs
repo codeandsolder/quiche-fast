@@ -177,10 +177,10 @@ type InboundFrameSender = PollSender<InboundFrame>;
 /// associated with this channel.
 pub type InboundFrameStream = mpsc::Receiver<InboundFrame>;
 
-/// The error type used internally in [H3Driver].
+/// The error type used internally in [`H3Driver`].
 ///
 /// Note that [`ApplicationOverQuic`] errors are not exposed to users at this
-/// time. The type is public to document the failure modes in [H3Driver].
+/// time. The type is public to document the failure modes in [`H3Driver`].
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum H3ConnectionError {
@@ -199,13 +199,13 @@ pub enum H3ConnectionError {
 
 impl From<h3::Error> for H3ConnectionError {
     fn from(err: h3::Error) -> Self {
-        H3ConnectionError::H3(err)
+        Self::H3(err)
     }
 }
 
 impl From<quiche::Error> for H3ConnectionError {
     fn from(err: quiche::Error) -> Self {
-        H3ConnectionError::H3(h3::Error::Transport(err))
+        Self::H3(h3::Error::Transport(err))
     }
 }
 
@@ -244,7 +244,7 @@ pub struct IncomingH3Headers {
     /// The actual [`h3::Header`]s which were received.
     pub headers: Vec<h3::Header>,
     /// An [`OutboundFrameSender`] for streaming body data to the peer. For
-    /// [ClientH3Driver], note that the request body can also be passed a
+    /// [`ClientH3Driver`], note that the request body can also be passed a
     /// cloned sender via [`NewClientRequest`].
     pub send: OutboundFrameSender,
     /// An [`InboundFrameStream`] of body data received from the peer.
@@ -266,9 +266,10 @@ impl fmt::Debug for IncomingH3Headers {
     }
 }
 
-/// [`H3Event`]s are produced by an [H3Driver] to describe HTTP/3 state updates.
+/// [`H3Event`]s are produced by an [`H3Driver`] to describe HTTP/3 state
+/// updates.
 ///
-/// Both [ServerH3Driver] and [ClientH3Driver] may extend this enum with
+/// Both [`ServerH3Driver`] and [`ClientH3Driver`] may extend this enum with
 /// endpoint-specific variants. The events must be consumed by users of the
 /// drivers, like a higher-level `Server` or `Client` controller.
 #[derive(Debug)]
@@ -294,7 +295,7 @@ pub enum H3Event {
         /// Unreliable payloads received from the peer.
         recv: mpsc::Receiver<DgramBuffer>,
     },
-    /// A RST_STREAM frame was seen on the given `stream_id`. The user of the
+    /// A `RST_STREAM` frame was seen on the given `stream_id`. The user of the
     /// driver should clean up any state allocated for this stream.
     ResetStream { stream_id: u64 },
     /// The connection has irrecoverably errored and is shutting down.
@@ -312,17 +313,17 @@ pub enum H3Event {
         fin: bool,
     },
     /// The stream has been closed. This is used to signal stream closures that
-    /// don't result from RST_STREAM frames, unlike the
+    /// don't result from `RST_STREAM` frames, unlike the
     /// [`H3Event::ResetStream`] variant.
     StreamClosed { stream_id: u64 },
     /// A GOAWAY frame was received from the peer containing `id`,
-    /// as described in https://datatracker.ietf.org/doc/html/rfc9114#section-5.2.
+    /// as described in <https://datatracker.ietf.org/doc/html/rfc9114#section-5.2>.
     GoAway { id: u64 },
 }
 
 impl H3Event {
     /// Generates an event from an applicable [`H3ConnectionError`].
-    fn from_error(err: &H3ConnectionError) -> Option<Self> {
+    const fn from_error(err: &H3ConnectionError) -> Option<Self> {
         Some(match err {
             H3ConnectionError::H3(e) => Self::ConnectionError(*e),
             H3ConnectionError::PostAcceptTimeout => Self::ConnectionShutdown(
@@ -363,11 +364,12 @@ pub struct InboundFrame {
 /// Depending on the `DriverHooks` in use, it powers either a client or a
 /// server.
 ///
-/// Use the [ClientH3Driver] and [ServerH3Driver] aliases to access the
+/// Use the [`ClientH3Driver`] and [`ServerH3Driver`] aliases to access the
 /// respective driver types. The driver is passed into an I/O loop and
 /// communicates with the driver's user (e.g., an HTTP client or a server) via
-/// its associated [H3Controller]. The controller allows the application to both
-/// listen for [`H3Event`]s of note and send [`H3Command`]s into the I/O loop.
+/// its associated [`H3Controller`]. The controller allows the application to
+/// both listen for [`H3Event`]s of note and send [`H3Command`]s into the I/O
+/// loop.
 pub struct H3Driver<H: DriverHooks> {
     /// Configuration used to initialize `conn`. Created from [`Http3Settings`]
     /// in the constructor.
@@ -377,12 +379,13 @@ pub struct H3Driver<H: DriverHooks> {
     conn: Option<h3::Connection>,
     /// State required by the client/server hooks.
     hooks: H,
-    /// Sends [`H3Event`]s to the [H3Controller] paired with this driver.
+    /// Sends [`H3Event`]s to the [`H3Controller`] paired with this driver.
     h3_event_sender: mpsc::UnboundedSender<H::Event>,
-    /// Receives [`H3Command`]s from the [H3Controller] paired with this driver.
+    /// Receives [`H3Command`]s from the [`H3Controller`] paired with this
+    /// driver.
     cmd_recv: mpsc::UnboundedReceiver<H::Command>,
 
-    /// A map of stream IDs to their [StreamCtx]. This is mainly used to
+    /// A map of stream IDs to their [`StreamCtx`]. This is mainly used to
     /// retrieve the internal Tokio channels associated with the stream.
     stream_map: BTreeMap<u64, StreamCtx>,
     /// Datagram flows keyed by their owning HTTP request stream ID.
@@ -412,7 +415,7 @@ pub struct H3Driver<H: DriverHooks> {
     max_stream_seen: u64,
 
     /// Tracks whether we have forwarded the HTTP/3 SETTINGS frame
-    /// to the [H3Controller] once.
+    /// to the [`H3Controller`] once.
     settings_received_and_forwarded: bool,
     /// Tracks whether the H3 event receiver has been dropped.
     /// Used to avoid busy-looping on `h3_event_sender.closed()`.
@@ -420,7 +423,7 @@ pub struct H3Driver<H: DriverHooks> {
 }
 
 impl<H: DriverHooks> H3Driver<H> {
-    /// Builds a new [H3Driver] and an associated [H3Controller].
+    /// Builds a new [`H3Driver`] and an associated [`H3Controller`].
     ///
     /// The driver should then be passed to
     /// [`InitialQuicConnection`](crate::InitialQuicConnection)'s `start`
@@ -432,7 +435,7 @@ impl<H: DriverHooks> H3Driver<H> {
         let (h3_event_sender, h3_event_recv) = mpsc::unbounded_channel();
 
         (
-            H3Driver {
+            Self {
                 h3_config: (&http3_settings).into(),
                 conn: None,
                 hooks: H::new(&http3_settings),
@@ -494,7 +497,7 @@ impl<H: DriverHooks> H3Driver<H> {
         Ok(())
     }
 
-    /// Adds a [StreamCtx] to the stream map with the given `stream_id`.
+    /// Adds a [`StreamCtx`] to the stream map with the given `stream_id`.
     fn insert_stream(&mut self, stream_id: u64, ctx: StreamCtx) {
         self.stream_map.insert(stream_id, ctx);
         self.max_stream_seen = self.max_stream_seen.max(stream_id);
@@ -834,10 +837,10 @@ impl<H: DriverHooks> H3Driver<H> {
                     conn.send_response_with_priority(
                         qconn, stream_id, headers, prio, false,
                     )
-                    .inspect(|_| ctx.initial_headers_sent = true)
+                    .inspect(|()| ctx.initial_headers_sent = true)
                 };
 
-                if let Err(h3::Error::StreamBlocked) = res {
+                if res == Err(h3::Error::StreamBlocked) {
                     ctx.first_full_headers_flush_fail_time
                         .get_or_insert(Instant::now());
                 }
@@ -870,7 +873,13 @@ impl<H: DriverHooks> H3Driver<H> {
 
                 audit_stats.add_downstream_bytes_sent(n as _);
 
-                return if n != len {
+                return if n == len {
+                    if *fin {
+                        Self::on_fin_sent(ctx);
+                    }
+
+                    Ok(())
+                } else {
                     // Couldn't write the entire body, `send_body_zc` will
                     // have trimmed `body` accordingly. The driver keeps
                     // the remainder of the body to send in the future.
@@ -880,12 +889,6 @@ impl<H: DriverHooks> H3Driver<H> {
                         "send_body_zc() should have trimmed body but did not"
                     );
                     Err(h3::Error::StreamBlocked)
-                } else {
-                    if *fin {
-                        Self::on_fin_sent(ctx);
-                    }
-
-                    Ok(())
                 };
             },
 
@@ -966,11 +969,11 @@ impl<H: DriverHooks> H3Driver<H> {
         // After a stop, the closed parked receiver can still return frames
         // queued before it. The write side is done, so drop the receiver and
         // any such frame. Shutdown commands use the independent control queue.
-        if !stream.fin_or_reset_sent {
+        if stream.fin_or_reset_sent {
+            return Ok(());
+        } else {
             stream.recv = Some(chan);
             stream.queued_frame = data;
-        } else {
-            return Ok(());
         }
 
         self.process_writable_stream(qconn, stream_id)
@@ -1183,7 +1186,7 @@ impl<H: DriverHooks> H3Driver<H> {
     }
 
     /// Handles a regular [`H3Command`]. May be called internally by
-    /// [DriverHooks] for non-endpoint-specific [`H3Command`]s.
+    /// [`DriverHooks`] for non-endpoint-specific [`H3Command`]s.
     fn handle_core_command(
         &mut self, qconn: &mut QuicheConnection, cmd: H3Command,
     ) -> H3ConnectionResult<()> {
@@ -1291,9 +1294,8 @@ impl<H: DriverHooks> H3Driver<H> {
 
                     if ctx.both_directions_done() {
                         return self.cleanup_stream(qconn, stream_id);
-                    } else {
-                        return Ok(());
                     }
+                    return Ok(());
                 },
                 Err(h3::Error::Transport(quiche::Error::InvalidStreamState(
                     stream,
@@ -1425,7 +1427,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
                     log::debug!("connection closed due to h3 protocol error"; "error"=>?err);
                     return Ok(());
                 },
-            };
+            }
         }
 
         self.process_available_dgrams(qconn)?;
@@ -1451,7 +1453,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     }
 
     /// Reports connection-level error metrics and forwards
-    /// IOWorker errors to the associated [H3Controller].
+    /// `IOWorker` errors to the associated [`H3Controller`].
     fn on_conn_close<M: Metrics>(
         &mut self, quiche_conn: &mut QuicheConnection, metrics: &M,
         work_loop_result: &QuicResult<()>,
@@ -1496,7 +1498,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
         }
     }
 
-    /// Wait for incoming data from the [H3Controller]. The next iteration of
+    /// Wait for incoming data from the [`H3Controller`]. The next iteration of
     /// the I/O loop commences when one of the `select!`ed futures triggers.
     #[inline]
     async fn wait_for_data(
@@ -1513,7 +1515,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
                 Ok(())
             },
             Some(cmd) = self.cmd_recv.recv() => H::conn_command(self, qconn, cmd),
-            _ = self.h3_event_sender.closed(), if !self.h3_event_receiver_dropped => {
+            () = self.h3_event_sender.closed(), if !self.h3_event_receiver_dropped => {
                 self.h3_event_receiver_dropped = true;
                 self.close_if_idle(qconn);
                 Ok(())
@@ -1546,10 +1548,10 @@ impl<H: DriverHooks> Drop for H3Driver<H> {
     }
 }
 
-/// [`H3Command`]s are sent by the [H3Controller] to alter the [H3Driver]'s
+/// [`H3Command`]s are sent by the [`H3Controller`] to alter the [`H3Driver`]'s
 /// state.
 ///
-/// Both [ServerH3Driver] and [ClientH3Driver] may extend this enum with
+/// Both [`ServerH3Driver`] and [`ClientH3Driver`] may extend this enum with
 /// endpoint-specific variants.
 #[derive(Debug)]
 pub enum H3Command {
@@ -1596,7 +1598,7 @@ pub enum StreamShutdown {
     },
 }
 
-/// Sends [`H3Command`]s to an [H3Driver]. The sender is typed and internally
+/// Sends [`H3Command`]s to an [`H3Driver`]. The sender is typed and internally
 /// wraps instances of `T` in the appropriate `H3Command` variant.
 pub struct RequestSender<C, T> {
     sender: UnboundedSender<C>,
@@ -1605,7 +1607,7 @@ pub struct RequestSender<C, T> {
 }
 
 impl<C, T: Into<C>> RequestSender<C, T> {
-    /// Send a request to the [H3Driver]. This can only fail if the driver is
+    /// Send a request to the [`H3Driver`]. This can only fail if the driver is
     /// gone.
     #[inline(always)]
     pub fn send(&self, v: T) -> Result<(), mpsc::error::SendError<C>> {
@@ -1622,39 +1624,41 @@ impl<C, T> Clone for RequestSender<C, T> {
     }
 }
 
-/// Interface to communicate with a paired [H3Driver].
+/// Interface to communicate with a paired [`H3Driver`].
 ///
-/// An [H3Controller] receives [`H3Event`]s from its driver, which must be
+/// An [`H3Controller`] receives [`H3Event`]s from its driver, which must be
 /// consumed by the application built on top of the driver to react to incoming
 /// events. The controller also allows the application to send ad-hoc
 /// [`H3Command`]s to the driver, which will be processed when the driver waits
 /// for incoming data.
 pub struct H3Controller<H: DriverHooks> {
-    /// Sends [`H3Command`]s to the [H3Driver], like [`QuicCommand`]s or
+    /// Sends [`H3Command`]s to the [`H3Driver`], like [`QuicCommand`]s or
     /// outbound HTTP requests.
     cmd_sender: UnboundedSender<H::Command>,
-    /// Receives [`H3Event`]s from the [H3Driver]. Can be extracted and
-    /// used independently of the [H3Controller].
+    /// Receives [`H3Event`]s from the [`H3Driver`]. Can be extracted and
+    /// used independently of the [`H3Controller`].
     h3_event_recv: Option<UnboundedReceiver<H::Event>>,
 }
 
 impl<H: DriverHooks> H3Controller<H> {
     /// Gets a mut reference to the [`H3Event`] receiver for the paired
-    /// [H3Driver].
-    pub fn event_receiver_mut(&mut self) -> &mut UnboundedReceiver<H::Event> {
+    /// [`H3Driver`].
+    pub const fn event_receiver_mut(
+        &mut self,
+    ) -> &mut UnboundedReceiver<H::Event> {
         self.h3_event_recv
             .as_mut()
             .expect("No event receiver on H3Controller")
     }
 
-    /// Takes the [`H3Event`] receiver for the paired [H3Driver].
-    pub fn take_event_receiver(&mut self) -> UnboundedReceiver<H::Event> {
+    /// Takes the [`H3Event`] receiver for the paired [`H3Driver`].
+    pub const fn take_event_receiver(&mut self) -> UnboundedReceiver<H::Event> {
         self.h3_event_recv
             .take()
             .expect("No event receiver on H3Controller")
     }
 
-    /// Creates a [`QuicCommand`] sender for the paired [H3Driver].
+    /// Creates a [`QuicCommand`] sender for the paired [`H3Driver`].
     pub fn cmd_sender(&self) -> RequestSender<H::Command, QuicCommand> {
         RequestSender {
             sender: self.cmd_sender.clone(),
@@ -1667,7 +1671,7 @@ impl<H: DriverHooks> H3Controller<H> {
         let _ = self.cmd_sender.send(H3Command::GoAway.into());
     }
 
-    /// Creates an [`H3Command`] sender for the paired [H3Driver].
+    /// Creates an [`H3Command`] sender for the paired [`H3Driver`].
     pub fn h3_cmd_sender(&self) -> RequestSender<H::Command, H3Command> {
         RequestSender {
             sender: self.cmd_sender.clone(),

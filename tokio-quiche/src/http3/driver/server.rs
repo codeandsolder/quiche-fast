@@ -47,14 +47,14 @@ use crate::quic::HandshakeInfo;
 use crate::quic::QuicCommand;
 use crate::quic::QuicheConnection;
 
-/// An [H3Driver] for a server-side HTTP/3 connection. See [H3Driver] for
+/// An [`H3Driver`] for a server-side HTTP/3 connection. See [`H3Driver`] for
 /// details. Emits [`ServerH3Event`]s and expects [`ServerH3Command`]s for
 /// control.
 pub type ServerH3Driver = H3Driver<ServerHooks>;
-/// The [H3Controller] type paired with [ServerH3Driver]. See [H3Controller] for
-/// details.
+/// The [`H3Controller`] type paired with [`ServerH3Driver`]. See
+/// [`H3Controller`] for details.
 pub type ServerH3Controller = H3Controller<ServerHooks>;
-/// Receives [`ServerH3Event`]s from a [ServerH3Driver]. This is the control
+/// Receives [`ServerH3Event`]s from a [`ServerH3Driver`]. This is the control
 /// stream which describes what is happening on the connection, but does not
 /// transfer data.
 pub type ServerEventStream = mpsc::UnboundedReceiver<ServerH3Event>;
@@ -64,7 +64,7 @@ pub struct RawPriorityValue(Vec<u8>);
 
 impl From<Vec<u8>> for RawPriorityValue {
     fn from(value: Vec<u8>) -> Self {
-        RawPriorityValue(value)
+        Self(value)
     }
 }
 
@@ -81,8 +81,8 @@ impl Deref for RawPriorityValue {
 pub struct IsInEarlyData(bool);
 
 impl IsInEarlyData {
-    fn new(is_in_early_data: bool) -> Self {
-        IsInEarlyData(is_in_early_data)
+    const fn new(is_in_early_data: bool) -> Self {
+        Self(is_in_early_data)
     }
 }
 
@@ -94,14 +94,14 @@ impl Deref for IsInEarlyData {
     }
 }
 
-/// Events produced by [ServerH3Driver].
+/// Events produced by [`ServerH3Driver`].
 #[derive(Debug)]
 pub enum ServerH3Event {
     Core(H3Event),
 
     Headers {
         incoming_headers: IncomingH3Headers,
-        /// The latest PRIORITY_UPDATE frame value, if any.
+        /// The latest `PRIORITY_UPDATE` frame value, if any.
         priority: Option<RawPriorityValue>,
         is_in_early_data: IsInEarlyData,
     },
@@ -127,7 +127,7 @@ impl From<H3Event> for ServerH3Event {
     }
 }
 
-/// Commands accepted by [ServerH3Driver].
+/// Commands accepted by [`ServerH3Driver`].
 #[derive(Debug)]
 pub enum ServerH3Command {
     Core(H3Command),
@@ -167,7 +167,7 @@ pub struct ServerHooks {
 impl ServerHooks {
     /// Handles a new request, creating a stream context, checking for a
     /// potential DATAGRAM flow (CONNECT-{UDP,IP}) and sending a relevant
-    /// [`H3Event`] to the [ServerH3Controller] for application-level
+    /// [`H3Event`] to the [`ServerH3Controller`] for application-level
     /// processing.
     fn handle_request(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
@@ -199,7 +199,7 @@ impl ServerHooks {
             .conn_mut()?
             .take_last_priority_update(stream_id)
             .ok()
-            .map(|v| v.into());
+            .map(std::convert::Into::into);
 
         // Boost the priority of the stream until we write response headers via
         // process_write_frame(), which will set the desired priority. Since it

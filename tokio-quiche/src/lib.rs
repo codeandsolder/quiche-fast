@@ -26,10 +26,11 @@
 
 //! Bridging the gap between [quiche] and [tokio].
 //!
-//! tokio-quiche connects [quiche::Connection]s and [quiche::h3::Connection]s to
-//! tokio's event loop. Users have the choice between implementing their own,
-//! custom [`ApplicationOverQuic`] or using the ready-made
-//! [H3Driver](crate::http3::driver::H3Driver) for HTTP/3 clients and servers.
+//! tokio-quiche connects [`quiche::Connection`]s and
+//! [`quiche::h3::Connection`]s to tokio's event loop. Users have the choice
+//! between implementing their own, custom [`ApplicationOverQuic`] or using the
+//! ready-made [`H3Driver`](crate::http3::driver::H3Driver) for HTTP/3 clients
+//! and servers.
 //!
 //! # Starting an HTTP/3 Server
 //!
@@ -218,7 +219,7 @@ where
 
 static GLOBAL_LOGGER_INITIALIZED: OnceLock<bool> = OnceLock::new();
 
-/// Forward Quiche logs into the slog::Drain currently used by Foundations
+/// Forward Quiche logs into the `slog::Drain` currently used by Foundations
 ///
 /// # Warning
 ///

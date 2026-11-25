@@ -166,7 +166,7 @@ where
         let (conn_map_cmd_tx, conn_map_cmd_rx) = mpsc::unbounded_channel();
 
         (
-            InboundPacketRouter {
+            Self {
                 local_addr,
                 socket_tx,
                 socket_rx,
@@ -432,7 +432,7 @@ where
     I: InitialPacketHandler,
 {
     /// [`InboundPacketRouter::poll_recv_from`] should be used if the underlying
-    /// system or socket does not support rx_time nor GRO.
+    /// system or socket does not support `rx_time` nor GRO.
     fn poll_recv_from(
         &mut self, cx: &mut Context<'_>,
     ) -> Poll<io::Result<Incoming>> {
@@ -652,7 +652,7 @@ where
 /// Categorizes errors that are returned when handling packets which are not
 /// associated with an established connection. The purpose is to suppress
 /// logging of 'expected' errors (e.g. junk data sent to the UDP socket) to
-/// prevent DoS.
+/// prevent `DoS`.
 fn initial_packet_error_type(
     e: &io::Error,
 ) -> labels::QuicInvalidInitialPacketError {
@@ -673,7 +673,7 @@ fn initial_packet_error_type(
 /// [`Incoming`] packets to it when it receives initials.
 ///
 /// The handler produces [`quiche::Connection`]s which are then turned into
-/// [`QuicConnection`](super::QuicConnection), IoWorker pair.
+/// [`QuicConnection`](super::QuicConnection), `IoWorker` pair.
 pub trait InitialPacketHandler {
     fn update(&mut self, _ctx: &mut Context<'_>) -> io::Result<()> {
         Ok(())

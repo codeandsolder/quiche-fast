@@ -54,22 +54,23 @@ use crate::quic::HandshakeInfo;
 use crate::quic::QuicCommand;
 use crate::quic::QuicheConnection;
 
-/// An [H3Driver] for a client-side HTTP/3 connection. See [H3Driver] for
+/// An [`H3Driver`] for a client-side HTTP/3 connection. See [`H3Driver`] for
 /// details. Emits [`ClientH3Event`]s and expects [`ClientH3Command`]s for
 /// control.
 pub type ClientH3Driver = H3Driver<ClientHooks>;
-/// The [H3Controller] type paired with [ClientH3Driver]. See [H3Controller] for
-/// details.
+/// The [`H3Controller`] type paired with [`ClientH3Driver`]. See
+/// [`H3Controller`] for details.
 pub type ClientH3Controller = H3Controller<ClientHooks>;
-/// Receives [`ClientH3Event`]s from a [ClientH3Driver]. This is the control
+/// Receives [`ClientH3Event`]s from a [`ClientH3Driver`]. This is the control
 /// stream which describes what is happening on the connection, but does not
 /// transfer data.
 pub type ClientEventStream = mpsc::UnboundedReceiver<ClientH3Event>;
-/// A [RequestSender] to send HTTP requests over a [ClientH3Driver]'s
+/// A [`RequestSender`] to send HTTP requests over a [`ClientH3Driver`]'s
 /// connection.
 pub type ClientRequestSender = RequestSender<ClientH3Command, NewClientRequest>;
 
-/// An HTTP request sent using a [ClientRequestSender] to the [ClientH3Driver].
+/// An HTTP request sent using a [`ClientRequestSender`] to the
+/// [`ClientH3Driver`].
 #[derive(Debug)]
 pub struct NewClientRequest {
     /// A user-defined identifier to match [`ClientH3Event::NewOutboundRequest`]
@@ -82,7 +83,7 @@ pub struct NewClientRequest {
     pub body_writer: Option<oneshot::Sender<OutboundFrameSender>>,
 }
 
-/// Events produced by [ClientH3Driver].
+/// Events produced by [`ClientH3Driver`].
 #[derive(Debug)]
 pub enum ClientH3Event {
     Core(H3Event),
@@ -106,7 +107,7 @@ impl From<H3Event> for ClientH3Event {
     }
 }
 
-/// Commands accepted by [ClientH3Driver].
+/// Commands accepted by [`ClientH3Driver`].
 #[derive(Debug)]
 pub enum ClientH3Command {
     Core(H3Command),
@@ -137,7 +138,7 @@ impl From<NewClientRequest> for ClientH3Command {
 /// A [`PendingClientRequest`] is a request which has not yet received a
 /// response.
 ///
-/// The `send` and `recv` halves are passed to the [ClientH3Controller] in an
+/// The `send` and `recv` halves are passed to the [`ClientH3Controller`] in an
 /// [`H3Event::IncomingHeaders`] once the server's response has been received.
 struct PendingClientRequest {
     send: OutboundFrameSender,
@@ -170,8 +171,8 @@ impl ClientHooks {
     ///   exhausted; the stream entry is removed by `send_request` before
     ///   returning, so the stream ID is not consumed.
     /// * `Transport(StreamLimit)` — the peer's concurrent-stream limit has been
-    ///   reached; QUIC will deliver a MAX_STREAMS frame when credit opens up.
-    fn is_retriable_send_error(err: &h3::Error) -> bool {
+    ///   reached; QUIC will deliver a `MAX_STREAMS` frame when credit opens up.
+    const fn is_retriable_send_error(err: &h3::Error) -> bool {
         matches!(
             err,
             h3::Error::StreamBlocked |
@@ -288,7 +289,7 @@ impl ClientHooks {
     }
 
     /// Handles a response from the peer by sending a relevant [`H3Event`] to
-    /// the [ClientH3Controller] for application-level processing.
+    /// the [`ClientH3Controller`] for application-level processing.
     fn handle_response(
         driver: &mut H3Driver<Self>, headers: InboundHeaders,
         pending_request: PendingClientRequest,
@@ -423,7 +424,7 @@ impl DriverHooks for ClientHooks {
 }
 
 impl ClientH3Controller {
-    /// Creates a [`NewClientRequest`] sender for the paired [ClientH3Driver].
+    /// Creates a [`NewClientRequest`] sender for the paired [`ClientH3Driver`].
     pub fn request_sender(&self) -> ClientRequestSender {
         RequestSender {
             sender: self.cmd_sender.clone(),

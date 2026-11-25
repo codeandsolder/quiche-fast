@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Helper to wrap existing [quiche::Connection]s.
+//! Helper to wrap existing [`quiche::Connection`]s.
 //!
 //! This is a low-level interface for users who either need to heavily customize
 //! the [`quiche::Connection`] beyond what is possible via the crate's
@@ -170,6 +170,6 @@ impl ConnCloseReceiver {
 
     /// Waits for a `connection closed` notification.
     pub async fn recv(&mut self) {
-        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await;
     }
 }

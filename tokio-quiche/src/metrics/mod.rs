@@ -55,7 +55,7 @@ pub trait Metrics: Send + Sync + Clone + Unpin + 'static {
     fn write_errors(&self, reason: labels::QuicWriteError) -> Counter;
 
     /// Record timing information from sendmsg calls that return
-    /// WouldBlock and are retried in a loop.
+    /// `WouldBlock` and are retried in a loop.
     fn send_to_wouldblock_duration_s(&self) -> TimeHistogram;
 
     /// Number of mid-handshake flush operations that were skipped due to future

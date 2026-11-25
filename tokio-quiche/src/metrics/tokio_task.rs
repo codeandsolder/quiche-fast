@@ -74,7 +74,7 @@ struct InstrumentedWaker {
 
 impl Wake for InstrumentedWaker {
     fn wake(self: Arc<Self>) {
-        self.wake_by_ref()
+        self.wake_by_ref();
     }
 
     fn wake_by_ref(self: &Arc<Self>) {
@@ -85,7 +85,7 @@ impl Wake for InstrumentedWaker {
                 self.timer.lock().unwrap_or_else(PoisonError::into_inner);
 
             if guard.is_none() {
-                *guard = Some(Instant::now())
+                *guard = Some(Instant::now());
             }
         }
 

@@ -29,7 +29,7 @@ use btls::ssl::SslContextBuilder;
 use crate::quic::QuicheConnection;
 use crate::settings::TlsCertificatePaths;
 
-/// A set of hooks executed at the level of a [quiche::Connection].
+/// A set of hooks executed at the level of a [`quiche::Connection`].
 pub trait ConnectionHook {
     /// Constructs an optional [`SslContextBuilder`].
     ///

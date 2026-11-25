@@ -26,7 +26,7 @@
 
 //! `async`-ified QUIC connections powered by [quiche].
 //!
-//! Hooking up a [quiche::Connection] to [tokio]'s executor and IO primitives
+//! Hooking up a [`quiche::Connection`] to [tokio]'s executor and IO primitives
 //! requires an [`ApplicationOverQuic`] to control the connection. The
 //! application exposes a small number of callbacks which are executed whenever
 //! there is work to do with the connection.
@@ -128,7 +128,7 @@ pub use self::dscp::Dscp;
 pub use self::dscp::DscpHandle;
 pub use self::hooks::ConnectionHook;
 
-/// Alias of [quiche::Connection] used internally by the crate.
+/// Alias of [`quiche::Connection`] used internally by the crate.
 pub type QuicheConnection = quiche::Connection<crate::buf_factory::BufFactory>;
 
 /// Connects to an HTTP/3 server using `socket` and the default client
@@ -136,8 +136,8 @@ pub type QuicheConnection = quiche::Connection<crate::buf_factory::BufFactory>;
 ///
 /// This function always uses the [`ApplicationOverQuic`] provided in
 /// [`http3::driver`](crate::http3::driver) and returns a corresponding
-/// [ClientH3Controller]. To specify a different implementation or customize the
-/// configuration, use [`connect_with_config`].
+/// [`ClientH3Controller`]. To specify a different implementation or customize
+/// the configuration, use [`connect_with_config`].
 ///
 /// # Note
 /// tokio-quiche currently only supports one client connection per socket.
@@ -233,7 +233,7 @@ where
     // Attach tracing before the worker sends its first handshake packet.
     if let Some(qlog_dir) = &client_config.qlog_dir {
         log::info!("setting up qlogs"; "qlog_dir"=>qlog_dir);
-        let id = format!("{:?}", scid);
+        let id = format!("{scid:?}");
         let path = std::path::Path::new(qlog_dir)
             .join(qlog_file_name(&id, client_config.qlog_compression));
         if let Ok(writer) =

@@ -149,7 +149,7 @@ impl std::error::Error for QuicInvalidInitialPacketError {}
 
 impl From<QuicInvalidInitialPacketError> for std::io::Error {
     fn from(e: QuicInvalidInitialPacketError) -> Self {
-        std::io::Error::other(e)
+        Self::other(e)
     }
 }
 

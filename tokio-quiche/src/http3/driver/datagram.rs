@@ -38,6 +38,7 @@ pub(super) const DATAGRAM_ERROR: u64 = 0x33;
 const MAX_QUARTER_STREAM_ID: u64 = octets::MAX_VAR_INT / 4;
 
 /// A local application handle bound to one HTTP request stream.
+///
 /// Datagram submissions are best effort: queue acceptance does not guarantee
 /// transmission or delivery. A closed stream can never be reopened through
 /// a retained handle, because QUIC stream IDs are not reused.
