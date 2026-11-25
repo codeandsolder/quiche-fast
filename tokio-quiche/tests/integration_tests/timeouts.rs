@@ -47,7 +47,6 @@ use tokio::time::timeout;
 use tokio_quiche::http3::driver::H3ConnectionError;
 use tokio_quiche::quic::ConnectionHook;
 use tokio_quiche::settings::TlsCertificatePaths;
-use url::Url;
 
 use crate::fixtures::h3i_fixtures::*;
 use crate::fixtures::*;
@@ -148,7 +147,7 @@ async fn native_client_handshake_deadline_survives_permanently_blocked_send(
 
 // TODO(erittenhouse): figure out a way to avoid all of this duplication
 #[tokio::test]
-async fn test_handshake_duration_ioworker() {
+async fn test_handshake_duration_ioworker() -> QuicResult<()> {
     use h3i::client::ClientError;
 
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -158,10 +157,9 @@ async fn test_handshake_duration_ioworker() {
 
     impl ConnectionHook for TestAsyncCallbackConnectionHook {
         fn create_custom_ssl_context_builder(
-            &self, _settings: TlsCertificatePaths<'_>,
-        ) -> Option<SslContextBuilder> {
-            let mut ssl_ctx_builder =
-                SslContextBuilder::new(SslMethod::tls()).ok()?;
+            &self, settings: TlsCertificatePaths<'_>,
+        ) -> QuicResult<Option<SslContextBuilder>> {
+            let mut ssl_ctx_builder = SslContextBuilder::new(SslMethod::tls())?;
             let cloned_bool = Arc::clone(&self.was_called);
 
             ssl_ctx_builder.set_async_select_certificate_callback(move |_| {
@@ -176,14 +174,12 @@ async fn test_handshake_duration_ioworker() {
                 }))
             });
 
-            let (cert, private_key) = test_credentials();
             ssl_ctx_builder
-                .set_private_key_file(private_key, SslFiletype::PEM)
-                .unwrap();
+                .set_private_key_file(settings.private_key, SslFiletype::PEM)?;
 
-            ssl_ctx_builder.set_certificate_chain_file(cert).unwrap();
+            ssl_ctx_builder.set_certificate_chain_file(settings.cert)?;
 
-            Some(ssl_ctx_builder)
+            Ok(Some(ssl_ctx_builder))
         }
     }
 
@@ -203,7 +199,7 @@ async fn test_handshake_duration_ioworker() {
         http3_settings,
         hook.clone(),
         handle_connection,
-    );
+    )?;
 
     // TODO: Use the synchronous h3i client to assert that CONNECTION_CLOSE was
     // received while isolating the tokio-quiche IO loop.
@@ -218,10 +214,11 @@ async fn test_handshake_duration_ioworker() {
 
     assert!(matches!(client_res, Err(ClientError::HandshakeFail)));
     assert!(hook.was_called.load(Ordering::SeqCst));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_handshake_timeout_with_one_client_flight() {
+async fn test_handshake_timeout_with_one_client_flight() -> QuicResult<()> {
     let hook = TestConnectionHook::new();
 
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
@@ -233,82 +230,79 @@ async fn test_handshake_timeout_with_one_client_flight() {
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
+    )?;
 
-    let peer_addr = Url::parse(&url)
-        .expect("fixture should return a valid URL")
-        .socket_addrs(|| None)
-        .expect("URL should resolve to a SocketAddr")[0];
+    let peer_addr = extract_host_ipv4(&url)?;
 
-    let mut quiche_config = quiche::Config::new(1).unwrap();
+    let mut quiche_config = quiche::Config::new(1)?;
     quiche_config.verify_peer(false);
-    quiche_config.set_application_protos(&[b"h3"]).unwrap();
+    quiche_config.set_application_protos(&[b"h3"])?;
     quiche_config.set_max_recv_udp_payload_size(1350);
     quiche_config.set_max_send_udp_payload_size(1350);
 
-    let socket = UdpSocket::bind("0.0.0.0:0").await.unwrap();
-    socket.connect(peer_addr).await.unwrap();
+    let socket = UdpSocket::bind("0.0.0.0:0").await?;
+    socket.connect(peer_addr).await?;
 
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    btls::rand::rand_bytes(&mut scid).unwrap();
+    btls::rand::rand_bytes(&mut scid)?;
     let scid = quiche::ConnectionId::from_ref(&scid);
 
-    let local_addr = socket.local_addr().unwrap();
+    let local_addr = socket.local_addr()?;
     let mut quiche_conn = quiche::connect(
         Some("test.com"),
         &scid,
         local_addr,
         peer_addr,
         &mut quiche_config,
-    )
-    .unwrap();
+    )?;
 
     // Send first Initial packet
-    let mut out = [0; 65535];
-    let (write, _) = quiche_conn.send(&mut out).expect("initial send failed");
-    socket.send(&out[..write]).await.unwrap();
+    let mut out = vec![0; 65535];
+    let (write, _) = quiche_conn.send(&mut out)?;
+    socket.send(&out[..write]).await?;
 
     // Receive Retry packet
-    let (len, from) = socket.recv_from(&mut out).await.unwrap();
+    let (len, from) = socket.recv_from(&mut out).await?;
     let recv_info = quiche::RecvInfo {
         from,
-        to: socket.local_addr().unwrap(),
+        to: socket.local_addr()?,
     };
     let _ = quiche_conn.recv(&mut out[..len], recv_info);
 
     // Send second Initial packet, which will spawn the TQ Handshake IOW
-    let (written, _) = quiche_conn.send(&mut out).unwrap();
-    socket.send(&out[..written]).await.unwrap();
+    let (written, _) = quiche_conn.send(&mut out)?;
+    socket.send(&out[..written]).await?;
 
     let err = timeout(
         // Give a small buffer for the handshake timeout to fire
         HANDSHAKE_TIMEOUT.mul_f32(1.5),
         async move {
             loop {
-                let (len, from) = socket.recv_from(&mut out).await.unwrap();
+                let (len, from) = socket.recv_from(&mut out).await?;
                 let recv_info = quiche::RecvInfo {
                     from,
-                    to: socket.local_addr().unwrap(),
+                    to: socket.local_addr()?,
                 };
                 let _ = quiche_conn.recv(&mut out[..len], recv_info);
 
                 if let Some(e) = quiche_conn.peer_error().cloned() {
-                    return e;
+                    return Ok::<_, tokio_quiche::BoxError>(e);
                 }
             }
         },
     )
     .await;
 
-    assert_eq!(err.unwrap(), ConnectionError {
+    assert_eq!(err??, ConnectionError {
         is_app: false,
         error_code: quiche::WireErrorCode::ApplicationError as u64,
         reason: vec![]
     });
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_post_accept_timeout() {
+async fn test_post_accept_timeout() -> QuicResult<()> {
     const POST_ACCEPT_TIMEOUT: Duration = Duration::from_secs(1);
 
     // Absence of async callbacks should render the handshake portion of the
@@ -329,31 +323,29 @@ async fn test_post_accept_timeout() {
     let mut http3_settings = Http3Settings::default();
     http3_settings.post_accept_timeout = Some(POST_ACCEPT_TIMEOUT);
 
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
     let (url, _) = start_server_with_settings(
         quic_settings,
         http3_settings,
         hook,
         move |mut h3_conn| {
             let counter = Arc::clone(&clone);
+            let result_tx = result_tx.clone();
             async move {
-                let err =
+                let result =
                     serve_connection_details(&mut h3_conn.h3_controller, counter)
-                        .await
-                        .expect_err("serve_connection didn't return an error");
-                let h3_err: &H3ConnectionError = err
-                    .downcast_ref()
-                    .expect("Didn't receive an H3ConnectionError error");
-                assert_eq!(h3_err, &H3ConnectionError::PostAcceptTimeout);
+                        .await;
+                let _ = result_tx.send(result);
             }
         },
-    );
+    )?;
 
-    let h3i_config = h3i_config(&url);
+    let h3i_config = h3i_config(&url)?;
     let actions = vec![Action::Wait {
         wait_type: WaitType::WaitDuration(POST_ACCEPT_TIMEOUT.mul_f32(1.5)),
     }];
 
-    let summary = summarize_connection(h3i_config, actions).await;
+    let summary = summarize_connection(h3i_config, actions).await?;
 
     // Since the server's idle timeout is longer than the H3Driver's post-accept
     // timeout, the connection should have closed without any requests being
@@ -363,13 +355,24 @@ async fn test_post_accept_timeout() {
     let err = summary
         .conn_close_details
         .peer_error()
-        .expect("no error received");
+        .ok_or("no error received")?;
     assert!(err.is_app);
     assert_eq!(err.error_code, quiche::h3::WireErrorCode::NoError as u64);
+    let result = timeout(Duration::from_secs(2), result_rx.recv())
+        .await?
+        .ok_or("missing server result")?;
+    let error = result
+        .err()
+        .ok_or("server did not report post-accept timeout")?;
+    assert_eq!(
+        error.downcast_ref::<H3ConnectionError>(),
+        Some(&H3ConnectionError::PostAcceptTimeout)
+    );
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_post_accept_timeout_is_reset() {
+async fn test_post_accept_timeout_is_reset() -> QuicResult<()> {
     const POST_ACCEPT_TIMEOUT: Duration = Duration::from_secs(1);
 
     // Absence of async callbacks should render the handshake portion of the
@@ -389,21 +392,24 @@ async fn test_post_accept_timeout_is_reset() {
     let mut http3_settings = Http3Settings::default();
     http3_settings.post_accept_timeout = Some(POST_ACCEPT_TIMEOUT);
 
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
     let (url, _) = start_server_with_settings(
         quic_settings,
         http3_settings,
         hook,
         move |mut h3_conn| {
             let counter = Arc::clone(&clone);
+            let result_tx = result_tx.clone();
             async move {
-                serve_connection_details(&mut h3_conn.h3_controller, counter)
-                    .await
-                    .expect("serve_connection failed");
+                let result =
+                    serve_connection_details(&mut h3_conn.h3_controller, counter)
+                        .await;
+                let _ = result_tx.send(result);
             }
         },
-    );
+    )?;
 
-    let h3i_config = h3i_config(&url);
+    let h3i_config = h3i_config(&url)?;
     let actions = vec![
         // Just to ensure that normal waits don't accidentally trigger the
         // post-accept timeout
@@ -422,7 +428,7 @@ async fn test_post_accept_timeout_is_reset() {
         Action::FlushPackets,
     ];
 
-    let summary = summarize_connection(h3i_config, actions).await;
+    let summary = summarize_connection(h3i_config, actions).await?;
     assert!(summary.conn_close_details.no_err());
 
     for i in [0, 4] {
@@ -430,4 +436,9 @@ async fn test_post_accept_timeout_is_reset() {
     }
 
     assert_eq!(request_counter.load(Ordering::SeqCst), 2);
+    let result = timeout(Duration::from_secs(2), result_rx.recv())
+        .await?
+        .ok_or("missing server result")?;
+    result?;
+    Ok(())
 }

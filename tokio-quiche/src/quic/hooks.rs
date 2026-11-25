@@ -28,6 +28,7 @@ use btls::ssl::SslContextBuilder;
 
 use crate::quic::QuicheConnection;
 use crate::settings::TlsCertificatePaths;
+use crate::QuicResult;
 
 /// A set of hooks executed at the level of a [`quiche::Connection`].
 pub trait ConnectionHook {
@@ -40,9 +41,16 @@ pub trait ConnectionHook {
     ///
     /// Only called if both the hook and [`TlsCertificatePaths`] are set in
     /// [`ConnectionParams`](crate::ConnectionParams).
+    ///
+    /// Returning `Ok(None)` selects the default TLS configuration.
+    ///
+    /// # Errors
+    ///
+    /// A custom context initialization error is returned to the caller of
+    /// socket setup, rather than silently falling back to default TLS.
     fn create_custom_ssl_context_builder(
         &self, settings: TlsCertificatePaths<'_>,
-    ) -> Option<SslContextBuilder>;
+    ) -> QuicResult<Option<SslContextBuilder>>;
 
     /// Called when the QUIC connection reports a path-specific event.
     ///

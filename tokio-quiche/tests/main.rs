@@ -24,5 +24,5 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-pub mod fixtures;
-pub mod integration_tests;
+mod fixtures;
+mod integration_tests;

@@ -31,8 +31,7 @@ use crate::integration_tests::Http3Settings;
 use crate::integration_tests::QuicSettings;
 use crate::integration_tests::TestConnectionHook;
 use datagram_socket::QuicAuditStats;
-use foundations::telemetry::with_test_telemetry;
-use foundations::telemetry::TestTelemetryContext;
+use foundations::telemetry::TelemetryContext;
 use futures::SinkExt;
 use h3i;
 use h3i::actions::h3::send_headers_frame;
@@ -61,6 +60,7 @@ use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::metrics::Metrics;
 use tokio_quiche::quic::HandshakeError;
 use tokio_quiche::quiche::h3::Header;
+use tokio_quiche::QuicResult;
 use tokio_quiche::ServerH3Connection;
 
 #[derive(Debug, Default, Clone)]
@@ -70,16 +70,18 @@ struct TestContext {
 }
 
 #[tokio::test]
-async fn handle_0_rtt_request() {
-    check_resumed_requests(false).await;
+async fn handle_0_rtt_request() -> QuicResult<()> {
+    check_resumed_requests(false).await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn handle_0_rtt_request_with_retry() {
-    check_resumed_requests(true).await;
+async fn handle_0_rtt_request_with_retry() -> QuicResult<()> {
+    check_resumed_requests(true).await?;
+    Ok(())
 }
 
-async fn check_resumed_requests(retry: bool) {
+async fn check_resumed_requests(retry: bool) -> QuicResult<()> {
     let context = Arc::new(Mutex::new(TestContext::default()));
     let early_stream_id = 0;
     let stream_id = 4;
@@ -88,26 +90,33 @@ async fn check_resumed_requests(retry: bool) {
     let mut quic_settings = QuicSettings::default();
     quic_settings.enable_early_data = true;
     quic_settings.disable_client_ip_validation = !retry;
+    let (handler_tx, mut handler_rx) = mpsc::unbounded_channel();
     let (url, _) = start_server_with_settings(
         quic_settings,
         Http3Settings::default(),
         TestConnectionHook::new(),
-        move |h3_conn| helper_server_handler(h3_conn, &context_clone),
-    );
+        move |h3_conn| {
+            let handler = helper_server_handler(h3_conn, &context_clone);
+            let handler_tx = handler_tx.clone();
+            async move {
+                let _ = handler_tx.send(handler.await);
+            }
+        },
+    )?;
 
     let nst_data = {
         let summary = {
-            let h3i_config = h3i_fixtures::h3i_config(&url);
+            let h3i_config = h3i_fixtures::h3i_config(&url)?;
             helper_connect_with_early_data(
                 h3i_config,
                 None,
                 helper_frame_actions(stream_id),
             )
-            .await
+            .await?
         };
 
         {
-            let context = context.lock().unwrap();
+            let context = context.lock().map_err(|_| "test context poisoned")?;
             assert_eq!(context.requests_seen, vec![(
                 "test.com".to_owned(),
                 false
@@ -116,10 +125,16 @@ async fn check_resumed_requests(retry: bool) {
         }
 
         // Get Session data from this connection to resume the 0-RTT connection.
-        summary.conn_close_details.session.unwrap()
+        summary
+            .conn_close_details
+            .session
+            .ok_or("missing resumption session")?
     };
 
-    helper_reset_test(&context);
+    timeout(Duration::from_secs(2), handler_rx.recv())
+        .await?
+        .ok_or("missing first server result")??;
+    helper_reset_test(&context)?;
 
     {
         let early_frame_actions = vec![
@@ -131,7 +146,7 @@ async fn check_resumed_requests(retry: bool) {
             Action::FlushPackets,
         ];
 
-        let mut h3i_config = h3i_fixtures::h3i_config(&url);
+        let mut h3i_config = h3i_fixtures::h3i_config(&url)?;
         // Provide session to the client to enable resumption.
         h3i_config.session = Some(nst_data);
         h3i_config.tls.early_data = true;
@@ -140,10 +155,10 @@ async fn check_resumed_requests(retry: bool) {
             Some(early_frame_actions),
             helper_frame_actions(stream_id),
         )
-        .await;
+        .await?;
 
         {
-            let context = context.lock().unwrap();
+            let context = context.lock().map_err(|_| "test context poisoned")?;
             // QUIC does not order requests across independent streams.
             let mut requests = context.requests_seen.clone();
             requests.sort_unstable();
@@ -158,12 +173,16 @@ async fn check_resumed_requests(retry: bool) {
             assert_eq!(context.requests_handled_count, 2);
         }
     }
+    timeout(Duration::from_secs(2), handler_rx.recv())
+        .await?
+        .ok_or("missing resumed server result")??;
+    Ok(())
 }
 
 pub async fn helper_connect_with_early_data(
     h3i_config: h3i::config::Config, early_actions: Option<Vec<Action>>,
     actions: Vec<Action>,
-) -> ConnectionSummary {
+) -> QuicResult<ConnectionSummary> {
     tokio::task::spawn_blocking(move || {
         h3i::client::sync_client::connect_with_early_data(
             h3i_config,
@@ -171,15 +190,15 @@ pub async fn helper_connect_with_early_data(
             actions,
             None,
         )
-        .unwrap()
     })
-    .await
-    .unwrap()
+    .await?
+    .map_err(Into::into)
 }
 
-fn helper_reset_test(context: &Arc<Mutex<TestContext>>) {
-    let mut context = context.lock().unwrap();
+fn helper_reset_test(context: &Arc<Mutex<TestContext>>) -> QuicResult<()> {
+    let mut context = context.lock().map_err(|_| "test context poisoned")?;
     *context = TestContext::default();
+    Ok(())
 }
 
 fn helper_frame_actions(stream_id: u64) -> Vec<Action> {
@@ -204,7 +223,7 @@ fn helper_frame_actions(stream_id: u64) -> Vec<Action> {
 
 fn helper_server_handler(
     mut h3_conn: ServerH3Connection, context: &Arc<Mutex<TestContext>>,
-) -> impl Future<Output = ()> {
+) -> impl Future<Output = QuicResult<()>> + use<> {
     let context = context.clone();
 
     async move {
@@ -229,15 +248,16 @@ fn helper_server_handler(
 
                     let authority = headers
                         .iter()
-                        .find(|v| v.name().eq(":authority".as_bytes()))
-                        .unwrap();
+                        .find(|v| v.name() == b":authority")
+                        .ok_or("missing authority")?;
 
                     {
-                        let mut context = context.lock().unwrap();
+                        let mut context = context
+                            .lock()
+                            .map_err(|_| "test context poisoned")?;
                         context.requests_handled_count += 1;
-                        let host = std::str::from_utf8(authority.value())
-                            .unwrap()
-                            .to_string();
+                        let host =
+                            std::str::from_utf8(authority.value())?.to_string();
                         context.requests_seen.push((host, *is_in_early_data));
                     }
 
@@ -246,15 +266,14 @@ fn helper_server_handler(
                         vec![Header::new(b":status", b"200")],
                         None,
                     ))
-                    .await
-                    .unwrap();
+                    .await?;
 
-                    send.send(OutboundFrame::Body(Default::default(), true))
-                        .await
-                        .unwrap();
+                    send.send(OutboundFrame::Body(bytes::Bytes::new(), true))
+                        .await?;
                 },
             }
         }
+        Ok(())
     }
 }
 
@@ -270,7 +289,7 @@ struct EarlyDataServer {
 }
 
 impl EarlyDataServer {
-    async fn start(handshake_timeout: Duration) -> Self {
+    async fn start(handshake_timeout: Duration) -> QuicResult<Self> {
         let mut quic_settings = QuicSettings::default();
         quic_settings.enable_early_data = true;
         quic_settings.disable_client_ip_validation = true;
@@ -306,40 +325,44 @@ impl EarlyDataServer {
                     }
                 }
             },
-        );
+        )?;
 
         // Get a session to resume with 0-RTT.
         let session = {
-            let h3i_config = h3i_fixtures::h3i_config(&url);
+            let h3i_config = h3i_fixtures::h3i_config(&url)?;
             let summary = helper_connect_with_early_data(
                 h3i_config,
                 None,
                 helper_frame_actions(4),
             )
-            .await;
+            .await?;
 
-            summary.conn_close_details.session.unwrap()
+            summary
+                .conn_close_details
+                .session
+                .ok_or("missing resumption session")?
         };
 
         // Wait for the first connection to be fully closed.
         timeout(Duration::from_secs(5), audit_stats_rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
+            .await?
+            .ok_or("first connection did not close")?;
 
-        Self {
+        Ok(Self {
             url,
             audit_stats_rx,
             recv_early_data_request,
             session,
-        }
+        })
     }
 
     /// Asserts that the connection resumed with 0-RTT was closed by the
     /// handshake timeout, after the application was started.
-    fn assert_handshake_timeout(&self, audit_stats: &QuicAuditStats) {
+    fn assert_handshake_timeout(
+        &self, audit_stats: &QuicAuditStats,
+    ) -> QuicResult<()> {
         let close_reason = audit_stats.connection_close_reason();
-        let close_reason = close_reason.unwrap();
+        let close_reason = close_reason.ok_or("missing close reason")?;
         assert_eq!(audit_stats.transport_handshake_duration(), None);
         assert!(matches!(
             close_reason.downcast_ref::<HandshakeError>(),
@@ -347,6 +370,7 @@ impl EarlyDataServer {
         ));
 
         assert!(self.recv_early_data_request.load(Ordering::SeqCst));
+        Ok(())
     }
 }
 
@@ -360,15 +384,15 @@ struct EarlyDataClient {
 }
 
 impl EarlyDataClient {
-    fn connect(server: &EarlyDataServer) -> Self {
-        let peer_addr = extract_host_ipv4(&server.url);
+    fn connect(server: &EarlyDataServer) -> QuicResult<Self> {
+        let peer_addr = extract_host_ipv4(&server.url)?;
 
-        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-        socket.connect(peer_addr).unwrap();
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+        socket.connect(peer_addr)?;
 
-        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
+        let mut config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
         config.verify_peer(false);
-        config.set_application_protos(&[b"h3"]).unwrap();
+        config.set_application_protos(&[b"h3"])?;
         config.set_initial_max_data(1_000_000);
         config.set_initial_max_stream_data_bidi_local(1_000_000);
         config.set_initial_max_stream_data_bidi_remote(1_000_000);
@@ -378,63 +402,66 @@ impl EarlyDataClient {
         config.enable_early_data();
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-        btls::rand::rand_bytes(&mut scid).unwrap();
+        btls::rand::rand_bytes(&mut scid)?;
         let scid = quiche::ConnectionId::from_ref(&scid);
 
         let mut conn = quiche::connect(
             Some("test.com"),
             &scid,
-            socket.local_addr().unwrap(),
+            socket.local_addr()?,
             peer_addr,
             &mut config,
-        )
-        .unwrap();
-        conn.set_session(&server.session).unwrap();
+        )?;
+        conn.set_session(&server.session)?;
 
         // Send the Initial flight, after which the client can send 0-RTT data.
-        let mut out = [0; 65535];
-        let (len, _) = conn.send(&mut out).unwrap();
-        socket.send(&out[..len]).unwrap();
+        let mut out = vec![0; 65535];
+        let (len, _) = conn.send(&mut out)?;
+        socket.send(&out[..len])?;
         assert!(conn.is_in_early_data());
 
         let h3_config = quiche::h3::Config::new();
         let mut h3_conn =
-            quiche::h3::Connection::with_transport(&mut conn, &h3_config)
-                .unwrap();
-        let stream_id = h3_conn
-            .send_request(&mut conn, &h3i_fixtures::default_headers(), false)
-            .unwrap();
+            quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
+        let stream_id = h3_conn.send_request(
+            &mut conn,
+            &h3i_fixtures::default_headers(),
+            false,
+        )?;
 
-        Self {
+        Ok(Self {
             socket,
             conn,
             h3_conn,
             stream_id,
-        }
+        })
     }
 
     /// Sends request body data in 0-RTT packets.
-    fn send_body(&mut self, body: &[u8]) {
+    fn send_body(&mut self, body: &[u8]) -> QuicResult<()> {
         assert!(self.conn.is_in_early_data());
         let _ =
             self.h3_conn
                 .send_body(&mut self.conn, self.stream_id, body, false);
 
-        let mut out = [0; 65535];
+        let mut out = vec![0; 65535];
         while let Ok((len, _)) = self.conn.send(&mut out) {
-            self.socket.send(&out[..len]).unwrap();
+            self.socket.send(&out[..len])?;
         }
+        Ok(())
     }
 }
 
 /// A client that resumes a session with 0-RTT, but never completes the
 /// handshake while it keeps sending 0-RTT packets, must still be subject to
 /// the handshake timeout, even though the application was already started.
-#[with_test_telemetry(tokio::test)]
-async fn handshake_timeout_after_0_rtt(cx: TestTelemetryContext) {
+#[tokio::test]
+async fn handshake_timeout_after_0_rtt() -> QuicResult<()> {
+    let cx = TelemetryContext::test();
+    cx.clone().apply(async move {
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
-    let mut server = EarlyDataServer::start(HANDSHAKE_TIMEOUT).await;
+    let mut server = EarlyDataServer::start(HANDSHAKE_TIMEOUT).await?;
 
     // Metrics are global and shared with tests running concurrently, so only
     // check that the counter was incremented.
@@ -445,22 +472,22 @@ async fn handshake_timeout_after_0_rtt(cx: TestTelemetryContext) {
     };
     let failed_handshake_timeouts_before = failed_handshake_timeouts();
 
-    let mut client = EarlyDataClient::connect(&server);
+    let mut client = EarlyDataClient::connect(&server)?;
 
     let audit_stats = timeout(HANDSHAKE_TIMEOUT * 5, async {
         loop {
-            client.send_body(b"a");
+            client.send_body(b"a")?;
 
             tokio::select! {
-                stats = server.audit_stats_rx.recv() => return stats.unwrap(),
+                stats = server.audit_stats_rx.recv() => return stats.ok_or_else(|| tokio_quiche::BoxError::from("missing audit stats")),
                 () = tokio::time::sleep(Duration::from_millis(50)) => (),
             }
         }
     })
     .await
-    .expect("connection wasn't closed by the server");
+    ??;
 
-    server.assert_handshake_timeout(&audit_stats);
+    server.assert_handshake_timeout(&audit_stats)?;
     assert!(failed_handshake_timeouts() > failed_handshake_timeouts_before);
 
     // A handshake timeout is an expected outcome, it must not be logged as an
@@ -475,4 +502,6 @@ async fn handshake_timeout_after_0_rtt(cx: TestTelemetryContext) {
         error_logs.is_empty(),
         "unexpected error logs: {error_logs:?}"
     );
+    Ok(())
+    }).await
 }

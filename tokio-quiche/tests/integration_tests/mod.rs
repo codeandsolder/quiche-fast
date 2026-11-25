@@ -27,8 +27,7 @@
 use crate::fixtures::*;
 use h3i_fixtures::received_status_code_on_stream;
 
-use foundations::telemetry::with_test_telemetry;
-use foundations::telemetry::TestTelemetryContext;
+use foundations::telemetry::TelemetryContext;
 use futures::StreamExt;
 use futures_util::future::try_join_all;
 use std::time::Duration;
@@ -51,11 +50,11 @@ pub mod timeouts;
 pub mod zero_rtt;
 
 #[tokio::test]
-async fn echo() {
+async fn echo() -> QuicResult<()> {
     const CONN_COUNT: usize = 5;
 
     let req_count = |conn_num| conn_num * 100;
-    let (url, hook, _) = start_server();
+    let (url, hook, _) = start_server()?;
     let mut reqs = vec![];
 
     for i in 1..=CONN_COUNT {
@@ -64,37 +63,39 @@ async fn echo() {
         reqs.push(request(url, req_count(i) as u64));
     }
 
-    let res = try_join_all(reqs).await.unwrap();
-    let res_map = map_responses(res);
+    let results = try_join_all(reqs).await?;
+    let res_map = map_responses(results)?;
 
     assert_eq!(res_map.len(), CONN_COUNT);
 
     for i in 1..=CONN_COUNT {
-        let resps = res_map.get(&i).unwrap();
+        let responses = res_map.get(&i).ok_or("missing connection response")?;
 
-        assert_eq!(resps.len(), req_count(i));
+        assert_eq!(responses.len(), req_count(i));
     }
 
     assert!(hook.was_called());
+    Ok(())
 }
 
 #[tokio::test]
-async fn e2e() {
-    let (url, hook, _) = start_server();
+async fn e2e() -> QuicResult<()> {
+    let (url, hook, _) = start_server()?;
     let url = format!("{url}/1");
 
-    let res = request(url, 1).await.unwrap();
-    let res_map = map_responses(vec![res]);
+    let results = request(url, 1).await?;
+    let res_map = map_responses(vec![results])?;
 
     assert_eq!(res_map.len(), 1);
 
-    let resps = res_map.get(&1).unwrap();
-    assert_eq!(resps.len(), 1);
+    let responses = res_map.get(&1).ok_or("missing connection response")?;
+    assert_eq!(responses.len(), 1);
     assert!(hook.was_called());
+    Ok(())
 }
 
 #[tokio::test]
-async fn e2e_client_ip_validation_disabled() {
+async fn e2e_client_ip_validation_disabled() -> QuicResult<()> {
     let mut quic_settings = QuicSettings::default();
     quic_settings.max_recv_udp_payload_size = 1400;
     quic_settings.max_send_udp_payload_size = 1400;
@@ -108,25 +109,26 @@ async fn e2e_client_ip_validation_disabled() {
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
+    )?;
     let url = format!("{url}/1");
     let reqs = vec![request(url, 1)];
 
-    let res = try_join_all(reqs).await.unwrap();
-    let res_map = map_responses(res);
+    let results = try_join_all(reqs).await?;
+    let res_map = map_responses(results)?;
 
     assert_eq!(res_map.len(), 1);
 
-    let resps = res_map.get(&1).unwrap();
-    assert_eq!(resps.len(), 1);
+    let responses = res_map.get(&1).ok_or("missing connection response")?;
+    assert_eq!(responses.len(), 1);
     assert!(hook.was_called());
+    Ok(())
 }
 
 // Exercise the persistent per-connection egress buffer path, i.e. the IO
 // worker with `QuicSettings::pool_send_buffer` disabled. The default (pooling
 // enabled) path is covered by every other end-to-end test.
 #[tokio::test]
-async fn e2e_pooled_send_buffer_disabled() {
+async fn e2e_pooled_send_buffer_disabled() -> QuicResult<()> {
     let mut quic_settings = QuicSettings::default();
     quic_settings.max_recv_udp_payload_size = 1400;
     quic_settings.max_send_udp_payload_size = 1400;
@@ -139,57 +141,65 @@ async fn e2e_pooled_send_buffer_disabled() {
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
+    )?;
     let url = format!("{url}/1");
     let reqs = vec![request(url, 1)];
 
-    let res = try_join_all(reqs).await.unwrap();
-    let res_map = map_responses(res);
+    let results = try_join_all(reqs).await?;
+    let res_map = map_responses(results)?;
 
     assert_eq!(res_map.len(), 1);
 
-    let resps = res_map.get(&1).unwrap();
-    assert_eq!(resps.len(), 1);
+    let responses = res_map.get(&1).ok_or("missing connection response")?;
+    assert_eq!(responses.len(), 1);
     assert!(hook.was_called());
-}
-
-#[with_test_telemetry(tokio::test)]
-async fn quiche_logs_forwarded_server_side(cx: TestTelemetryContext) {
-    let mut quic_settings = QuicSettings::default();
-    quic_settings.capture_quiche_logs = true;
-
-    let hook = TestConnectionHook::new();
-
-    let (url, _) = start_server_with_settings(
-        quic_settings,
-        Http3Settings::default(),
-        hook,
-        handle_connection,
-    );
-    let url = format!("{url}/1");
-    let reqs = vec![request(url, 1)];
-
-    let res = try_join_all(reqs).await.unwrap();
-    let res_map = map_responses(res);
-
-    assert_eq!(res_map.len(), 1);
-
-    // Unfortunately, the Foundations `fields` struct is empty for some reason.
-    // This is a bit of a hacky test, but it checks for a string that should
-    // come from Quiche's Trace logs
-    assert!(cx.log_records().iter().any(|record| (record
-        .message
-        .contains("rx pkt") ||
-        record.message.contains("tx pkt")) &&
-        record.level.as_str() == "TRACE"));
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_ioworker_state_machine_pause() {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}", socket.local_addr().unwrap().port());
+async fn quiche_logs_forwarded_server_side() -> QuicResult<()> {
+    let cx = TelemetryContext::test();
+    cx.clone()
+        .apply(async move {
+            let mut quic_settings = QuicSettings::default();
+            quic_settings.capture_quiche_logs = true;
 
-    let tls_cert_settings = test_certificate_paths();
+            let hook = TestConnectionHook::new();
+
+            let (url, _) = start_server_with_settings(
+                quic_settings,
+                Http3Settings::default(),
+                hook,
+                handle_connection,
+            )?;
+            let url = format!("{url}/1");
+            let reqs = vec![request(url, 1)];
+
+            let results = try_join_all(reqs).await?;
+            let res_map = map_responses(results)?;
+
+            assert_eq!(res_map.len(), 1);
+
+            // Unfortunately, the Foundations `fields` struct is empty for some
+            // reason. This is a bit of a hacky test, but it checks for a string
+            // that should come from Quiche's Trace logs
+            assert!(cx.log_records().iter().any(|record| (record
+                .message
+                .contains("rx pkt") ||
+                record.message.contains("tx pkt")) &&
+                record.level.as_str() == "TRACE"));
+            Ok(())
+        })
+        .await
+}
+
+#[tokio::test]
+async fn test_ioworker_state_machine_pause() -> QuicResult<()> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    let url = format!("http://127.0.0.1:{}", socket.local_addr()?.port());
+
+    let credentials = TestCredentials::new()?;
+    let tls_cert_settings = test_certificate_paths(&credentials);
 
     let hooks = Hooks {
         connection_hook: Some(TestConnectionHook::new()),
@@ -200,36 +210,27 @@ async fn test_ioworker_state_machine_pause() {
         tls_cert_settings,
         hooks,
     );
-    let mut stream = listen(vec![socket], &params, &DefaultMetrics)
-        .unwrap()
-        .remove(0);
+    let mut stream = listen(vec![socket], &params, &DefaultMetrics)?
+        .into_iter()
+        .next()
+        .ok_or("listener returned no stream")?;
 
-    tokio::spawn(async move {
-        loop {
-            let (h3_driver, h3_controller) =
-                ServerH3Driver::new(&Http3Settings::default());
-            let conn = stream.next().await.unwrap().unwrap();
-
-            let (quic_connection, worker) =
-                conn.handshake(h3_driver).await.expect("handshake failed");
-
-            InitialQuicConnection::resume(worker);
-
-            let h3_over_quic =
-                ServerH3Connection::new(quic_connection, h3_controller);
-            tokio::spawn(async move {
-                handle_connection(h3_over_quic).await;
-            });
-        }
+    let server = tokio::spawn(async move {
+        let (driver, controller) = ServerH3Driver::new(&Http3Settings::default());
+        let conn = stream.next().await.ok_or("listener closed")??;
+        let (connection, worker) = conn.handshake(driver).await?;
+        InitialQuicConnection::resume(worker);
+        handle_connection(ServerH3Connection::new(connection, controller)).await;
+        Ok::<(), tokio_quiche::BoxError>(())
     });
 
     let url = format!("{url}/1");
-    let summary = timeout(Duration::from_secs(2), h3i_fixtures::request(&url, 1))
-        .await
-        .expect("request timed out")
-        .expect("request failed");
+    let summary =
+        timeout(Duration::from_secs(2), h3i_fixtures::request(&url, 1)).await??;
 
     assert!(received_status_code_on_stream(&summary, 0, 200));
+    timeout(Duration::from_secs(2), server).await???;
+    Ok(())
 }
 
 #[tokio::test]
@@ -239,9 +240,9 @@ async fn native_client_handshakes_and_exchanges_http3_request(
     use tokio_quiche::http3::driver::H3Event;
     use tokio_quiche::http3::driver::NewClientRequest;
     use tokio_quiche::quiche::h3::NameValue;
-    let (url, _hook, _audit) = start_server();
+    let (url, _hook, _audit) = start_server()?;
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
-    socket.connect(extract_host_ipv4(&url)).await?;
+    socket.connect(extract_host_ipv4(&url)?).await?;
     let (connection, mut controller) = timeout(
         Duration::from_secs(5),
         tokio_quiche::quic::connect(socket, Some("test.com")),
@@ -285,9 +286,9 @@ async fn native_client_handshakes_and_exchanges_http3_request(
 async fn native_client_shutdown_waits_for_worker_and_is_idempotent(
 ) -> tokio_quiche::QuicResult<()> {
     use datagram_socket::ShutdownConnectionExt as _;
-    let (url, _hook, _audit) = start_server();
+    let (url, _hook, _audit) = start_server()?;
     let socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
-    socket.connect(extract_host_ipv4(&url)).await?;
+    socket.connect(extract_host_ipv4(&url)?).await?;
     let (mut connection, mut controller) = timeout(
         Duration::from_secs(5),
         tokio_quiche::quic::connect(socket, Some("test.com")),
@@ -313,8 +314,8 @@ async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
     use tokio_quiche::ClientH3Driver;
     use tokio_quiche::ConnectionIdGenerator;
 
-    let (url, _hook, _audit_stats_rx) = start_server();
-    let addr = extract_host_ipv4(&url);
+    let (url, _hook, _audit_stats_rx) = start_server()?;
+    let addr = extract_host_ipv4(&url)?;
 
     let tokio_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
     tokio_socket.connect(addr).await?;
@@ -337,20 +338,21 @@ async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
 
 #[tokio::test]
 #[cfg(target_os = "linux")]
-async fn test_so_mark_receive_data() {
-    let (url, _, mut audit_stats_rx) = start_server();
+async fn test_so_mark_receive_data() -> QuicResult<()> {
+    let (url, _, mut audit_stats_rx) = start_server()?;
 
     let url = format!("{url}/1");
-    let summary = timeout(Duration::from_secs(2), h3i_fixtures::request(&url, 1))
-        .await
-        .expect("request timed out")
-        .expect("request failed");
+    let summary =
+        timeout(Duration::from_secs(2), h3i_fixtures::request(&url, 1)).await??;
 
     assert!(received_status_code_on_stream(&summary, 0, 200));
 
-    let audit_stats = audit_stats_rx.recv().await.expect("should receive stats");
+    let audit_stats = timeout(Duration::from_secs(2), audit_stats_rx.recv())
+        .await?
+        .ok_or("should receive stats")?;
     let so_mark_data = audit_stats.initial_so_mark_data();
     // SO_MARK is not set. Only verify that `Some` indicates receipt of the
     // socket control message.
-    assert_eq!(so_mark_data.unwrap(), &[0, 0, 0, 0]);
+    assert_eq!(so_mark_data.ok_or("missing SO_MARK data")?, &[0, 0, 0, 0]);
+    Ok(())
 }

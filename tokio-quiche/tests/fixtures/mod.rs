@@ -75,38 +75,14 @@ pub mod h3i_fixtures;
 
 use h3i_fixtures::stream_body;
 
-pub fn test_credentials() -> (&'static str, &'static str) {
-    static CREDENTIALS: std::sync::OnceLock<(String, String)> =
-        std::sync::OnceLock::new();
+#[path = "../../src/test_credentials.rs"]
+mod credentials;
+pub use credentials::TestCredentials;
 
-    let (cert, key) = CREDENTIALS.get_or_init(|| {
-        let dir = std::env::temp_dir().join(format!(
-            "tokio-quiche-integration-credentials-{}",
-            std::process::id()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let cert = dir.join("cert.crt");
-        let key = dir.join("cert.key");
-        std::fs::write(
-            &cert,
-            include_bytes!("../../../quiche/examples/cert.crt"),
-        )
-        .unwrap();
-        std::fs::write(&key, include_bytes!("../../../quiche/examples/cert.key"))
-            .unwrap();
-
-        (
-            cert.to_string_lossy().into_owned(),
-            key.to_string_lossy().into_owned(),
-        )
-    });
-
-    (cert.as_str(), key.as_str())
-}
-
-pub fn test_certificate_paths() -> TlsCertificatePaths<'static> {
-    let (cert, private_key) = test_credentials();
+pub fn test_certificate_paths(
+    credentials: &TestCredentials,
+) -> TlsCertificatePaths<'_> {
+    let (cert, private_key) = credentials.paths();
     TlsCertificatePaths {
         cert,
         private_key,
@@ -132,41 +108,45 @@ impl TestConnectionHook {
     }
 
     pub fn path_events(&self) -> Vec<tokio_quiche::quiche::PathEvent> {
-        self.path_events.lock().unwrap().clone()
+        self.path_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
 impl ConnectionHook for TestConnectionHook {
     fn create_custom_ssl_context_builder(
         &self, _settings: TlsCertificatePaths<'_>,
-    ) -> Option<btls::ssl::SslContextBuilder> {
+    ) -> QuicResult<Option<btls::ssl::SslContextBuilder>> {
         self.was_called.store(true, Ordering::SeqCst);
-        None
+        Ok(None)
     }
 
     fn on_path_event(
         &self, _qconn: &mut tokio_quiche::quic::QuicheConnection,
         event: &tokio_quiche::quiche::PathEvent,
     ) {
-        self.path_events.lock().unwrap().push(event.clone());
+        self.path_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(event.clone());
     }
 }
 
 pub async fn request(
     url: String, count: u64,
 ) -> QuicResult<HashMap<u64, String>> {
-    let summary = h3i_fixtures::request(&url, count)
-        .await
-        .expect("requests failed");
-    let map = (0..count)
+    let summary = h3i_fixtures::request(&url, count).await?;
+    (0..count)
         .map(|req| {
             let stream_id = req * 4;
-            let body =
-                stream_body(&summary, stream_id).expect("missing response body");
-            (stream_id, body)
+            let body = stream_body(&summary, stream_id)?.ok_or_else(|| {
+                format!("missing response body on stream {stream_id}")
+            })?;
+            Ok((stream_id, body))
         })
-        .collect();
-    Ok(map)
+        .collect()
 }
 
 pub async fn serve_connection_details(
@@ -184,7 +164,9 @@ pub async fn serve_connection_details(
                             H3Event::IncomingSettings {..} | H3Event::BodyBytesReceived { .. } | H3Event::StreamClosed { .. } | H3Event::IncomingHeaders(..) => {},
                             H3Event::ConnectionError(err) => { break Err(err.into()); }
                             H3Event::ConnectionShutdown(Some(err)) => { break Err(err.into()); }
-                            _ => unreachable!()
+                            H3Event::ConnectionShutdown(None) => { break Ok(()); }
+                            H3Event::ResetStream { .. } | H3Event::GoAway { .. } => {},
+                            H3Event::NewFlow { .. } => { break Err("unexpected datagram flow in HTTP fixture".into()); }
                         }
                     }
 
@@ -198,7 +180,7 @@ pub async fn serve_connection_details(
                     }
                 }
             }
-            Some(()) = request_futs.next() => {}
+            Some(result) = request_futs.next() => { result?; }
             else => { break Ok(()); }
         }
     }
@@ -215,47 +197,40 @@ pub async fn handle_connection(mut connection: ServerH3Connection) {
 pub async fn handle_forwarded_headers_frame(
     stream_id: u64, list: Vec<Header>, mut send: OutboundFrameSender,
     mut recv: InboundFrameStream,
-) {
+) -> QuicResult<()> {
+    let path = list
+        .iter()
+        .find(|header| header.name() == b":path")
+        .ok_or("missing request path")?;
+    let path = std::str::from_utf8(path.value())?;
     send.send(OutboundFrame::Headers(
         vec![h3::Header::new(b":status", b"200")],
         None,
     ))
-    .await
-    .unwrap();
+    .await?;
 
-    let path = list
-        .iter()
-        .find_map(|l| (l.name() == b":path").then(|| l.value().to_vec()))
-        .unwrap();
-
-    while let Some(frame) = recv.recv().await {
-        match frame {
-            InboundFrame { fin, .. } =>
-                if fin {
-                    let res = format!(
-                        "{stream_id},GET {}|",
-                        String::from_utf8(path).unwrap()
-                    );
-                    send.send(OutboundFrame::Body(
-                        Bytes::copy_from_slice(res.as_bytes()),
-                        true,
-                    ))
-                    .await
-                    .unwrap();
-                    return;
-                },
+    while let Some(InboundFrame { fin, .. }) = recv.recv().await {
+        if fin {
+            let res = format!("{stream_id},GET {path}|");
+            send.send(OutboundFrame::Body(Bytes::from(res), true))
+                .await?;
+            return Ok(());
         }
     }
+    // A reset can end the request without a FIN.
+    Ok(())
 }
 
-pub fn start_server() -> (
+pub fn start_server() -> QuicResult<(
     String,
     Arc<TestConnectionHook>,
     mpsc::UnboundedReceiver<Arc<QuicAuditStats>>,
-) {
-    let mut quic_settings = QuicSettings::default();
-    quic_settings.max_send_udp_payload_size = 1400;
-    quic_settings.max_recv_udp_payload_size = 1400;
+)> {
+    let quic_settings = QuicSettings {
+        max_send_udp_payload_size: 1400,
+        max_recv_udp_payload_size: 1400,
+        ..QuicSettings::default()
+    };
 
     let hook = TestConnectionHook::new();
 
@@ -264,22 +239,23 @@ pub fn start_server() -> (
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
-    (url, hook, audit_stats_rx)
+    )?;
+    Ok((url, hook, audit_stats_rx))
 }
 
 pub fn start_server_with_settings<F, Fut>(
     quic_settings: QuicSettings, http3_settings: Http3Settings,
     hook: Arc<impl ConnectionHook + Send + Sync + 'static>, hdl: F,
-) -> (String, mpsc::UnboundedReceiver<Arc<QuicAuditStats>>)
+) -> QuicResult<(String, mpsc::UnboundedReceiver<Arc<QuicAuditStats>>)>
 where
     F: Fn(ServerH3Connection) -> Fut + Send + Clone + 'static,
     Fut: Future<Output = ()> + Send,
 {
-    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://127.0.0.1:{}", socket.local_addr().unwrap().port());
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    let url = format!("http://127.0.0.1:{}", socket.local_addr()?.port());
 
-    let tls_cert_settings = test_certificate_paths();
+    let credentials = TestCredentials::new()?;
+    let tls_cert_settings = test_certificate_paths(&credentials);
 
     let hooks = Hooks {
         connection_hook: Some(hook),
@@ -287,16 +263,24 @@ where
 
     let params =
         ConnectionParams::new_server(quic_settings, tls_cert_settings, hooks);
-    let mut stream = listen(vec![socket], &params, &DefaultMetrics)
-        .unwrap()
-        .remove(0);
+    let mut stream = listen(vec![socket], &params, &DefaultMetrics)?
+        .into_iter()
+        .next()
+        .ok_or("listener returned no stream")?;
 
     let (audit_stats_tx, audit_stats_rx) = mpsc::unbounded_channel();
 
     tokio::spawn(async move {
-        loop {
+        while let Some(accepted) = stream.next().await {
+            let conn = match accepted {
+                Ok(conn) => conn,
+                Err(error) => {
+                    log::error!("fixture listener failed: {error}");
+                    break;
+                },
+            };
             let (h3_driver, h3_controller) = ServerH3Driver::new(&http3_settings);
-            let conn = stream.next().await.unwrap().unwrap().start(h3_driver);
+            let conn = conn.start(h3_driver);
             let h3_over_quic = ServerH3Connection::new(conn, h3_controller);
 
             let audit_stats = Arc::clone(h3_over_quic.audit_log_stats());
@@ -309,24 +293,23 @@ where
         }
     });
 
-    (url, audit_stats_rx)
+    Ok((url, audit_stats_rx))
 }
 
-pub fn extract_host_ipv4(url: &str) -> SocketAddr {
-    let url = url::Url::parse(url).expect("url should be valid");
+pub fn extract_host_ipv4(url: &str) -> QuicResult<SocketAddr> {
+    let url = url::Url::parse(url)?;
     match (url.host(), url.port()) {
         (Some(url::Host::Ipv4(addr)), Some(port)) =>
-            SocketAddr::new(addr.into(), port),
-        _ => panic!("invalid server address"),
+            Ok(SocketAddr::new(addr.into(), port)),
+        _ => Err("invalid fixture server address".into()),
     }
 }
 
 pub fn map_responses(
     responses: Vec<HashMap<u64, String>>,
-) -> HashMap<usize, HashSet<usize>> {
+) -> QuicResult<HashMap<usize, HashSet<usize>>> {
     let mut map = HashMap::<_, HashSet<_>>::default();
-    let res_info_re =
-        Regex::new(r"^(?P<stream_id>\d+),GET /(?P<conn_num>\d+)$").unwrap();
+    let res_info_re = Regex::new(r"^(?P<stream_id>\d+),GET /(?P<conn_num>\d+)$")?;
 
     for resp in responses {
         for (_, content) in resp {
@@ -335,16 +318,24 @@ pub fn map_responses(
                     continue;
                 }
 
-                let caps = res_info_re.captures(res).unwrap();
-                let conn_num =
-                    caps.name("conn_num").unwrap().as_str().parse().unwrap();
-                let stream_id =
-                    caps.name("stream_id").unwrap().as_str().parse().unwrap();
+                let caps = res_info_re
+                    .captures(res)
+                    .ok_or_else(|| format!("invalid response: {res}"))?;
+                let conn_num = caps
+                    .name("conn_num")
+                    .ok_or("missing connection number")?
+                    .as_str()
+                    .parse()?;
+                let stream_id = caps
+                    .name("stream_id")
+                    .ok_or("missing stream ID")?
+                    .as_str()
+                    .parse()?;
 
                 map.entry(conn_num).or_default().insert(stream_id);
             }
         }
     }
 
-    map
+    Ok(map)
 }

@@ -151,7 +151,9 @@ fn make_quiche_config(
         .connection_hook
         .as_ref()
         .zip(params.tls_cert)
-        .and_then(|(hook, tls)| hook.create_custom_ssl_context_builder(tls));
+        .map(|(hook, tls)| hook.create_custom_ssl_context_builder(tls))
+        .transpose()?
+        .flatten();
 
     let mut config = if let Some(builder) = ssl_ctx_builder {
         quiche::Config::with_btls_ssl_ctx_builder(
@@ -341,6 +343,34 @@ mod tests {
             ConnectionParams::new_client(settings, None, Hooks::default());
 
         assert!(make_quiche_config(&params, false).is_err());
+    }
+
+    #[test]
+    fn tls_hook_error_is_not_a_default_context_fallback() -> QuicResult<()> {
+        struct FailingHook;
+        impl crate::quic::ConnectionHook for FailingHook {
+            fn create_custom_ssl_context_builder(
+                &self, _settings: TlsCertificatePaths<'_>,
+            ) -> QuicResult<Option<btls::ssl::SslContextBuilder>> {
+                Err(std::io::Error::other("custom TLS context rejected").into())
+            }
+        }
+        let params = ConnectionParams::new_server(
+            QuicSettings::default(),
+            TlsCertificatePaths {
+                cert: "unused",
+                private_key: "unused",
+                kind: CertificateKind::X509,
+            },
+            Hooks {
+                connection_hook: Some(std::sync::Arc::new(FailingHook)),
+            },
+        );
+        let error = make_quiche_config(&params, false)
+            .err()
+            .ok_or("TLS hook failure was ignored")?;
+        assert_eq!(error.to_string(), "custom TLS context rejected");
+        Ok(())
     }
 
     #[cfg(not(feature = "rpk"))]
