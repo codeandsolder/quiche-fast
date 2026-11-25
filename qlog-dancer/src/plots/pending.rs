@@ -428,7 +428,7 @@ mod tests {
                 in_flight: 1,
             },
         ]);
-        assert!(occupancy_intervals(&ds, 0.0)?.is_empty());
+        assert_eq!(occupancy_intervals(&ds, 0.0)?, []);
         // An open request beginning after the horizon is valid, not a
         // reversed lifecycle caused by an invented FIN at the horizon.
         ds.http_requests.insert(7, HttpRequestStub {

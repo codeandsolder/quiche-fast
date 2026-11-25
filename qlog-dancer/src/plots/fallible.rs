@@ -83,9 +83,9 @@ pub(super) fn checked_pixel(value: u64) -> io::Result<i32> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn bitmap_area<'a>(
-    path: &'a str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
-) -> Result<DrawingArea<BitMapBackend<'a>, Shift>, Box<dyn Error>> {
+pub(super) fn bitmap_area(
+    path: &str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
+) -> Result<DrawingArea<BitMapBackend<'_>, Shift>, Box<dyn Error>> {
     if size.width == 0 ||
         size.height == 0 ||
         u64::from(size.width) >= i32::MAX as u64 ||

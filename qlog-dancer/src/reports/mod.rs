@@ -56,7 +56,7 @@ pub fn report(
                     data.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
                 );
             }
-            println!("{}", table);
+            println!("{table}");
             println!();
 
             text::print_stats(&data.datastore, stats);

@@ -245,21 +245,19 @@ mod tests {
     }
 
     #[test]
-    fn label_rectangle_rejects_final_coordinate_overflow() {
-        assert_eq!(label_right_edge(0).expect("empty state"), 1);
-        assert_eq!(label_right_edge(8).expect("short state"), 49);
+    fn label_rectangle_rejects_final_coordinate_overflow(
+    ) -> Result<(), Box<dyn Error>> {
+        assert_eq!(label_right_edge(0)?, 1);
+        assert_eq!(label_right_edge(8)?, 49);
         let largest = ((i32::MAX as usize) - 1) / 6;
-        assert_eq!(
-            label_right_edge(largest).expect("largest valid label"),
-            (largest * 6 + 1) as i32
-        );
+        assert_eq!(label_right_edge(largest)?, i32::try_from(largest * 6 + 1)?);
         assert!(label_right_edge(largest + 1).is_err());
         assert!(label_right_edge(usize::MAX).is_err());
+        Ok(())
     }
 
     #[test]
-    fn empty_congestion_renders_and_invalid_timestamps_fail(
-    ) -> Result<(), Box<dyn Error>> {
+    fn empty_congestion_renders_and_invalid_timestamps_fail() {
         let mut buffer = vec![0_u8; 1000 * 900 * 3];
         let area = BitMapBackend::with_buffer(&mut buffer, (1000, 900))
             .into_drawing_area();
@@ -285,6 +283,5 @@ mod tests {
         assert!(
             draw_congestion_plot(&params, &axis, &ss, &invalid, &area).is_err()
         );
-        Ok(())
     }
 }

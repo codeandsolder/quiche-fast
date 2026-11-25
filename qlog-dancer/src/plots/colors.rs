@@ -67,7 +67,7 @@ impl<'a> ColorCycle<'a> {
     }
 
     /// Advance through the palette, wrapping to its beginning.
-    pub fn next_color(&mut self) -> RGBColor {
+    pub const fn next_color(&mut self) -> RGBColor {
         let color = self.colors[self.tracking_index];
         self.tracking_index = if self.tracking_index + 1 == self.colors.len() {
             0
@@ -248,17 +248,19 @@ mod tests {
     }
 
     #[test]
-    fn borrowed_custom_palette_rejects_invalid_starts_and_cycles() {
+    fn borrowed_custom_palette_rejects_invalid_starts_and_cycles(
+    ) -> Result<(), &'static str> {
         let colors = [RGBColor(1, 2, 3), RGBColor(4, 5, 6)];
         assert!(ColorCycle::with_colors(&[], 0).is_none());
         assert!(ColorCycle::with_colors(&colors, colors.len()).is_none());
 
         let mut cycle =
-            ColorCycle::with_colors(&colors, 1).expect("valid starting index");
+            ColorCycle::with_colors(&colors, 1).ok_or("valid starting index")?;
         assert_eq!(cycle.next_color(), colors[1]);
         assert_eq!(cycle.next_color(), colors[0]);
         assert_eq!(cycle.next_color(), colors[1]);
         cycle.reset();
         assert_eq!(cycle.next_color(), colors[1]);
+        Ok(())
     }
 }

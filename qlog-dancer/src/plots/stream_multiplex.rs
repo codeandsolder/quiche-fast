@@ -639,7 +639,7 @@ mod tests {
         let model = MultiplexModel::new(&params, &ss, &ds)?;
         assert_eq!(model.lanes.keys().copied().collect::<Vec<_>>(), [1, 5]);
         assert_eq!(model.lanes[&1].frames, [(9.0, 7)]);
-        assert!(model.lanes[&1].data.is_empty());
+        assert_eq!(model.lanes[&1].data, []);
         assert_eq!(model.x_range, 0.0..9.0);
         assert_eq!(model.max_data, 30);
         assert_eq!(model.layout, MultiplexLayout::new(&params, 2)?);
