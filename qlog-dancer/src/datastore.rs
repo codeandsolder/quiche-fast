@@ -452,8 +452,8 @@ pub struct Datastore {
     pub largest_data_frame_rx_length_global: u64,
     pub largest_data_frame_tx_length_global: u64,
 
-    local_initial_stream_limits: InitialStreamLimits,
-    peer_initial_stream_limits: InitialStreamLimits,
+    pub local_initial_stream_limits: InitialStreamLimits,
+    pub peer_initial_stream_limits: InitialStreamLimits,
 
     pub h2_recv_window_updates: BTreeMap<u32, Vec<(f64, i32)>>,
 
@@ -528,7 +528,7 @@ fn cumulative_total(
 /// not the vantage point of the log. For bidirectional streams bit zero
 /// selects the initiator; bit one identifies unidirectional streams.
 #[derive(Debug, Default, PartialEq, Eq)]
-struct InitialStreamLimits {
+pub struct InitialStreamLimits {
     bidi_local: u64,
     bidi_remote: u64,
     uni: u64,
@@ -1484,10 +1484,10 @@ impl Datastore {
         &mut self, packet_type: PacketType,
         ranges: &[qlog::events::quic::AckRange],
     ) {
-        let spaces = match packet_type {
-            PacketType::Initial => &[PacketType::Initial][..],
-            PacketType::Handshake => &[PacketType::Handshake][..],
-            PacketType::OneRtt => &[PacketType::ZeroRtt, PacketType::OneRtt][..],
+        let spaces: &[PacketType] = match packet_type {
+            PacketType::Initial => &[PacketType::Initial],
+            PacketType::Handshake => &[PacketType::Handshake],
+            PacketType::OneRtt => &[PacketType::ZeroRtt, PacketType::OneRtt],
             _ => return,
         };
         for range in ranges {
