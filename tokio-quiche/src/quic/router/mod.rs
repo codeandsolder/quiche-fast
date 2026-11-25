@@ -956,7 +956,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_timeout() -> Result<(), Box<dyn std::error::Error>> {
+    async fn test_timeout() -> crate::QuicResult<()> {
         // Configure a short idle timeout to speed up connection reclamation as
         // quiche doesn't support time mocking
         let quic_settings = QuicSettings {
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn test_poll_packet_always_ready() {
+    fn test_poll_packet_always_ready() -> crate::QuicResult<()> {
         let (cert, private_key) = test_credentials();
         let tls_cert_settings = TlsCertificatePaths {
             cert,
@@ -1238,7 +1238,7 @@ mod tests {
             Hooks::default(),
         );
 
-        let config = Config::new(&params, SocketCapabilities::default()).unwrap();
+        let config = Config::new(&params, SocketCapabilities::default())?;
         let local_addr = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
 
         let (mut ipr, accept_stream) = InboundPacketRouter::new(
@@ -1264,10 +1264,10 @@ mod tests {
 
         // Fill the `conn_map_cmd` channel with some messages to process
         for _ in 0..20 {
-            let random_cid = SimpleConnectionIdGenerator.new_connection_id();
+            let random_cid = SimpleConnectionIdGenerator.new_connection_id()?;
             conn_map_cmd_tx
                 .send(ConnectionMapCommand::UnmapCid(random_cid))
-                .unwrap();
+                .map_err(|_| "router command channel closed")?;
         }
         // Give the IPR some time to process the ConnectionMapCommands
         std::thread::sleep(Duration::from_secs(1));
@@ -1284,7 +1284,8 @@ mod tests {
 
         // Check that the ConnectionMapCommands we added above were actually
         // processed
-        let ipr = ipr.join().unwrap();
+        let ipr = ipr.join().map_err(|_| "router thread panicked")?;
         assert!(ipr.conn_map_cmd_rx.is_empty());
+        Ok(())
     }
 }

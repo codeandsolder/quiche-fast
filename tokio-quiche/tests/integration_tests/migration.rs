@@ -65,13 +65,15 @@ fn connection_stats_use_active_path() {
 }
 
 #[tokio::test]
-async fn test_passive_migration() {
-    let _ = run_migration_test(false, 12345).await;
+async fn test_passive_migration() -> tokio_quiche::QuicResult<()> {
+    run_migration_test(false, 12345).await?;
+    Ok(())
 }
 
 #[tokio::test]
-async fn test_active_migration() {
-    let _ = run_migration_test(true, 23456).await;
+async fn test_active_migration() -> tokio_quiche::QuicResult<()> {
+    run_migration_test(true, 23456).await?;
+    Ok(())
 }
 
 /// Tests that the client can migrate either actively or passively.
@@ -97,7 +99,7 @@ async fn test_active_migration() {
 /// where packets are sent to, which is not possible using h3i.
 pub(crate) async fn run_migration_test(
     active: bool, base_port: u16,
-) -> (Vec<quiche::PathEvent>, SocketAddr, SocketAddr) {
+) -> tokio_quiche::QuicResult<(Vec<quiche::PathEvent>, SocketAddr, SocketAddr)> {
     let mut quic_settings = QuicSettings::default();
     quic_settings.active_connection_id_limit = 2;
     quic_settings.disable_active_migration = !active;
@@ -112,9 +114,8 @@ pub(crate) async fn run_migration_test(
     );
     let server_addr = extract_host_ipv4(&url);
 
-    let mut client_config =
-        quiche::Config::new(quiche::PROTOCOL_VERSION).unwrap();
-    client_config.set_application_protos(&[b"h3"]).unwrap();
+    let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
+    client_config.set_application_protos(&[b"h3"])?;
     client_config.set_initial_max_data(1500);
     client_config.set_initial_max_stream_data_bidi_local(1500);
     client_config.set_initial_max_stream_data_bidi_remote(1500);
@@ -126,10 +127,10 @@ pub(crate) async fn run_migration_test(
     client_config.set_disable_active_migration(true);
     client_config.verify_peer(false);
 
-    let client_scid = SimpleConnectionIdGenerator.new_connection_id();
+    let client_scid = SimpleConnectionIdGenerator.new_connection_id()?;
 
-    let client_addr = SocketAddr::new("127.0.0.1".parse().unwrap(), base_port);
-    let socket = tokio::net::UdpSocket::bind(client_addr).await.unwrap();
+    let client_addr = SocketAddr::new("127.0.0.1".parse()?, base_port);
+    let socket = tokio::net::UdpSocket::bind(client_addr).await?;
 
     let mut conn = quiche::connect(
         Some("test.com"),
@@ -137,14 +138,12 @@ pub(crate) async fn run_migration_test(
         client_addr,
         server_addr,
         &mut client_config,
-    )
-    .unwrap();
+    )?;
 
     if active {
         // Supply a second SCID to the server to facilitate active migration
-        let extra_scid = SimpleConnectionIdGenerator.new_connection_id();
-        conn.new_scid(&extra_scid, 0xAABBCCDDEEFF0123454678, false)
-            .unwrap();
+        let extra_scid = SimpleConnectionIdGenerator.new_connection_id()?;
+        conn.new_scid(&extra_scid, 0xAABBCCDDEEFF0123454678, false)?;
     }
 
     // Handshake.
@@ -156,7 +155,7 @@ pub(crate) async fn run_migration_test(
     // Create a new HTTP/3 connection once the QUIC connection is established.
     let h3_config = quiche::h3::Config::new();
     let mut h3_conn =
-        quiche::h3::Connection::with_transport(&mut conn, &h3_config).unwrap();
+        quiche::h3::Connection::with_transport(&mut conn, &h3_config)?;
 
     // Client sends first request on the initial path.
     let req = vec![
@@ -167,7 +166,7 @@ pub(crate) async fn run_migration_test(
         quiche::h3::Header::new(b"user-agent", b"quiche"),
     ];
 
-    h3_conn.send_request(&mut conn, &req, true).unwrap();
+    h3_conn.send_request(&mut conn, &req, true)?;
     emit_flight(&socket, &mut conn).await;
     process_flight(&socket, client_addr, &mut conn).await;
 
@@ -175,14 +174,12 @@ pub(crate) async fn run_migration_test(
 
     // Client migrates to new address.
     let migrated_addr = SocketAddr::new(client_addr.ip(), base_port + 1);
-    let migrated_socket =
-        tokio::net::UdpSocket::bind(migrated_addr).await.unwrap();
+    let migrated_socket = tokio::net::UdpSocket::bind(migrated_addr).await?;
 
     let client_addr = if active {
         // We actively switch the connection to `migrated_addr` and report that
         // address for all packets we receive from now on.
-        conn.migrate_source(migrated_addr)
-            .expect("active migration should succeed");
+        conn.migrate_source(migrated_addr)?;
         migrated_addr
     } else {
         // Keep the original client address to emulate an unrecognized path
@@ -191,7 +188,7 @@ pub(crate) async fn run_migration_test(
     };
 
     // Client sends second request on the new address.
-    h3_conn.send_request(&mut conn, &req, true).unwrap();
+    h3_conn.send_request(&mut conn, &req, true)?;
     emit_flight(&migrated_socket, &mut conn).await;
 
     let stats = conn.stats();
@@ -210,7 +207,7 @@ pub(crate) async fn run_migration_test(
 
     assert_eq!(process_h3_events(&mut h3_conn, &mut conn), (true, true));
 
-    (hook.path_events(), server_addr, migrated_addr)
+    Ok((hook.path_events(), server_addr, migrated_addr))
 }
 
 async fn emit_flight(

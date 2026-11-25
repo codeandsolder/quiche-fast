@@ -98,7 +98,7 @@ where
         pending_cid: ConnectionId<'static>, quiche_config: &mut quiche::Config,
     ) -> io::Result<Option<NewConnection>> {
         let handshake_start_time = Instant::now();
-        let scid = self.cid_generator.new_connection_id();
+        let scid = self.cid_generator.new_connection_id().into_io()?;
 
         let mut conn = if let Some(retry_cids) = retry_cids {
             quiche::accept_with_retry(
@@ -213,7 +213,7 @@ where
         &self, incoming: Incoming, hdr: &Header,
         manager: &AddrValidationTokenManager,
     ) -> io::Result<Option<NewConnection>> {
-        let scid = self.cid_generator.new_connection_id();
+        let scid = self.cid_generator.new_connection_id().into_io()?;
 
         let token = manager.gen(&hdr.dcid, incoming.peer_addr)?;
 

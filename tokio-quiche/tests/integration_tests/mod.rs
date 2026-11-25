@@ -234,7 +234,7 @@ async fn test_ioworker_state_machine_pause() {
 
 #[tokio::test]
 #[cfg(feature = "custom-client-dcid")]
-async fn test_connect_with_custom_dcid() {
+async fn test_connect_with_custom_dcid() -> tokio_quiche::QuicResult<()> {
     use tokio_quiche::http3::settings::Http3Settings;
     use tokio_quiche::quic::connect_with_config;
     use tokio_quiche::socket::Socket;
@@ -244,13 +244,13 @@ async fn test_connect_with_custom_dcid() {
     let (url, _hook, _audit_stats_rx) = start_server();
     let addr = extract_host_ipv4(&url);
 
-    let tokio_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-    tokio_socket.connect(addr).await.unwrap();
-    let socket = Socket::try_from(tokio_socket).unwrap();
+    let tokio_socket = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    tokio_socket.connect(addr).await?;
+    let socket = Socket::try_from(tokio_socket)?;
     let (h3_driver, _h3_controller) =
         ClientH3Driver::new(Http3Settings::default());
     let dcid =
-        tokio_quiche::quic::SimpleConnectionIdGenerator.new_connection_id();
+        tokio_quiche::quic::SimpleConnectionIdGenerator.new_connection_id()?;
     let mut params = ConnectionParams::default();
     params.dcid = Some(dcid);
 
@@ -258,9 +258,9 @@ async fn test_connect_with_custom_dcid() {
         Duration::from_secs(5),
         connect_with_config(socket, Some("127.0.0.1"), &params, h3_driver,),
     )
-    .await
-    .expect("connection timed out")
+    .await?
     .is_ok());
+    Ok(())
 }
 
 #[tokio::test]

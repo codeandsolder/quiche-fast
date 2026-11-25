@@ -27,12 +27,14 @@
 use super::migration::run_migration_test;
 
 #[tokio::test]
-async fn connection_hook_receives_path_events_from_worker() {
+async fn connection_hook_receives_path_events_from_worker(
+) -> tokio_quiche::QuicResult<()> {
     let (path_events, server_addr, migrated_addr) =
-        run_migration_test(false, 34567).await;
+        run_migration_test(false, 34567).await?;
 
     assert!(path_events.contains(&tokio_quiche::quiche::PathEvent::New(
         server_addr,
         migrated_addr,
     )));
+    Ok(())
 }
