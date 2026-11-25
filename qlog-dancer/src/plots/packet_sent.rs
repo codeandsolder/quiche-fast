@@ -644,8 +644,8 @@ mod tests {
         let png = std::fs::read(out.only_file()?)?;
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
 
-        let blocked = TempCharts::new()?;
-        let blocker = blocked.0.join("file-instead-of-directory");
+        let temp_dir = TempCharts::new()?;
+        let blocker = temp_dir.0.join("file-instead-of-directory");
         std::fs::write(&blocker, b"no mkdir")?;
         let ty = ChartOutputType::Png {
             output_dir: blocker.to_string_lossy().into_owned(),

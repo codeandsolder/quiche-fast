@@ -31,7 +31,7 @@ use qlog::reader::QlogSeqDecoder;
 use qlog::QlogSeq;
 
 #[derive(Default)]
-pub(super) struct SqlogStream {
+pub struct SqlogStream {
     decoder: QlogSeqDecoder,
     events: Vec<Event>,
 }
