@@ -29,7 +29,6 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 mod bandwidth_sampler;
-mod windowed_filter;
 
 pub use bandwidth_sampler::BandwidthSampler;
 pub use bandwidth_sampler::SendTimeState;

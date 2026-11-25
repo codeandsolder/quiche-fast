@@ -279,6 +279,7 @@ pub(crate) struct IoWorkerParams<Tx, M> {
     pub(crate) dscp_handle: Option<DscpHandle>,
     pub(crate) route_lease: RouteLease,
     pub(crate) active_connection: GaugeGuard<Gauge>,
+    pub(in crate::quic) bw_estimator: BandwidthReporter,
     pub(crate) cid_generator: Option<SharedConnectionIdGenerator>,
     #[cfg(feature = "perf-quic-listener-metrics")]
     pub(crate) init_rx_time: Option<SystemTime>,
@@ -330,9 +331,6 @@ where
     S: ConnectionStage,
 {
     pub(crate) fn new(params: IoWorkerParams<Tx, M>, conn_stage: S) -> Self {
-        let bw_estimator =
-            BandwidthReporter::new(params.metrics.utilized_bandwidth());
-
         log::trace!("Creating IoWorker with stage: {conn_stage:?}");
 
         Self {
@@ -350,7 +348,7 @@ where
             metrics: params.metrics,
             handshake_info: params.handshake_info,
             conn_stage,
-            bw_estimator,
+            bw_estimator: params.bw_estimator,
         }
     }
 
@@ -495,13 +493,12 @@ where
             // kept across sleeps for the connection's lifetime.
             drop(pooled_send_buf);
 
-            self.bw_estimator.update(qconn, now);
+            self.bw_estimator.update(qconn, Instant::now());
 
             self.audit_log_stats
                 .set_max_bandwidth(self.bw_estimator.max_bandwidth);
-            self.audit_log_stats.set_max_loss_pct(
-                (self.bw_estimator.max_loss_pct * 100_f32).round() as u8,
-            );
+            self.audit_log_stats
+                .set_max_loss_pct(self.bw_estimator.max_loss.rounded_percent());
 
             let new_deadline = min_of_some(
                 qconn.timeout_instant(),
@@ -1167,6 +1164,7 @@ impl<Tx, M, S> From<IoWorker<Tx, M, S>> for IoWorkerParams<Tx, M> {
             dscp_handle: value.dscp_handle,
             route_lease: value.route_lease,
             active_connection: value.active_connection,
+            bw_estimator: value.bw_estimator,
             cid_generator: value.cid_generator,
             #[cfg(feature = "perf-quic-listener-metrics")]
             init_rx_time: value.init_rx_time,
@@ -1234,6 +1232,11 @@ where
         mut self, qconn: &mut QuicheConnection,
         ctx: &mut ConnectionStageContext<A>,
     ) {
+        self.bw_estimator.update(qconn, Instant::now());
+        self.audit_log_stats
+            .set_max_bandwidth(self.bw_estimator.max_bandwidth);
+        self.audit_log_stats
+            .set_max_loss_pct(self.bw_estimator.max_loss.rounded_percent());
         if self.conn_stage.work_loop_result.is_ok() &&
             self.bw_estimator.max_bandwidth > 0
         {
@@ -1245,7 +1248,7 @@ where
 
             metrics
                 .max_loss_pct()
-                .observe(self.bw_estimator.max_loss_pct as f64 * 100.);
+                .observe(self.bw_estimator.max_loss.percent());
         }
 
         if ctx.application.should_act() {

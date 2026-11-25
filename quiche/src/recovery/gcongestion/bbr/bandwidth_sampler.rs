@@ -37,7 +37,7 @@ use crate::recovery::gcongestion::Bandwidth;
 use crate::recovery::gcongestion::BbrAckCompensation;
 use crate::recovery::gcongestion::Lost;
 
-use super::windowed_filter::WindowedFilter;
+use crate::windowed_filter::WindowedFilter;
 
 #[derive(Debug)]
 struct ConnectionStateMap<T> {
