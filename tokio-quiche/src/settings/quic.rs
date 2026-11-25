@@ -201,7 +201,7 @@ pub struct QuicSettings {
     #[serde(default = "QuicSettings::default_pmtud_max_probes")]
     pub pmtud_max_probes: u8,
 
-    /// Whether to use HyStart++ (only with `cubic` and `reno` CC).
+    /// Whether to use `HyStart++` (only with `cubic` and `reno` CC).
     ///
     /// Defaults to `true`.
     #[serde(default = "QuicSettings::default_enable_hystart")]
