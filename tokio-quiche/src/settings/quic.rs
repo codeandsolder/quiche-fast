@@ -24,7 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use foundations::settings::settings;
 use serde_with::serde_as;
 use serde_with::DurationMilliSeconds;
 use std::time::Duration;
@@ -33,7 +32,8 @@ pub use qlog::writer::QlogCompression;
 
 /// QUIC configuration parameters.
 #[serde_as]
-#[settings]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "These are independent protocol and deployment options, not mutually exclusive states"
@@ -227,8 +227,7 @@ pub struct QuicSettings {
     /// peers are arbitrary eyeballs from the global internet.
     pub enable_expensive_packet_count_metrics: bool,
 
-    /// Forwards [`quiche`] logs into the logging system currently used by
-    /// [`foundations`].
+    /// Forwards [`quiche`] log records to the active [`tracing`] subscriber.
     ///
     /// Defaults to `false`.
     ///
@@ -504,10 +503,81 @@ impl QuicSettings {
     }
 }
 
+impl Default for QuicSettings {
+    fn default() -> Self {
+        Self {
+            alpn: Self::default_alpn(),
+            enable_dgram: Self::default_enable_dgram(),
+            dgram_recv_max_queue_len: Self::default_dgram_max_queue_len(),
+            dgram_send_max_queue_len: Self::default_dgram_max_queue_len(),
+            enable_early_data: false,
+            initial_max_data: Self::default_initial_max_data(),
+            initial_max_stream_data_bidi_local:
+                Self::default_initial_max_stream_data(),
+            initial_max_stream_data_bidi_remote:
+                Self::default_initial_max_stream_data(),
+            initial_max_stream_data_uni: Self::default_initial_max_stream_data(),
+            initial_max_streams_bidi: Self::default_initial_max_streams(),
+            initial_max_streams_uni: Self::default_initial_max_streams(),
+            max_idle_timeout: Self::default_max_idle_timeout(),
+            disable_active_migration: Self::default_disable_active_migration(),
+            active_connection_id_limit: Self::default_active_connection_id_limit(
+            ),
+            max_recv_udp_payload_size: Self::default_max_recv_udp_payload_size(),
+            max_send_udp_payload_size: Self::default_max_send_udp_payload_size(),
+            disable_client_ip_validation: false,
+            keylog_file: None,
+            qlog_dir: None,
+            qlog_compression: QlogCompression::None,
+            cc_algorithm: Self::default_cc_algorithm(),
+            initial_congestion_window_packets:
+                Self::default_initial_congestion_window_packets(),
+            enable_relaxed_loss_threshold: false,
+            discover_path_mtu: false,
+            pmtud_max_probes: Self::default_pmtud_max_probes(),
+            enable_hystart: Self::default_enable_hystart(),
+            enable_pacing: false,
+            max_pacing_rate: None,
+            enable_expensive_packet_count_metrics: false,
+            capture_quiche_logs: false,
+            handshake_timeout: None,
+            listen_backlog: Self::default_listen_backlog(),
+            verify_peer: false,
+            max_connection_window: Self::default_max_connection_window(),
+            max_stream_window: Self::default_max_stream_window(),
+            enable_send_streams_blocked: false,
+            grease: Self::default_grease(),
+            max_amplification_factor: Self::default_amplification_factor(),
+            send_capacity_factor: Self::default_send_capacity_factor(),
+            ack_delay_exponent: Self::default_ack_delay_exponent(),
+            max_ack_delay: Self::default_max_ack_delay(),
+            max_path_challenge_recv_queue_len:
+                Self::default_max_path_challenge_recv_queue_len(),
+            stateless_reset_token: None,
+            disable_dcid_reuse: false,
+            track_unknown_transport_parameters: None,
+            pool_send_buffer: Self::default_pool_send_buffer(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::QuicSettings;
     use std::time::Duration;
+
+    #[test]
+    fn omitted_settings_match_programmatic_defaults(
+    ) -> Result<(), serde_json::Error> {
+        let decoded: QuicSettings = serde_json::from_str("{}")?;
+        let defaults = QuicSettings::default();
+        assert_eq!(
+            serde_json::to_value(&decoded)?,
+            serde_json::to_value(&defaults)?
+        );
+        assert_eq!(decoded.alpn, defaults.alpn);
+        Ok(())
+    }
 
     #[test]
     fn timeouts_parse_as_milliseconds() -> Result<(), serde_json::Error> {

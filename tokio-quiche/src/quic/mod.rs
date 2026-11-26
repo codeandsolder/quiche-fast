@@ -85,9 +85,11 @@ use std::time::Duration;
 
 use datagram_socket::DatagramSocketRecv;
 use datagram_socket::DatagramSocketSend;
-use foundations::telemetry::log;
 use qlog::writer::make_qlog_writer_from_path;
 use qlog::writer::qlog_file_name;
+use tracing as log;
+use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 use crate::http3::settings::Http3Settings;
 use crate::metrics::DefaultMetrics;
@@ -225,20 +227,20 @@ where
     )?;
 
     #[cfg(feature = "custom-client-dcid")]
-    log::info!("created unestablished quiche::Connection"; "scid" => ?scid, "provided_dcid" => ?params.dcid);
+    log::info!(scid = ?scid, provided_dcid = ?params.dcid, "created unestablished quiche::Connection");
     #[cfg(not(feature = "custom-client-dcid"))]
-    log::info!("created unestablished quiche::Connection"; "scid" => ?scid);
+    log::info!(scid = ?scid, "created unestablished quiche::Connection");
 
     if let Some(session) = &params.session {
         quiche_conn.set_session(session).map_err(|error| {
-            log::error!("application provided an invalid session"; "error"=>?error);
+            log::error!(error = ?error, "application provided an invalid session");
             quiche::Error::CryptoFail
         })?;
     }
 
     // Attach tracing before the worker sends its first handshake packet.
     if let Some(qlog_dir) = &client_config.qlog_dir {
-        log::info!("setting up qlogs"; "qlog_dir"=>qlog_dir);
+        log::info!(qlog_dir = qlog_dir, "setting up qlogs");
         let id = format!("{scid:?}");
         let path = std::path::Path::new(qlog_dir)
             .join(qlog_file_name(&id, client_config.qlog_compression));
@@ -275,16 +277,20 @@ where
     )?;
 
     // drive the packet router:
-    tokio::spawn(async move {
-        match router.await {
-            Ok(()) => {
-                log::debug!("incoming packet router finished");
-            },
-            Err(error) => {
-                log::error!("incoming packet router failed"; "error"=>error);
-            },
+    tokio::spawn(
+        async move {
+            match router.await {
+                Ok(()) => {
+                    log::debug!("incoming packet router finished");
+                },
+                Err(error) => {
+                    log::error!(error = %error, "incoming packet router failed");
+                },
+            }
         }
-    });
+        .in_current_span()
+        .with_current_subscriber(),
+    );
 
     let (connection, running) = initial_connection.handshake(app).await?;
     crate::quic::connection::InitialQuicConnection::resume(running);
@@ -344,7 +350,7 @@ where
                 log::trace!("incoming packet router finished");
             },
             Err(error) => {
-                log::error!("incoming packet router failed"; "error"=>error);
+                log::error!(error = %error, "incoming packet router failed");
             },
         }
     });

@@ -898,9 +898,9 @@ impl ExData<'_> {
     }
 
     #[cfg(feature = "boringssl-btls-crate")]
-    pub(super) fn from_ssl_ref<'callback>(
-        ssl: &'callback mut btls::ssl::SslRef,
-    ) -> Option<&'callback mut ExData<'callback>> {
+    pub(super) fn from_ssl_ref(
+        ssl: &mut btls::ssl::SslRef,
+    ) -> Option<&mut ExData<'_>> {
         use foreign_types_shared::ForeignTypeRef;
 
         // SAFETY: This private index contains a borrowed ExData only during

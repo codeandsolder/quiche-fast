@@ -45,7 +45,6 @@ use crate::quic::DscpHandle;
 use crate::settings::Config;
 use datagram_socket::DatagramSocketRecv;
 use datagram_socket::DatagramSocketSend;
-use foundations::telemetry::log;
 use quiche::ConnectionId;
 use quiche::Header;
 use quiche::MAX_CONN_ID_LEN;
@@ -63,6 +62,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 use task_killswitch::spawn_with_killswitch;
 use tokio::sync::mpsc;
+use tracing as log;
 
 type ConnStream<Tx, M> = mpsc::Receiver<io::Result<InitialQuicConnection<Tx, M>>>;
 
@@ -505,7 +505,7 @@ where
 
         let peer_addr = pkt_data.peer_addr;
         if pkt_data.local_addr != self.local_addr {
-            log::trace!("overriding local address"; "actual_local" => pkt_data.local_addr, "configured_local" => self.local_addr);
+            log::trace!(actual_local = %pkt_data.local_addr, configured_local = %self.local_addr, "overriding local address");
         }
         let res = self.on_incoming(pkt_data);
 

@@ -46,8 +46,6 @@ mod response;
 use response::resource;
 use response::ResponseBody;
 
-use ring::rand::SecureRandom;
-
 use quiche::h3::NameValue;
 use quiche::h3::Priority;
 
@@ -189,14 +187,13 @@ pub fn hdrs_to_strings(hdrs: &[quiche::h3::Header]) -> Vec<(String, String)> {
 ///
 /// # Errors
 /// Returns an error if the random source cannot supply bytes.
-pub fn generate_cid_and_reset_token<T: SecureRandom>(
-    rng: &T,
-) -> Result<(quiche::ConnectionId<'static>, u128), ring::error::Unspecified> {
+pub fn generate_cid_and_reset_token(
+) -> Result<(quiche::ConnectionId<'static>, u128), btls::error::ErrorStack> {
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    rng.fill(&mut scid)?;
+    btls::rand::rand_bytes(&mut scid)?;
     let scid = scid.to_vec().into();
     let mut reset_token = [0; 16];
-    rng.fill(&mut reset_token)?;
+    btls::rand::rand_bytes(&mut reset_token)?;
     let reset_token = u128::from_be_bytes(reset_token);
     Ok((scid, reset_token))
 }

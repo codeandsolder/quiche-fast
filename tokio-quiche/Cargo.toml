@@ -44,9 +44,7 @@ tokio-task-metrics = []
 # Enable gzip compression for QLOG output files. Forwards to the
 # `qlog` crate's `gzip` feature so `QuicSettings::qlog_compression =
 # QlogCompression::Gzip` is available at runtime and emits
-# `.sqlog.gz` files. Pulls in `flate2` with its crate-default backend
-# (consumers can override the backend by depending on `flate2`
-# directly).
+# `.sqlog.gz` files using the fleet zlib-rs backend.
 #
 # May be combined with `qlog-zstd`; the algorithm is selected per
 # connection at runtime via `QuicSettings::qlog_compression`.
@@ -69,13 +67,10 @@ workspace = true
 anyhow = { workspace = true }
 btls = { workspace = true }
 bytes = { workspace = true }
-crossbeam = { workspace = true, default-features = false }
+crossbeam-utils = { workspace = true }
 datagram-socket = { workspace = true }
 foundations = { workspace = true, default-features = false, features = [
-  "logging",
   "metrics",
-  "settings",
-  "testing",
 ] }
 
 futures = { workspace = true }
@@ -84,12 +79,12 @@ ipnetwork = { workspace = true }
 log = { workspace = true }
 octets = { workspace = true }
 pin-project = { workspace = true }
-qlog = { workspace = true, features = ["foundations"] }
+qlog = { workspace = true }
 quiche = { workspace = true, features = ["boringssl-btls-crate", "qlog"] }
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_with = { workspace = true }
-slog-scope = { workspace = true }
-slog-stdlog = { workspace = true }
+tracing = { workspace = true }
+tracing-log = { workspace = true }
 smallvec = { workspace = true }
 task-killswitch = { workspace = true }
 thiserror = { workspace = true }
@@ -103,18 +98,11 @@ tokio-util = { workspace = true, features = [
   "rt",
 ] }
 
-# `foundations/tracing` pulls cf-rustracing's backtrace dependency. libc 0.2.190
-# removed dyld APIs that backtrace 0.3.76 still references on Apple mobile OSs.
-# Keep tracing enabled everywhere else, while avoiding that broken dependency
-# edge on iOS/tvOS/watchOS/visionOS until the upstream stack is corrected.
-[target.'cfg(not(any(target_os = "ios", target_os = "tvos", target_os = "watchos", target_os = "visionos")))'.dependencies]
-foundations = { workspace = true, default-features = false, features = ["tracing"] }
-
 [dev-dependencies]
 url = { workspace = true }
 assert_matches = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
-env_logger = { workspace = true }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter", "registry", "std"] }
 h3i = { workspace = true, features = ["async"] }
 http = "1"
 http-body = "1"

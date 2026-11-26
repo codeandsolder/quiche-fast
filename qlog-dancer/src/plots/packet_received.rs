@@ -24,11 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
-#[cfg(target_arch = "wasm32")]
-use crate::plots::fallible::canvas_area;
-use crate::plots::fallible::invalid_chart;
 use crate::plots::packet_sent::draw_packet_sent_received_plot;
 use crate::plots::ChartConfig;
 use crate::plots::ChartOutputType;
@@ -49,36 +44,18 @@ pub fn plot_packet_received(
     let chart_config =
         ChartConfig::new("packet-received", filename, &params.clamp, ds, ty);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let chart_path = match ty {
-        ChartOutputType::Png { .. } => chart_config.chart_filepath(),
-        ChartOutputType::Canvas { .. } =>
-            return Err(invalid_chart(
-                "native received chart requires PNG output",
-            )
-            .into()),
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let root = bitmap_area(
-        &chart_path,
+    chart_config.render(
         params.chart_size,
         params.colors,
         params.chart_margin,
-    )?;
-
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id = chart_config.canvas_id().ok_or_else(|| {
-        invalid_chart("browser received chart requires canvas output")
-    })?;
-    #[cfg(target_arch = "wasm32")]
-    let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
-
-    // Received packets have only one timeline panel. Reuse the full drawing
-    // area instead of leaving the lower 40% unused (unlike sent packet plots,
-    // which have several additional panels).
-    draw_packet_sent_received_plot(false, filename, params, ss, &root)?;
-    root.present()?;
-    Ok(())
+        |root| {
+            // Received packets have only one timeline panel. Reuse the full
+            // drawing area instead of leaving the lower 40% unused (unlike sent
+            // packet plots, which have several additional panels).
+            draw_packet_sent_received_plot(false, filename, params, ss, root)?;
+            Ok(())
+        },
+    )
 }
 
 #[cfg(test)]

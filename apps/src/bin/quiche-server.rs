@@ -32,10 +32,10 @@ use quiche::ConnectionId;
 use quiche::Header;
 use quiche::RecvInfo;
 use quiche::SendInfo;
+use quiche_apps::args::server_command;
 use quiche_apps::args::Args;
 use quiche_apps::args::CommonArgs;
 use quiche_apps::args::ServerArgs;
-use quiche_apps::args::SERVER_USAGE;
 use quiche_apps::common::alpns;
 use quiche_apps::common::generate_cid_and_reset_token;
 use quiche_apps::common::stdout_sink;
@@ -47,8 +47,6 @@ use quiche_apps::common::PartialResponse;
 use quiche_apps::sendto::detect_gso;
 use quiche_apps::sendto::DatagramBatch;
 use quiche_apps::sendto::DatagramQueue;
-use ring::hmac;
-use ring::rand::SystemRandom;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -73,9 +71,7 @@ fn failure(context: &str, error: impl std::fmt::Display) -> io::Error {
 
 fn main() {
     env_logger::builder().format_timestamp_nanos().init();
-    let parsed = docopt::Docopt::new(SERVER_USAGE)
-        .and_then(|parser| parser.parse())
-        .unwrap_or_else(|error| error.exit());
+    let parsed = server_command().get_matches();
     let common =
         CommonArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
     let args =
@@ -267,8 +263,7 @@ struct Connections<'a> {
     common: &'a CommonArgs,
     config: quiche::Config,
     keylog: Option<std::fs::File>,
-    rng: SystemRandom,
-    cid_key: hmac::Key,
+    cid_key: [u8; 32],
     retry: RetryTokens,
     next_id: ClientId,
     clients: HashMap<ClientId, Client>,
@@ -304,16 +299,15 @@ impl<'a> Connections<'a> {
         if keylog.is_some() {
             config.log_keys();
         }
-        let rng = SystemRandom::new();
-        let cid_key = hmac::Key::generate(hmac::HMAC_SHA256, &rng)
+        let mut cid_key = [0; 32];
+        btls::rand::rand_bytes(&mut cid_key)
             .map_err(|error| failure("CID key", error))?;
-        let retry = RetryTokens::new(&rng)?;
+        let retry = RetryTokens::new()?;
         Ok(Self {
             args,
             common,
             config,
             keylog,
-            rng,
             cid_key,
             retry,
             next_id: 0,
@@ -323,12 +317,19 @@ impl<'a> Connections<'a> {
         })
     }
 
-    fn derived_cid(&self, dcid: &ConnectionId<'_>) -> ConnectionId<'static> {
+    fn derived_cid(
+        &self, dcid: &ConnectionId<'_>,
+    ) -> quiche::Result<ConnectionId<'static>> {
         if cfg!(feature = "fuzzing") {
-            return ConnectionId::copy_from_slice(&[0; quiche::MAX_CONN_ID_LEN]);
+            return Ok(ConnectionId::copy_from_slice(
+                &[0; quiche::MAX_CONN_ID_LEN],
+            ));
         }
-        let tag = hmac::sign(&self.cid_key, dcid);
-        ConnectionId::copy_from_slice(&tag.as_ref()[..quiche::MAX_CONN_ID_LEN])
+        let tag = btls::hash::hmac_sha256(&self.cid_key, dcid)
+            .map_err(|_| quiche::Error::CryptoFail)?;
+        Ok(ConnectionId::copy_from_slice(
+            &tag[..quiche::MAX_CONN_ID_LEN],
+        ))
     }
 
     fn route(
@@ -338,7 +339,7 @@ impl<'a> Connections<'a> {
         if let Some(&id) = self.ids.get(&header.dcid) {
             return Ok(Route::Client(id));
         }
-        let derived = self.derived_cid(&header.dcid);
+        let derived = self.derived_cid(&header.dcid)?;
         if let Some(&id) = self.ids.get(&derived) {
             return Ok(Route::Client(id));
         }
@@ -359,7 +360,10 @@ impl<'a> Connections<'a> {
                 return Ok(Route::Drop);
             };
             if token.is_empty() {
-                let token = self.retry.mint(peer.ip(), &derived, &header.dcid);
+                let token = self
+                    .retry
+                    .mint(peer.ip(), &derived, &header.dcid)
+                    .map_err(|_| quiche::Error::CryptoFail)?;
                 return quiche::retry(
                     &header.scid,
                     &header.dcid,
@@ -429,7 +433,7 @@ impl<'a> Connections<'a> {
             self.ids.remove(&retired);
         }
         while client.conn.scids_left() > 0 {
-            let (cid, reset) = match generate_cid_and_reset_token(&self.rng) {
+            let (cid, reset) = match generate_cid_and_reset_token() {
                 Ok(value) => value,
                 Err(error) => {
                     error!("generate CID: {error}");
@@ -671,13 +675,14 @@ impl BurstLimit {
 }
 
 struct RetryTokens {
-    key: hmac::Key,
+    key: [u8; 32],
     start: Instant,
 }
 
 impl RetryTokens {
-    fn new(rng: &SystemRandom) -> io::Result<Self> {
-        let key = hmac::Key::generate(hmac::HMAC_SHA256, rng)
+    fn new() -> io::Result<Self> {
+        let mut key = [0; 32];
+        btls::rand::rand_bytes(&mut key)
             .map_err(|error| failure("Retry token key", error))?;
         Ok(Self {
             key,
@@ -688,21 +693,21 @@ impl RetryTokens {
     fn mint(
         &self, ip: IpAddr, retry_cid: &ConnectionId<'_>,
         original: &ConnectionId<'_>,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, btls::error::ErrorStack> {
         self.mint_at(ip, retry_cid, original, self.start.elapsed().as_secs())
     }
 
     fn mint_at(
         &self, ip: IpAddr, retry_cid: &ConnectionId<'_>,
         original: &ConnectionId<'_>, now: u64,
-    ) -> Vec<u8> {
+    ) -> Result<Vec<u8>, btls::error::ErrorStack> {
         let mut token = now.to_be_bytes().to_vec();
         append_ip(&mut token, ip);
         token.extend_from_slice(retry_cid);
         token.extend_from_slice(original);
-        let tag = hmac::sign(&self.key, &token);
-        token.extend_from_slice(tag.as_ref());
-        token
+        let tag = btls::hash::hmac_sha256(&self.key, &token)?;
+        token.extend_from_slice(&tag);
+        Ok(token)
     }
 
     fn validate<'a>(
@@ -719,10 +724,11 @@ impl RetryTokens {
             return None;
         }
         let (payload, tag) =
-            token.split_at_checked(token.len().checked_sub(
-                hmac::HMAC_SHA256.digest_algorithm().output_len(),
-            )?)?;
-        hmac::verify(&self.key, payload, tag).ok()?;
+            token.split_at_checked(token.len().checked_sub(32)?)?;
+        let expected = btls::hash::hmac_sha256(&self.key, payload).ok()?;
+        if !btls::memcmp::eq(&expected, tag) {
+            return None;
+        }
         let (issued, rest) = payload.split_at_checked(8)?;
         let issued = u64::from_be_bytes(issued.try_into().ok()?);
         if now.checked_sub(issued)? > RETRY_TOKEN_LIFETIME {
@@ -787,16 +793,14 @@ mod tests {
     use super::RetryTokens;
     use super::RETRY_TOKEN_LIFETIME;
     use quiche::ConnectionId;
-    use ring::rand::SystemRandom;
     use std::net::IpAddr;
     use std::net::Ipv4Addr;
     use std::net::Ipv6Addr;
 
     #[test]
     fn retry_tokens_bind_ip_connection_and_expiry() -> std::io::Result<()> {
-        let rng = SystemRandom::new();
-        let tokens = RetryTokens::new(&rng)?;
-        let foreign = RetryTokens::new(&rng)?;
+        let tokens = RetryTokens::new()?;
+        let foreign = RetryTokens::new()?;
         let retry = ConnectionId::copy_from_slice(&[1; quiche::MAX_CONN_ID_LEN]);
         let other = ConnectionId::copy_from_slice(&[2; quiche::MAX_CONN_ID_LEN]);
         let original = ConnectionId::copy_from_slice(b"original");
@@ -804,7 +808,9 @@ mod tests {
             IpAddr::V4(Ipv4Addr::LOCALHOST),
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ] {
-            let token = tokens.mint_at(ip, &retry, &original, 10);
+            let token = tokens
+                .mint_at(ip, &retry, &original, 10)
+                .map_err(|error| super::failure("mint token", error))?;
             assert_eq!(
                 tokens.validate_at(ip, &retry, &token, 10),
                 Some(original.clone())

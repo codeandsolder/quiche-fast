@@ -44,7 +44,6 @@ use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
 use datagram_socket::ShutdownConnection;
 use datagram_socket::SocketStats;
-use foundations::telemetry::log;
 use futures::Future;
 use quiche::ConnectionId;
 use std::fmt;
@@ -63,6 +62,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
+use tracing as log;
 
 use self::error::make_handshake_result;
 use super::hooks::ConnectionHook;
@@ -505,7 +505,7 @@ where
             match handshake_fut.await {
                 Ok(running) => Self::resume(running),
                 Err(e) => {
-                    log::error!("QUIC handshake failed in IQC::start"; "error" => e);
+                    log::error!(error = %e, "QUIC handshake failed in IQC::start");
                 },
             }
         };

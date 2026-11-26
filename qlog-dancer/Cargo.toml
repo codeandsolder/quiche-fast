@@ -18,7 +18,7 @@ clap = { workspace = true, features = ["derive"] }
 env_logger = { workspace = true }
 log = { workspace = true }
 netlog = { workspace = true }
-plotters = "0.3.4"
+plotters = { version = "0.3.7", default-features = false, features = ["line_series", "full_palette"] }
 qlog = { workspace = true, features = ["gzip", "zstd"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -37,8 +37,12 @@ serde-wasm-bindgen = "0.6"
 wasm-bindgen = "0.2"
 web-sys = { version = "0.3", features = ["HtmlCanvasElement", "Document", "Window", "Element"] }
 
-[dev-dependencies]
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+plotters = { version = "0.3.7", default-features = false, features = ["bitmap_backend", "ttf"] }
+
 image = { version = "0.25.0", default-features = false, features = ["png"] }
+
+[dev-dependencies]
 smallvec = { workspace = true }
 
 [lib]

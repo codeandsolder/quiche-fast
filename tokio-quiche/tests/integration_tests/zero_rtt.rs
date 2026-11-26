@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use crate::fixtures::TestLogs;
 use crate::integration_tests::extract_host_ipv4;
 use crate::integration_tests::h3i_fixtures;
 use crate::integration_tests::start_server_with_settings;
@@ -31,7 +32,6 @@ use crate::integration_tests::Http3Settings;
 use crate::integration_tests::QuicSettings;
 use crate::integration_tests::TestConnectionHook;
 use datagram_socket::QuicAuditStats;
-use foundations::telemetry::TelemetryContext;
 use futures::SinkExt;
 use h3i;
 use h3i::actions::h3::send_headers_frame;
@@ -62,6 +62,7 @@ use tokio_quiche::quic::HandshakeError;
 use tokio_quiche::quiche::h3::Header;
 use tokio_quiche::QuicResult;
 use tokio_quiche::ServerH3Connection;
+use tracing::instrument::WithSubscriber;
 
 #[derive(Debug, Default, Clone)]
 struct TestContext {
@@ -110,7 +111,7 @@ async fn check_resumed_requests(retry: bool) -> QuicResult<()> {
             helper_connect_with_early_data(
                 h3i_config,
                 None,
-                helper_frame_actions(stream_id),
+                helper_frame_actions(stream_id, &[]),
             )
             .await?
         };
@@ -153,7 +154,7 @@ async fn check_resumed_requests(retry: bool) -> QuicResult<()> {
         let _summary = helper_connect_with_early_data(
             h3i_config,
             Some(early_frame_actions),
-            helper_frame_actions(stream_id),
+            helper_frame_actions(stream_id, &[early_stream_id]),
         )
         .await?;
 
@@ -202,24 +203,33 @@ fn helper_reset_test(context: &Arc<Mutex<TestContext>>) -> QuicResult<()> {
     Ok(())
 }
 
-fn helper_frame_actions(stream_id: u64) -> Vec<Action> {
-    vec![
+fn helper_frame_actions(
+    stream_id: u64, additional_streams: &[u64],
+) -> Vec<Action> {
+    let mut actions = vec![
         send_headers_frame(stream_id, true, h3i_fixtures::default_headers()),
         Action::FlushPackets,
-        Action::Wait {
-            wait_type: WaitType::StreamEvent(StreamEvent {
-                stream_id,
-                event_type: StreamEventType::Finished,
+    ];
+    // Streams complete independently, including retransmitted early data after
+    // Retry. Do not close the connection until every expected response ends.
+    actions.extend(
+        std::iter::once(stream_id)
+            .chain(additional_streams.iter().copied())
+            .map(|stream_id| Action::Wait {
+                wait_type: WaitType::StreamEvent(StreamEvent {
+                    stream_id,
+                    event_type: StreamEventType::Finished,
+                }),
             }),
+    );
+    actions.push(Action::ConnectionClose {
+        error: ConnectionError {
+            is_app: true,
+            error_code: WireErrorCode::NoError as _,
+            reason: Vec::new(),
         },
-        Action::ConnectionClose {
-            error: ConnectionError {
-                is_app: true,
-                error_code: WireErrorCode::NoError as _,
-                reason: Vec::new(),
-            },
-        },
-    ]
+    });
+    actions
 }
 
 fn helper_server_handler(
@@ -334,7 +344,7 @@ impl EarlyDataServer {
             let summary = helper_connect_with_early_data(
                 h3i_config,
                 None,
-                helper_frame_actions(4),
+                helper_frame_actions(4, &[]),
             )
             .await?;
 
@@ -458,8 +468,9 @@ impl EarlyDataClient {
 /// the handshake timeout, even though the application was already started.
 #[tokio::test]
 async fn handshake_timeout_after_0_rtt() -> QuicResult<()> {
-    let cx = TelemetryContext::test();
-    cx.clone().apply(async move {
+    let cx = TestLogs::default();
+    let subscriber = cx.subscriber();
+    async move {
     const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(1);
 
     let mut server = EarlyDataServer::start(HANDSHAKE_TIMEOUT).await?;
@@ -494,15 +505,15 @@ async fn handshake_timeout_after_0_rtt() -> QuicResult<()> {
     // A handshake timeout is an expected outcome, it must not be logged as an
     // error by the application.
     let error_logs: Vec<_> = cx
-        .log_records()
-        .iter()
-        .filter(|record| record.level.as_str() == "ERROR")
-        .map(|record| record.message.clone())
+        .records()
+        .into_iter()
+        .filter(|(level, _)| *level == tracing::Level::ERROR)
+        .map(|(_, message)| message)
         .collect();
     assert!(
         error_logs.is_empty(),
         "unexpected error logs: {error_logs:?}"
     );
     Ok(())
-    }).await
+    }.with_subscriber(subscriber).await
 }

@@ -99,9 +99,6 @@ pub enum QlogCompression {
     Zstd,
 }
 
-#[cfg(feature = "foundations")]
-impl foundations::settings::Settings for QlogCompression {}
-
 /// Return the qlog filename (not including the directory) for a
 /// stream whose identifier is `id`, with the suffix matching
 /// `compression`: `<id>.sqlog`, `<id>.sqlog.gz`, or `<id>.sqlog.zst`.

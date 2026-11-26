@@ -181,6 +181,44 @@ impl ChartConfig {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    fn render(
+        &self, size: ChartSize, colors: PlotColors, margin: ChartMargin,
+        draw: impl FnOnce(
+            &DrawingArea<BitMapBackend<'_>, plotters::coord::Shift>,
+        ) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if !matches!(self.ty, ChartOutputType::Png { .. }) {
+            return Err(fallible::invalid_chart(
+                "native chart requires PNG output",
+            )
+            .into());
+        }
+        let mut bitmap = fallible::PngBitmap::new(&self.chart_filepath(), size)?;
+        {
+            let root = bitmap.area(colors, margin)?;
+            draw(&root)?;
+            root.present()?;
+        }
+        bitmap.save()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    fn render(
+        &self, _size: ChartSize, colors: PlotColors, margin: ChartMargin,
+        draw: impl FnOnce(
+            &DrawingArea<plotters_canvas::CanvasBackend, plotters::coord::Shift>,
+        ) -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let id = self.canvas_id().ok_or_else(|| {
+            fallible::invalid_chart("browser chart requires canvas output")
+        })?;
+        let root = fallible::canvas_area(&id, colors, margin)?;
+        draw(&root)?;
+        root.present()?;
+        Ok(())
+    }
+
     #[cfg(target_arch = "wasm32")]
     fn canvas_id(&self) -> Option<String> {
         match &self.ty {

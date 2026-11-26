@@ -28,9 +28,6 @@
 
 use std::time::Instant;
 
-use ring::rand::SecureRandom;
-use ring::rand::SystemRandom;
-
 use crate::actions::h3::Action;
 use crate::config::Config;
 use crate::quiche;
@@ -242,8 +239,7 @@ fn create_connection(
         .transpose()?;
     let mut config = create_config(&args, keylog.is_some())?;
     let mut scid_bytes = [0; quiche::MAX_CONN_ID_LEN];
-    SystemRandom::new()
-        .fill(&mut scid_bytes)
+    btls::rand::rand_bytes(&mut scid_bytes)
         .map_err(|error| ClientError::Other(error.to_string()))?;
     let scid = quiche::ConnectionId::from_ref(&scid_bytes);
     let local_addr = io.local_addr();
@@ -279,12 +275,11 @@ fn provide_connection_ids(
 /// Returns an error if the operating system random source fails.
 pub fn generate_cid_and_reset_token(
 ) -> Result<(quiche::ConnectionId<'static>, u128), ClientError> {
-    let rng = SystemRandom::new();
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    rng.fill(&mut scid)
+    btls::rand::rand_bytes(&mut scid)
         .map_err(|error| ClientError::Other(error.to_string()))?;
     let mut reset_token = [0; 16];
-    rng.fill(&mut reset_token)
+    btls::rand::rand_bytes(&mut reset_token)
         .map_err(|error| ClientError::Other(error.to_string()))?;
     Ok((scid.to_vec().into(), u128::from_be_bytes(reset_token)))
 }

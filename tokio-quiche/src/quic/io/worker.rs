@@ -71,7 +71,6 @@ use datagram_socket::DatagramSocketSend;
 use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
 use datagram_socket::QuicCloseCode;
-use foundations::telemetry::log;
 use foundations::telemetry::metrics::Gauge;
 use foundations::telemetry::metrics::GaugeGuard;
 use quiche::ConnectionId;
@@ -82,6 +81,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
+use tracing as log;
 
 // Number of incoming packets to be buffered in the incoming channel.
 pub const INCOMING_QUEUE_SIZE: usize = 2048;
@@ -1237,12 +1237,10 @@ where
         // The `ex_data` waker must remain stable for this task. Moving a future
         // with an async callback to another task leaves a stale waker that
         // wakes the wrong task.
-        std::future::poll_fn(|cx| {
+        let waker_result = std::future::poll_fn(|cx| {
             // Deref to pick `Connection::as_mut` over `Box::as_mut`.
             let ssl = (*qconn).as_mut();
-            ssl.set_task_waker(Some(cx.waker().clone()));
-
-            Poll::Ready(())
+            Poll::Ready(ssl.set_task_waker(Some(cx.waker().clone())))
         })
         .await;
 
@@ -1252,7 +1250,13 @@ where
                 .set_initial_so_mark_data(incoming.so_mark_data.take());
         }
 
-        let mut work_loop_result = self.work_loop(&mut qconn, &mut ctx).await;
+        let mut work_loop_result = match waker_result {
+            Ok(()) => self.work_loop(&mut qconn, &mut ctx).await,
+            Err(error) => {
+                log::error!(%error, "TLS callback waker registration failed");
+                Err(QuicheError::TlsFail.into())
+            },
+        };
         notify_path_events(ctx.connection_hook.as_deref(), &mut qconn);
         if work_loop_result.is_ok() && qconn.is_closed() {
             work_loop_result = Err(HandshakeError::ConnectionClosed.into());
@@ -1280,9 +1284,7 @@ where
                 qconn,
             }),
             Err(e) => {
-                foundations::telemetry::log::warn!(
-                    "Application startup failed"; "error"=>%e
-                );
+                log::warn!(error = %e, "Application startup failed");
 
                 RunningOrClosing::Closing(Closing {
                     params: self.into(),
