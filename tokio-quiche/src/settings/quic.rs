@@ -227,8 +227,7 @@ pub struct QuicSettings {
     /// peers are arbitrary eyeballs from the global internet.
     pub enable_expensive_packet_count_metrics: bool,
 
-    /// Forwards [`quiche`] logs into the logging system currently used by
-    /// [`foundations`].
+    /// Forwards [`quiche`] log records to the active [`tracing`] subscriber.
     ///
     /// Defaults to `false`.
     ///
