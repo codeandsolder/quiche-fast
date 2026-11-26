@@ -91,4 +91,7 @@ debug = true
 debug = true
 
 [patch.crates-io]
+# Reviewed maintenance patches, advanced through the shared patch queue.
+plotters = { git = "https://github.com/codeandsolder/cargo-patches.git", branch = "generated/quiche-maintenance" }
+sliceslice = { git = "https://github.com/codeandsolder/cargo-patches.git", branch = "generated/quiche-maintenance" }
 zlib-rs = { git = "https://github.com/codeandsolder/zlib-rs-fast.git", rev = "1ec3a5612ee28803a7756fa52bd013389507a2db" }

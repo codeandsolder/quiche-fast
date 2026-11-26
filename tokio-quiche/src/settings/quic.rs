@@ -567,6 +567,19 @@ mod test {
     use std::time::Duration;
 
     #[test]
+    fn omitted_settings_match_programmatic_defaults(
+    ) -> Result<(), serde_json::Error> {
+        let decoded: QuicSettings = serde_json::from_str("{}")?;
+        let defaults = QuicSettings::default();
+        assert_eq!(
+            serde_json::to_value(&decoded)?,
+            serde_json::to_value(&defaults)?
+        );
+        assert_eq!(decoded.alpn, defaults.alpn);
+        Ok(())
+    }
+
+    #[test]
     fn timeouts_parse_as_milliseconds() -> Result<(), serde_json::Error> {
         let quic = serde_json::from_str::<QuicSettings>(
             r#"{ "handshake_timeout_ms": 5000, "max_idle_timeout_ms": 7000 }"#,

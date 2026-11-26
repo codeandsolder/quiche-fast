@@ -71,6 +71,19 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 | jq -e '[.packages[] | select(.name == "foundations") | .version] | unique | if length == 1 then . else error("expected exactly one Foundations ABI: " + tostring) end'
 
+      - name: Check consolidated dependency providers
+        shell: bash
+        run: |
+          tree="$(cargo tree --locked --workspace --all-features --target all --prefix none --format '{p}')"
+          if rg '^(ring|docopt|humantime|chrono|paste|ttf-parser|yaml-rust|opentelemetry_sdk|slog) v' <<< "$tree"; then
+            echo 'Removed legacy dependency provider has returned' >&2
+            exit 1
+          fi
+          cargo metadata --locked --all-features --format-version 1 | jq -e '
+            [.packages[] | select(.name == "plotters" or .name == "sliceslice") |
+             .source | startswith("git+https://github.com/codeandsolder/cargo-patches.git?branch=generated/quiche-maintenance#")]
+            | length == 2 and all'
+
       - name: Validate standalone dependency locks
         shell: bash
         run: |
