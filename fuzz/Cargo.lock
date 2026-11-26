@@ -81,7 +81,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 3.0.10",
+ "syn 2.0.119",
 ]
 
 [[package]]
@@ -93,7 +93,7 @@ checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=1f74e9fda91926e5185c2d028d393054b167e84a#1f74e9fda91926e5185c2d028d393054b167e84a"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
 dependencies = [
  "bitflags",
  "btls-sys",
@@ -105,7 +105,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=1f74e9fda91926e5185c2d028d393054b167e84a#1f74e9fda91926e5185c2d028d393054b167e84a"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
 dependencies = [
  "bindgen",
  "cmake",
@@ -202,9 +202,9 @@ dependencies = [
 
 [[package]]
 name = "env_logger"
-version = "0.11.11"
+version = "0.11.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "de671bd27a75a797dc9ae289ba1e77276e75e2026408aab65185384e2d5cd3f6"
+checksum = "82bdfc6e01c305a3ea46ed815b06ac0b379d7c5eac588fa4464048d731c4dcdf"
 dependencies = [
  "anstream",
  "anstyle",
@@ -299,9 +299,9 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "jiff"
-version = "0.2.40"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14ed8250fe4472173a765b89fea4b46f2c4aa12adc12a3e310f1dc6c108e041b"
+checksum = "ed5d126d72eb017f10b302e73bdeca446bea405ee449af4d9e7866d6b082d83e"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -313,23 +313,23 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.4"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a24020db0ee88d1c681d677681bd31f9f4ea189a455425223d52ce4f1508aa"
+checksum = "b6b46a105a9874634dd96231021526bf24ca04955a5998c59a9c7666e634b7b8"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.40"
+version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9522de39a5298859d9e844b660eb7d5e6fd1b63b9953f51535408a62f2d31b3"
+checksum = "c0127e9bde3c6130d6169e7d8d68676e4be69c4bf7573c308b6f960a5089c428"
 dependencies = [
  "jiff-core",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.10",
 ]
 
 [[package]]

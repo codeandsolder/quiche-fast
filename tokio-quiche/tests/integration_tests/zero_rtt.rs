@@ -111,7 +111,7 @@ async fn check_resumed_requests(retry: bool) -> QuicResult<()> {
             helper_connect_with_early_data(
                 h3i_config,
                 None,
-                helper_frame_actions(stream_id),
+                helper_frame_actions(stream_id, &[]),
             )
             .await?
         };
@@ -154,7 +154,7 @@ async fn check_resumed_requests(retry: bool) -> QuicResult<()> {
         let _summary = helper_connect_with_early_data(
             h3i_config,
             Some(early_frame_actions),
-            helper_frame_actions(stream_id),
+            helper_frame_actions(stream_id, &[early_stream_id]),
         )
         .await?;
 
@@ -203,24 +203,33 @@ fn helper_reset_test(context: &Arc<Mutex<TestContext>>) -> QuicResult<()> {
     Ok(())
 }
 
-fn helper_frame_actions(stream_id: u64) -> Vec<Action> {
-    vec![
+fn helper_frame_actions(
+    stream_id: u64, additional_streams: &[u64],
+) -> Vec<Action> {
+    let mut actions = vec![
         send_headers_frame(stream_id, true, h3i_fixtures::default_headers()),
         Action::FlushPackets,
-        Action::Wait {
-            wait_type: WaitType::StreamEvent(StreamEvent {
-                stream_id,
-                event_type: StreamEventType::Finished,
+    ];
+    // Streams complete independently, including retransmitted early data after
+    // Retry. Do not close the connection until every expected response ends.
+    actions.extend(
+        std::iter::once(stream_id)
+            .chain(additional_streams.iter().copied())
+            .map(|stream_id| Action::Wait {
+                wait_type: WaitType::StreamEvent(StreamEvent {
+                    stream_id,
+                    event_type: StreamEventType::Finished,
+                }),
             }),
+    );
+    actions.push(Action::ConnectionClose {
+        error: ConnectionError {
+            is_app: true,
+            error_code: WireErrorCode::NoError as _,
+            reason: Vec::new(),
         },
-        Action::ConnectionClose {
-            error: ConnectionError {
-                is_app: true,
-                error_code: WireErrorCode::NoError as _,
-                reason: Vec::new(),
-            },
-        },
-    ]
+    });
+    actions
 }
 
 fn helper_server_handler(
@@ -335,7 +344,7 @@ impl EarlyDataServer {
             let summary = helper_connect_with_early_data(
                 h3i_config,
                 None,
-                helper_frame_actions(4),
+                helper_frame_actions(4, &[]),
             )
             .await?;
 

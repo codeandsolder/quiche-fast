@@ -153,8 +153,8 @@ pub fn connect_with_early_data(
         if conn.is_closed() {
             break;
         }
-        if early.as_ref().is_some_and(ActionQueue::is_finished) {
-            early = None;
+        if let Some(previous) = early.take_if(|queue| queue.is_finished()) {
+            normal.inherit_finished_streams(previous);
         }
         let now = Instant::now();
         let action_deadline = if tx_status == TxStatus::Idle {

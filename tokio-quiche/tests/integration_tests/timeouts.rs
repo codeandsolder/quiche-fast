@@ -172,7 +172,7 @@ async fn test_handshake_duration_ioworker() -> QuicResult<()> {
                     Ok(Box::new(|_: ClientHello<'_>| Ok(()))
                         as BoxSelectCertFinish)
                 }))
-            });
+            })?;
 
             ssl_ctx_builder
                 .set_private_key_file(settings.private_key, SslFiletype::PEM)?;

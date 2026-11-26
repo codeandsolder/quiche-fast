@@ -9503,39 +9503,41 @@ fn in_handshake_config(
     server_tls_ctx_builder.set_certificate_chain_file("examples/cert.crt")?;
     server_tls_ctx_builder
         .set_private_key_file("examples/cert.key", btls::ssl::SslFiletype::PEM)?;
-    server_tls_ctx_builder.set_select_certificate_callback(move |mut hello| {
-        <Connection>::set_cc_algorithm_in_handshake(
-            hello.ssl_mut(),
-            custom_cc_algorithm,
-        )
-        .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
+    server_tls_ctx_builder.set_select_certificate_callback(
+        move |mut hello| {
+            <Connection>::set_cc_algorithm_in_handshake(
+                hello.ssl_mut(),
+                custom_cc_algorithm,
+            )
+            .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
-        <Connection>::set_initial_congestion_window_packets_in_handshake(
-            hello.ssl_mut(),
-            CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS,
-        )
-        .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
+            <Connection>::set_initial_congestion_window_packets_in_handshake(
+                hello.ssl_mut(),
+                CUSTOM_INITIAL_CONGESTION_WINDOW_PACKETS,
+            )
+            .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
-        <Connection>::set_max_send_udp_payload_size_in_handshake(
-            hello.ssl_mut(),
-            0,
-        )
-        .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
+            <Connection>::set_max_send_udp_payload_size_in_handshake(
+                hello.ssl_mut(),
+                0,
+            )
+            .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
-        <Connection>::set_max_idle_timeout_in_handshake(
-            hello.ssl_mut(),
-            CUSTOM_MAX_IDLE_TIMEOUT.as_secs() * 1_000,
-        )
-        .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
+            <Connection>::set_max_idle_timeout_in_handshake(
+                hello.ssl_mut(),
+                CUSTOM_MAX_IDLE_TIMEOUT.as_secs() * 1_000,
+            )
+            .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
-        <Connection>::set_initial_max_streams_bidi_in_handshake(
-            hello.ssl_mut(),
-            CUSTOM_INITIAL_MAX_STREAMS_BIDI,
-        )
-        .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
+            <Connection>::set_initial_max_streams_bidi_in_handshake(
+                hello.ssl_mut(),
+                CUSTOM_INITIAL_MAX_STREAMS_BIDI,
+            )
+            .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
-        Ok(())
-    });
+            Ok(())
+        },
+    )?;
 
     let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
@@ -9671,7 +9673,7 @@ fn max_streams_threshold_after_handshake_callback_update(
         .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
         Ok(())
-    });
+    })?;
 
     let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
@@ -12247,7 +12249,7 @@ fn enable_pmtud_mid_handshake(
             .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
         Ok(())
-    });
+    })?;
 
     let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
@@ -12359,7 +12361,7 @@ fn disable_pmtud_mid_handshake(
             .map_err(|_| btls::ssl::SelectCertError::ERROR)?;
 
         Ok(())
-    });
+    })?;
 
     let mut server_config = Config::with_btls_ssl_ctx_builder(
         PROTOCOL_VERSION,
