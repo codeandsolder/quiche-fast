@@ -43,7 +43,7 @@ ENV RUST_LOG=info
 ## https://github.com/marten-seemann/quic-network-simulator
 ## https://github.com/marten-seemann/quic-interop-runner
 ##
-FROM martenseemann/quic-network-simulator-endpoint:latest@sha256:3b2b9e6fa317da238c8140a7b6d2bf8d4d45a8464b873eecac3ff2a32520b71a AS quiche-qns
+FROM martenseemann/quic-network-simulator-endpoint:latest@sha256:78d81987a522d543e0781f89c46954a6427588f891b52456f744391ac2b9909b AS quiche-qns
 
 WORKDIR /quiche
 
