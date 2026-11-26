@@ -29,7 +29,7 @@ use tokio::time::Instant;
 
 use crate::http3::driver::H3ConnectionError;
 use crate::quic::QuicheConnection;
-use foundations::telemetry::log;
+use tracing as log;
 
 /// Unified configuration parameters for
 /// [`H3Driver`](crate::http3::driver::H3Driver)s.
@@ -154,7 +154,7 @@ impl Http3SettingsEnforcer {
             .is_some_and(|deadline| deadline <= Instant::now())
         {
             self.cancel_post_accept();
-            log::debug!("connection timed out due to post-accept-timeout"; "scid" => ?qconn.source_id());
+            log::debug!(scid = ?qconn.source_id(), "connection timed out due to post-accept-timeout");
             // Preserve the timeout as the primary failure even if transport
             // closure was already underway.
             let _ =

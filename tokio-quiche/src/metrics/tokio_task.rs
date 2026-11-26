@@ -35,7 +35,6 @@
 //! than we would like.
 
 use crate::metrics::Metrics;
-use foundations::telemetry::TelemetryContext;
 use pin_project::pin_project;
 use std::future::Future;
 use std::pin::Pin;
@@ -49,6 +48,8 @@ use std::task::Waker;
 use std::time::Instant;
 use task_killswitch::spawn_with_killswitch as killswitch_spawn;
 use tokio::task::JoinHandle;
+use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 /// An instrumented future.
 ///
@@ -177,12 +178,12 @@ where
     T::Output: Send + 'static,
     M: Metrics,
 {
-    let ctx = TelemetryContext::current();
+    let future = future.in_current_span().with_current_subscriber();
 
     if cfg!(feature = "tokio-task-metrics") {
-        tokio::spawn(Instrumented::new(name, metrics, ctx.apply(future)))
+        tokio::spawn(Instrumented::new(name, metrics, future))
     } else {
-        tokio::spawn(ctx.apply(future))
+        tokio::spawn(future)
     }
 }
 
@@ -197,12 +198,12 @@ where
     T: Future<Output = ()> + Send + 'static,
     M: Metrics,
 {
-    let ctx = TelemetryContext::current();
+    let future = future.in_current_span().with_current_subscriber();
 
     if cfg!(feature = "tokio-task-metrics") {
-        killswitch_spawn(Instrumented::new(name, metrics, ctx.apply(future)));
+        killswitch_spawn(Instrumented::new(name, metrics, future));
     } else {
-        killswitch_spawn(ctx.apply(future));
+        killswitch_spawn(future);
     }
 }
 

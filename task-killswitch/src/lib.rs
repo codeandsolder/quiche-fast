@@ -25,7 +25,7 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 use dashmap::DashMap;
-use parking_lot::Mutex;
+use std::sync::Mutex;
 use tokio::sync::watch;
 use tokio::task;
 use tokio::task::AbortHandle;
@@ -135,7 +135,11 @@ impl TaskKillswitch {
         );
 
         let tasks = self.storage;
-        let signal_killed = self.signal_killed.lock().take();
+        let signal_killed = self
+            .signal_killed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
         std::thread::spawn(move || {
             tasks.kill_all();
             drop(signal_killed);

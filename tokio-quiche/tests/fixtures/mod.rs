@@ -24,6 +24,57 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#[derive(Clone, Default)]
+pub(crate) struct TestLogs {
+    records: std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
+}
+
+impl TestLogs {
+    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+        use tracing_subscriber::prelude::*;
+        tracing_subscriber::Registry::default().with(self.clone())
+    }
+
+    pub(crate) fn records(&self) -> Vec<(tracing::Level, String)> {
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+}
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TestLogs {
+    fn on_event(
+        &self, event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        #[derive(Default)]
+        struct Message(String);
+        impl tracing::field::Visit for Message {
+            fn record_debug(
+                &mut self, field: &tracing::field::Field,
+                value: &dyn std::fmt::Debug,
+            ) {
+                if field.name() == "message" {
+                    self.0 = format!("{value:?}");
+                }
+            }
+
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                if field.name() == "message" {
+                    self.0 = value.to_owned();
+                }
+            }
+        }
+        let mut message = Message::default();
+        event.record(&mut message);
+        self.records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((*event.metadata().level(), message.0));
+    }
+}
+
 use bytes::Bytes;
 use datagram_socket::QuicAuditStats;
 use tokio_quiche::http3::driver::H3Event;
@@ -274,7 +325,7 @@ where
             let conn = match accepted {
                 Ok(conn) => conn,
                 Err(error) => {
-                    log::error!("fixture listener failed: {error}");
+                    tracing::error!("fixture listener failed: {error}");
                     break;
                 },
             };

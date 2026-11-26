@@ -32,9 +32,6 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 
-use ring::hmac;
-use ring::rand::SystemRandom;
-
 use crate::transport::DatagramOutput;
 use crate::transport::Result;
 use crate::transport::{
@@ -53,16 +50,17 @@ struct Session<P> {
 }
 
 struct RetryTokens {
-    cid_key: hmac::Key,
-    token_key: hmac::Key,
+    cid_key: [u8; 32],
+    token_key: [u8; 32],
 }
 
 impl RetryTokens {
     fn new() -> io::Result<Self> {
-        let rng = SystemRandom::new();
         let generate = || {
-            hmac::Key::generate(hmac::HMAC_SHA256, &rng)
-                .map_err(|_| io::Error::other("could not generate Retry key"))
+            let mut key = [0; 32];
+            btls::rand::rand_bytes(&mut key)
+                .map_err(|error| io::Error::other(error.to_string()))?;
+            Ok::<_, io::Error>(key)
         };
         Ok(Self {
             cid_key: generate()?,
@@ -70,11 +68,11 @@ impl RetryTokens {
         })
     }
 
-    fn cid(&self, original: &[u8]) -> quiche::ConnectionId<'static> {
-        let tag = hmac::sign(&self.cid_key, original);
-        quiche::ConnectionId::from_vec(
-            tag.as_ref()[..quiche::MAX_CONN_ID_LEN].to_vec(),
-        )
+    fn cid(&self, original: &[u8]) -> Result<quiche::ConnectionId<'static>> {
+        let tag = btls::hash::hmac_sha256(&self.cid_key, original)?;
+        Ok(quiche::ConnectionId::from_vec(
+            tag[..quiche::MAX_CONN_ID_LEN].to_vec(),
+        ))
     }
 
     fn address_prefix(ip: IpAddr) -> Vec<u8> {
@@ -84,12 +82,12 @@ impl RetryTokens {
         }
     }
 
-    fn mint(&self, peer: SocketAddr, original: &[u8]) -> Vec<u8> {
+    fn mint(&self, peer: SocketAddr, original: &[u8]) -> Result<Vec<u8>> {
         let mut token = Self::address_prefix(peer.ip());
         token.extend_from_slice(original);
-        let tag = hmac::sign(&self.token_key, &token);
-        token.extend_from_slice(tag.as_ref());
-        token
+        let tag = btls::hash::hmac_sha256(&self.token_key, &token)?;
+        token.extend_from_slice(&tag);
+        Ok(token)
     }
 
     fn validate<'a>(
@@ -98,11 +96,14 @@ impl RetryTokens {
         // HMAC-SHA256 uses a 32-byte tag.
         let (payload, tag) =
             token.split_at_checked(token.len().checked_sub(32)?)?;
-        hmac::verify(&self.token_key, payload, tag).ok()?;
+        let expected = btls::hash::hmac_sha256(&self.token_key, payload).ok()?;
+        if !btls::memcmp::eq(&expected, tag) {
+            return None;
+        }
         let original =
             payload.strip_prefix(Self::address_prefix(peer.ip()).as_slice())?;
         if !(8..=quiche::MAX_CONN_ID_LEN).contains(&original.len()) ||
-            self.cid(original).as_ref() != destination
+            self.cid(original).ok()?.as_ref() != destination
         {
             return None;
         }
@@ -144,8 +145,8 @@ impl<P: Protocol> Router<P> {
             if !(8..=quiche::MAX_CONN_ID_LEN).contains(&header.dcid.len()) {
                 return Ok(None);
             }
-            let scid = self.tokens.cid(&header.dcid);
-            let token = self.tokens.mint(peer, &header.dcid);
+            let scid = self.tokens.cid(&header.dcid)?;
+            let token = self.tokens.mint(peer, &header.dcid)?;
             let length = quiche::retry(
                 &header.scid,
                 &header.dcid,
@@ -374,8 +375,8 @@ mod tests {
         let tokens = RetryTokens::new()?;
         let original = [3; 16];
         let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 1234));
-        let destination = tokens.cid(&original);
-        let token = tokens.mint(peer, &original);
+        let destination = tokens.cid(&original)?;
+        let token = tokens.mint(peer, &original)?;
         assert_eq!(
             tokens.validate(peer, &token, &destination).as_deref(),
             Some(original.as_slice())

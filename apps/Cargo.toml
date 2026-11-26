@@ -25,7 +25,7 @@ sfv = ["quiche/sfv"]
 default = ["qlog", "sfv"]
 
 [dependencies]
-docopt = "1"
+clap = { workspace = true }
 env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
@@ -33,7 +33,7 @@ mio = { workspace = true, features = ["net", "os-poll"] }
 nix = { workspace = true, features = ["net", "socket", "uio"] }
 octets = { workspace = true }
 quiche = { workspace = true }
-ring = { workspace = true }
+btls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 url = { workspace = true }

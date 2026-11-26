@@ -100,7 +100,7 @@ impl ExampleBody {
                     }
                 },
                 Err(error) => {
-                    log::error!("Received error when sending or receiving HTTP body: {error:?}");
+                    tracing::error!("Received error when sending or receiving HTTP body: {error:?}");
 
                     return None;
                 },

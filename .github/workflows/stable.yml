@@ -71,6 +71,15 @@ jobs:
         run: |
           cargo metadata --locked --format-version 1 | jq -e '[.packages[] | select(.name == "foundations") | .version] | unique | if length == 1 then . else error("expected exactly one Foundations ABI: " + tostring) end'
 
+      - name: Validate standalone dependency locks
+        shell: bash
+        run: |
+          btls_source="$(cargo metadata --locked --format-version 1 | jq -er '.packages[] | select(.name == "btls") | .source')"
+          for manifest in fuzz/Cargo.toml tools/http3_test/Cargo.toml; do
+            cargo metadata --locked --manifest-path "$manifest" --format-version 1 |
+              jq -e --arg source "$btls_source" '[.packages[] | select(.name == "btls") | .source] == [$source]'
+          done
+
       - name: Run cargo test
         run: cargo test --verbose --all-targets ${{ env.DEFAULT_OPTIONS }}
 

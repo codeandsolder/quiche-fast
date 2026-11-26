@@ -29,10 +29,10 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use datagram_socket::StreamClosureKind;
-use foundations::telemetry::log;
 use quiche::h3;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tracing as log;
 
 use super::datagram;
 use super::DriverHooks;
@@ -200,17 +200,13 @@ impl ClientHooks {
         ) {
             Ok(id) => id,
             Err(ref err) if Self::is_retriable_send_error(err) => {
-                log::debug!(
-                    "send_request blocked, queuing for retry";
-                    "request_id" => request.request_id,
-                    "error" => %err,
-                );
+                log::debug!(request_id = request.request_id, error = %err, "send_request blocked, queuing for retry");
                 return Ok(RequestAttempt::Blocked(request));
             },
             Err(err) => return Err(H3ConnectionError::from(err)),
         };
 
-        // log::info!("sent h3 request"; "stream_id" => stream_id);
+        // log::info!(stream_id = stream_id, "sent h3 request");
         let (mut stream_ctx, send, recv) =
             StreamCtx::new(stream_id, STREAM_CAPACITY);
 

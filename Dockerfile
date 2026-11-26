@@ -7,7 +7,6 @@ COPY Cargo.lock ./
 
 COPY Cargo.toml ./
 COPY apps/ ./apps/
-COPY buffer-pool ./buffer-pool/
 COPY datagram-socket/ ./datagram-socket/
 COPY h3i/ ./h3i/
 COPY netlog/ ./netlog/

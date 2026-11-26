@@ -24,12 +24,12 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::PngBitmap;
 use plotters::chart::ChartContext;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
@@ -312,14 +312,13 @@ pub fn plot_conn_flow_control(
         .into());
     }
     let path = config.chart_filepath();
-    let root = bitmap_area(
-        &path,
-        params.chart_size,
-        params.colors,
-        params.chart_margin,
-    )?;
-    draw_flow_control(params, filename, ss, ds, &root)?;
-    root.present()?;
+    let mut bitmap = PngBitmap::new(&path, params.chart_size)?;
+    {
+        let root = bitmap.area(params.colors, params.chart_margin)?;
+        draw_flow_control(params, filename, ss, ds, &root)?;
+        root.present()?;
+    }
+    bitmap.save()?;
     Ok(())
 }
 

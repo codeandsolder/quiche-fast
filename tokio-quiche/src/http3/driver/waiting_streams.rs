@@ -31,18 +31,38 @@ use std::task::ready;
 use std::task::Context;
 use std::task::Poll;
 
-use foundations::telemetry::log;
 use futures::future::AbortHandle;
 use futures::future::Abortable;
 use futures_util::stream::FuturesUnordered;
 use quiche::h3;
 use tokio_stream::Stream;
+use tracing as log;
 
 use super::streams::StreamReady;
 use super::streams::WaitForStream;
 use super::streams::WaitKey;
 use super::H3ConnectionError;
 use super::H3ConnectionResult;
+
+fn report_duplicate_wait(key: WaitKey) {
+    use std::sync::Mutex;
+    use std::sync::PoisonError;
+    use std::time::Duration;
+    use std::time::Instant;
+    static WINDOW: Mutex<Option<(Instant, u8)>> = Mutex::new(None);
+    let now = Instant::now();
+    let mut guard = WINDOW.lock().unwrap_or_else(PoisonError::into_inner);
+    let (start, count) = guard.get_or_insert((now, 0));
+    if now.duration_since(*start) >= Duration::from_secs(60) {
+        *start = now;
+        *count = 0;
+    }
+    if *count < 60 {
+        *count += 1;
+        drop(guard);
+        log::error!(?key, "duplicate stream wait");
+    }
+}
 
 /// Tracks streams that are waiting on the application.
 ///
@@ -70,7 +90,7 @@ impl WaitingStreams {
         let key = wait.key();
         let Entry::Vacant(entry) = self.handles.entry(key) else {
             // Do not replace the live abort handle on a duplicate registration.
-            log::error!(ratelimit=60/m; "duplicate stream wait"; "key" => ?key);
+            report_duplicate_wait(key);
             return Err(H3ConnectionError::H3(h3::Error::Internal));
         };
         let (handle, registration) = AbortHandle::new_pair();

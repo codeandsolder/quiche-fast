@@ -24,11 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::invalid_chart;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::PngBitmap;
 use crate::plots::packet_sent::draw_packet_sent_received_plot;
 use crate::plots::ChartConfig;
 use crate::plots::ChartOutputType;
@@ -59,25 +59,26 @@ pub fn plot_packet_received(
             .into()),
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let root = bitmap_area(
-        &chart_path,
-        params.chart_size,
-        params.colors,
-        params.chart_margin,
-    )?;
+    let mut bitmap = PngBitmap::new(&chart_path, params.chart_size)?;
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = bitmap.area(params.colors, params.chart_margin)?;
 
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id = chart_config.canvas_id().ok_or_else(|| {
-        invalid_chart("browser received chart requires canvas output")
-    })?;
-    #[cfg(target_arch = "wasm32")]
-    let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
+        #[cfg(target_arch = "wasm32")]
+        let canvas_id = chart_config.canvas_id().ok_or_else(|| {
+            invalid_chart("browser received chart requires canvas output")
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
 
-    // Received packets have only one timeline panel. Reuse the full drawing
-    // area instead of leaving the lower 40% unused (unlike sent packet plots,
-    // which have several additional panels).
-    draw_packet_sent_received_plot(false, filename, params, ss, &root)?;
-    root.present()?;
+        // Received packets have only one timeline panel. Reuse the full drawing
+        // area instead of leaving the lower 40% unused (unlike sent packet
+        // plots, which have several additional panels).
+        draw_packet_sent_received_plot(false, filename, params, ss, &root)?;
+        root.present()?;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    bitmap.save()?;
     Ok(())
 }
 

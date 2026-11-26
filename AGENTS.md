@@ -6,7 +6,7 @@
 
 ## OVERVIEW
 
-Cloudflare's QUIC and HTTP/3 implementation in Rust. Workspace of 11 crates: core `quiche` protocol library, `tokio-quiche` async integration, CLI tools (`apps`, `h3i`), logging/analysis (`qlog`, `qlog-dancer`, `netlog`), and supporting primitives (`octets`, `buffer-pool`, `datagram-socket`, `task-killswitch`).
+Cloudflare's QUIC and HTTP/3 implementation in Rust. Workspace of 10 crates: core `quiche` protocol library, `tokio-quiche` async integration, CLI tools (`apps`, `h3i`), logging/analysis (`qlog`, `qlog-dancer`, `netlog`), and supporting primitives (`octets`, `datagram-socket`, `task-killswitch`).
 
 ## STRUCTURE
 
@@ -19,7 +19,6 @@ qlog/                       # qlog event schema (RFC draft)
 qlog-dancer/                # qlog/netlog visualization (native + wasm)
 netlog/                     # Chrome netlog parser
 octets/                     # Zero-copy byte buffer primitives
-buffer-pool/                # Sharded lock-free buffer pool (deprecated — no longer used by other workspace crates)
 datagram-socket/            # UDP socket abstraction (sendmmsg/recvmmsg) + zero-copy buffer for datagrams
 task-killswitch/            # Async task cancellation primitive
 fuzz/                       # Fuzz targets (excluded from workspace)
@@ -29,7 +28,7 @@ tools/                      # Android build tooling, http3_test harness
 ## DEPENDENCY GRAPH
 
 ```
-octets  task-killswitch  qlog  netlog  buffer-pool    (Layer 0: no workspace deps)
+octets  task-killswitch  qlog  netlog    (Layer 0: no workspace deps)
   |           |            |      |     (no dependents)
   v           |            v      v
 quiche  datagram-socket  qlog-dancer        (Layer 1)

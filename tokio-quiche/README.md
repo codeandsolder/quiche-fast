@@ -14,7 +14,7 @@ task to handle each individual connection.
 
 ```rust
 use bytes::Bytes;
-use foundations::telemetry::log;
+use tracing as log;
 use tokio_quiche::http3::driver::{H3Event, IncomingH3Headers, OutboundFrame, ServerH3Event};
 use tokio_quiche::http3::settings::Http3Settings;
 use tokio_quiche::listen;
@@ -52,7 +52,7 @@ async fn handle_connection(mut controller: ServerH3Controller) {
             H3Event::IncomingHeaders(IncomingH3Headers {
                 mut send, headers, ..
             }) => {
-                log::info!("incoming headers"; "headers" => ?headers);
+                log::info!(?headers, "incoming headers");
                 send.send(OutboundFrame::Headers(
                     vec![h3::Header::new(b":status", b"200")],
                     None,
@@ -78,7 +78,7 @@ async fn handle_connection(mut controller: ServerH3Controller) {
 # Sending an HTTP/3 request
 
 ```rust
-use foundations::telemetry::log;
+use tracing as log;
 use tokio_quiche::http3::driver::{ClientH3Event, H3Event, IncomingH3Headers};
 use tokio_quiche::quiche::h3;
 
@@ -102,14 +102,10 @@ while let Some(event) = controller.event_receiver_mut().recv().await {
             headers,
             ..
         })) => {
-            log::info!("incoming headers"; "stream_id" => stream_id, "headers" => ?headers);
+            log::info!(stream_id, ?headers, "incoming headers");
         }
         ClientH3Event::Core(H3Event::BodyBytesReceived { stream_id, data, fin }) => {
-            log::info!("inbound body";
-                "stream_id" => stream_id,
-                "len" => data.len(),
-                "fin" => fin
-            );
+            log::info!(stream_id, len = data.len(), fin, "inbound body");
             if fin {
                 log::info!("received full body, exiting");
                 break;
@@ -120,9 +116,7 @@ while let Some(event) = controller.event_receiver_mut().recv().await {
             stream_id,
             request_id,
         } => log::info!(
-            "sending outbound request";
-            "stream_id" => stream_id,
-            "request_id" => request_id
+            stream_id, request_id, "sending outbound request"
         ),
     }
 }

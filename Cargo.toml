@@ -1,7 +1,6 @@
 [workspace]
 members = [
   "apps",
-  "buffer-pool",
   "datagram-socket",
   "h3i",
   "netlog",
@@ -49,11 +48,11 @@ assert_matches = { version = "1" }
 btls = { git = "https://github.com/codeandsolder/btls-fast.git", rev = "1f74e9fda91926e5185c2d028d393054b167e84a" }
 bytes = { version = "1.11.1" }
 clap = { version = "4" }
-crossbeam = { version = "0.8.1", default-features = false }
+crossbeam-utils = { version = "0.8", default-features = false }
 dashmap = { version = "6" }
 datagram-socket = { version = "0.8.1", path = "./datagram-socket" }
-env_logger = "0.11"
-# qlog exports Foundations trait impls consumed by tokio-quiche, so the workspace must share one major ABI.
+env_logger = "0.11.12"
+# Shared metrics ABI for tokio-quiche.
 foundations = { version = "5", default-features = false }
 futures = { version = "0.3" }
 futures-util = { version = "0.3", default-features = false }
@@ -65,27 +64,25 @@ mio = { version = "1" }
 nix = { version = "0.32.0", features = ["net", "uio", "socket"] }
 netlog = { version = "0.1", path="./netlog" }
 octets = { version = "0.3.7", path = "./octets" }
-parking_lot = { version = "0.13.0", default-features = false }
 pin-project = { version = "1.0.12" }
 qlog = { version = "0.18.1", path = "./qlog" }
 quiche = { version = "0.30.0", path = "./quiche" }
 regex = { version = "1.4.2" }
-ring = { version = "0.17.8" }
 rstest = { version = "0.28.0" }
 serde = { version = "1" }
 serde_json = { version = "1" }
 serde_with = { version = "3.20.0", default-features = false }
-slog-scope = { version = "4.0" }
-slog-stdlog = { version = "4.1.1" }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+tracing-log = "0.2"
 smallvec = { version = "1.10", default-features = false }
 task-killswitch = { version = "0.2.1", path = "./task-killswitch" }
 thiserror = { version = "2" }
-humantime = { version = "2" }
+jiff = { version = "1.0.1", default-features = false, features = ["std"] }
 tokio = { version = "1.44", default-features = false }
 tokio-quiche = { version = "0.20.0", path = "./tokio-quiche" }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7.13" }
-url = { version = "2" }
+url = { version = "2.5.9" }
 
 [profile.bench]
 debug = true

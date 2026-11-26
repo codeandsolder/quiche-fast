@@ -83,26 +83,62 @@ pub(super) fn checked_pixel(value: u64) -> io::Result<i32> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub(super) fn bitmap_area(
-    path: &str, size: ChartSize, colors: PlotColors, margin: ChartMargin,
-) -> Result<DrawingArea<BitMapBackend<'_>, Shift>, Box<dyn Error>> {
-    if size.width == 0 ||
-        size.height == 0 ||
-        u64::from(size.width) >= i32::MAX as u64 ||
-        u64::from(size.height) >= i32::MAX as u64
-    {
-        return Err(invalid_chart(
-            "chart bitmap dimensions must fit signed renderer coordinates",
+pub(super) struct PngBitmap {
+    path: std::path::PathBuf,
+    size: ChartSize,
+    pixels: Vec<u8>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PngBitmap {
+    pub(super) fn new(
+        path: &str, size: ChartSize,
+    ) -> Result<Self, Box<dyn Error>> {
+        if size.width == 0 ||
+            size.height == 0 ||
+            u64::from(size.width) >= i32::MAX as u64 ||
+            u64::from(size.height) >= i32::MAX as u64
+        {
+            return Err(invalid_chart(
+                "chart bitmap dimensions must fit signed renderer coordinates",
+            )
+            .into());
+        }
+        let len =
+            usize::try_from(u64::from(size.width) * u64::from(size.height) * 3)?;
+        let mut pixels = Vec::new();
+        pixels.try_reserve_exact(len)?;
+        pixels.resize(len, 0);
+        let path = std::path::PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        Ok(Self { path, size, pixels })
+    }
+
+    pub(super) fn area(
+        &mut self, colors: PlotColors, margin: ChartMargin,
+    ) -> Result<DrawingArea<BitMapBackend<'_>, Shift>, Box<dyn Error>> {
+        let area = BitMapBackend::with_buffer(
+            &mut self.pixels,
+            (self.size.width, self.size.height),
         )
-        .into());
+        .into_drawing_area();
+        area.fill(&colors.fill)?;
+        Ok(area.margin(margin.top, margin.bottom, margin.left, margin.right))
     }
-    if let Some(parent) = std::path::Path::new(path).parent() {
-        std::fs::create_dir_all(parent)?;
+
+    pub(super) fn save(self) -> Result<(), Box<dyn Error>> {
+        image::save_buffer_with_format(
+            self.path,
+            &self.pixels,
+            self.size.width,
+            self.size.height,
+            image::ColorType::Rgb8,
+            image::ImageFormat::Png,
+        )?;
+        Ok(())
     }
-    let area =
-        BitMapBackend::new(path, (size.width, size.height)).into_drawing_area();
-    area.fill(&colors.fill)?;
-    Ok(area.margin(margin.top, margin.bottom, margin.left, margin.right))
 }
 
 #[cfg(target_arch = "wasm32")]

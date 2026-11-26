@@ -31,12 +31,12 @@ use crate::datastore::Datastore;
 use crate::plots::chart_label_style;
 use crate::plots::chart_title_style;
 use crate::plots::colors;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::PngBitmap;
 use crate::plots::ChartConfig;
 use crate::plots::ChartMargin;
 use crate::plots::ChartOutputType;
@@ -271,69 +271,73 @@ pub fn plot_pending(
             ),
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let root = bitmap_area(
-        &path,
-        params.chart_size,
-        params.colors,
-        ChartMargin::default(),
-    )?;
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id = config.canvas_id().ok_or_else(|| {
-        invalid_chart("browser pending plot requires canvas output")
-    })?;
-    #[cfg(target_arch = "wasm32")]
-    let root = canvas_area(&canvas_id, params.colors, ChartMargin::default())?;
-    let mut builder = ChartBuilder::on(&root);
-    builder
-        .set_label_area_size(LabelAreaPosition::Left, 40)
-        .set_label_area_size(LabelAreaPosition::Bottom, 40);
-    if params.display_chart_title {
-        builder.caption(
-            format!(
+    let mut bitmap = PngBitmap::new(&path, params.chart_size)?;
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = bitmap.area(params.colors, ChartMargin::default())?;
+        #[cfg(target_arch = "wasm32")]
+        let canvas_id = config.canvas_id().ok_or_else(|| {
+            invalid_chart("browser pending plot requires canvas output")
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let root =
+            canvas_area(&canvas_id, params.colors, ChartMargin::default())?;
+        let mut builder = ChartBuilder::on(&root);
+        builder
+            .set_label_area_size(LabelAreaPosition::Left, 40)
+            .set_label_area_size(LabelAreaPosition::Bottom, 40);
+        if params.display_chart_title {
+            builder.caption(
+                format!(
                 "{filename} Pending vs. awaiting observed response end (stacked)"
             ),
-            chart_title_style(&params.colors.caption),
-        );
+                chart_title_style(&params.colors.caption),
+            );
+        }
+        let mut chart = builder.build_cartesian_2d(range, 0..y_max)?;
+        chart
+            .configure_mesh()
+            .axis_style(params.colors.axis)
+            .bold_line_style(params.colors.bold_line.mix(0.5))
+            .light_line_style(params.colors.light_line.mix(0.2))
+            .label_style(chart_label_style(&params.colors.caption))
+            .draw()?;
+        chart
+            .draw_series(intervals.iter().map(|item| {
+                Rectangle::new(
+                    [(item.start, 0), (item.end, item.in_flight)],
+                    colors::FOREST_GREEN.filled(),
+                )
+            }))?
+            .label("Awaiting observed response end")
+            .legend(|(x, y)| {
+                PathElement::new([(x, y), (x + 20, y)], colors::FOREST_GREEN)
+            });
+        chart
+            .draw_series(intervals.iter().map(|item| {
+                Rectangle::new(
+                    [
+                        (item.start, item.in_flight),
+                        (item.end, item.in_flight + item.pending),
+                    ],
+                    colors::ORANGE.filled(),
+                )
+            }))?
+            .label("Pending requests")
+            .legend(|(x, y)| {
+                PathElement::new([(x, y), (x + 20, y)], colors::ORANGE)
+            });
+        chart
+            .configure_series_labels()
+            .label_font(chart_label_style(&params.colors.caption))
+            .background_style(params.colors.fill.mix(0.8))
+            .border_style(params.colors.axis)
+            .position(SeriesLabelPosition::UpperRight)
+            .draw()?;
+        root.present()?;
     }
-    let mut chart = builder.build_cartesian_2d(range, 0..y_max)?;
-    chart
-        .configure_mesh()
-        .axis_style(params.colors.axis)
-        .bold_line_style(params.colors.bold_line.mix(0.5))
-        .light_line_style(params.colors.light_line.mix(0.2))
-        .label_style(chart_label_style(&params.colors.caption))
-        .draw()?;
-    chart
-        .draw_series(intervals.iter().map(|item| {
-            Rectangle::new(
-                [(item.start, 0), (item.end, item.in_flight)],
-                colors::FOREST_GREEN.filled(),
-            )
-        }))?
-        .label("Awaiting observed response end")
-        .legend(|(x, y)| {
-            PathElement::new([(x, y), (x + 20, y)], colors::FOREST_GREEN)
-        });
-    chart
-        .draw_series(intervals.iter().map(|item| {
-            Rectangle::new(
-                [
-                    (item.start, item.in_flight),
-                    (item.end, item.in_flight + item.pending),
-                ],
-                colors::ORANGE.filled(),
-            )
-        }))?
-        .label("Pending requests")
-        .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], colors::ORANGE));
-    chart
-        .configure_series_labels()
-        .label_font(chart_label_style(&params.colors.caption))
-        .background_style(params.colors.fill.mix(0.8))
-        .border_style(params.colors.axis)
-        .position(SeriesLabelPosition::UpperRight)
-        .draw()?;
-    root.present()?;
+    #[cfg(not(target_arch = "wasm32"))]
+    bitmap.save()?;
     Ok(())
 }
 

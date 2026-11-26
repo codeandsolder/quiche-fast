@@ -40,9 +40,6 @@ use std::rc::Rc;
 
 use std::cell::RefCell;
 
-use ring::rand::SecureRandom;
-use ring::rand::SystemRandom;
-
 const MAX_DATAGRAM_SIZE: usize = 1350;
 
 #[derive(Debug)]
@@ -306,7 +303,7 @@ impl MigrationState {
 
     fn update(
         &mut self, conn: &mut quiche::Connection, io: &ClientIo,
-        peer: std::net::SocketAddr, rng: &SystemRandom,
+        peer: std::net::SocketAddr,
     ) -> Result<(), ClientError> {
         while let Some(event) = conn.path_event_next() {
             match event {
@@ -335,7 +332,7 @@ impl MigrationState {
             info!("Retiring source CID {retired:?}");
         }
         while conn.scids_left() > 0 {
-            let (scid, reset) = generate_cid_and_reset_token(rng)
+            let (scid, reset) = generate_cid_and_reset_token()
                 .map_err(|error| failure("generate CID", error))?;
             if conn.new_scid(&scid, reset, false).is_err() {
                 break;
@@ -365,7 +362,6 @@ impl MigrationState {
 fn open_connection(
     args: &ClientArgs, conn_args: &CommonArgs, connect_url: &url::Url,
     local_addr: std::net::SocketAddr, peer_addr: std::net::SocketAddr,
-    rng: &SystemRandom,
 ) -> Result<quiche::Connection, ClientError> {
     // Create the configuration for the QUIC connection.
     let mut config = quiche::Config::new(args.version)
@@ -404,7 +400,7 @@ fn open_connection(
     // Generate a random source connection ID for the connection.
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
     if !cfg!(feature = "fuzzing") {
-        rng.fill(&mut scid)
+        btls::rand::rand_bytes(&mut scid)
             .map_err(|error| failure("generate source CID", error))?;
     }
 
@@ -482,14 +478,12 @@ pub fn connect(
             })?
     };
     let mut io = ClientIo::new(peer, args)?;
-    let rng = SystemRandom::new();
     let mut conn = open_connection(
         args,
         conn_args,
         connect_url,
         io.primary.address()?,
         peer,
-        &rng,
     )?;
     io.send_initial(&mut conn)?;
 
@@ -556,7 +550,7 @@ pub fn connect(
                 .handle_responses(&mut conn, &mut io.input, &start)
                 .map_err(ClientError::Other)?;
         }
-        migration.update(&mut conn, &io, peer, &rng)?;
+        migration.update(&mut conn, &io, peer)?;
         io.send_available(&mut conn)?;
         if conn.is_closed() {
             return finish_connection(&conn, http.as_deref(), args, &start);

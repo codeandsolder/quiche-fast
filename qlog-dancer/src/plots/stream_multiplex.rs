@@ -27,13 +27,13 @@
 //! Multiplexing charts
 //! A single image file containing various renderings of stream and H3 DATA
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_pixel;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::invalid_chart;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::plots::fallible::PngBitmap;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::error::Error;
@@ -549,29 +549,31 @@ pub fn plot_stream_multiplexing(
             .into()),
     };
     #[cfg(not(target_arch = "wasm32"))]
-    let root = bitmap_area(
-        &chart_path,
-        ChartSize {
-            width: model.layout.width,
-            height: model.layout.height,
-        },
-        params.colors,
-        margin,
-    )?;
-
-    // Keep the actual browser canvas extent in sync with the same checked
-    // layout used by the native bitmap renderer. In particular, do not clip
-    // stream rows to the initial HTML canvas height.
-    #[cfg(target_arch = "wasm32")]
-    canvas.set_height(model.layout.height);
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id = config.canvas_id().ok_or_else(|| {
-        invalid_chart("browser multiplex chart requires canvas output")
+    let mut bitmap = PngBitmap::new(&chart_path, ChartSize {
+        width: model.layout.width,
+        height: model.layout.height,
     })?;
-    #[cfg(target_arch = "wasm32")]
-    let root = canvas_area(&canvas_id, params.colors, margin)?;
+    {
+        #[cfg(not(target_arch = "wasm32"))]
+        let root = bitmap.area(params.colors, margin)?;
 
-    draw_multiplex(&root, params, &model)
+        // Keep the actual browser canvas extent in sync with the same checked
+        // layout used by the native bitmap renderer. In particular, do not clip
+        // stream rows to the initial HTML canvas height.
+        #[cfg(target_arch = "wasm32")]
+        canvas.set_height(model.layout.height);
+        #[cfg(target_arch = "wasm32")]
+        let canvas_id = config.canvas_id().ok_or_else(|| {
+            invalid_chart("browser multiplex chart requires canvas output")
+        })?;
+        #[cfg(target_arch = "wasm32")]
+        let root = canvas_area(&canvas_id, params.colors, margin)?;
+
+        draw_multiplex(&root, params, &model)?;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    bitmap.save()?;
+    Ok(())
 }
 
 #[cfg(test)]
