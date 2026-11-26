@@ -898,16 +898,17 @@ impl ExData<'_> {
     }
 
     #[cfg(feature = "boringssl-btls-crate")]
-    pub fn from_ssl_ref(ssl: &mut btls::ssl::SslRef) -> Option<&mut Self> {
-        use btls::ex_data::Index;
+    pub(super) fn from_ssl_ref<'callback>(
+        ssl: &'callback mut btls::ssl::SslRef,
+    ) -> Option<&'callback mut ExData<'callback>> {
+        use foreign_types_shared::ForeignTypeRef;
 
-        let index = (*QUICHE_EX_DATA_INDEX)?;
-        // SAFETY: The reserved index is private to this module and only
-        // run_with_ex_data installs a value, always of type ExData.
-        let idx: Index<btls::ssl::Ssl, ExData> =
-            unsafe { Index::from_raw(index) };
-
-        ssl.ex_data_mut(idx)
+        // SAFETY: This private index contains a borrowed ExData only during
+        // run_with_ex_data's synchronous TLS operation. The exclusive SSL
+        // borrow bounds this access to the callback; an empty slot is None.
+        // BTLS typed ex_data_mut is for owned, 'static allocations, not this
+        // temporary non-owning C slot.
+        unsafe { ExData::from_ssl_ptr(ssl.as_ptr().cast()) }
     }
 }
 
