@@ -26,10 +26,12 @@
 
 //! Shared action scheduling for synchronous and asynchronous clients.
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::actions::h3::Action;
 use crate::actions::h3::StreamEvent;
+use crate::actions::h3::StreamEventType;
 use crate::actions::h3::WaitType;
 use crate::actions::h3::WaitingFor;
 use crate::quiche;
@@ -45,6 +47,7 @@ pub(super) struct ActionQueue {
     actions: Vec<Action>,
     next: usize,
     waiting: WaitingFor,
+    finished_streams: HashSet<u64>,
     deadline: Option<Instant>,
 }
 
@@ -54,6 +57,7 @@ impl ActionQueue {
             actions,
             next: 0,
             waiting: WaitingFor::default(),
+            finished_streams: HashSet::new(),
             deadline: None,
         }
     }
@@ -102,7 +106,13 @@ impl ActionQueue {
                             })?,
                     );
                 },
-                WaitType::StreamEvent(event) => self.waiting.add_wait(event),
+                WaitType::StreamEvent(event) => {
+                    // A FIN/reset is terminal, not an edge that can be missed
+                    // between two actions. It also supersedes frame waits.
+                    if !self.finished_streams.contains(&event.stream_id) {
+                        self.waiting.add_wait(event);
+                    }
+                },
                 WaitType::CanOpenNumStreams(quota) =>
                     self.waiting.set_required_stream_quota(*quota),
             }
@@ -125,7 +135,16 @@ impl ActionQueue {
     }
 
     pub(super) fn on_stream_event(&mut self, event: StreamEvent) {
+        if event.event_type == StreamEventType::Finished {
+            self.finished_streams.insert(event.stream_id);
+        }
         self.waiting.remove_wait(event);
+    }
+
+    /// Carry terminal receive state across the early-data action phase.
+    /// Nonterminal frame notifications remain edge-triggered.
+    pub(super) fn inherit_finished_streams(&mut self, previous: Self) {
+        self.finished_streams.extend(previous.finished_streams);
     }
 
     /// Execute until blocked, exhausted, or an explicit flush is encountered.
@@ -208,6 +227,43 @@ mod tests {
         assert!(!queue.is_blocked());
         assert_eq!(queue.wakeup(deadline), Some(deadline));
         assert_eq!(queue.actions.get(queue.next), Some(&Action::FlushPackets));
+        Ok(())
+    }
+
+    #[test]
+    fn late_waits_recognize_terminal_events_across_action_phases(
+    ) -> Result<(), String> {
+        let now = Instant::now();
+        let mut early = ActionQueue::new(Vec::new());
+        early.on_stream_event(StreamEvent {
+            stream_id: 0,
+            event_type: StreamEventType::Finished,
+        });
+        let mut normal = ActionQueue::new(vec![
+            WaitType::StreamEvent(StreamEvent {
+                stream_id: 0,
+                event_type: StreamEventType::Finished,
+            })
+            .into(),
+            WaitType::StreamEvent(StreamEvent {
+                stream_id: 0,
+                event_type: StreamEventType::Data,
+            })
+            .into(),
+            WaitType::StreamEvent(StreamEvent {
+                stream_id: 4,
+                event_type: StreamEventType::Finished,
+            })
+            .into(),
+        ]);
+        normal.inherit_finished_streams(early);
+        normal.prepare_waits(now, 0, 0)?;
+        assert!(!normal.is_finished());
+        normal.on_stream_event(StreamEvent {
+            stream_id: 4,
+            event_type: StreamEventType::Finished,
+        });
+        assert!(normal.is_finished());
         Ok(())
     }
 

@@ -59,7 +59,7 @@ async fn test_hello_world_async_callbacks() -> QuicResult<()> {
                     Ok(Box::new(|_: ClientHello<'_>| Ok(()))
                         as BoxSelectCertFinish)
                 }))
-            });
+            })?;
 
             ssl_ctx_builder
                 .set_private_key_file(settings.private_key, SslFiletype::PEM)?;
@@ -114,7 +114,7 @@ async fn test_async_callbacks_fail_after_initial_send() -> QuicResult<()> {
                     yield_now().await;
                     Err(btls::ssl::AsyncSelectCertError)
                 }))
-            });
+            })?;
 
             ssl_ctx_builder
                 .set_private_key_file(settings.private_key, SslFiletype::PEM)?;
