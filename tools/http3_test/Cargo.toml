@@ -12,5 +12,5 @@ test_resets = []
 log = "0.4"
 mio = { version = "1.0", features = ["net", "os-poll"] }
 quiche = { path = "../../quiche" }
-btls = { git = "https://github.com/codeandsolder/btls-fast.git", rev = "26e090db4e6acd0faa69fd95f07580f8cedbb5ca" }
+btls = { git = "https://github.com/codeandsolder/btls-fast.git", rev = "a0cccd60709091822287f0e395e1398aa132ed87" }
 url = "2.5.9"
