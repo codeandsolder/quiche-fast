@@ -702,6 +702,24 @@ mod tests {
     use super::ReferenceTime;
 
     #[test]
+    fn reference_time_preserves_subsecond_and_pre_epoch_times() {
+        let time = UNIX_EPOCH + Duration::from_nanos(123_456_789);
+        assert_eq!(
+            ReferenceTime::new_monotonic(Some(time))
+                .wall_clock_time
+                .as_deref(),
+            Some("1970-01-01T00:00:00.123456789Z")
+        );
+        let time = UNIX_EPOCH - Duration::from_millis(500);
+        assert_eq!(
+            ReferenceTime::new_monotonic(Some(time))
+                .wall_clock_time
+                .as_deref(),
+            Some("1969-12-31T23:59:59.5Z")
+        );
+    }
+
+    #[test]
     #[expect(
         clippy::duration_suboptimal_units,
         reason = "The fixture is an explicit Unix timestamp in seconds; converting it to minutes would obscure the test value"
