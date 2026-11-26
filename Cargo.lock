@@ -223,7 +223,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=1f74e9fda91926e5185c2d028d393054b167e84a#1f74e9fda91926e5185c2d028d393054b167e84a"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
 dependencies = [
  "bitflags 2.13.2",
  "btls-sys",
@@ -235,7 +235,7 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=1f74e9fda91926e5185c2d028d393054b167e84a#1f74e9fda91926e5185c2d028d393054b167e84a"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
 dependencies = [
  "bindgen",
  "cmake",
