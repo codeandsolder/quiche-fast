@@ -145,7 +145,7 @@ impl<T> SparkOutputs<T> {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn as_mut(&mut self) -> SparkOutputs<&mut T> {
+    const fn as_mut(&mut self) -> SparkOutputs<&mut T> {
         SparkOutputs {
             download: SparkPair {
                 absolute: &mut self.download.absolute,

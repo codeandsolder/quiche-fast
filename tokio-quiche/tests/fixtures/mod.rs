@@ -25,17 +25,17 @@
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #[derive(Clone, Default)]
-pub(crate) struct TestLogs {
+pub struct TestLogs {
     records: std::sync::Arc<std::sync::Mutex<Vec<(tracing::Level, String)>>>,
 }
 
 impl TestLogs {
-    pub(crate) fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
+    pub fn subscriber(&self) -> impl tracing::Subscriber + Send + Sync {
         use tracing_subscriber::prelude::*;
         tracing_subscriber::Registry::default().with(self.clone())
     }
 
-    pub(crate) fn records(&self) -> Vec<(tracing::Level, String)> {
+    pub fn records(&self) -> Vec<(tracing::Level, String)> {
         self.records
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -62,7 +62,7 @@ impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for TestLogs {
 
             fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
                 if field.name() == "message" {
-                    self.0 = value.to_owned();
+                    value.clone_into(&mut self.0);
                 }
             }
         }
@@ -96,6 +96,8 @@ use tokio_quiche::settings::Hooks;
 use tokio_quiche::settings::TlsCertificatePaths;
 use tokio_quiche::ConnectionParams;
 use tokio_quiche::ServerH3Controller;
+use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 use futures::stream::FuturesUnordered;
 use futures::Future;
@@ -320,28 +322,37 @@ where
 
     let (audit_stats_tx, audit_stats_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(async move {
-        while let Some(accepted) = stream.next().await {
-            let conn = match accepted {
-                Ok(conn) => conn,
-                Err(error) => {
-                    tracing::error!("fixture listener failed: {error}");
-                    break;
-                },
-            };
-            let (h3_driver, h3_controller) = ServerH3Driver::new(&http3_settings);
-            let conn = conn.start(h3_driver);
-            let h3_over_quic = ServerH3Connection::new(conn, h3_controller);
+    tokio::spawn(
+        async move {
+            while let Some(accepted) = stream.next().await {
+                let conn = match accepted {
+                    Ok(conn) => conn,
+                    Err(error) => {
+                        tracing::error!("fixture listener failed: {error}");
+                        break;
+                    },
+                };
+                let (h3_driver, h3_controller) =
+                    ServerH3Driver::new(&http3_settings);
+                let conn = conn.start(h3_driver);
+                let h3_over_quic = ServerH3Connection::new(conn, h3_controller);
 
-            let audit_stats = Arc::clone(h3_over_quic.audit_log_stats());
-            let hdl = hdl.clone();
-            let tx = audit_stats_tx.clone();
-            tokio::spawn(async move {
-                hdl(h3_over_quic).await;
-                let _ = tx.send(audit_stats);
-            });
+                let audit_stats = Arc::clone(h3_over_quic.audit_log_stats());
+                let hdl = hdl.clone();
+                let tx = audit_stats_tx.clone();
+                tokio::spawn(
+                    async move {
+                        hdl(h3_over_quic).await;
+                        let _ = tx.send(audit_stats);
+                    }
+                    .in_current_span()
+                    .with_current_subscriber(),
+                );
+            }
         }
-    });
+        .in_current_span()
+        .with_current_subscriber(),
+    );
 
     Ok((url, audit_stats_rx))
 }

@@ -28,9 +28,6 @@
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 #[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::invalid_chart;
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::PngBitmap;
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
@@ -392,74 +389,67 @@ pub fn plot_connection_overview(
         ds,
         &ty.clone().into(),
     );
-    if !matches!(ty, OverviewChartOutputType::Png { .. }) {
-        return Err(invalid_chart(
-            "native connection overview requires PNG output",
-        )
-        .into());
-    }
-    let chart_path = chart_config.chart_filepath();
-    let mut bitmap = PngBitmap::new(&chart_path, params.chart_size)?;
-    {
-        let root = bitmap.area(params.colors, params.chart_margin)?;
+    chart_config.render(
+        params.chart_size,
+        params.colors,
+        params.chart_margin,
+        |root| {
+            let (top_margin, bottom) = root.split_vertically((5).percent());
+            let (stream_plots, cwnd_rtt_area) =
+                bottom.split_vertically((60).percent());
+            let (stream_send_plot, stream_recv_plot) =
+                stream_plots.split_vertically((50).percent());
+            let (congestion_plot, rtt_plot) =
+                cwnd_rtt_area.split_vertically((60).percent());
 
-        let (top_margin, bottom) = root.split_vertically((5).percent());
-        let (stream_plots, cwnd_rtt_area) =
-            bottom.split_vertically((60).percent());
-        let (stream_send_plot, stream_recv_plot) =
-            stream_plots.split_vertically((50).percent());
-        let (congestion_plot, rtt_plot) =
-            cwnd_rtt_area.split_vertically((60).percent());
+            let send_y = params
+                .clamp
+                .stream_y_max
+                .unwrap_or(ss.y_max_stream_send_plot);
+            let recv_y = params
+                .clamp
+                .stream_y_max
+                .unwrap_or(ss.y_max_stream_recv_plot);
+            let stream_send_axis = XYMinMax::init(params, ss, send_y)?;
+            let stream_recv_axis = XYMinMax::init(params, ss, recv_y)?;
+            let cwnd_max = params
+                .cwnd_y_max
+                .unwrap_or_else(|| {
+                    let original = ss.y_max_congestion_plot;
+                    original.saturating_add(original / 10)
+                })
+                .max(1);
+            let common_axis = super::minmax::XYMinMax::init(
+                checked_time_range(ss.sent_x_min, ss.sent_x_max, &params.clamp)?,
+                None,
+                None,
+                0..cwnd_max,
+            );
 
-        let send_y = params
-            .clamp
-            .stream_y_max
-            .unwrap_or(ss.y_max_stream_send_plot);
-        let recv_y = params
-            .clamp
-            .stream_y_max
-            .unwrap_or(ss.y_max_stream_recv_plot);
-        let stream_send_axis = XYMinMax::init(params, ss, send_y)?;
-        let stream_recv_axis = XYMinMax::init(params, ss, recv_y)?;
-        let cwnd_max = params
-            .cwnd_y_max
-            .unwrap_or_else(|| {
-                let original = ss.y_max_congestion_plot;
-                original.saturating_add(original / 10)
-            })
-            .max(1);
-        let common_axis = super::minmax::XYMinMax::init(
-            checked_time_range(ss.sent_x_min, ss.sent_x_max, &params.clamp)?,
-            None,
-            None,
-            0..cwnd_max,
-        );
-
-        top_margin.draw_text(
-            &format!("{filename} Connection overview"),
-            &chart_title_style(&params.colors.caption),
-            (0, 0),
-        )?;
-        draw_stream_plot(
-            params,
-            &stream_send_axis,
-            ss,
-            &stream_send_plot,
-            StreamPlotDirection::Send,
-        )?;
-        draw_stream_plot(
-            params,
-            &stream_recv_axis,
-            ss,
-            &stream_recv_plot,
-            StreamPlotDirection::Receive,
-        )?;
-        draw_congestion_plot(params, &common_axis, ss, ds, &congestion_plot)?;
-        draw_rtt_plot(params, &common_axis, ss, &rtt_plot)?;
-        root.present()?;
-    }
-    bitmap.save()?;
-    Ok(())
+            top_margin.draw_text(
+                &format!("{filename} Connection overview"),
+                &chart_title_style(&params.colors.caption),
+                (0, 0),
+            )?;
+            draw_stream_plot(
+                params,
+                &stream_send_axis,
+                ss,
+                &stream_send_plot,
+                StreamPlotDirection::Send,
+            )?;
+            draw_stream_plot(
+                params,
+                &stream_recv_axis,
+                ss,
+                &stream_recv_plot,
+                StreamPlotDirection::Receive,
+            )?;
+            draw_congestion_plot(params, &common_axis, ss, ds, &congestion_plot)?;
+            draw_rtt_plot(params, &common_axis, ss, &rtt_plot)?;
+            Ok(())
+        },
+    )
 }
 
 #[cfg(target_arch = "wasm32")]

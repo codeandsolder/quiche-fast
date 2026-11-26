@@ -88,6 +88,8 @@ use datagram_socket::DatagramSocketSend;
 use qlog::writer::make_qlog_writer_from_path;
 use qlog::writer::qlog_file_name;
 use tracing as log;
+use tracing::instrument::WithSubscriber;
+use tracing::Instrument;
 
 use crate::http3::settings::Http3Settings;
 use crate::metrics::DefaultMetrics;
@@ -275,16 +277,20 @@ where
     )?;
 
     // drive the packet router:
-    tokio::spawn(async move {
-        match router.await {
-            Ok(()) => {
-                log::debug!("incoming packet router finished");
-            },
-            Err(error) => {
-                log::error!(error = %error, "incoming packet router failed");
-            },
+    tokio::spawn(
+        async move {
+            match router.await {
+                Ok(()) => {
+                    log::debug!("incoming packet router finished");
+                },
+                Err(error) => {
+                    log::error!(error = %error, "incoming packet router failed");
+                },
+            }
         }
-    });
+        .in_current_span()
+        .with_current_subscriber(),
+    );
 
     let (connection, running) = initial_connection.handshake(app).await?;
     crate::quic::connection::InitialQuicConnection::resume(running);

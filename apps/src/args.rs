@@ -288,7 +288,7 @@ fn common_command(name: &'static str, datagram_default: &'static str) -> Command
 }
 
 /// Command-line definition for the QUIC client.
-#[must_use]
+#[must_use = "the returned command defines the CLI arguments"]
 pub fn client_command() -> Command {
     common_command("quiche-client", "quack")
         .arg(Arg::new("method").long("method").help("Use the given HTTP request method").value_name("METHOD").default_value("GET"))
@@ -404,7 +404,7 @@ impl Default for ClientArgs {
 }
 
 /// Command-line definition for the QUIC server.
-#[must_use]
+#[must_use = "the returned command defines the CLI arguments"]
 pub fn server_command() -> Command {
     common_command("quiche-server", "brrr")
         .arg(
