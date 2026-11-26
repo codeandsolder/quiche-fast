@@ -45,7 +45,7 @@ publish = false
 [workspace.dependencies]
 anyhow = { version = "1" }
 assert_matches = { version = "1" }
-btls = { git = "https://github.com/codeandsolder/btls-fast.git", rev = "26e090db4e6acd0faa69fd95f07580f8cedbb5ca" }
+btls = { git = "https://github.com/codeandsolder/btls-fast.git", rev = "a0cccd60709091822287f0e395e1398aa132ed87" }
 bytes = { version = "1.11.1" }
 clap = { version = "4" }
 crossbeam-utils = { version = "0.8", default-features = false }
