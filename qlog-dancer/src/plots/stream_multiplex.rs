@@ -486,7 +486,6 @@ where
             .shrink((0, y), (layout.chart_width, params.bubbles_swimlane_height));
         draw_length_lane(&area, params, model, lane)?;
     }
-    root.present()?;
     Ok(())
 }
 

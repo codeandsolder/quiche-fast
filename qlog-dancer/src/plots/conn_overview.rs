@@ -27,7 +27,6 @@
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
-#[cfg(not(target_arch = "wasm32"))]
 use plotters::coord::types::RangedCoordf64;
 use plotters::coord::types::RangedCoordu64;
 use plotters::coord::Shift;
