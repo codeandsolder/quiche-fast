@@ -43,20 +43,18 @@ use super::StreamCtx;
 use super::STREAM_CAPACITY;
 use crate::http3::settings::Http3Settings;
 use crate::http3::settings::Http3SettingsEnforcer;
-use crate::http3::settings::Http3TimeoutType;
-use crate::http3::settings::TimeoutKey;
 use crate::quic::HandshakeInfo;
 use crate::quic::QuicCommand;
 use crate::quic::QuicheConnection;
 
-/// An [H3Driver] for a server-side HTTP/3 connection. See [H3Driver] for
+/// An [`H3Driver`] for a server-side HTTP/3 connection. See [`H3Driver`] for
 /// details. Emits [`ServerH3Event`]s and expects [`ServerH3Command`]s for
 /// control.
 pub type ServerH3Driver = H3Driver<ServerHooks>;
-/// The [H3Controller] type paired with [ServerH3Driver]. See [H3Controller] for
-/// details.
+/// The [`H3Controller`] type paired with [`ServerH3Driver`]. See
+/// [`H3Controller`] for details.
 pub type ServerH3Controller = H3Controller<ServerHooks>;
-/// Receives [`ServerH3Event`]s from a [ServerH3Driver]. This is the control
+/// Receives [`ServerH3Event`]s from a [`ServerH3Driver`]. This is the control
 /// stream which describes what is happening on the connection, but does not
 /// transfer data.
 pub type ServerEventStream = mpsc::UnboundedReceiver<ServerH3Event>;
@@ -66,7 +64,7 @@ pub struct RawPriorityValue(Vec<u8>);
 
 impl From<Vec<u8>> for RawPriorityValue {
     fn from(value: Vec<u8>) -> Self {
-        RawPriorityValue(value)
+        Self(value)
     }
 }
 
@@ -83,8 +81,8 @@ impl Deref for RawPriorityValue {
 pub struct IsInEarlyData(bool);
 
 impl IsInEarlyData {
-    fn new(is_in_early_data: bool) -> Self {
-        IsInEarlyData(is_in_early_data)
+    const fn new(is_in_early_data: bool) -> Self {
+        Self(is_in_early_data)
     }
 }
 
@@ -96,14 +94,14 @@ impl Deref for IsInEarlyData {
     }
 }
 
-/// Events produced by [ServerH3Driver].
+/// Events produced by [`ServerH3Driver`].
 #[derive(Debug)]
 pub enum ServerH3Event {
     Core(H3Event),
 
     Headers {
         incoming_headers: IncomingH3Headers,
-        /// The latest PRIORITY_UPDATE frame value, if any.
+        /// The latest `PRIORITY_UPDATE` frame value, if any.
         priority: Option<RawPriorityValue>,
         is_in_early_data: IsInEarlyData,
     },
@@ -129,7 +127,7 @@ impl From<H3Event> for ServerH3Event {
     }
 }
 
-/// Commands accepted by [ServerH3Driver].
+/// Commands accepted by [`ServerH3Driver`].
 #[derive(Debug)]
 pub enum ServerH3Command {
     Core(H3Command),
@@ -161,9 +159,6 @@ pub struct ServerHooks {
     /// Tracks the number of requests that have been handled by this driver.
     requests: u64,
 
-    /// Handle to the post-accept timeout entry. If present, the server must
-    /// receive a HEADERS frame before this timeout.
-    post_accept_timeout: Option<TimeoutKey>,
     /// Whether the extended CONNECT protocol is enabled. When disabled,
     /// skip DATAGRAM flow creation for `:protocol` requests.
     extended_connect_enabled: bool,
@@ -172,7 +167,7 @@ pub struct ServerHooks {
 impl ServerHooks {
     /// Handles a new request, creating a stream context, checking for a
     /// potential DATAGRAM flow (CONNECT-{UDP,IP}) and sending a relevant
-    /// [`H3Event`] to the [ServerH3Controller] for application-level
+    /// [`H3Event`] to the [`ServerH3Controller`] for application-level
     /// processing.
     fn handle_request(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
@@ -194,26 +189,17 @@ impl ServerHooks {
         let (mut stream_ctx, send, recv) =
             StreamCtx::new(stream_id, STREAM_CAPACITY);
 
-        // When Extended CONNECT is enabled, extract the datagram flow ID
-        // from the request headers and register it in flow_map. This
-        // allows incoming DATAGRAMs to be routed to the correct stream.
-        // Note: flow_map entries are considered active work, so the
-        // connection will not be closed in cleanup_stream() while
-        // flows remain.
-        if driver.hooks.extended_connect_enabled() {
-            if let Some(flow_id) =
-                datagram::extract_quarter_stream_id(stream_id, &headers)
-            {
-                let _ = driver.get_or_insert_flow(flow_id)?;
-                stream_ctx.associated_dgram_flow_id = Some(flow_id);
-            }
+        if driver.hooks.extended_connect_enabled() &&
+            datagram::is_extended_connect(&headers)
+        {
+            driver.register_flow(stream_id)?;
         }
 
         let latest_priority_update: Option<RawPriorityValue> = driver
             .conn_mut()?
             .take_last_priority_update(stream_id)
             .ok()
-            .map(|v| v.into());
+            .map(std::convert::Into::into);
 
         // Boost the priority of the stream until we write response headers via
         // process_write_frame(), which will set the desired priority. Since it
@@ -237,7 +223,7 @@ impl ServerHooks {
 
         driver
             .waiting_streams
-            .push(stream_ctx.wait_for_recv(stream_id))?;
+            .push(stream_ctx.wait_for_recv(stream_id)?)?;
         driver.insert_stream(stream_id, stream_ctx);
 
         // A STOP_SENDING received before HEADERS had no stream context for
@@ -273,7 +259,6 @@ impl DriverHooks for ServerHooks {
         Self {
             settings_enforcer: settings.into(),
             requests: 0,
-            post_accept_timeout: None,
             extended_connect_enabled: settings.enable_extended_connect,
         }
     }
@@ -282,36 +267,30 @@ impl DriverHooks for ServerHooks {
         self.extended_connect_enabled
     }
 
-    fn conn_established(
+    fn application_ready(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {
-        assert!(
-            qconn.is_server(),
-            "ServerH3Driver requires a server-side QUIC connection"
-        );
-
-        if let Some(post_accept_timeout) =
-            driver.hooks.settings_enforcer.post_accept_timeout()
-        {
-            let remaining = post_accept_timeout
-                .checked_sub(handshake_info.elapsed())
-                .ok_or(H3ConnectionError::PostAcceptTimeout)?;
-
-            let key = driver
-                .hooks
-                .settings_enforcer
-                .add_timeout(Http3TimeoutType::PostAccept, remaining);
-            driver.hooks.post_accept_timeout = Some(key);
+        if !qconn.is_server() {
+            return Err(H3ConnectionError::InvalidDriverRole {
+                expected_server: true,
+            });
         }
 
-        Ok(())
+        driver
+            .hooks
+            .settings_enforcer
+            .arm_post_accept(handshake_info.start_time())?;
+        driver.hooks.check_deadlines(qconn)
     }
 
     fn headers_received(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         headers: InboundHeaders,
     ) -> H3ConnectionResult<()> {
+        // Never accept a late first request merely because its packet was
+        // processed before the timer future got scheduled.
+        driver.hooks.check_deadlines(qconn)?;
         if driver
             .hooks
             .settings_enforcer
@@ -322,11 +301,7 @@ impl DriverHooks for ServerHooks {
             return Ok(());
         }
 
-        if let Some(timeout) = driver.hooks.post_accept_timeout.take() {
-            // We've seen the first Headers event for the connection,
-            // so we can abort the post-accept timeout
-            driver.hooks.settings_enforcer.cancel_timeout(timeout);
-        }
+        driver.hooks.settings_enforcer.cancel_post_accept();
 
         Self::handle_request(driver, qconn, headers)
     }
@@ -347,14 +322,19 @@ impl DriverHooks for ServerHooks {
         driver.handle_core_command(qconn, cmd)
     }
 
+    fn check_deadlines(
+        &mut self, qconn: &mut QuicheConnection,
+    ) -> H3ConnectionResult<()> {
+        self.settings_enforcer.check_deadline(qconn)
+    }
+
     fn has_wait_action(driver: &mut H3Driver<Self>) -> bool {
-        driver.hooks.settings_enforcer.has_pending_timeouts()
+        driver.hooks.settings_enforcer.deadline().is_some()
     }
 
     async fn wait_for_action(
         &mut self, qconn: &mut QuicheConnection,
     ) -> H3ConnectionResult<()> {
-        self.settings_enforcer.enforce_timeouts(qconn).await?;
-        Err(H3ConnectionError::PostAcceptTimeout)
+        self.settings_enforcer.wait_for_timeout(qconn).await
     }
 }

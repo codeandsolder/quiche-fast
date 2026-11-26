@@ -35,44 +35,44 @@ use crate::http3::settings::Http3Settings;
 use crate::quic::HandshakeInfo;
 use crate::quic::QuicheConnection;
 
-/// A HEADERS frame received from the [`h3::Connection`], to be processed by
-/// the [DriverHooks].
-pub(crate) struct InboundHeaders {
+/// A `HEADERS` frame received from the [`h3::Connection`], to be processed by
+/// the [`DriverHooks`].
+pub(super) struct InboundHeaders {
     pub(crate) stream_id: u64,
     pub(crate) headers: Vec<h3::Header>,
     pub(crate) has_body: bool,
 }
 
-/// Private trait to customize [H3Driver] for server or client operations.
+/// Private trait to customize [`H3Driver`] for server or client operations.
 ///
 /// Wherever endpoint-specific logic is required, a hook should be created in
-/// this trait and this hook then called in the appropriate [H3Driver] code.
-/// The hook can store its own data inside the [H3Driver] struct.
+/// this trait and this hook then called in the appropriate [`H3Driver`] code.
+/// The hook can store its own data inside the [`H3Driver`] struct.
 #[expect(
     private_interfaces,
     reason = "The public hook surface intentionally seals associated implementation types"
 )]
 pub trait DriverHooks: Sized + Send + 'static {
-    /// The type of [`H3Event`]s emitted by an [H3Driver] using these hooks.
+    /// The type of [`H3Event`]s emitted by an [`H3Driver`] using these hooks.
     /// The concrete type is expected to wrap [`H3Event`].
     type Event: From<H3Event> + Send;
-    /// The type of [`H3Command`]s accepted by an [H3Driver] using these hooks.
-    /// The concrete type is expected to wrap [`H3Command`].
+    /// The type of [`H3Command`]s accepted by an [`H3Driver`] using these
+    /// hooks. The concrete type is expected to wrap [`H3Command`].
     type Command: From<H3Command> + Send;
 
     /// Initializes the storage for these hooks.
     fn new(settings: &Http3Settings) -> Self;
 
-    /// Called in `ApplicationOverQuic::on_conn_established` after [H3Driver]
+    /// Called in `ApplicationOverQuic::on_application_ready` after [`H3Driver`]
     /// has been initialized. Used to verify connection settings and set up
     /// post-accept state like timeouts.
-    fn conn_established(
+    fn application_ready(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()>;
 
     /// Processes any received [`h3::Event::Headers`]. There is no default
-    /// processing of HEADERS frames in [H3Driver].
+    /// processing of `HEADERS` frames in [`H3Driver`].
     fn headers_received(
         driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         headers: InboundHeaders,
@@ -102,7 +102,7 @@ pub trait DriverHooks: Sized + Send + 'static {
         Ok(())
     }
 
-    /// Notifies endpoint-specific state after the peer sends GOAWAY.
+    /// Notifies endpoint-specific state after the peer sends `GOAWAY`.
     fn peer_goaway(
         _driver: &mut H3Driver<Self>, _goaway_id: u64,
     ) -> H3ConnectionResult<()> {
@@ -115,6 +115,14 @@ pub trait DriverHooks: Sized + Send + 'static {
         false
     }
 
+    /// Checks endpoint-specific deadlines even while application or network
+    /// events continuously make progress.
+    fn check_deadlines(
+        &mut self, _qconn: &mut QuicheConnection,
+    ) -> H3ConnectionResult<()> {
+        Ok(())
+    }
+
     /// Determines whether the hook's `wait_for_action` future will be polled
     /// as part of `ApplicationOverQuic::wait_for_data`. Defaults to `false` and
     /// must be overridden if `wait_for_action` is overridden.
@@ -124,7 +132,7 @@ pub trait DriverHooks: Sized + Send + 'static {
 
     /// Returns a future that will be polled in
     /// `ApplicationOverQuic::wait_for_data`, along with the other input
-    /// sources for the [H3Driver]. Note that the future will be dropped
+    /// sources for the [`H3Driver`]. Note that the future will be dropped
     /// before it resolves if another input is available first.
     fn wait_for_action(
         &mut self, _qconn: &mut QuicheConnection,

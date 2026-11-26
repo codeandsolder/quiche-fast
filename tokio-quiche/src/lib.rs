@@ -26,10 +26,11 @@
 
 //! Bridging the gap between [quiche] and [tokio].
 //!
-//! tokio-quiche connects [quiche::Connection]s and [quiche::h3::Connection]s to
-//! tokio's event loop. Users have the choice between implementing their own,
-//! custom [`ApplicationOverQuic`] or using the ready-made
-//! [H3Driver](crate::http3::driver::H3Driver) for HTTP/3 clients and servers.
+//! tokio-quiche connects [`quiche::Connection`]s and
+//! [`quiche::h3::Connection`]s to tokio's event loop. Users have the choice
+//! between implementing their own, custom [`ApplicationOverQuic`] or using the
+//! ready-made [`H3Driver`](crate::http3::driver::H3Driver) for HTTP/3 clients
+//! and servers.
 //!
 //! # Starting an HTTP/3 Server
 //!
@@ -48,12 +49,12 @@
 //! # async fn example() -> tokio_quiche::QuicResult<()> {
 //! let socket = tokio::net::UdpSocket::bind("0.0.0.0:443").await?;
 //! let mut listeners =
-//!     listen([socket], ConnectionParams::default(), DefaultMetrics)?;
+//!     listen([socket], &ConnectionParams::default(), &DefaultMetrics)?;
 //! let mut accept_stream = &mut listeners[0];
 //!
 //! while let Some(conn) = accept_stream.next().await {
 //!     let (driver, mut controller) =
-//!         ServerH3Driver::new(Http3Settings::default());
+//!         ServerH3Driver::new(&Http3Settings::default());
 //!     conn?.start(driver);
 //!
 //!     tokio::spawn(async move {
@@ -117,6 +118,22 @@ pub mod quic;
 mod result;
 pub mod settings;
 pub mod socket;
+#[cfg(test)]
+mod test_credentials;
+
+#[cfg(test)]
+fn poison_test_mutex<T>(mutex: &std::sync::Mutex<T>) {
+    // Unwind while the guard is alive without invoking the process-global
+    // panic hook. This intentionally exercises std's poison recovery path.
+    let result = std::panic::catch_unwind(|| {
+        let _guard = mutex
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        std::panic::resume_unwind(Box::new("intentional test mutex poison"));
+    });
+    assert!(result.is_err());
+    assert!(mutex.is_poisoned());
+}
 
 pub use datagram_socket;
 
@@ -165,12 +182,14 @@ pub type QuicConnectionStream<M> =
 /// The task shuts down when the returned stream is closed (or dropped) and all
 /// previously-yielded connections are closed.
 ///
+/// # Errors
+/// Returns socket setup or listener initialization errors.
 /// If `capture_quiche_logs` is enabled, this returns
 /// [`io::ErrorKind::AlreadyExists`] when another global `log` logger has
 /// already been installed.
 pub fn listen_with_capabilities<M>(
-    sockets: impl IntoIterator<Item = QuicListener>, params: ConnectionParams,
-    metrics: M,
+    sockets: impl IntoIterator<Item = QuicListener>,
+    params: &ConnectionParams<'_>, metrics: &M,
 ) -> io::Result<Vec<QuicConnectionStream<M>>>
 where
     M: Metrics,
@@ -181,7 +200,7 @@ where
 
     sockets
         .into_iter()
-        .map(|s| crate::quic::start_listener(s, &params, metrics.clone()))
+        .map(|s| crate::quic::start_listener(s, params, metrics.clone()))
         .collect()
 }
 
@@ -189,8 +208,12 @@ where
 ///
 /// Each socket is converted into a [`QuicListener`] with defaulted socket
 /// parameters. The listeners are then passed to [`listen_with_capabilities`].
+///
+/// # Errors
+/// Returns socket conversion or listener initialization errors.
 pub fn listen<S, M>(
-    sockets: impl IntoIterator<Item = S>, params: ConnectionParams, metrics: M,
+    sockets: impl IntoIterator<Item = S>, params: &ConnectionParams<'_>,
+    metrics: &M,
 ) -> io::Result<Vec<QuicConnectionStream<M>>>
 where
     S: TryInto<QuicListener, Error = io::Error>,
@@ -218,7 +241,7 @@ where
 
 static GLOBAL_LOGGER_INITIALIZED: OnceLock<bool> = OnceLock::new();
 
-/// Forward Quiche logs into the slog::Drain currently used by Foundations
+/// Forward Quiche logs into the `slog::Drain` currently used by Foundations
 ///
 /// # Warning
 ///

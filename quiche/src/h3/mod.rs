@@ -1911,6 +1911,16 @@ impl Connection {
             conn.dgram_max_writable_len().is_some()
     }
 
+    /// Returns whether both endpoints have enabled HTTP/3 datagrams and the
+    /// peer's QUIC transport permits sending them.
+    #[must_use = "the result determines whether sending HTTP datagrams is negotiated"]
+    pub fn dgram_negotiated<F: BufFactory>(
+        &self, conn: &super::Connection<F>,
+    ) -> bool {
+        self.local_settings.h3_datagram == Some(1) &&
+            self.dgram_enabled_by_peer(conn)
+    }
+
     /// Returns whether the peer enabled extended CONNECT support.
     ///
     /// Support is signalled by the peer's SETTINGS, so this method always

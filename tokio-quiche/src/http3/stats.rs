@@ -24,7 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use std::sync::atomic::AtomicI64;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -33,7 +32,7 @@ use crossbeam::atomic::AtomicCell;
 use datagram_socket::StreamClosureKind;
 
 /// Stream-level HTTP/3 audit statistics recorded by
-/// [H3Driver](crate::http3::driver::H3Driver).
+/// [`H3Driver`](crate::http3::driver::H3Driver).
 #[derive(Debug)]
 pub struct H3AuditStats {
     /// The stream ID of this session.
@@ -42,54 +41,57 @@ pub struct H3AuditStats {
     downstream_bytes_sent: AtomicU64,
     /// The number of bytes received over the stream.
     downstream_bytes_recvd: AtomicU64,
-    /// A STOP_SENDING error code received from the peer.
+    /// A `STOP_SENDING` error code received from the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
-    recvd_stop_sending_error_code: AtomicI64,
-    /// A RESET_STREAM error code received from the peer.
+    /// `None` indicates that no such error code has been recorded.
+    recvd_stop_sending_error_code: AtomicCell<Option<u64>>,
+    /// A `RESET_STREAM` error code received from the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
-    recvd_reset_stream_error_code: AtomicI64,
-    /// A STOP_SENDING error code sent to the peer.
+    /// `None` indicates that no such error code has been recorded.
+    recvd_reset_stream_error_code: AtomicCell<Option<u64>>,
+    /// A `STOP_SENDING` error code sent to the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
-    sent_stop_sending_error_code: AtomicI64,
-    /// A RESET_STREAM error code sent to the peer.
+    /// `None` indicates that no such error code has been recorded.
+    sent_stop_sending_error_code: AtomicCell<Option<u64>>,
+    /// A `RESET_STREAM` error code sent to the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
-    sent_reset_stream_error_code: AtomicI64,
+    /// `None` indicates that no such error code has been recorded.
+    sent_reset_stream_error_code: AtomicCell<Option<u64>>,
     /// Stream FIN received from the peer.
     recvd_stream_fin: AtomicCell<StreamClosureKind>,
     /// Stream FIN sent to the peer.
     sent_stream_fin: AtomicCell<StreamClosureKind>,
-    /// Cumulative time between HEADERS failed flush and complete.
+    /// Cumulative time between `HEADERS` failed flush and complete.
     ///
-    /// Measured as the duration between the first moment a HEADERS frame was
+    /// Measured as the duration between the first moment a `HEADERS` frame was
     /// not flushed in full, and the moment that it was completely flushed.
-    /// Measured across all HEADERS frames sent on the stream. A value of 0
+    /// Measured across all `HEADERS` frames sent on the stream. A value of 0
     /// indicates there was no failed flushing.
     headers_flush_duration: AtomicCell<Duration>,
 }
 
 impl H3AuditStats {
-    pub fn new(stream_id: u64) -> Self {
+    /// Creates an empty audit record for the stream.
+    #[must_use = "the returned record tracks the stream statistics"]
+    pub const fn new(stream_id: u64) -> Self {
         Self {
             stream_id,
             downstream_bytes_sent: AtomicU64::new(0),
             downstream_bytes_recvd: AtomicU64::new(0),
-            recvd_stop_sending_error_code: AtomicI64::new(-1),
-            recvd_reset_stream_error_code: AtomicI64::new(-1),
-            sent_stop_sending_error_code: AtomicI64::new(-1),
-            sent_reset_stream_error_code: AtomicI64::new(-1),
+            recvd_stop_sending_error_code: AtomicCell::new(None),
+            recvd_reset_stream_error_code: AtomicCell::new(None),
+            sent_stop_sending_error_code: AtomicCell::new(None),
+            sent_reset_stream_error_code: AtomicCell::new(None),
             recvd_stream_fin: AtomicCell::new(StreamClosureKind::None),
             sent_stream_fin: AtomicCell::new(StreamClosureKind::None),
-            headers_flush_duration: AtomicCell::new(Duration::from_secs(0)),
+            headers_flush_duration: AtomicCell::new(Duration::ZERO),
         }
     }
 
     /// The stream ID of this session.
     #[inline]
-    pub fn stream_id(&self) -> u64 {
+    #[must_use = "the ID identifies the audited stream"]
+    pub const fn stream_id(&self) -> u64 {
         self.stream_id
     }
 
@@ -105,36 +107,36 @@ impl H3AuditStats {
         self.downstream_bytes_recvd.load(Ordering::Relaxed)
     }
 
-    /// A STOP_SENDING error code received from the peer.
+    /// A `STOP_SENDING` error code received from the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
+    /// `None` indicates that no such error code has been recorded.
     #[inline]
-    pub fn recvd_stop_sending_error_code(&self) -> i64 {
-        self.recvd_stop_sending_error_code.load(Ordering::Relaxed)
+    pub fn recvd_stop_sending_error_code(&self) -> Option<u64> {
+        self.recvd_stop_sending_error_code.load()
     }
 
-    /// A RESET_STREAM error code received from the peer.
+    /// A `RESET_STREAM` error code received from the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
+    /// `None` indicates that no such error code has been recorded.
     #[inline]
-    pub fn recvd_reset_stream_error_code(&self) -> i64 {
-        self.recvd_reset_stream_error_code.load(Ordering::Relaxed)
+    pub fn recvd_reset_stream_error_code(&self) -> Option<u64> {
+        self.recvd_reset_stream_error_code.load()
     }
 
-    /// A STOP_SENDING error code sent to the peer.
+    /// A `STOP_SENDING` error code sent to the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
+    /// `None` indicates that no such error code has been recorded.
     #[inline]
-    pub fn sent_stop_sending_error_code(&self) -> i64 {
-        self.sent_stop_sending_error_code.load(Ordering::Relaxed)
+    pub fn sent_stop_sending_error_code(&self) -> Option<u64> {
+        self.sent_stop_sending_error_code.load()
     }
 
-    /// A RESET_STREAM error code sent to the peer.
+    /// A `RESET_STREAM` error code sent to the peer.
     ///
-    /// -1 indicates that this error code was not received yet.
+    /// `None` indicates that no such error code has been recorded.
     #[inline]
-    pub fn sent_reset_stream_error_code(&self) -> i64 {
-        self.sent_reset_stream_error_code.load(Ordering::Relaxed)
+    pub fn sent_reset_stream_error_code(&self) -> Option<u64> {
+        self.sent_reset_stream_error_code.load()
     }
 
     /// Stream FIN received from the peer.
@@ -149,11 +151,11 @@ impl H3AuditStats {
         self.sent_stream_fin.load()
     }
 
-    /// Cumulative time between HEADERS failed flush and complete.
+    /// Cumulative time between `HEADERS` failed flush and complete.
     ///
-    /// Measured as the duration between the first moment a HEADERS frame was
+    /// Measured as the duration between the first moment a `HEADERS` frame was
     /// not flushed in full, and the moment that it was completely flushed.
-    /// Measured across all HEADERS frames sent on the stream. A value of 0
+    /// Measured across all `HEADERS` frames sent on the stream. A value of 0
     /// indicates there was no failed flushing.
     #[inline]
     pub fn headers_flush_duration(&self) -> Duration {
@@ -174,34 +176,34 @@ impl H3AuditStats {
 
     #[inline]
     pub fn set_recvd_stop_sending_error_code(
-        &self, recvd_stop_sending_error_code: i64,
+        &self, recvd_stop_sending_error_code: u64,
     ) {
         self.recvd_stop_sending_error_code
-            .store(recvd_stop_sending_error_code, Ordering::Relaxed);
+            .store(Some(recvd_stop_sending_error_code));
     }
 
     #[inline]
     pub fn set_recvd_reset_stream_error_code(
-        &self, recvd_reset_stream_error_code: i64,
+        &self, recvd_reset_stream_error_code: u64,
     ) {
         self.recvd_reset_stream_error_code
-            .store(recvd_reset_stream_error_code, Ordering::Relaxed);
+            .store(Some(recvd_reset_stream_error_code));
     }
 
     #[inline]
     pub fn set_sent_stop_sending_error_code(
-        &self, sent_stop_sending_error_code: i64,
+        &self, sent_stop_sending_error_code: u64,
     ) {
         self.sent_stop_sending_error_code
-            .store(sent_stop_sending_error_code, Ordering::Relaxed);
+            .store(Some(sent_stop_sending_error_code));
     }
 
     #[inline]
     pub fn set_sent_reset_stream_error_code(
-        &self, sent_reset_stream_error_code: i64,
+        &self, sent_reset_stream_error_code: u64,
     ) {
         self.sent_reset_stream_error_code
-            .store(sent_reset_stream_error_code, Ordering::Relaxed);
+            .store(Some(sent_reset_stream_error_code));
     }
 
     #[inline]
@@ -216,9 +218,50 @@ impl H3AuditStats {
 
     #[inline]
     pub fn add_header_flush_duration(&self, duration: Duration) {
-        // NB: load and store may not be atomic but we aren't accessing the
-        // object from any other thread so things should be ok.
-        let current = self.headers_flush_duration.load();
-        self.headers_flush_duration.store(current + duration);
+        let _ = self
+            .headers_flush_duration
+            .fetch_update(|current| Some(current.saturating_add(duration)));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_wire_codes_are_distinct_from_missing() {
+        let stats = H3AuditStats::new(4);
+        assert_eq!(stats.recvd_stop_sending_error_code(), None);
+        assert_eq!(stats.recvd_reset_stream_error_code(), None);
+        assert_eq!(stats.sent_stop_sending_error_code(), None);
+        assert_eq!(stats.sent_reset_stream_error_code(), None);
+        stats.set_recvd_stop_sending_error_code(0);
+        stats.set_recvd_reset_stream_error_code(octets::MAX_VAR_INT);
+        stats.set_sent_stop_sending_error_code(42);
+        stats.set_sent_reset_stream_error_code(1 << 32);
+        assert_eq!(stats.recvd_stop_sending_error_code(), Some(0));
+        assert_eq!(
+            stats.recvd_reset_stream_error_code(),
+            Some(octets::MAX_VAR_INT)
+        );
+        assert_eq!(stats.sent_stop_sending_error_code(), Some(42));
+        assert_eq!(stats.sent_reset_stream_error_code(), Some(1 << 32));
+    }
+
+    #[test]
+    fn flush_duration_accumulates_concurrent_updates_and_saturates() {
+        let stats = H3AuditStats::new(0);
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                scope.spawn(|| {
+                    for _ in 0..1000 {
+                        stats.add_header_flush_duration(Duration::from_nanos(1));
+                    }
+                });
+            }
+        });
+        assert_eq!(stats.headers_flush_duration(), Duration::from_nanos(4000));
+        stats.add_header_flush_duration(Duration::MAX);
+        assert_eq!(stats.headers_flush_duration(), Duration::MAX);
     }
 }

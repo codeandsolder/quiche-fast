@@ -35,33 +35,40 @@ use tokio_quiche::ConnectionIdGenerator as _;
 use crate::fixtures::*;
 
 #[test]
-fn connection_stats_use_active_path() {
-    let mut config = Pipe::default_config("cubic").unwrap();
+fn connection_stats_use_active_path() -> QuicResult<()> {
+    let mut config = Pipe::default_config("cubic")?;
     config.set_active_connection_id_limit(2);
 
     let mut pipe = Pipe::<BufFactory>::with_config_and_scid_lengths_and_buf(
         &mut config,
         0,
         0,
-    )
-    .unwrap();
-    pipe.handshake().unwrap();
+    )?;
+    pipe.handshake()?;
 
-    let migrated_addr: SocketAddr = "127.0.0.1:5678".parse().unwrap();
-    pipe.client.migrate_source(migrated_addr).unwrap();
+    let migrated_addr: SocketAddr = "127.0.0.1:5678".parse()?;
+    pipe.client.migrate_source(migrated_addr)?;
 
-    assert!(!pipe.client.path_stats().next().unwrap().active);
+    assert!(
+        !pipe
+            .client
+            .path_stats()
+            .next()
+            .ok_or("missing initial path")?
+            .active
+    );
 
     let (stats_tx, stats_rx) = std::sync::mpsc::channel();
     QuicCommand::ConnectionStats(Box::new(move |stats| {
-        stats_tx.send(stats).unwrap();
+        let _ = stats_tx.send(stats);
     }))
     .execute(&mut pipe.client);
 
-    let path_stats = stats_rx.recv().unwrap().path_stats.unwrap();
+    let path_stats = stats_rx.recv()?.path_stats.ok_or("missing path stats")?;
 
     assert!(path_stats.active);
     assert_eq!(path_stats.local_addr, migrated_addr);
+    Ok(())
 }
 
 #[tokio::test]
@@ -97,7 +104,7 @@ async fn test_active_migration() -> tokio_quiche::QuicResult<()> {
 ///
 /// This requires using "plain" quiche as a client to properly control when and
 /// where packets are sent to, which is not possible using h3i.
-pub(crate) async fn run_migration_test(
+pub(super) async fn run_migration_test(
     active: bool, base_port: u16,
 ) -> tokio_quiche::QuicResult<(Vec<quiche::PathEvent>, SocketAddr, SocketAddr)> {
     let mut quic_settings = QuicSettings::default();
@@ -111,8 +118,8 @@ pub(crate) async fn run_migration_test(
         Http3Settings::default(),
         hook.clone(),
         handle_connection,
-    );
-    let server_addr = extract_host_ipv4(&url);
+    )?;
+    let server_addr = extract_host_ipv4(&url)?;
 
     let mut client_config = quiche::Config::new(quiche::PROTOCOL_VERSION)?;
     client_config.set_application_protos(&[b"h3"])?;
@@ -143,13 +150,13 @@ pub(crate) async fn run_migration_test(
     if active {
         // Supply a second SCID to the server to facilitate active migration
         let extra_scid = SimpleConnectionIdGenerator.new_connection_id()?;
-        conn.new_scid(&extra_scid, 0xAABBCCDDEEFF0123454678, false)?;
+        conn.new_scid(&extra_scid, 0x00AA_BBCC_DDEE_FF01_2345_4678, false)?;
     }
 
     // Handshake.
     while !conn.is_established() {
-        emit_flight(&socket, &mut conn).await;
-        process_flight(&socket, client_addr, &mut conn).await;
+        emit_flight(&socket, &mut conn).await?;
+        process_flight(&socket, client_addr, &mut conn).await?;
     }
 
     // Create a new HTTP/3 connection once the QUIC connection is established.
@@ -167,10 +174,10 @@ pub(crate) async fn run_migration_test(
     ];
 
     h3_conn.send_request(&mut conn, &req, true)?;
-    emit_flight(&socket, &mut conn).await;
-    process_flight(&socket, client_addr, &mut conn).await;
+    emit_flight(&socket, &mut conn).await?;
+    process_flight(&socket, client_addr, &mut conn).await?;
 
-    assert_eq!(process_h3_events(&mut h3_conn, &mut conn), (true, true));
+    assert_eq!(process_h3_events(&mut h3_conn, &mut conn)?, (true, true));
 
     // Client migrates to new address.
     let migrated_addr = SocketAddr::new(client_addr.ip(), base_port + 1);
@@ -189,59 +196,60 @@ pub(crate) async fn run_migration_test(
 
     // Client sends second request on the new address.
     h3_conn.send_request(&mut conn, &req, true)?;
-    emit_flight(&migrated_socket, &mut conn).await;
+    emit_flight(&migrated_socket, &mut conn).await?;
 
     let stats = conn.stats();
     assert_eq!(stats.path_challenge_rx_count, 0);
 
-    process_flight(&migrated_socket, client_addr, &mut conn).await;
+    process_flight(&migrated_socket, client_addr, &mut conn).await?;
 
     let stats = conn.stats();
     assert_eq!(stats.path_challenge_rx_count, 1);
 
     // Client responds to PATH_CHALLENGE.
-    emit_flight(&migrated_socket, &mut conn).await;
+    emit_flight(&migrated_socket, &mut conn).await?;
 
     // Client receives response for the second request.
-    process_flight(&migrated_socket, client_addr, &mut conn).await;
+    process_flight(&migrated_socket, client_addr, &mut conn).await?;
 
-    assert_eq!(process_h3_events(&mut h3_conn, &mut conn), (true, true));
+    assert_eq!(process_h3_events(&mut h3_conn, &mut conn)?, (true, true));
 
     Ok((hook.path_events(), server_addr, migrated_addr))
 }
 
 async fn emit_flight(
     socket: &tokio::net::UdpSocket, conn: &mut quiche::Connection,
-) {
+) -> QuicResult<()> {
     let flight = match quiche::test_utils::emit_flight(conn) {
         Ok(v) => v,
 
-        Err(quiche::Error::Done) => return,
+        Err(quiche::Error::Done) => return Ok(()),
 
-        Err(e) => panic!("failed to emit flight: {e:?}"),
+        Err(e) => return Err(e.into()),
     };
 
     for p in flight {
         // We avoid using the `from` field here on purpose, as in case of
         // passive migration the client might be unaware that their address
         // changed.
-        socket.send_to(&p.0, p.1.to).await.unwrap();
+        socket.send_to(&p.0, p.1.to).await?;
     }
+    Ok(())
 }
 
 async fn process_flight(
     socket: &tokio::net::UdpSocket, client_addr: std::net::SocketAddr,
     conn: &mut quiche::Connection,
-) {
-    let mut buf = [0; 65535];
+) -> QuicResult<()> {
+    let mut buf = vec![0; 65535];
 
-    socket.readable().await.unwrap();
+    socket.readable().await?;
 
     loop {
         let (len, from) = match socket.try_recv_from(&mut buf) {
             Ok(v) => v,
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(e) => panic!("failed to receive packets: {e:?}"),
+            Err(e) => return Err(e.into()),
         };
 
         // We use an explicit `client_addr` here rather than the socket's
@@ -253,14 +261,15 @@ async fn process_flight(
         };
 
         // Process potentially coalesced packets.
-        let _ = conn.recv(&mut buf[..len], recv_info).unwrap();
+        let _ = conn.recv(&mut buf[..len], recv_info)?;
     }
+    Ok(())
 }
 
 fn process_h3_events(
     h3_conn: &mut quiche::h3::Connection, conn: &mut quiche::Connection,
-) -> (bool, bool) {
-    let mut buf = [0; 65535];
+) -> QuicResult<(bool, bool)> {
+    let mut buf = vec![0; 65535];
 
     let mut got_headers = false;
 
@@ -275,9 +284,11 @@ fn process_h3_events(
 
             Ok((_, quiche::h3::Event::Finished)) => {
                 // Request is complete, return.
-                return (got_headers, true);
+                return Ok((got_headers, true));
             },
 
+            Err(quiche::h3::Error::Done) => return Ok((got_headers, false)),
+            Err(error) => return Err(error.into()),
             _ => {},
         }
     }

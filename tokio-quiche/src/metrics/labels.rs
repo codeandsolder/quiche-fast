@@ -57,6 +57,8 @@ pub enum QuicWriteError {
     Err,
     Partial,
     WouldBlock,
+    DeadlineExpired,
+    QueueFull,
 }
 
 /// Category of error that caused the QUIC handshake to fail.
@@ -92,12 +94,10 @@ impl From<&quic::HandshakeError> for HandshakeError {
 impl From<&BoxError> for HandshakeError {
     fn from(err: &BoxError) -> Self {
         if let Some(e) = err.downcast_ref::<quic::HandshakeError>() {
-            Self::from(e)
-        } else if let Some(e) = err.downcast_ref::<quiche::Error>() {
-            Self::from(e)
-        } else {
-            Self::Other
+            return Self::from(e);
         }
+        err.downcast_ref::<quiche::Error>()
+            .map_or(Self::Other, Self::from)
     }
 }
 
@@ -147,7 +147,7 @@ impl std::error::Error for QuicInvalidInitialPacketError {}
 
 impl From<QuicInvalidInitialPacketError> for std::io::Error {
     fn from(e: QuicInvalidInitialPacketError) -> Self {
-        std::io::Error::other(e)
+        Self::other(e)
     }
 }
 

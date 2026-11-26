@@ -62,7 +62,7 @@ src/
 
 ## ANTI-PATTERNS
 
-- `connection_not_present()` returns `TlsFail` in driver — misleading sentinel. Don't propagate.
+- Missing HTTP/3 initialization returns `H3ConnectionError::NotEstablished`. Preserve typed errors and their sources; do not replace unrelated failures with TLS errors.
 - `Error::Done` used as success signal in H3 driver write path. Don't replicate.
 - Don't add new `ApplicationOverQuic` methods without considering the worker loop order (recv -> reads -> writes -> send).
 - Don't block in `wait_for_data` — it's polled concurrently with packet recv and timers.
@@ -70,8 +70,8 @@ src/
 ## NOTES
 
 - Hardcodes `quiche/boringssl-btls-crate` + `quiche/qlog` in Cargo.toml deps.
-- Features: `zero-copy` implies `gcongestion`. `rpk` enables raw public keys via `boring/rpk`.
-- `--cfg capture_keylogs` (build flag, not feature) enables SSLKEYLOGFILE support.
+- Features: `qlog-gzip` and `qlog-zstd` are enabled by default. `zero-copy` is a deprecated alias for `gcongestion`; `rpk` enables raw public keys via `btls/rpk`.
+- `--cfg capture_keylogs` enables SSLKEYLOGFILE support; the deprecated Cargo feature also enables it.
 - `perf-quic-listener-metrics` adds handshake timing instrumentation.
 - `tokio-task-metrics` adds schedule/poll duration histograms per spawned task.
 - Linux-only: `libc`/`nix` deps for signal handling and socket options.

@@ -34,7 +34,7 @@ mod hooks;
 mod server;
 mod streams;
 #[cfg(test)]
-pub mod test_utils;
+mod test_utils;
 #[cfg(test)]
 mod tests;
 mod waiting_streams;
@@ -68,6 +68,7 @@ use self::hooks::DriverHooks;
 use self::hooks::InboundHeaders;
 use self::streams::FlowCtx;
 use self::streams::HaveUpstreamCapacity;
+use self::streams::ReadState;
 use self::streams::ReceivedDownstreamData;
 use self::streams::StreamCtx;
 use self::streams::StreamReady;
@@ -89,6 +90,8 @@ pub use self::client::ClientH3Driver;
 pub use self::client::ClientH3Event;
 pub use self::client::ClientRequestSender;
 pub use self::client::NewClientRequest;
+pub use self::datagram::DatagramFlowSender;
+use self::datagram::FlowDatagram;
 pub use self::server::IsInEarlyData;
 pub use self::server::RawPriorityValue;
 pub use self::server::ServerEventStream;
@@ -112,6 +115,8 @@ const STREAM_CAPACITY: usize = 1;
 // For *all* flows use a shared channel with 2048 entries, which works out
 // to 3MB of max buffered data at 1500 bytes per datagram.
 const FLOW_CAPACITY: usize = 2048;
+// Bound an uninterrupted outbound datagram burst to keep stream I/O responsive.
+const FLOW_SEND_BATCH: usize = 64;
 
 // Floor for the lazily-allocated body receive buffer. The buffer is sized to
 // the amount currently readable on the stream (see [`process_h3_data`]), but we
@@ -156,27 +161,66 @@ fn body_recv_buf_size(readable: usize, max: usize) -> usize {
     readable.clamp(floor, max)
 }
 
+enum StreamStatus {
+    Drained,
+    ReceiverClosed,
+    Reset(u64),
+    Failed(h3::Error),
+    FinDelivered,
+    Blocked,
+}
+
+/// Read a chunk into reusable scratch storage and transfer its ownership.
+/// A failed read may already have appended bytes; never reuse that partially
+/// written buffer for another stream.
+fn read_body_chunk(
+    scratch: &mut Option<bytes::buf::Limit<BytesMut>>, want: usize,
+    read: impl FnOnce(&mut bytes::buf::Limit<BytesMut>) -> h3::Result<usize>,
+) -> h3::Result<BytesMut> {
+    let buffer =
+        scratch.get_or_insert_with(|| BytesMut::with_capacity(want).limit(want));
+    if buffer.remaining_mut() < want {
+        *buffer = BytesMut::with_capacity(want).limit(want);
+    }
+    match read(buffer) {
+        Ok(n) => {
+            let body = buffer.get_mut().split();
+            debug_assert_eq!(body.len(), n);
+            if !buffer.has_remaining_mut() {
+                *scratch = None;
+            }
+            Ok(body)
+        },
+        Err(error) => {
+            if !buffer.get_ref().is_empty() {
+                *scratch = None;
+            }
+            Err(error)
+        },
+    }
+}
+
 /// Used by a local task to send [`OutboundFrame`]s to a peer on the
-/// stream or flow associated with this channel.
+/// stream associated with this channel.
 pub type OutboundFrameSender = PollSender<OutboundFrame>;
 
 /// Used internally to receive [`OutboundFrame`]s which should be sent to a peer
-/// on the stream or flow associated with this channel.
+/// on the stream associated with this channel.
 type OutboundFrameStream = mpsc::Receiver<OutboundFrame>;
 
 /// Used internally to send [`InboundFrame`]s (data) from the peer to a local
-/// task on the stream or flow associated with this channel.
+/// task on the stream associated with this channel.
 type InboundFrameSender = PollSender<InboundFrame>;
 
-/// Used by a local task to receive [`InboundFrame`]s (data) on the stream or
-/// flow associated with this channel.
+/// Used by a local task to receive [`InboundFrame`]s (data) on the stream
+/// associated with this channel.
 pub type InboundFrameStream = mpsc::Receiver<InboundFrame>;
 
-/// The error type used internally in [H3Driver].
+/// The error type used internally in [`H3Driver`].
 ///
 /// Note that [`ApplicationOverQuic`] errors are not exposed to users at this
-/// time. The type is public to document the failure modes in [H3Driver].
-#[derive(Debug, PartialEq, Eq)]
+/// time. The type is public to document the failure modes in [`H3Driver`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum H3ConnectionError {
     /// The controller task was shut down and is no longer listening.
@@ -188,17 +232,23 @@ pub enum H3ConnectionError {
     /// The server's post-accept timeout was hit.
     /// The timeout can be configured in [`Http3Settings`].
     PostAcceptTimeout,
+    /// A malformed HTTP/3 datagram prefix.
+    InvalidDatagram,
+    /// The HTTP/3 connection has not been initialized.
+    NotEstablished,
+    /// The driver was attached to the wrong transport endpoint role.
+    InvalidDriverRole { expected_server: bool },
 }
 
 impl From<h3::Error> for H3ConnectionError {
     fn from(err: h3::Error) -> Self {
-        H3ConnectionError::H3(err)
+        Self::H3(err)
     }
 }
 
 impl From<quiche::Error> for H3ConnectionError {
     fn from(err: quiche::Error) -> Self {
-        H3ConnectionError::H3(h3::Error::Transport(err))
+        Self::H3(h3::Error::Transport(err))
     }
 }
 
@@ -218,6 +268,14 @@ impl fmt::Display for H3ConnectionError {
             Self::H3(e) => e,
             Self::NonexistentStream => &"nonexistent stream",
             Self::PostAcceptTimeout => &"post accept timeout hit",
+            Self::InvalidDatagram => &"invalid HTTP/3 datagram",
+            Self::NotEstablished => &"HTTP/3 connection not initialized",
+            Self::InvalidDriverRole {
+                expected_server: true,
+            } => &"server driver requires a server transport",
+            Self::InvalidDriverRole {
+                expected_server: false,
+            } => &"client driver requires a client transport",
         };
 
         write!(f, "H3ConnectionError: {s}")
@@ -236,7 +294,7 @@ pub struct IncomingH3Headers {
     /// The actual [`h3::Header`]s which were received.
     pub headers: Vec<h3::Header>,
     /// An [`OutboundFrameSender`] for streaming body data to the peer. For
-    /// [ClientH3Driver], note that the request body can also be passed a
+    /// [`ClientH3Driver`], note that the request body can also be passed a
     /// cloned sender via [`NewClientRequest`].
     pub send: OutboundFrameSender,
     /// An [`InboundFrameStream`] of body data received from the peer.
@@ -254,13 +312,14 @@ impl fmt::Debug for IncomingH3Headers {
             .field("headers", &self.headers)
             .field("read_fin", &self.read_fin)
             .field("h3_audit_stats", &self.h3_audit_stats)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
-/// [`H3Event`]s are produced by an [H3Driver] to describe HTTP/3 state updates.
+/// [`H3Event`]s are produced by an [`H3Driver`] to describe HTTP/3 state
+/// updates.
 ///
-/// Both [ServerH3Driver] and [ClientH3Driver] may extend this enum with
+/// Both [`ServerH3Driver`] and [`ClientH3Driver`] may extend this enum with
 /// endpoint-specific variants. The events must be consumed by users of the
 /// drivers, like a higher-level `Server` or `Client` controller.
 #[derive(Debug)]
@@ -276,17 +335,17 @@ pub enum H3Event {
     /// receiver.
     IncomingHeaders(IncomingH3Headers),
 
-    /// A DATAGRAM flow was created and associated with the given `flow_id`.
-    /// This event is fired before a HEADERS event for CONNECT[-UDP] requests.
+    /// A datagram flow was created for an extended CONNECT request stream.
+    /// The event precedes the corresponding request headers on the server.
     NewFlow {
-        /// Flow ID of the new flow.
-        flow_id: u64,
-        /// An [`OutboundFrameSender`] for transmitting datagrams to the peer.
-        send: OutboundFrameSender,
-        /// An [`InboundFrameStream`] for receiving datagrams from the peer.
-        recv: InboundFrameStream,
+        /// The request stream that owns the flow.
+        stream_id: u64,
+        /// A sender bound to this request.
+        send: DatagramFlowSender,
+        /// Unreliable payloads received from the peer.
+        recv: mpsc::Receiver<DgramBuffer>,
     },
-    /// A RST_STREAM frame was seen on the given `stream_id`. The user of the
+    /// A `RST_STREAM` frame was seen on the given `stream_id`. The user of the
     /// driver should clean up any state allocated for this stream.
     ResetStream { stream_id: u64 },
     /// The connection has irrecoverably errored and is shutting down.
@@ -304,24 +363,21 @@ pub enum H3Event {
         fin: bool,
     },
     /// The stream has been closed. This is used to signal stream closures that
-    /// don't result from RST_STREAM frames, unlike the
+    /// don't result from `RST_STREAM` frames, unlike the
     /// [`H3Event::ResetStream`] variant.
     StreamClosed { stream_id: u64 },
     /// A GOAWAY frame was received from the peer containing `id`,
-    /// as described in https://datatracker.ietf.org/doc/html/rfc9114#section-5.2.
+    /// as described in <https://datatracker.ietf.org/doc/html/rfc9114#section-5.2>.
     GoAway { id: u64 },
 }
 
 impl H3Event {
     /// Generates an event from an applicable [`H3ConnectionError`].
-    fn from_error(err: &H3ConnectionError) -> Option<Self> {
-        Some(match err {
-            H3ConnectionError::H3(e) => Self::ConnectionError(*e),
-            H3ConnectionError::PostAcceptTimeout => Self::ConnectionShutdown(
-                Some(H3ConnectionError::PostAcceptTimeout),
-            ),
-            _ => return None,
-        })
+    const fn from_error(err: H3ConnectionError) -> Self {
+        match err {
+            H3ConnectionError::H3(error) => Self::ConnectionError(error),
+            other => Self::ConnectionShutdown(Some(other)),
+        }
     }
 }
 
@@ -336,65 +392,60 @@ pub enum OutboundFrame {
     Headers(Vec<h3::Header>, Option<quiche::h3::Priority>),
     /// Response body/CONNECT downstream data plus FIN flag.
     Body(Bytes, bool),
-    /// CONNECT-UDP (DATAGRAM) downstream data plus flow ID.
-    Datagram(DgramBuffer, u64),
     /// Close the stream with a trailers, with optional priority.
     Trailers(Vec<h3::Header>, Option<quiche::h3::Priority>),
-    /// An error encountered when serving the request. Stream should be closed.
-    PeerStreamError,
-    /// DATAGRAM flow explicitly closed.
-    FlowShutdown { flow_id: u64, stream_id: u64 },
 }
 
-/// An [`InboundFrame`] is a data frame that was received from the peer over a
-/// [`quiche::h3::Connection`]. This is used by peers to send body or datagrams
-/// to the local task.
+/// Reliable body data received from the peer, together with its FIN flag.
 #[derive(Debug)]
-pub enum InboundFrame {
-    /// Request body/CONNECT upstream data plus FIN flag.
-    Body(BytesMut, bool),
-    /// CONNECT-UDP (DATAGRAM) upstream data.
-    Datagram(DgramBuffer),
+pub struct InboundFrame {
+    /// Received body bytes (empty for a standalone FIN).
+    pub body: BytesMut,
+    /// The peer's end-of-body marker.
+    pub fin: bool,
 }
 
 /// A ready-made [`ApplicationOverQuic`] which can handle HTTP/3 and MASQUE.
 /// Depending on the `DriverHooks` in use, it powers either a client or a
 /// server.
 ///
-/// Use the [ClientH3Driver] and [ServerH3Driver] aliases to access the
+/// Use the [`ClientH3Driver`] and [`ServerH3Driver`] aliases to access the
 /// respective driver types. The driver is passed into an I/O loop and
 /// communicates with the driver's user (e.g., an HTTP client or a server) via
-/// its associated [H3Controller]. The controller allows the application to both
-/// listen for [`H3Event`]s of note and send [`H3Command`]s into the I/O loop.
+/// its associated [`H3Controller`]. The controller allows the application to
+/// both listen for [`H3Event`]s of note and send [`H3Command`]s into the I/O
+/// loop.
 pub struct H3Driver<H: DriverHooks> {
     /// Configuration used to initialize `conn`. Created from [`Http3Settings`]
     /// in the constructor.
     h3_config: h3::Config,
     /// The underlying HTTP/3 connection. Initialized in
-    /// `ApplicationOverQuic::on_conn_established`.
+    /// `ApplicationOverQuic::on_application_ready`.
     conn: Option<h3::Connection>,
     /// State required by the client/server hooks.
     hooks: H,
-    /// Sends [`H3Event`]s to the [H3Controller] paired with this driver.
+    /// Sends [`H3Event`]s to the [`H3Controller`] paired with this driver.
     h3_event_sender: mpsc::UnboundedSender<H::Event>,
-    /// Receives [`H3Command`]s from the [H3Controller] paired with this driver.
+    /// Receives [`H3Command`]s from the [`H3Controller`] paired with this
+    /// driver.
     cmd_recv: mpsc::UnboundedReceiver<H::Command>,
 
-    /// A map of stream IDs to their [StreamCtx]. This is mainly used to
+    /// A map of stream IDs to their [`StreamCtx`]. This is mainly used to
     /// retrieve the internal Tokio channels associated with the stream.
     stream_map: BTreeMap<u64, StreamCtx>,
-    /// A map of flow IDs to their [FlowCtx]. This is mainly used to retrieve
-    /// the internal Tokio channels associated with the flow.
+    /// Datagram flows keyed by their owning HTTP request stream ID.
     flow_map: BTreeMap<u64, FlowCtx>,
     /// Set of [`WaitForStream`] futures. A stream is added to this set if
     /// we need to send to it and its channel is at capacity, or if we need
     /// data from its channel and the channel is empty.
     waiting_streams: WaitingStreams,
 
-    /// Receives [`OutboundFrame`]s from all datagram flows on the connection.
-    dgram_recv: OutboundFrameStream,
-    /// Keeps the datagram channel open such that datagram flows can be created.
-    dgram_send: OutboundFrameSender,
+    /// Bounded queue shared by all outbound datagram flows.
+    dgram_recv: mpsc::Receiver<FlowDatagram>,
+    dgram_send: mpsc::Sender<FlowDatagram>,
+    /// Reliable flow shutdown requests cannot be blocked by the data queue.
+    flow_close_recv: UnboundedReceiver<u64>,
+    flow_close_send: UnboundedSender<u64>,
     /// A buffer to receive H3 body data from quiche. Lazily allocated on the
     /// first body read and released once no streams remain, so idle
     /// connections hold no receive buffer. We `split()` off filled parts until
@@ -406,10 +457,10 @@ pub struct H3Driver<H: DriverHooks> {
     max_recv_body_buf_size: usize,
 
     /// The maximum HTTP/3 stream ID seen on this connection.
-    max_stream_seen: u64,
+    max_stream_seen: Option<u64>,
 
     /// Tracks whether we have forwarded the HTTP/3 SETTINGS frame
-    /// to the [H3Controller] once.
+    /// to the [`H3Controller`] once.
     settings_received_and_forwarded: bool,
     /// Tracks whether the H3 event receiver has been dropped.
     /// Used to avoid busy-looping on `h3_event_sender.closed()`.
@@ -417,21 +468,23 @@ pub struct H3Driver<H: DriverHooks> {
 }
 
 impl<H: DriverHooks> H3Driver<H> {
-    /// Builds a new [H3Driver] and an associated [H3Controller].
+    /// Builds a new [`H3Driver`] and an associated [`H3Controller`].
     ///
     /// The driver should then be passed to
     /// [`InitialQuicConnection`](crate::InitialQuicConnection)'s `start`
     /// method.
-    pub fn new(http3_settings: Http3Settings) -> (Self, H3Controller<H>) {
+    #[must_use = "the returned driver and controller must be paired"]
+    pub fn new(http3_settings: &Http3Settings) -> (Self, H3Controller<H>) {
         let (dgram_send, dgram_recv) = mpsc::channel(FLOW_CAPACITY);
+        let (flow_close_send, flow_close_recv) = mpsc::unbounded_channel();
         let (cmd_sender, cmd_recv) = mpsc::unbounded_channel();
         let (h3_event_sender, h3_event_recv) = mpsc::unbounded_channel();
 
         (
-            H3Driver {
-                h3_config: (&http3_settings).into(),
+            Self {
+                h3_config: http3_settings.into(),
                 conn: None,
-                hooks: H::new(&http3_settings),
+                hooks: H::new(http3_settings),
                 h3_event_sender,
                 cmd_recv,
 
@@ -439,8 +492,10 @@ impl<H: DriverHooks> H3Driver<H> {
                 flow_map: BTreeMap::new(),
 
                 dgram_recv,
-                dgram_send: PollSender::new(dgram_send),
-                max_stream_seen: 0,
+                dgram_send,
+                flow_close_recv,
+                flow_close_send,
+                max_stream_seen: None,
                 body_recv_buf: None,
                 // `Some(0)` would make `recv_body_buf` a no-op, so treat it as
                 // unset.
@@ -456,39 +511,45 @@ impl<H: DriverHooks> H3Driver<H> {
             },
             H3Controller {
                 cmd_sender,
-                h3_event_recv: Some(h3_event_recv),
+                h3_event_recv,
             },
         )
     }
 
-    /// Retrieve the [FlowCtx] associated with the given `flow_id`. If no
-    /// context is found, a new one will be created.
-    fn get_or_insert_flow(
-        &mut self, flow_id: u64,
-    ) -> H3ConnectionResult<&mut FlowCtx> {
+    /// Register a flow only while processing an explicit extended CONNECT.
+    /// QUIC stream IDs are unique, and inbound datagrams never create flows.
+    fn register_flow(&mut self, stream_id: u64) -> H3ConnectionResult<()> {
         use std::collections::btree_map::Entry;
-        Ok(match self.flow_map.entry(flow_id) {
-            Entry::Vacant(e) => {
-                // This is a datagram for a new flow we haven't seen before
-                let (flow, recv) = FlowCtx::new(FLOW_CAPACITY);
-                let flow_req = H3Event::NewFlow {
-                    flow_id,
+        let Entry::Vacant(entry) = self.flow_map.entry(stream_id) else {
+            return Err(h3::Error::InvalidId.into());
+        };
+        let (flow, recv) = FlowCtx::new(FLOW_CAPACITY);
+        let send = DatagramFlowSender::new(
+            stream_id,
+            self.dgram_send.clone(),
+            self.flow_close_send.clone(),
+        );
+        self.h3_event_sender
+            .send(
+                H3Event::NewFlow {
+                    stream_id,
+                    send,
                     recv,
-                    send: self.dgram_send.clone(),
-                };
-                self.h3_event_sender
-                    .send(flow_req.into())
-                    .map_err(|_| H3ConnectionError::ControllerWentAway)?;
-                e.insert(flow)
-            },
-            Entry::Occupied(e) => e.into_mut(),
-        })
+                }
+                .into(),
+            )
+            .map_err(|_| H3ConnectionError::ControllerWentAway)?;
+        entry.insert(flow);
+        Ok(())
     }
 
-    /// Adds a [StreamCtx] to the stream map with the given `stream_id`.
+    /// Adds a [`StreamCtx`] to the stream map with the given `stream_id`.
     fn insert_stream(&mut self, stream_id: u64, ctx: StreamCtx) {
         self.stream_map.insert(stream_id, ctx);
-        self.max_stream_seen = self.max_stream_seen.max(stream_id);
+        self.max_stream_seen = Some(
+            self.max_stream_seen
+                .map_or(stream_id, |max| max.max(stream_id)),
+        );
     }
 
     /// Fetches body chunks from the [`quiche::h3::Connection`] and forwards
@@ -496,169 +557,148 @@ impl<H: DriverHooks> H3Driver<H> {
     fn process_h3_data(
         &mut self, qconn: &mut QuicheConnection, stream_id: u64,
     ) -> H3ConnectionResult<()> {
-        // Split self borrow between conn and stream_map
         let conn = self.conn.as_mut().ok_or(Self::connection_not_present())?;
         let ctx = self
             .stream_map
             .get_mut(&stream_id)
             .ok_or(H3ConnectionError::NonexistentStream)?;
-
-        enum StreamStatus {
-            Done { close: bool },
-            Reset { wire_err_code: u64 },
-            Blocked,
+        if ctx.read_state == ReadState::Closed {
+            return Ok(());
         }
 
-        let status = loop {
-            let Some(sender) = ctx.send.as_ref().and_then(PollSender::get_ref)
-            else {
-                // already waiting for capacity
-                break StreamStatus::Done { close: false };
-            };
-
-            let try_reserve_result = sender.try_reserve();
-            let permit = match try_reserve_result {
-                Ok(permit) => permit,
-                Err(TrySendError::Closed(())) => {
-                    // The channel has closed before we delivered a fin or reset
-                    // to the application.
-                    if !ctx.fin_or_reset_recv &&
-                        ctx.associated_dgram_flow_id.is_none()
-                    // The channel might be closed if the stream was used to
-                    // initiate a datagram exchange.
-                    // TODO: ideally, the application would still shut down the
-                    // stream properly. Once applications code
-                    // is fixed, we can remove this check.
-                    {
-                        let err = h3::WireErrorCode::RequestCancelled as u64;
-                        let _ = qconn.stream_shutdown(
-                            stream_id,
-                            quiche::Shutdown::Read,
-                            err,
-                        );
-                        // Release the borrow of `ctx` before updating it.
-                        drop(try_reserve_result);
-                        ctx.handle_sent_stop_sending(err);
-                        // TODO: should we send an H3Event event to
-                        // h3_event_sender? We can only get here if the app
-                        // actively closed or dropped
-                        // the channel so any event we send would be more for
-                        // logging or auditing
-                    }
-                    break StreamStatus::Done {
-                        close: ctx.both_directions_done(),
-                    };
-                },
-                Err(TrySendError::Full(())) => {
-                    if ctx.fin_or_reset_recv || qconn.stream_readable(stream_id) {
-                        break StreamStatus::Blocked;
-                    }
-                    break StreamStatus::Done { close: false };
-                },
-            };
-
-            if ctx.fin_or_reset_recv {
-                // Signal end-of-body to upstream
-                permit.send(InboundFrame::Body(Default::default(), true));
-                break StreamStatus::Done {
-                    close: ctx.fin_or_reset_sent,
-                };
-            }
-
-            // Size the buffer for currently readable, in-order data, capped at
-            // the configured maximum. The readable length includes H3 framing,
-            // so it can drain all readable body bytes. The minimum keeps the
-            // allocation nonzero and amortizes a trickle of small reads.
-            let want = body_recv_buf_size(
-                qconn.stream_readable_len(stream_id, self.max_recv_body_buf_size),
-                self.max_recv_body_buf_size,
-            );
-            // Lazily allocate the receive buffer on first use; idle
-            // connections never receive body bytes and never allocate it.
-            let body_recv_buf = self
-                .body_recv_buf
-                .get_or_insert_with(|| BytesMut::with_capacity(want).limit(want));
-            // `Limit<BytesMut>` reports only capacity below its limit. Plain
-            // `BytesMut` can reallocate and always reports available space.
-            //
-            // Reallocate when the remaining room cannot hold this read. This
-            // handles exhausted buffers and reads larger than the previous
-            // allocation. Keep capacity equal to the limit to preserve the
-            // `split()` invariant checked below.
-            if body_recv_buf.remaining_mut() < want {
-                *body_recv_buf = BytesMut::with_capacity(want).limit(want);
-            }
-            match conn.recv_body_buf(qconn, stream_id, &mut *body_recv_buf) {
-                Ok(n) => {
-                    ctx.audit_stats.add_downstream_bytes_recvd(n as u64);
-                    let event = H3Event::BodyBytesReceived {
-                        stream_id,
-                        num_bytes: n as u64,
-                        fin: false,
-                    };
-                    let _ = self.h3_event_sender.send(event.into());
-                    // Take the filled part, leave the remaining capacity
-                    let filled_body = body_recv_buf.get_mut().split();
-                    // Sanity check: the remaining spare capacity should equal
-                    // the limit.
-                    debug_assert_eq!(
-                        body_recv_buf.get_mut().spare_capacity_mut().len(),
-                        body_recv_buf.remaining_mut()
-                    );
-                    // A full split leaves only an empty shared handle, so let
-                    // the forwarded frame own the allocation.
-                    if !body_recv_buf.has_remaining_mut() {
-                        self.body_recv_buf = None;
-                    }
-                    permit.send(InboundFrame::Body(filled_body, false));
-                },
-                Err(h3::Error::Done) =>
-                    break StreamStatus::Done { close: false },
-                Err(h3::Error::Transport(quiche::Error::StreamReset(code))) => {
-                    break StreamStatus::Reset {
-                        wire_err_code: code,
-                    };
-                },
-                Err(_) => break StreamStatus::Done { close: true },
-            }
-        };
+        let status = Self::drain_stream_body(
+            conn,
+            qconn,
+            ctx,
+            &mut self.body_recv_buf,
+            self.max_recv_body_buf_size,
+            &self.h3_event_sender,
+        );
 
         match status {
-            StreamStatus::Done { close } => {
-                if close {
-                    return self.cleanup_stream(qconn, stream_id);
-                }
-
-                // The QUIC stream is finished, manually invoke `process_h3_fin`
-                // in case `h3::poll()` is never called again.
-                //
-                // Note that this case will not conflict with StreamStatus::Done
-                // being returned due to the body channel being
-                // blocked. qconn.stream_finished() will guarantee
-                // that we've fully parsed the body as it only returns true
-                // if we've seen a Fin for the read half of the stream.
-                if !ctx.fin_or_reset_recv && qconn.stream_finished(stream_id) {
+            StreamStatus::Drained => {
+                // Finished receive data may be observed before the next H3
+                // poll.
+                if ctx.read_state == ReadState::Open &&
+                    qconn.stream_finished(stream_id)
+                {
                     return self.process_h3_fin(qconn, stream_id);
                 }
             },
-            StreamStatus::Reset { wire_err_code } => {
-                debug_assert!(ctx.send.is_some());
-                ctx.handle_recvd_reset(wire_err_code);
-                let cleanup = ctx.both_directions_done();
-                H::stream_recv_closed(self, stream_id);
-                self.h3_event_sender
-                    .send(H3Event::ResetStream { stream_id }.into())
-                    .map_err(|_| H3ConnectionError::ControllerWentAway)?;
-                if cleanup {
-                    return self.cleanup_stream(qconn, stream_id);
+            StreamStatus::ReceiverClosed => {
+                if ctx.read_state == ReadState::FinPending {
+                    ctx.close_read();
+                    if ctx.both_directions_done() {
+                        self.cleanup_stream(qconn, stream_id);
+                    }
+                } else if !self.flow_map.contains_key(&stream_id) {
+                    // Datagram users may intentionally drop the reliable body
+                    // receiver while retaining the associated flow.
+                    return self.shutdown_stream(
+                        qconn,
+                        stream_id,
+                        StreamShutdown::Read {
+                            error_code: WireErrorCode::RequestCancelled as u64,
+                        },
+                    );
+                } else if qconn.stream_finished(stream_id) {
+                    return self.process_h3_fin(qconn, stream_id);
                 }
             },
+            StreamStatus::FinDelivered => {
+                ctx.close_read();
+                if ctx.both_directions_done() {
+                    self.cleanup_stream(qconn, stream_id);
+                }
+            },
+            StreamStatus::Reset(code) =>
+                return self.process_h3_reset(qconn, stream_id, code),
+            StreamStatus::Failed(h3::Error::MalformedMessage) => {
+                return self.shutdown_stream(
+                    qconn,
+                    stream_id,
+                    StreamShutdown::Both {
+                        read_error_code: WireErrorCode::MessageError as u64,
+                        write_error_code: WireErrorCode::MessageError as u64,
+                    },
+                );
+            },
+            StreamStatus::Failed(h3::Error::Transport(
+                quiche::Error::InvalidStreamState(id),
+            )) if id == stream_id => {
+                self.cleanup_stream(qconn, stream_id);
+            },
+            StreamStatus::Failed(error) => return Err(error.into()),
             StreamStatus::Blocked => {
-                self.waiting_streams.push(ctx.wait_for_send(stream_id))?;
+                self.waiting_streams.push(ctx.wait_for_send(stream_id)?)?;
             },
         }
 
         Ok(())
+    }
+
+    /// Transfer available body data without mutating stream lifecycle state.
+    fn drain_stream_body(
+        conn: &mut h3::Connection, qconn: &mut QuicheConnection, ctx: &StreamCtx,
+        body_recv_buf: &mut Option<bytes::buf::Limit<BytesMut>>,
+        max_recv_body_buf_size: usize,
+        event_sender: &mpsc::UnboundedSender<H::Event>,
+    ) -> StreamStatus {
+        let stream_id = ctx.audit_stats.stream_id();
+        loop {
+            let Some(sender) = ctx.send.as_ref().and_then(PollSender::get_ref)
+            else {
+                return StreamStatus::Drained;
+            };
+            let permit = match sender.try_reserve() {
+                Ok(permit) => permit,
+                Err(TrySendError::Closed(())) =>
+                    return StreamStatus::ReceiverClosed,
+                Err(TrySendError::Full(())) => {
+                    if ctx.read_state == ReadState::FinPending ||
+                        qconn.stream_readable(stream_id)
+                    {
+                        return StreamStatus::Blocked;
+                    }
+                    return StreamStatus::Drained;
+                },
+            };
+
+            if ctx.read_state == ReadState::FinPending {
+                // FIN is delivered exactly once, even if the app was blocked.
+                permit.send(InboundFrame {
+                    body: BytesMut::new(),
+                    fin: true,
+                });
+                return StreamStatus::FinDelivered;
+            }
+
+            let want = body_recv_buf_size(
+                qconn.stream_readable_len(stream_id, max_recv_body_buf_size),
+                max_recv_body_buf_size,
+            );
+            match read_body_chunk(body_recv_buf, want, |buffer| {
+                conn.recv_body_buf(qconn, stream_id, buffer)
+            }) {
+                Ok(body) => {
+                    let num_bytes = body.len() as u64;
+                    ctx.audit_stats.add_downstream_bytes_recvd(num_bytes);
+                    let _ = event_sender.send(
+                        H3Event::BodyBytesReceived {
+                            stream_id,
+                            num_bytes,
+                            fin: false,
+                        }
+                        .into(),
+                    );
+                    permit.send(InboundFrame { body, fin: false });
+                },
+                Err(h3::Error::Done) => return StreamStatus::Drained,
+                Err(h3::Error::Transport(quiche::Error::StreamReset(code))) =>
+                    return StreamStatus::Reset(code),
+                Err(error) => return StreamStatus::Failed(error),
+            }
+        }
     }
 
     /// Processes an end-of-stream event from the [`quiche::h3::Connection`].
@@ -674,11 +714,14 @@ impl<H: DriverHooks> H3Driver<H> {
             return Ok(());
         };
 
-        if ctx.fin_or_reset_recv {
+        if ctx.read_state != ReadState::Open {
             return Ok(());
         }
 
-        ctx.fin_or_reset_recv = true;
+        ctx.read_state = ReadState::FinPending;
+        if let Some(flow) = self.flow_map.get_mut(&stream_id) {
+            flow.close_read();
+        }
         ctx.audit_stats
             .set_recvd_stream_fin(StreamClosureKind::Explicit);
         H::stream_recv_closed(self, stream_id);
@@ -693,9 +736,35 @@ impl<H: DriverHooks> H3Driver<H> {
         };
         let _ = self.h3_event_sender.send(event.into());
 
-        // Communicate fin to upstream. Since `ctx.fin_recv` is true now,
+        // Communicate fin to upstream. Since the FIN is pending delivery,
         // there can't be a recursive loop.
         self.process_h3_data(qconn, stream_id)
+    }
+
+    fn process_h3_reset(
+        &mut self, qconn: &mut QuicheConnection, stream_id: u64, code: u64,
+    ) -> H3ConnectionResult<()> {
+        let Some(ctx) = self.stream_map.get_mut(&stream_id) else {
+            let _ = qconn.stream_capacity(stream_id);
+            return Ok(());
+        };
+        if ctx.audit_stats.recvd_reset_stream_error_code().is_some() {
+            return Ok(());
+        }
+        ctx.handle_recvd_reset(code);
+        if let Some(flow) = self.flow_map.get_mut(&stream_id) {
+            flow.close_read();
+        }
+        self.waiting_streams.cancel_upstream(stream_id);
+        let cleanup = ctx.both_directions_done();
+        H::stream_recv_closed(self, stream_id);
+        self.h3_event_sender
+            .send(H3Event::ResetStream { stream_id }.into())
+            .map_err(|_| H3ConnectionError::ControllerWentAway)?;
+        if cleanup {
+            self.cleanup_stream(qconn, stream_id);
+        }
+        Ok(())
     }
 
     /// Processes a single [`quiche::h3::Event`] received from the underlying
@@ -718,28 +787,8 @@ impl<H: DriverHooks> H3Driver<H> {
             h3::Event::Data => self.process_h3_data(qconn, stream_id),
             h3::Event::Finished => self.process_h3_fin(qconn, stream_id),
 
-            h3::Event::Reset(code) => {
-                if let Some(ctx) = self.stream_map.get_mut(&stream_id) {
-                    ctx.handle_recvd_reset(code);
-                    self.waiting_streams.cancel_upstream(stream_id);
-
-                    let cleanup = ctx.both_directions_done();
-                    H::stream_recv_closed(self, stream_id);
-                    self.h3_event_sender
-                        .send(H3Event::ResetStream { stream_id }.into())
-                        .map_err(|_| H3ConnectionError::ControllerWentAway)?;
-                    if cleanup {
-                        return self.cleanup_stream(qconn, stream_id);
-                    }
-                } else {
-                    // A reset can finish a stream that never had a context.
-                    let _ = qconn.stream_capacity(stream_id);
-                }
-
-                // TODO: if we don't have the stream in our map: should we
-                // send the H3Event::ResetStream?
-                Ok(())
-            },
+            h3::Event::Reset(code) =>
+                self.process_h3_reset(qconn, stream_id, code),
 
             h3::Event::PriorityUpdate => Ok(()),
             h3::Event::GoAway => {
@@ -803,12 +852,12 @@ impl<H: DriverHooks> H3Driver<H> {
                     conn.send_response_with_priority(
                         qconn, stream_id, headers, prio, false,
                     )
-                    .inspect(|_| ctx.initial_headers_sent = true)
+                    .inspect(|()| ctx.initial_headers_sent = true)
                 };
 
-                if let Err(h3::Error::StreamBlocked) = res {
+                if res == Err(h3::Error::StreamBlocked) {
                     ctx.first_full_headers_flush_fail_time
-                        .get_or_insert(Instant::now());
+                        .get_or_insert_with(Instant::now);
                 }
 
                 if res.is_ok() {
@@ -839,7 +888,13 @@ impl<H: DriverHooks> H3Driver<H> {
 
                 audit_stats.add_downstream_bytes_sent(n as _);
 
-                return if n != len {
+                return if n == len {
+                    if *fin {
+                        Self::on_fin_sent(ctx);
+                    }
+
+                    Ok(())
+                } else {
                     // Couldn't write the entire body, `send_body_zc` will
                     // have trimmed `body` accordingly. The driver keeps
                     // the remainder of the body to send in the future.
@@ -849,17 +904,7 @@ impl<H: DriverHooks> H3Driver<H> {
                         "send_body_zc() should have trimmed body but did not"
                     );
                     Err(h3::Error::StreamBlocked)
-                } else {
-                    if *fin {
-                        Self::on_fin_sent(ctx)?;
-                    }
-
-                    Ok(())
                 };
-            },
-
-            Some(OutboundFrame::Body(..)) => {
-                // An empty non-FIN body falls through to the STOP probe below.
             },
 
             Some(OutboundFrame::Trailers(headers, priority)) => {
@@ -871,26 +916,14 @@ impl<H: DriverHooks> H3Driver<H> {
                 );
 
                 if res.is_ok() {
-                    Self::on_fin_sent(ctx)?;
+                    Self::on_fin_sent(ctx);
                 }
 
                 return res;
             },
 
-            Some(OutboundFrame::PeerStreamError) => {
-                return Err(h3::Error::MalformedMessage);
-            },
-
-            Some(OutboundFrame::FlowShutdown { .. }) => {
-                unreachable!("Only flows send shutdowns")
-            },
-
-            Some(OutboundFrame::Datagram(..)) => {
-                unreachable!("Only flows send datagrams")
-            },
-
-            None => {
-                // With no queued frame, fall through to the STOP probe below.
+            Some(OutboundFrame::Body(..)) | None => {
+                // No nonempty frame to send; probe STOP_SENDING below.
             },
         }
 
@@ -908,18 +941,10 @@ impl<H: DriverHooks> H3Driver<H> {
         Ok(())
     }
 
-    fn on_fin_sent(ctx: &mut StreamCtx) -> h3::Result<()> {
-        ctx.recv = None;
-        ctx.fin_or_reset_sent = true;
+    fn on_fin_sent(ctx: &mut StreamCtx) {
+        ctx.close_write();
         ctx.audit_stats
             .set_sent_stream_fin(StreamClosureKind::Explicit);
-        if ctx.fin_or_reset_recv {
-            // Return a transport error to trigger stream cleanup
-            // instead of h3::Error::Done
-            Err(h3::Error::Transport(quiche::Error::Done))
-        } else {
-            Ok(())
-        }
     }
 
     /// Resumes reads or writes to the connection when a stream channel becomes
@@ -954,16 +979,12 @@ impl<H: DriverHooks> H3Driver<H> {
 
         // After a stop, the closed parked receiver can still return frames
         // queued before it. The write side is done, so drop the receiver and
-        // any such frame, except a peer stream error, which must still shut
-        // down the read side.
-        if !stream.fin_or_reset_sent {
-            stream.recv = Some(chan);
-            stream.queued_frame = data;
-        } else if let Some(OutboundFrame::PeerStreamError) = data {
-            stream.queued_frame = data;
-        } else {
+        // any such frame. Shutdown commands use the independent control queue.
+        if stream.fin_or_reset_sent {
             return Ok(());
         }
+        stream.recv = Some(chan);
+        stream.queued_frame = data;
 
         self.process_writable_stream(qconn, stream_id)
     }
@@ -979,6 +1000,7 @@ impl<H: DriverHooks> H3Driver<H> {
 
         match self.stream_map.get_mut(&stream_id) {
             None => Ok(()),
+            Some(stream) if stream.read_state == ReadState::Closed => Ok(()),
             Some(stream) => {
                 // Release the associated permit before retaining the channel.
                 chan.abort_send();
@@ -988,40 +1010,41 @@ impl<H: DriverHooks> H3Driver<H> {
         }
     }
 
-    /// Processes all queued outbound datagrams from the `dgram_recv` channel.
-    fn dgram_ready(
-        &mut self, qconn: &mut QuicheConnection, frame: OutboundFrame,
-    ) -> H3ConnectionResult<()> {
-        let mut frame = Ok(frame);
-
-        loop {
-            match frame {
-                Ok(OutboundFrame::Datagram(dgram, flow_id)) => {
-                    // Drop datagrams if there is no capacity
-                    let _ = datagram::send_h3_dgram(qconn, flow_id, dgram);
-                },
-                Ok(OutboundFrame::FlowShutdown { flow_id, stream_id }) => {
-                    self.shutdown_stream(
-                        qconn,
-                        stream_id,
-                        StreamShutdown::Both {
-                            read_error_code: WireErrorCode::NoError as u64,
-                            write_error_code: WireErrorCode::NoError as u64,
-                        },
-                    )?;
-                    self.flow_map.remove(&flow_id);
-                    self.close_if_idle(qconn);
-                    break;
-                },
-                Ok(_) => unreachable!("Flows can't send frame of other types"),
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) =>
-                    return Err(H3ConnectionError::ControllerWentAway),
+    /// Process a bounded burst, dropping stale or unnegotiated datagrams.
+    fn dgram_ready(&mut self, qconn: &mut QuicheConnection, first: FlowDatagram) {
+        let mut next = Some(first);
+        for _ in 0..FLOW_SEND_BATCH {
+            let Some(frame) =
+                next.take().or_else(|| self.dgram_recv.try_recv().ok())
+            else {
+                break;
+            };
+            if self.flow_map.contains_key(&frame.stream_id) &&
+                self.stream_map
+                    .get(&frame.stream_id)
+                    .is_some_and(|ctx| !ctx.fin_or_reset_sent) &&
+                self.conn
+                    .as_ref()
+                    .is_some_and(|conn| conn.dgram_negotiated(qconn))
+            {
+                let _ = datagram::send_h3_dgram(
+                    qconn,
+                    frame.stream_id / 4,
+                    frame.payload,
+                );
             }
-
-            frame = self.dgram_recv.try_recv();
         }
+    }
 
+    fn shutdown_flow(
+        &mut self, qconn: &mut QuicheConnection, stream_id: u64,
+    ) -> H3ConnectionResult<()> {
+        if self.flow_map.contains_key(&stream_id) {
+            self.shutdown_stream(qconn, stream_id, StreamShutdown::Both {
+                read_error_code: WireErrorCode::NoError as u64,
+                write_error_code: WireErrorCode::NoError as u64,
+            })?;
+        }
         Ok(())
     }
 
@@ -1033,11 +1056,9 @@ impl<H: DriverHooks> H3Driver<H> {
         self.conn.as_mut().ok_or(Self::connection_not_present())
     }
 
-    /// Alias for [`quiche::Error::TlsFail`], which is used in the case where
-    /// this driver doesn't have an established HTTP/3 connection attached
-    /// to it yet.
+    /// Error when the driver has not initialized its HTTP/3 connection.
     const fn connection_not_present() -> H3ConnectionError {
-        H3ConnectionError::H3(h3::Error::Transport(quiche::Error::TlsFail))
+        H3ConnectionError::NotEstablished
     }
 
     /// Cleans up internal state for the indicated HTTP/3 stream.
@@ -1045,11 +1066,9 @@ impl<H: DriverHooks> H3Driver<H> {
     /// This function removes the stream from the stream map, closes any pending
     /// futures, removes associated DATAGRAM flows, and sends a
     /// [`H3Event::StreamClosed`] event (for servers).
-    fn cleanup_stream(
-        &mut self, qconn: &mut QuicheConnection, stream_id: u64,
-    ) -> H3ConnectionResult<()> {
+    fn cleanup_stream(&mut self, qconn: &mut QuicheConnection, stream_id: u64) {
         let Some(mut stream_ctx) = self.stream_map.remove(&stream_id) else {
-            return Ok(());
+            return;
         };
 
         // Receive-side cleanup can precede the writable stop notification.
@@ -1063,15 +1082,13 @@ impl<H: DriverHooks> H3Driver<H> {
         self.waiting_streams.cancel_downstream(stream_id);
 
         // Close any DATAGRAM-proxying channels associated with the stream.
-        if let Some(mapped_flow_id) = stream_ctx.associated_dgram_flow_id {
-            self.flow_map.remove(&mapped_flow_id);
+        if self.flow_map.remove(&stream_id).is_some() {
+            datagram::purge_stream_datagrams(qconn, stream_id);
         }
 
         H::stream_closed(self, stream_id);
 
         self.close_if_idle(qconn);
-
-        Ok(())
     }
 
     /// Handles connection cleanup once no streams or flows remain.
@@ -1094,72 +1111,94 @@ impl<H: DriverHooks> H3Driver<H> {
         }
     }
 
-    /// Shuts down the indicated HTTP/3 stream by sending frames and cleaning
-    /// up then cleans up internal state by calling
-    /// [`Self::cleanup_stream`].
+    /// Shuts down only the requested directions. Keep the opposite direction
+    /// alive until its data and final notification have been delivered.
     fn shutdown_stream(
         &mut self, qconn: &mut QuicheConnection, stream_id: u64,
         shutdown: StreamShutdown,
     ) -> H3ConnectionResult<()> {
-        let Some(stream_ctx) = self.stream_map.get(&stream_id) else {
-            return Ok(());
-        };
-
-        let audit_stats = &stream_ctx.audit_stats;
-
-        match shutdown {
-            StreamShutdown::Read { error_code } => {
-                audit_stats.set_sent_stop_sending_error_code(error_code as _);
-                let _ = qconn.stream_shutdown(
-                    stream_id,
-                    quiche::Shutdown::Read,
-                    error_code,
-                );
-            },
-            StreamShutdown::Write { error_code } => {
-                audit_stats.set_sent_reset_stream_error_code(error_code as _);
-                let _ = qconn.stream_shutdown(
-                    stream_id,
-                    quiche::Shutdown::Write,
-                    error_code,
-                );
-            },
+        let (read, write) = match shutdown {
+            StreamShutdown::Read { error_code } => (Some(error_code), None),
+            StreamShutdown::Write { error_code } => (None, Some(error_code)),
             StreamShutdown::Both {
                 read_error_code,
                 write_error_code,
-            } => {
-                audit_stats
-                    .set_sent_stop_sending_error_code(read_error_code as _);
-                let _ = qconn.stream_shutdown(
-                    stream_id,
-                    quiche::Shutdown::Read,
-                    read_error_code,
-                );
-                audit_stats
-                    .set_sent_reset_stream_error_code(write_error_code as _);
-                let _ = qconn.stream_shutdown(
-                    stream_id,
-                    quiche::Shutdown::Write,
-                    write_error_code,
-                );
-            },
+            } => (Some(read_error_code), Some(write_error_code)),
+        };
+        let Some(ctx) = self.stream_map.get_mut(&stream_id) else {
+            return Ok(());
+        };
+
+        // Validate both codes before mutating either direction.
+        if read
+            .into_iter()
+            .chain(write)
+            .any(|code| code > octets::MAX_VAR_INT)
+        {
+            return Err(H3ConnectionError::H3(h3::Error::Internal));
         }
 
-        self.cleanup_stream(qconn, stream_id)
+        let mut read_closed = false;
+        if let Some(code) = read {
+            if ctx.read_state != ReadState::Closed {
+                if ctx.read_state == ReadState::Open {
+                    match qconn.stream_shutdown(
+                        stream_id,
+                        quiche::Shutdown::Read,
+                        code,
+                    ) {
+                        Ok(()) => ctx.handle_sent_stop_sending(code),
+                        Err(quiche::Error::Done) => ctx.close_read(),
+                        Err(err) => return Err(err.into()),
+                    }
+                } else {
+                    // FIN already arrived: discard the undelivered app frame.
+                    ctx.close_read();
+                }
+                self.waiting_streams.cancel_upstream(stream_id);
+                if let Some(flow) = self.flow_map.get_mut(&stream_id) {
+                    flow.close_read();
+                }
+                read_closed = true;
+            }
+        }
+        if let Some(code) = write {
+            if !ctx.fin_or_reset_sent {
+                match qconn.stream_shutdown(
+                    stream_id,
+                    quiche::Shutdown::Write,
+                    code,
+                ) {
+                    Ok(()) => ctx.handle_sent_reset(code),
+                    Err(quiche::Error::Done) => ctx.close_write(),
+                    Err(err) => return Err(err.into()),
+                }
+                self.waiting_streams.cancel_downstream(stream_id);
+                if self.flow_map.contains_key(&stream_id) {
+                    datagram::purge_stream_datagrams(qconn, stream_id);
+                }
+            }
+        }
+        let done = ctx.both_directions_done();
+        if read_closed {
+            H::stream_recv_closed(self, stream_id);
+        }
+        if done {
+            self.cleanup_stream(qconn, stream_id);
+        }
+        Ok(())
     }
 
     /// Handles a regular [`H3Command`]. May be called internally by
-    /// [DriverHooks] for non-endpoint-specific [`H3Command`]s.
+    /// [`DriverHooks`] for non-endpoint-specific [`H3Command`]s.
     fn handle_core_command(
         &mut self, qconn: &mut QuicheConnection, cmd: H3Command,
     ) -> H3ConnectionResult<()> {
         match cmd {
             H3Command::QuicCmd(cmd) => cmd.execute(qconn),
             H3Command::GoAway => {
-                let max_id = self.max_stream_seen;
-                self.conn_mut()
-                    .expect("connection should be established")
-                    .send_goaway(qconn, max_id)?;
+                let max_id = self.max_stream_seen.unwrap_or_default();
+                self.conn_mut()?.send_goaway(qconn, max_id)?;
             },
             H3Command::ShutdownStream {
                 stream_id,
@@ -1173,22 +1212,42 @@ impl<H: DriverHooks> H3Driver<H> {
 }
 
 impl<H: DriverHooks> H3Driver<H> {
-    /// Reads all buffered datagrams out of `qconn` and distributes them to
-    /// their flow channels.
+    /// Demultiplex only to existing request streams (RFC 9297).
     fn process_available_dgrams(
         &mut self, qconn: &mut QuicheConnection,
     ) -> H3ConnectionResult<()> {
         loop {
-            match datagram::receive_h3_dgram(qconn) {
-                Ok((flow_id, dgram))
-                    if !qconn.is_server() ||
-                        self.hooks.extended_connect_enabled() =>
-                {
-                    self.get_or_insert_flow(flow_id)?.send_best_effort(dgram);
-                },
-                Ok(_) => {},
+            let (stream_id, dgram) = match datagram::receive_h3_dgram(qconn) {
+                Ok(frame) => frame,
                 Err(quiche::Error::Done) => return Ok(()),
-                Err(err) => return Err(H3ConnectionError::from(err)),
+                Err(
+                    quiche::Error::BufferTooShort | quiche::Error::InvalidFrame,
+                ) => {
+                    let _ = qconn.close(
+                        true,
+                        datagram::DATAGRAM_ERROR,
+                        b"invalid quarter stream ID",
+                    );
+                    return Err(H3ConnectionError::InvalidDatagram);
+                },
+                Err(err) => return Err(err.into()),
+            };
+            // A datagram may beat the request's HEADERS or follow its FIN.
+            // Discard these, rather than creating unbounded autonomous flows.
+            let Some(ctx) = self.stream_map.get(&stream_id) else {
+                continue;
+            };
+            if ctx.read_state != ReadState::Open {
+                continue;
+            }
+            if let Some(flow) = self.flow_map.get(&stream_id) {
+                flow.send_best_effort(dgram);
+            } else {
+                // Ordinary HTTP requests have no defined datagram semantics.
+                self.shutdown_stream(qconn, stream_id, StreamShutdown::Both {
+                    read_error_code: datagram::DATAGRAM_ERROR,
+                    write_error_code: datagram::DATAGRAM_ERROR,
+                })?;
             }
         }
     }
@@ -1212,6 +1271,7 @@ impl<H: DriverHooks> H3Driver<H> {
         loop {
             // Process each writable frame, queue the next frame for processing
             // and shut down any errored streams.
+            let write_was_open = !ctx.fin_or_reset_sent;
             match Self::process_write_frame(conn, qconn, ctx) {
                 Ok(()) => ctx.queued_frame = None,
                 Err(h3::Error::StreamBlocked | h3::Error::Done) => break,
@@ -1227,6 +1287,9 @@ impl<H: DriverHooks> H3Driver<H> {
                 },
                 Err(h3::Error::Transport(quiche::Error::StreamStopped(e))) => {
                     ctx.handle_recvd_stop_sending(e);
+                    if write_was_open && self.flow_map.contains_key(&stream_id) {
+                        datagram::purge_stream_datagrams(qconn, stream_id);
+                    }
 
                     // An idle stream's outbound receiver can be owned by a
                     // waiting future instead of ctx.recv. Cancel it so the
@@ -1234,19 +1297,32 @@ impl<H: DriverHooks> H3Driver<H> {
                     self.waiting_streams.cancel_downstream(stream_id);
 
                     if ctx.both_directions_done() {
-                        return self.cleanup_stream(qconn, stream_id);
-                    } else {
+                        self.cleanup_stream(qconn, stream_id);
                         return Ok(());
                     }
+                    return Ok(());
                 },
                 Err(h3::Error::Transport(quiche::Error::InvalidStreamState(
                     stream,
                 ))) => {
-                    return self.cleanup_stream(qconn, stream);
+                    self.cleanup_stream(qconn, stream);
+                    return Ok(());
                 },
                 Err(_) => {
-                    return self.cleanup_stream(qconn, stream_id);
+                    self.cleanup_stream(qconn, stream_id);
+                    return Ok(());
                 },
+            }
+
+            if write_was_open &&
+                ctx.fin_or_reset_sent &&
+                self.flow_map.contains_key(&stream_id)
+            {
+                datagram::purge_stream_datagrams(qconn, stream_id);
+            }
+            if ctx.both_directions_done() {
+                self.cleanup_stream(qconn, stream_id);
+                return Ok(());
             }
 
             let Some(recv) = ctx.recv.as_mut() else {
@@ -1269,7 +1345,7 @@ impl<H: DriverHooks> H3Driver<H> {
                 Ok(frame) => ctx.queued_frame = Some(frame),
                 Err(TryRecvError::Disconnected) => {
                     if !ctx.fin_or_reset_sent &&
-                        ctx.associated_dgram_flow_id.is_none()
+                        !self.flow_map.contains_key(&stream_id)
                     // The channel might be closed if the stream was used to
                     // initiate a datagram exchange.
                     // TODO: ideally, the application would still shut down the
@@ -1286,13 +1362,14 @@ impl<H: DriverHooks> H3Driver<H> {
                         );
                         ctx.handle_sent_reset(err);
                         if ctx.both_directions_done() {
-                            return self.cleanup_stream(qconn, stream_id);
+                            self.cleanup_stream(qconn, stream_id);
+                            return Ok(());
                         }
                     }
                     break;
                 },
                 Err(TryRecvError::Empty) => {
-                    self.waiting_streams.push(ctx.wait_for_recv(stream_id))?;
+                    self.waiting_streams.push(ctx.wait_for_recv(stream_id)?)?;
                     break;
                 },
             }
@@ -1303,7 +1380,7 @@ impl<H: DriverHooks> H3Driver<H> {
 
     /// Tests `qconn` for either a local or peer error and increments
     /// the associated HTTP/3 or QUIC error counter.
-    fn record_quiche_error(qconn: &mut QuicheConnection, metrics: &impl Metrics) {
+    fn record_quiche_error(qconn: &QuicheConnection, metrics: &impl Metrics) {
         // split metrics between local/peer and QUIC/HTTP/3 level errors
         if let Some(err) = qconn.local_error() {
             if err.is_app {
@@ -1324,14 +1401,14 @@ impl<H: DriverHooks> H3Driver<H> {
 }
 
 impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
-    fn on_conn_established(
+    fn on_application_ready(
         &mut self, quiche_conn: &mut QuicheConnection,
         handshake_info: &HandshakeInfo,
     ) -> QuicResult<()> {
         let conn = h3::Connection::with_transport(quiche_conn, &self.h3_config)?;
         self.conn = Some(conn);
 
-        H::conn_established(self, quiche_conn, handshake_info)?;
+        H::application_ready(self, quiche_conn, handshake_info)?;
         Ok(())
     }
 
@@ -1346,6 +1423,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     ///
     /// If a DATAGRAM is found, it is sent to the receiver on its channel.
     fn process_reads(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         loop {
             match self.conn_mut()?.poll(qconn) {
                 Ok((stream_id, event)) =>
@@ -1358,7 +1436,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
                     log::debug!("connection closed due to h3 protocol error"; "error"=>?err);
                     return Ok(());
                 },
-            };
+            }
         }
 
         self.process_available_dgrams(qconn)?;
@@ -1369,6 +1447,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     /// all sources. This will attempt to write any queued frames into their
     /// respective streams, if writable.
     fn process_writes(&mut self, qconn: &mut QuicheConnection) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         while let Some(stream_id) = qconn.stream_writable_next() {
             self.process_writable_stream(qconn, stream_id)?;
         }
@@ -1383,15 +1462,15 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
     }
 
     /// Reports connection-level error metrics and forwards
-    /// IOWorker errors to the associated [H3Controller].
+    /// `IOWorker` errors to the associated [`H3Controller`].
     fn on_conn_close<M: Metrics>(
         &mut self, quiche_conn: &mut QuicheConnection, metrics: &M,
         work_loop_result: &QuicResult<()>,
     ) {
-        let max_stream_seen = self.max_stream_seen;
+        let request_count = self.max_stream_seen.map_or(0, |id| id / 4 + 1);
         metrics
-            .maximum_writable_streams()
-            .observe(max_stream_seen as f64);
+            .request_streams_opened()
+            .observe(crate::metrics::histogram_value(request_count));
 
         Self::record_quiche_error(quiche_conn, metrics);
 
@@ -1423,24 +1502,29 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
             return;
         }
 
-        if let Some(ev) = H3Event::from_error(h3_err) {
-            let _ = self.h3_event_sender.send(ev.into());
-        }
+        let _ = self
+            .h3_event_sender
+            .send(H3Event::from_error(*h3_err).into());
     }
 
-    /// Wait for incoming data from the [H3Controller]. The next iteration of
+    /// Wait for incoming data from the [`H3Controller`]. The next iteration of
     /// the I/O loop commences when one of the `select!`ed futures triggers.
     #[inline]
     async fn wait_for_data(
         &mut self, qconn: &mut QuicheConnection,
     ) -> QuicResult<()> {
+        self.hooks.check_deadlines(qconn)?;
         select! {
             biased;
-            Some(ready) = self.waiting_streams.next() => self.upstream_ready(qconn, ready),
-            Some(dgram) = self.dgram_recv.recv() => self.dgram_ready(qconn, dgram),
-            Some(cmd) = self.cmd_recv.recv() => H::conn_command(self, qconn, cmd),
             r = self.hooks.wait_for_action(qconn), if H::has_wait_action(self) => r,
-            _ = self.h3_event_sender.closed(), if !self.h3_event_receiver_dropped => {
+            Some(ready) = self.waiting_streams.next() => self.upstream_ready(qconn, ready),
+            Some(stream_id) = self.flow_close_recv.recv() => self.shutdown_flow(qconn, stream_id),
+            Some(dgram) = self.dgram_recv.recv() => {
+                self.dgram_ready(qconn, dgram);
+                Ok(())
+            },
+            Some(cmd) = self.cmd_recv.recv() => H::conn_command(self, qconn, cmd),
+            () = self.h3_event_sender.closed(), if !self.h3_event_receiver_dropped => {
                 self.h3_event_receiver_dropped = true;
                 self.close_if_idle(qconn);
                 Ok(())
@@ -1450,6 +1534,9 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
         // Make sure controller is not starved, but also not prioritized in the
         // biased select. So poll it last, however also perform a try_recv
         // each iteration.
+        if let Ok(stream_id) = self.flow_close_recv.try_recv() {
+            self.shutdown_flow(qconn, stream_id)?;
+        }
         if let Ok(cmd) = self.cmd_recv.try_recv() {
             H::conn_command(self, qconn, cmd)?;
         }
@@ -1461,17 +1548,19 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
 impl<H: DriverHooks> Drop for H3Driver<H> {
     fn drop(&mut self) {
         for stream in self.stream_map.values() {
-            stream
-                .audit_stats
-                .set_recvd_stream_fin(StreamClosureKind::Implicit);
+            if stream.read_state == ReadState::Open {
+                stream
+                    .audit_stats
+                    .set_recvd_stream_fin(StreamClosureKind::Implicit);
+            }
         }
     }
 }
 
-/// [`H3Command`]s are sent by the [H3Controller] to alter the [H3Driver]'s
+/// [`H3Command`]s are sent by the [`H3Controller`] to alter the [`H3Driver`]'s
 /// state.
 ///
-/// Both [ServerH3Driver] and [ClientH3Driver] may extend this enum with
+/// Both [`ServerH3Driver`] and [`ClientH3Driver`] may extend this enum with
 /// endpoint-specific variants.
 #[derive(Debug)]
 pub enum H3Command {
@@ -1481,10 +1570,9 @@ pub enum H3Command {
     /// Send a GOAWAY frame to the peer to initiate a graceful connection
     /// shutdown.
     GoAway,
-    /// Shuts down a stream in the specified direction(s) and removes it from
-    /// local state.
+    /// Shuts down the requested stream direction(s).
     ///
-    /// This removes the stream from local state and sends a `RESET_STREAM`
+    /// This preserves any open opposite direction and sends a `RESET_STREAM`
     /// frame (for write direction) and/or a `STOP_SENDING` frame (for read
     /// direction) to the peer. See [`quiche::Connection::stream_shutdown`]
     /// for details.
@@ -1519,7 +1607,7 @@ pub enum StreamShutdown {
     },
 }
 
-/// Sends [`H3Command`]s to an [H3Driver]. The sender is typed and internally
+/// Sends [`H3Command`]s to an [`H3Driver`]. The sender is typed and internally
 /// wraps instances of `T` in the appropriate `H3Command` variant.
 pub struct RequestSender<C, T> {
     sender: UnboundedSender<C>,
@@ -1527,10 +1615,20 @@ pub struct RequestSender<C, T> {
     _r: PhantomData<fn() -> T>,
 }
 
+impl<C, T> RequestSender<C, T> {
+    fn new(sender: UnboundedSender<C>) -> Self {
+        Self {
+            sender,
+            _r: PhantomData,
+        }
+    }
+}
+
 impl<C, T: Into<C>> RequestSender<C, T> {
-    /// Send a request to the [H3Driver]. This can only fail if the driver is
-    /// gone.
-    #[inline(always)]
+    /// Sends a request to the paired driver.
+    ///
+    /// # Errors
+    /// Returns the converted command if the driver has stopped.
     pub fn send(&self, v: T) -> Result<(), mpsc::error::SendError<C>> {
         self.sender.send(v.into())
     }
@@ -1538,51 +1636,45 @@ impl<C, T: Into<C>> RequestSender<C, T> {
 
 impl<C, T> Clone for RequestSender<C, T> {
     fn clone(&self) -> Self {
-        Self {
-            sender: self.sender.clone(),
-            _r: Default::default(),
-        }
+        Self::new(self.sender.clone())
     }
 }
 
-/// Interface to communicate with a paired [H3Driver].
+/// Interface to communicate with a paired [`H3Driver`].
 ///
-/// An [H3Controller] receives [`H3Event`]s from its driver, which must be
+/// An [`H3Controller`] receives [`H3Event`]s from its driver, which must be
 /// consumed by the application built on top of the driver to react to incoming
 /// events. The controller also allows the application to send ad-hoc
 /// [`H3Command`]s to the driver, which will be processed when the driver waits
 /// for incoming data.
 pub struct H3Controller<H: DriverHooks> {
-    /// Sends [`H3Command`]s to the [H3Driver], like [`QuicCommand`]s or
+    /// Sends [`H3Command`]s to the [`H3Driver`], like [`QuicCommand`]s or
     /// outbound HTTP requests.
     cmd_sender: UnboundedSender<H::Command>,
-    /// Receives [`H3Event`]s from the [H3Driver]. Can be extracted and
-    /// used independently of the [H3Controller].
-    h3_event_recv: Option<UnboundedReceiver<H::Event>>,
+    /// Receives [`H3Event`]s from the [`H3Driver`]. Can be extracted and
+    /// used independently of the [`H3Controller`].
+    h3_event_recv: UnboundedReceiver<H::Event>,
 }
 
 impl<H: DriverHooks> H3Controller<H> {
-    /// Gets a mut reference to the [`H3Event`] receiver for the paired
-    /// [H3Driver].
-    pub fn event_receiver_mut(&mut self) -> &mut UnboundedReceiver<H::Event> {
-        self.h3_event_recv
-            .as_mut()
-            .expect("No event receiver on H3Controller")
+    /// Borrows the event receiver for the paired driver.
+    pub const fn event_receiver_mut(
+        &mut self,
+    ) -> &mut UnboundedReceiver<H::Event> {
+        &mut self.h3_event_recv
     }
 
-    /// Takes the [`H3Event`] receiver for the paired [H3Driver].
-    pub fn take_event_receiver(&mut self) -> UnboundedReceiver<H::Event> {
+    /// Consumes the controller and returns its event receiver. Clone any
+    /// required command senders before transferring ownership.
+    #[must_use = "the returned receiver consumes the driver's events"]
+    pub fn into_event_receiver(self) -> UnboundedReceiver<H::Event> {
         self.h3_event_recv
-            .take()
-            .expect("No event receiver on H3Controller")
     }
 
-    /// Creates a [`QuicCommand`] sender for the paired [H3Driver].
+    /// Creates a [`QuicCommand`] sender for the paired driver.
+    #[must_use = "the returned sender controls the QUIC connection"]
     pub fn cmd_sender(&self) -> RequestSender<H::Command, QuicCommand> {
-        RequestSender {
-            sender: self.cmd_sender.clone(),
-            _r: Default::default(),
-        }
+        RequestSender::new(self.cmd_sender.clone())
     }
 
     /// Sends a GOAWAY frame to initiate a graceful connection shutdown.
@@ -1590,18 +1682,15 @@ impl<H: DriverHooks> H3Controller<H> {
         let _ = self.cmd_sender.send(H3Command::GoAway.into());
     }
 
-    /// Creates an [`H3Command`] sender for the paired [H3Driver].
+    /// Creates an [`H3Command`] sender for the paired [`H3Driver`].
+    #[must_use = "the returned sender controls the HTTP/3 connection"]
     pub fn h3_cmd_sender(&self) -> RequestSender<H::Command, H3Command> {
-        RequestSender {
-            sender: self.cmd_sender.clone(),
-            _r: Default::default(),
-        }
+        RequestSender::new(self.cmd_sender.clone())
     }
 
-    /// Shuts down a stream in the specified direction(s) and removes it from
-    /// local state.
+    /// Shuts down the requested stream direction(s).
     ///
-    /// This removes the stream from local state and sends a `RESET_STREAM`
+    /// This preserves any open opposite direction and sends a `RESET_STREAM`
     /// frame (for write direction) and/or a `STOP_SENDING` frame (for read
     /// direction) to the peer, depending on the [`StreamShutdown`] variant.
     pub fn shutdown_stream(&self, stream_id: u64, shutdown: StreamShutdown) {

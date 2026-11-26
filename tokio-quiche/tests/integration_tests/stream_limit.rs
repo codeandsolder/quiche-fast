@@ -48,7 +48,7 @@ use h3i::actions::h3::WaitType;
 /// The client opens those 2 streams successfully, then attempts a third
 /// which is expected to return Err(StreamLimit). Verify that the server's
 /// `streams_blocked_bidi_recv_count` stat is incremented after processing
-/// the STREAMS_BLOCKED frame from the client.
+/// the `STREAMS_BLOCKED` frame from the client.
 #[tokio::test]
 async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     const MAX_STREAMS: u64 = 2;
@@ -69,14 +69,18 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
             let tx = Arc::clone(&server_stats_tx);
             async move {
                 handle_connection(connection).await;
-                if let Some(tx) = tx.lock().unwrap().take() {
+                let sender = tx
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                if let Some(tx) = sender {
                     let _ = tx.send(stats_handle);
                 }
             }
         },
-    );
+    )?;
 
-    let h3i = h3i_config(&url);
+    let h3i = h3i_config(&url)?;
 
     let mut actions = vec![];
 
@@ -116,7 +120,7 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     ));
     actions.push(Action::FlushPackets);
     // Wait for all streams to finish.
-    for i in 0..(MAX_STREAMS + 1) {
+    for i in 0..=MAX_STREAMS {
         let stream_id = i * 4;
         actions.push(Action::Wait {
             wait_type: WaitType::StreamEvent(StreamEvent {
@@ -133,12 +137,12 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
         },
     });
 
-    let summary = summarize_connection(h3i, actions).await;
+    let summary = summarize_connection(h3i, actions).await?;
 
     // All requests should have returned 200 responses, including the retried
     // blocked_stream_id (stream 8 succeeds on retry after the server sends a
     // MAX_STREAMS update once streams 0 and 4 complete).
-    for i in 0..(MAX_STREAMS + 1) {
+    for i in 0..=MAX_STREAMS {
         assert!(
             received_status_code_on_stream(&summary, i * 4, 200),
             "stream {} should have received a 200 response",
@@ -149,10 +153,10 @@ async fn test_bidi_stream_limit_reached() -> QuicResult<()> {
     // The client sent STREAMS_BLOCKED because we enabled
     // send_streams_blocked. Retrieve the server-side quiche::Stats and verify
     // that the server received exactly one STREAMS_BLOCKED (bidi) frame.
-    let server_stats_handle = server_stats_rx
-        .await
-        .expect("server should have sent its stats handle");
-    let server_stats = server_stats_handle.lock().unwrap();
+    let server_stats_handle = server_stats_rx.await?;
+    let server_stats = server_stats_handle
+        .lock()
+        .map_err(|_| "server stats mutex poisoned")?;
 
     assert_eq!(
         server_stats.stats.streams_blocked_bidi_recv_count, 1,

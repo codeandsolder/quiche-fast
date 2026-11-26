@@ -61,8 +61,8 @@ const DRAIN_DELAY: Duration = Duration::from_millis(200);
 #[cfg(all(feature = "qlog-gzip", feature = "qlog-zstd"))]
 async fn assert_server_emits_suffix(
     compression: QlogCompression, expected_suffix: &str,
-) {
-    let dir = tempfile::tempdir().expect("tempdir");
+) -> QuicResult<()> {
+    let dir = tempfile::tempdir()?;
 
     let mut quic_settings = QuicSettings::default();
     quic_settings.qlog_dir = Some(dir.path().to_string_lossy().into_owned());
@@ -74,32 +74,32 @@ async fn assert_server_emits_suffix(
         Http3Settings::default(),
         hook,
         handle_connection,
-    );
+    )?;
 
     let url = format!("{url}/1");
-    let _ = request(url, 1).await.expect("request failed");
+    let _ = request(url, 1).await?;
 
     sleep(DRAIN_DELAY).await;
 
-    let entries: Vec<_> = std::fs::read_dir(dir.path())
-        .expect("qlog dir readable")
+    let entries: Vec<_> = std::fs::read_dir(dir.path())?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.is_file())
         .collect();
     assert_eq!(
         entries.len(),
         1,
-        "expected 1 qlog file under {:?}, got {entries:?}",
-        dir.path()
+        "expected 1 qlog file under {}, got {entries:?}",
+        dir.path().display()
     );
     let name = entries[0]
         .file_name()
         .and_then(|s| s.to_str())
-        .expect("file name");
+        .ok_or("missing qlog file name")?;
     assert!(
         name.ends_with(expected_suffix),
         "expected name ending in {expected_suffix}, got {name}"
     );
+    Ok(())
 }
 
 /// Proves the full `QuicSettings::qlog_compression` plumbing path by
@@ -109,7 +109,7 @@ async fn assert_server_emits_suffix(
 /// this test is about TQ-side plumbing.
 #[cfg(all(feature = "qlog-gzip", feature = "qlog-zstd"))]
 #[tokio::test]
-async fn qlog_compression_threads_through_to_disk() {
-    assert_server_emits_suffix(QlogCompression::Gzip, ".sqlog.gz").await;
-    assert_server_emits_suffix(QlogCompression::Zstd, ".sqlog.zst").await;
+async fn qlog_compression_threads_through_to_disk() -> QuicResult<()> {
+    assert_server_emits_suffix(QlogCompression::Gzip, ".sqlog.gz").await?;
+    assert_server_emits_suffix(QlogCompression::Zstd, ".sqlog.zst").await
 }

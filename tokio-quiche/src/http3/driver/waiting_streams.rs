@@ -24,6 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::task::ready;
@@ -39,6 +40,7 @@ use tokio_stream::Stream;
 
 use super::streams::StreamReady;
 use super::streams::WaitForStream;
+use super::streams::WaitKey;
 use super::H3ConnectionError;
 use super::H3ConnectionResult;
 
@@ -51,78 +53,64 @@ pub(super) struct WaitingStreams {
     /// Pending waits. A wait is aborted if the stream is cleaned up or reset
     /// by the peer.
     waits: FuturesUnordered<Abortable<WaitForStream>>,
-    /// Abort handles for waits on capacity to deliver inbound data upstream.
-    upstream: HashMap<u64, AbortHandle>,
-    /// Abort handles for waits on outbound data from the app.
-    downstream: HashMap<u64, AbortHandle>,
+    /// Abort handles keyed by the exact stream direction.
+    handles: HashMap<WaitKey, AbortHandle>,
 }
 
 impl WaitingStreams {
     pub(super) fn new() -> Self {
         Self {
             waits: FuturesUnordered::new(),
-            upstream: HashMap::new(),
-            downstream: HashMap::new(),
+            handles: HashMap::new(),
         }
     }
 
     /// Registers a pending stream and stores its abort handle by stream ID.
     pub(super) fn push(&mut self, wait: WaitForStream) -> H3ConnectionResult<()> {
-        let (handle, registration) = AbortHandle::new_pair();
-
-        let (stream_id, prev, direction) = match &wait {
-            WaitForStream::Downstream(d) => (
-                d.stream_id,
-                self.downstream.insert(d.stream_id, handle),
-                "downstream",
-            ),
-            WaitForStream::Upstream(u) => (
-                u.stream_id,
-                self.upstream.insert(u.stream_id, handle),
-                "upstream",
-            ),
-        };
-        if prev.is_some() {
-            // There was an entry for this stream already. This should never
-            // happen.
-            let msg = format!(
-                "Added a waiting stream id={}, direction={},\
-                    but we were already waiting for it. Should never happen",
-                stream_id, direction
-            );
-            debug_assert!(false, "{}", msg);
-            log::error!(ratelimit=60/m; "{}", msg);
+        let key = wait.key();
+        let Entry::Vacant(entry) = self.handles.entry(key) else {
+            // Do not replace the live abort handle on a duplicate registration.
+            log::error!(ratelimit=60/m; "duplicate stream wait"; "key" => ?key);
             return Err(H3ConnectionError::H3(h3::Error::Internal));
-        }
-
+        };
+        let (handle, registration) = AbortHandle::new_pair();
+        entry.insert(handle);
         self.waits.push(Abortable::new(wait, registration));
         Ok(())
     }
 
-    /// Cancels the upstream-capacity wait for `stream_id`, if present.
-    pub(super) fn cancel_upstream(&mut self, stream_id: u64) {
-        if let Some(handle) = self.upstream.remove(&stream_id) {
+    fn cancel(&mut self, key: WaitKey) {
+        if let Some(handle) = self.handles.remove(&key) {
             handle.abort();
         }
     }
 
+    /// Cancels the upstream-capacity wait for `stream_id`, if present.
+    pub(super) fn cancel_upstream(&mut self, stream_id: u64) {
+        self.cancel(WaitKey::Upstream(stream_id));
+    }
+
     /// Cancels the downstream-data wait for `stream_id`, if present.
     pub(super) fn cancel_downstream(&mut self, stream_id: u64) {
-        if let Some(handle) = self.downstream.remove(&stream_id) {
-            handle.abort();
-        }
+        self.cancel(WaitKey::Downstream(stream_id));
     }
 
     /// Returns the number of live upstream-capacity waits.
     #[cfg(test)]
     pub fn upstream_len(&self) -> usize {
-        self.upstream.len()
+        self.handles
+            .keys()
+            .filter(|key| matches!(key, WaitKey::Upstream(_)))
+            .count()
     }
 
     /// Returns the number of live downstream-data waits.
     #[cfg(test)]
     pub fn downstream_len(&self) -> usize {
-        self.downstream.len()
+        self.handles
+            .keys()
+            .filter(|key| matches!(key, WaitKey::Downstream(_)))
+            .count()
     }
 }
 
@@ -135,15 +123,7 @@ impl Stream for WaitingStreams {
         loop {
             match ready!(Pin::new(&mut self.waits).poll_next(cx)) {
                 Some(Ok(ready)) => {
-                    match &ready {
-                        StreamReady::Downstream(r) => {
-                            self.downstream.remove(&r.stream_id);
-                        },
-                        StreamReady::Upstream(r) => {
-                            self.upstream.remove(&r.stream_id);
-                        },
-                    }
-
+                    self.handles.remove(&ready.key());
                     return Poll::Ready(Some(ready));
                 },
                 Some(Err(_aborted)) => {
@@ -163,8 +143,6 @@ mod tests {
     use tokio_util::sync::PollSender;
 
     use super::*;
-    use crate::http3::driver::streams::WaitForDownstreamData;
-    use crate::http3::driver::streams::WaitForUpstreamCapacity;
     use crate::http3::driver::InboundFrame;
     use crate::http3::driver::OutboundFrame;
 
@@ -172,10 +150,7 @@ mod tests {
         stream_id: u64,
     ) -> (mpsc::Sender<OutboundFrame>, WaitForStream) {
         let (tx, rx) = mpsc::channel(1);
-        let wait = WaitForStream::Downstream(WaitForDownstreamData {
-            stream_id,
-            chan: Some(rx),
-        });
+        let wait = WaitForStream::downstream(stream_id, rx);
 
         (tx, wait)
     }
@@ -184,24 +159,16 @@ mod tests {
         stream_id: u64,
     ) -> (mpsc::Receiver<InboundFrame>, WaitForStream) {
         let (tx, rx) = mpsc::channel(1);
-        let wait = WaitForStream::Upstream(WaitForUpstreamCapacity {
-            stream_id,
-            chan: Some(PollSender::new(tx)),
-        });
+        let wait = WaitForStream::upstream(stream_id, PollSender::new(tx));
 
         (rx, wait)
     }
 
-    #[test]
-    fn successful_readiness_removes_handle() {
-        let mut waiting = WaitingStreams::new();
-        let (tx, wait) = downstream_wait(4);
-
-        waiting.push(wait).unwrap();
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 1);
-
-        tx.try_send(OutboundFrame::PeerStreamError).unwrap();
+    fn assert_downstream_ready(
+        waiting: &mut WaitingStreams, tx: &mpsc::Sender<OutboundFrame>,
+    ) -> crate::QuicResult<()> {
+        tx.try_send(OutboundFrame::Body(bytes::Bytes::new(), false))
+            .map_err(|_| "outbound frame queue rejected test frame")?;
 
         let ready = waiting.next().now_or_never();
         assert!(matches!(
@@ -210,80 +177,97 @@ mod tests {
         ));
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 0);
+        Ok(())
     }
 
     #[test]
-    fn canceled_wait_produces_no_readiness() {
+    fn successful_readiness_removes_handle() -> crate::QuicResult<()> {
+        let mut waiting = WaitingStreams::new();
+        let (tx, wait) = downstream_wait(4);
+
+        waiting.push(wait)?;
+        assert_eq!(waiting.upstream_len(), 0);
+        assert_eq!(waiting.downstream_len(), 1);
+
+        assert_downstream_ready(&mut waiting, &tx)
+    }
+
+    #[test]
+    fn canceled_wait_produces_no_readiness() -> crate::QuicResult<()> {
         let mut waiting = WaitingStreams::new();
         let (_tx, wait) = downstream_wait(4);
 
-        waiting.push(wait).unwrap();
+        waiting.push(wait)?;
         waiting.cancel_downstream(4);
 
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 0);
         assert!(matches!(waiting.next().now_or_never(), Some(None)));
+        Ok(())
     }
 
     #[test]
-    fn upstream_cancel_preserves_downstream_wait() {
+    fn upstream_cancel_preserves_downstream_wait() -> crate::QuicResult<()> {
         let mut waiting = WaitingStreams::new();
         let (_rx, upstream) = upstream_wait(4);
         let (tx, downstream) = downstream_wait(4);
 
-        waiting.push(upstream).unwrap();
-        waiting.push(downstream).unwrap();
+        waiting.push(upstream)?;
+        waiting.push(downstream)?;
         waiting.cancel_upstream(4);
 
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::PeerStreamError).unwrap();
-
-        let ready = waiting.next().now_or_never();
-        assert!(matches!(
-            ready,
-            Some(Some(StreamReady::Downstream(r))) if r.stream_id == 4
-        ));
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 0);
+        assert_downstream_ready(&mut waiting, &tx)
     }
 
     #[test]
-    fn cancel_then_register_same_direction() {
+    fn cancel_then_register_same_direction() -> crate::QuicResult<()> {
         let mut waiting = WaitingStreams::new();
         let (_tx, wait) = downstream_wait(4);
 
-        waiting.push(wait).unwrap();
+        waiting.push(wait)?;
         waiting.cancel_downstream(4);
 
         let (tx, wait) = downstream_wait(4);
-        waiting.push(wait).unwrap();
+        waiting.push(wait)?;
 
         assert_eq!(waiting.upstream_len(), 0);
         assert_eq!(waiting.downstream_len(), 1);
         assert!(waiting.next().now_or_never().is_none());
 
-        tx.try_send(OutboundFrame::PeerStreamError).unwrap();
-
-        let ready = waiting.next().now_or_never();
-        assert!(matches!(
-            ready,
-            Some(Some(StreamReady::Downstream(r))) if r.stream_id == 4
-        ));
-        assert_eq!(waiting.upstream_len(), 0);
-        assert_eq!(waiting.downstream_len(), 0);
+        assert_downstream_ready(&mut waiting, &tx)
     }
 
     #[test]
-    #[should_panic]
-    fn duplicate_registration_panics() {
+    fn duplicate_registration_preserves_original_cancellation_handle(
+    ) -> crate::QuicResult<()> {
         let mut waiting = WaitingStreams::new();
-        let (_tx, wait) = downstream_wait(4);
-        let (_tx2, wait2) = downstream_wait(4);
+        let (tx, wait) = downstream_wait(4);
+        let (tx2, duplicate) = downstream_wait(4);
+        waiting.push(wait)?;
+        assert!(waiting.push(duplicate).is_err());
+        assert!(tx2.is_closed());
+        assert_eq!(waiting.downstream_len(), 1);
+        waiting.cancel_downstream(4);
+        assert!(matches!(waiting.next().now_or_never(), Some(None)));
+        assert!(tx.is_closed());
+        assert_eq!(waiting.downstream_len(), 0);
+        Ok(())
+    }
 
-        waiting.push(wait).unwrap();
-        let _ = waiting.push(wait2);
+    #[test]
+    fn completed_wait_is_safe_to_poll_again() -> crate::QuicResult<()> {
+        use std::future::Future as _;
+        let (tx, mut wait) = downstream_wait(4);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(Pin::new(&mut wait).poll(&mut cx).is_pending());
+        tx.try_send(OutboundFrame::Body(bytes::Bytes::new(), false))
+            .map_err(|_| "outbound frame queue rejected test frame")?;
+        assert!(Pin::new(&mut wait).poll(&mut cx).is_ready());
+        assert!(Pin::new(&mut wait).poll(&mut cx).is_pending());
+        Ok(())
     }
 }

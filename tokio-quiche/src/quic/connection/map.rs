@@ -61,9 +61,9 @@ impl From<&ConnectionId<'_>> for CidOwned {
 
 /// Unique within the lifetime of a router; never derived from a rotating CID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct RouteOwner(u64);
+pub(in crate::quic) struct RouteOwner(u64);
 
-pub(crate) enum ConnectionMapCommand {
+pub(in crate::quic) enum ConnectionMapCommand {
     Register {
         owner: RouteOwner,
         cid: ConnectionId<'static>,
@@ -78,13 +78,13 @@ pub(crate) enum ConnectionMapCommand {
 
 /// Moves with the connection, including its unstarted and cancelled states.
 /// Dropping it releases every route even when normal worker close is skipped.
-pub(crate) struct RouteLease {
+pub(in crate::quic) struct RouteLease {
     owner: RouteOwner,
     commands: Option<mpsc::UnboundedSender<ConnectionMapCommand>>,
 }
 
 impl RouteLease {
-    pub(crate) fn new(
+    pub(crate) const fn new(
         owner: RouteOwner, commands: mpsc::UnboundedSender<ConnectionMapCommand>,
     ) -> Self {
         Self {
@@ -93,7 +93,7 @@ impl RouteLease {
         }
     }
 
-    pub(crate) fn raw(
+    pub(crate) const fn raw(
         commands: mpsc::UnboundedSender<ConnectionMapCommand>,
     ) -> Self {
         Self::new(RouteOwner(0), commands)
@@ -161,7 +161,7 @@ struct OwnerRoutes {
 /// Direct single-lookup packet routing, with an inverse index for bounded
 /// owner cleanup. All mutation occurs on the router task.
 #[derive(Default)]
-pub(crate) struct ConnectionMap {
+pub(in crate::quic) struct ConnectionMap {
     routes: BTreeMap<CidOwned, Route>,
     owners: BTreeMap<RouteOwner, OwnerRoutes>,
     next_owner: u64,
@@ -260,7 +260,7 @@ impl ConnectionMap {
                 // connection has already stopped waiting for it.
                 if !reply.is_closed() {
                     let result = self.register(owner, &cid);
-                    if let Err(Ok(())) = reply.send(result) {
+                    if matches!(reply.send(result), Err(Ok(()))) {
                         self.retire(owner, &cid);
                     }
                 }
@@ -328,7 +328,7 @@ mod tests {
         let (b, _rx_b) = mpsc::channel(1);
         let original = ConnectionId::from_ref(b"original");
         let rotated = ConnectionId::from_ref(b"rotated");
-        map.insert(first, a.clone(), &original, None)?;
+        map.insert(first, a, &original, None)?;
         map.register(first, &rotated)?;
         assert!(map.register(first, &rotated).is_err());
         map.retire(first, &original);

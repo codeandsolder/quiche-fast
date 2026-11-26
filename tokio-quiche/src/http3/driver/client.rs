@@ -54,22 +54,23 @@ use crate::quic::HandshakeInfo;
 use crate::quic::QuicCommand;
 use crate::quic::QuicheConnection;
 
-/// An [H3Driver] for a client-side HTTP/3 connection. See [H3Driver] for
+/// An [`H3Driver`] for a client-side HTTP/3 connection. See [`H3Driver`] for
 /// details. Emits [`ClientH3Event`]s and expects [`ClientH3Command`]s for
 /// control.
 pub type ClientH3Driver = H3Driver<ClientHooks>;
-/// The [H3Controller] type paired with [ClientH3Driver]. See [H3Controller] for
-/// details.
+/// The [`H3Controller`] type paired with [`ClientH3Driver`]. See
+/// [`H3Controller`] for details.
 pub type ClientH3Controller = H3Controller<ClientHooks>;
-/// Receives [`ClientH3Event`]s from a [ClientH3Driver]. This is the control
+/// Receives [`ClientH3Event`]s from a [`ClientH3Driver`]. This is the control
 /// stream which describes what is happening on the connection, but does not
 /// transfer data.
 pub type ClientEventStream = mpsc::UnboundedReceiver<ClientH3Event>;
-/// A [RequestSender] to send HTTP requests over a [ClientH3Driver]'s
+/// A [`RequestSender`] to send HTTP requests over a [`ClientH3Driver`]'s
 /// connection.
 pub type ClientRequestSender = RequestSender<ClientH3Command, NewClientRequest>;
 
-/// An HTTP request sent using a [ClientRequestSender] to the [ClientH3Driver].
+/// An HTTP request sent using a [`ClientRequestSender`] to the
+/// [`ClientH3Driver`].
 #[derive(Debug)]
 pub struct NewClientRequest {
     /// A user-defined identifier to match [`ClientH3Event::NewOutboundRequest`]
@@ -82,7 +83,7 @@ pub struct NewClientRequest {
     pub body_writer: Option<oneshot::Sender<OutboundFrameSender>>,
 }
 
-/// Events produced by [ClientH3Driver].
+/// Events produced by [`ClientH3Driver`].
 #[derive(Debug)]
 pub enum ClientH3Event {
     Core(H3Event),
@@ -106,7 +107,7 @@ impl From<H3Event> for ClientH3Event {
     }
 }
 
-/// Commands accepted by [ClientH3Driver].
+/// Commands accepted by [`ClientH3Driver`].
 #[derive(Debug)]
 pub enum ClientH3Command {
     Core(H3Command),
@@ -137,7 +138,7 @@ impl From<NewClientRequest> for ClientH3Command {
 /// A [`PendingClientRequest`] is a request which has not yet received a
 /// response.
 ///
-/// The `send` and `recv` halves are passed to the [ClientH3Controller] in an
+/// The `send` and `recv` halves are passed to the [`ClientH3Controller`] in an
 /// [`H3Event::IncomingHeaders`] once the server's response has been received.
 struct PendingClientRequest {
     send: OutboundFrameSender,
@@ -170,8 +171,8 @@ impl ClientHooks {
     ///   exhausted; the stream entry is removed by `send_request` before
     ///   returning, so the stream ID is not consumed.
     /// * `Transport(StreamLimit)` — the peer's concurrent-stream limit has been
-    ///   reached; QUIC will deliver a MAX_STREAMS frame when credit opens up.
-    fn is_retriable_send_error(err: &h3::Error) -> bool {
+    ///   reached; QUIC will deliver a `MAX_STREAMS` frame when credit opens up.
+    const fn is_retriable_send_error(err: &h3::Error) -> bool {
         matches!(
             err,
             h3::Error::StreamBlocked |
@@ -224,23 +225,15 @@ impl ClientHooks {
                 .set_sent_stream_fin(StreamClosureKind::Explicit);
         }
 
-        if let Some(quarter_stream_id) =
-            datagram::extract_quarter_stream_id(stream_id, &request.headers)
-        {
-            log::info!(
-                "creating new flow for MASQUE request";
-                "stream_id" => stream_id,
-                "quarter_stream_id" => quarter_stream_id,
-            );
-            let _ = driver.get_or_insert_flow(quarter_stream_id)?;
-            stream_ctx.associated_dgram_flow_id = Some(quarter_stream_id);
+        if datagram::is_extended_connect(&request.headers) {
+            driver.register_flow(stream_id)?;
         }
 
         if let Some(body_writer) = request.body_writer {
             let _ = body_writer.send(send.clone());
             driver
                 .waiting_streams
-                .push(stream_ctx.wait_for_recv(stream_id))?;
+                .push(stream_ctx.wait_for_recv(stream_id)?)?;
         }
 
         driver.insert_stream(stream_id, stream_ctx);
@@ -263,7 +256,7 @@ impl ClientHooks {
     }
 
     fn reject_request(
-        driver: &H3Driver<Self>, request: NewClientRequest, goaway_id: u64,
+        driver: &H3Driver<Self>, request: &NewClientRequest, goaway_id: u64,
     ) -> H3ConnectionResult<()> {
         driver
             .h3_event_sender
@@ -282,7 +275,7 @@ impl ClientHooks {
             return Ok(());
         }
         if let Some(goaway_id) = driver.hooks.peer_goaway {
-            return Self::reject_request(driver, request, goaway_id);
+            return Self::reject_request(driver, &request, goaway_id);
         }
         // A newer request must not bypass an earlier blocked request.
         if !driver.hooks.queued_requests.is_empty() {
@@ -296,9 +289,9 @@ impl ClientHooks {
     }
 
     /// Handles a response from the peer by sending a relevant [`H3Event`] to
-    /// the [ClientH3Controller] for application-level processing.
+    /// the [`ClientH3Controller`] for application-level processing.
     fn handle_response(
-        driver: &mut H3Driver<Self>, headers: InboundHeaders,
+        driver: &H3Driver<Self>, headers: InboundHeaders,
         pending_request: PendingClientRequest,
     ) -> H3ConnectionResult<()> {
         let InboundHeaders {
@@ -328,12 +321,12 @@ impl ClientHooks {
     }
 
     #[cfg(test)]
-    pub(crate) fn pending_request_count(&self) -> usize {
+    pub(crate) const fn pending_request_count(&self) -> usize {
         self.pending_requests.len()
     }
 
     #[cfg(test)]
-    pub(crate) fn queued_request_count(&self) -> usize {
+    pub(crate) const fn queued_request_count(&self) -> usize {
         self.queued_requests.len()
     }
 }
@@ -354,14 +347,15 @@ impl DriverHooks for ClientHooks {
         }
     }
 
-    fn conn_established(
+    fn application_ready(
         _driver: &mut H3Driver<Self>, qconn: &mut QuicheConnection,
         _handshake_info: &HandshakeInfo,
     ) -> H3ConnectionResult<()> {
-        assert!(
-            !qconn.is_server(),
-            "ClientH3Driver requires a client-side QUIC connection"
-        );
+        if qconn.is_server() {
+            return Err(H3ConnectionError::InvalidDriverRole {
+                expected_server: false,
+            });
+        }
         Ok(())
     }
 
@@ -424,18 +418,16 @@ impl DriverHooks for ClientHooks {
     ) -> H3ConnectionResult<()> {
         driver.hooks.peer_goaway = Some(goaway_id);
         while let Some(request) = driver.hooks.queued_requests.pop_front() {
-            Self::reject_request(driver, request, goaway_id)?;
+            Self::reject_request(driver, &request, goaway_id)?;
         }
         Ok(())
     }
 }
 
 impl ClientH3Controller {
-    /// Creates a [`NewClientRequest`] sender for the paired [ClientH3Driver].
+    /// Creates a [`NewClientRequest`] sender for the paired [`ClientH3Driver`].
+    #[must_use = "the returned sender submits client HTTP requests"]
     pub fn request_sender(&self) -> ClientRequestSender {
-        RequestSender {
-            sender: self.cmd_sender.clone(),
-            _r: Default::default(),
-        }
+        RequestSender::new(self.cmd_sender.clone())
     }
 }

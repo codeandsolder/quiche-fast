@@ -24,7 +24,7 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-//! Helper to wrap existing [quiche::Connection]s.
+//! Helper to wrap existing [`quiche::Connection`]s.
 //!
 //! This is a low-level interface for users who either need to heavily customize
 //! the [`quiche::Connection`] beyond what is possible via the crate's
@@ -68,8 +68,8 @@ where
     /// Sender for inbound packets on the connection.
     pub incoming_tx: mpsc::Sender<Incoming>,
     /// Receiver for `connection closed` notifications. This fires
-    /// after a `CONNECTION_CLOSE` frame has been sent on the connection,
-    /// but before `worker_shutdown_rx`.
+    /// after the worker attempts its final `CONNECTION_CLOSE` flight,
+    /// but before `worker_shutdown_rx`. Delivery is best effort.
     pub conn_close_rx: ConnCloseReceiver,
     /// Receiver which fires only when its associated sender is dropped.
     /// This happens when the connection's IO task exits.
@@ -99,6 +99,7 @@ where
         send: socket,
         local_addr,
         peer_addr,
+        capabilities,
         ..
     } = tx_socket;
     let (shutdown_tx, worker_shutdown_rx) = mpsc::channel(1);
@@ -110,10 +111,7 @@ where
         pending_cid: None, // only used for unmapping in IPR
         peer_addr,
         local_addr,
-        // TODO: try to read Tx' SocketCaps. false is always a safe default.
-        with_gso: false,
-        pacing_offload: false,
-        with_pktinfo: false,
+        socket_capabilities: capabilities,
         // Match the default `QuicSettings::pool_send_buffer` (pooling on).
         pool_send_buffer: true,
     };
@@ -170,6 +168,6 @@ impl ConnCloseReceiver {
 
     /// Waits for a `connection closed` notification.
     pub async fn recv(&mut self) {
-        std::future::poll_fn(|cx| self.poll_recv(cx)).await
+        std::future::poll_fn(|cx| self.poll_recv(cx)).await;
     }
 }

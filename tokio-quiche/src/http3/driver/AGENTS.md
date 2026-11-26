@@ -43,7 +43,9 @@ Async HTTP/3 driver bridging `quiche::h3::Connection` to Tokio tasks via channel
 
 - `H3Driver::new()` returns `(H3Driver<H>, H3Controller<H>)` -- paired at construction, connected by unbounded mpsc channels.
 - Per-stream channels are bounded (`STREAM_CAPACITY`); per-connection event/cmd channels are unbounded.
-- Datagram flows use a shared `FLOW_CAPACITY=2048` bounded channel, separate from stream channels.
+- RFC 9297 datagram flows are registered only by extended CONNECT requests and keyed by full request stream ID. Unknown/closed receive streams drop datagrams; malformed quarter IDs close the connection with H3_DATAGRAM_ERROR; a datagram on an open ordinary HTTP request aborts that request.
+- `DatagramFlowSender` binds identity to the request, uses a shared `FLOW_CAPACITY=2048` bounded data queue and an independent shutdown queue. Do not reintroduce mixed stream/datagram frame variants or caller-supplied stream IDs. Retained handles cannot recreate flows; queued transport datagrams are purged when a stream's send half closes. Inbound datagrams use dedicated payload receivers, closed at peer FIN/reset or local read shutdown.
+- The obsolete draft CONNECT-UDP datagram-flow-id scheme and autonomous flows are not supported.
 - `H3Event` variants: `IncomingSettings`, `IncomingHeaders`, `NewFlow`, `ResetStream`, `ConnectionError`, `ConnectionShutdown`, `BodyBytesReceived`, `StreamClosed`.
 - `H3Command` variants: `QuicCmd`, `GoAway`, `ShutdownStream`.
 - Type aliases (`ClientH3Driver`, `ServerH3Driver`, etc.) are the public API; `H3Driver<H>` and `DriverHooks` are internal.

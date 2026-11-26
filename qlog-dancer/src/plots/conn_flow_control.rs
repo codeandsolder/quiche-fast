@@ -107,8 +107,7 @@ fn received_series(ss: &SeriesStore, proto: ApplicationProto) -> &[(f64, u64)] {
     match proto {
         ApplicationProto::Http2 =>
             &ss.netlog_h2_stream_received_connection_cumulative,
-        ApplicationProto::Http3 =>
-            &ss.netlog_quic_stream_received_connection_cumulative,
+        ApplicationProto::Http3 => &ss.quic_receive_credit_consumed,
     }
 }
 
@@ -119,20 +118,16 @@ fn window_series(
         ApplicationProto::Http2 =>
             Some(ss.h2_connection_receive_credit.as_slice())
                 .filter(|points| !points.is_empty()),
-        ApplicationProto::Http3 => ss
-            .netlog_quic_client_side_window_updates
-            .get(&-1)
-            .map(Vec::as_slice),
+        ApplicationProto::Http3 =>
+            Some(ss.sent_max_data.as_slice()).filter(|points| !points.is_empty()),
     }
 }
 
 fn blocked_connection_events(ds: &Datastore) -> Option<&[f64]> {
     match ds.application_proto {
         ApplicationProto::Http2 => None,
-        ApplicationProto::Http3 => ds
-            .netlog_quic_server_window_blocked
-            .get(&-1)
-            .map(Vec::as_slice),
+        ApplicationProto::Http3 =>
+            ds.quic_peer_window_blocked.get(&-1).map(Vec::as_slice),
     }
     .filter(|events| !events.is_empty())
 }
@@ -184,7 +179,7 @@ fn blocked_lines<DB: DrawingBackend>(
             .map(|time| PathElement::new([(*time, 0), (*time, y_max)], GREEN));
         chart
             .draw_series(lines)?
-            .label("server conn blocked")
+            .label("peer connection blocked")
             .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], GREEN));
     }
     Ok(())
@@ -197,7 +192,11 @@ fn received_data<DB: DrawingBackend>(
     let points = received_series(ss, proto);
     chart
         .draw_series(LineSeries::new(points.iter().copied(), ORANGE))?
-        .label("cumulative received stream data")
+        .label(match proto {
+            ApplicationProto::Http2 => "observed inbound DATA bytes",
+            ApplicationProto::Http3 =>
+                "observed receive-credit consumption (lower bound)",
+        })
         .legend(|(x, y)| PathElement::new([(x, y), (x + 20, y)], ORANGE));
     Ok(())
 }
@@ -339,18 +338,16 @@ mod tests {
             received_x_min: 0.0,
             received_x_max: 2.0,
             netlog_h2_stream_received_connection_cumulative: vec![(12.0, 15)],
-            netlog_quic_stream_received_connection_cumulative: vec![(20.0, 20)],
+            quic_receive_credit_consumed: vec![(20.0, 20)],
             ..SeriesStore::default()
         };
         series.h2_connection_receive_credit = vec![(85.0, 60)];
-        series
-            .netlog_quic_client_side_window_updates
-            .insert(-1, vec![(60.0, 80)]);
+        series.sent_max_data = vec![(60.0, 80)];
         let mut ds = Datastore {
             application_proto: ApplicationProto::Http2,
             ..Datastore::default()
         };
-        ds.netlog_quic_server_window_blocked.insert(-1, vec![80.0]);
+        ds.quic_peer_window_blocked.insert(-1, vec![80.0]);
         assert_eq!(XYMinMax::init(&params, &series, &ds)?.x, 12.0..85.0);
 
         ds.application_proto = ApplicationProto::Http3;
@@ -393,26 +390,19 @@ mod tests {
         };
         assert_eq!(XYMinMax::init(&params, &series, &ds)?.x, 3.0..4.0);
 
-        ds.netlog_quic_server_window_blocked.insert(-1, vec![40.0]);
+        ds.quic_peer_window_blocked.insert(-1, vec![40.0]);
         let range = XYMinMax::init(&params, &series, &ds)?.x;
         assert!(range.start < 40.0 && range.end > 40.0);
 
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
-            ds.netlog_quic_server_window_blocked
-                .insert(-1, vec![invalid]);
+            ds.quic_peer_window_blocked.insert(-1, vec![invalid]);
             assert!(XYMinMax::init(&params, &series, &ds).is_err());
         }
-        ds.netlog_quic_server_window_blocked.clear();
-        series
-            .netlog_quic_stream_received_connection_cumulative
-            .push((f64::NAN, 1));
+        ds.quic_peer_window_blocked.clear();
+        series.quic_receive_credit_consumed.push((f64::NAN, 1));
         assert!(XYMinMax::init(&params, &series, &ds).is_err());
-        series
-            .netlog_quic_stream_received_connection_cumulative
-            .clear();
-        series
-            .netlog_quic_client_side_window_updates
-            .insert(-1, vec![(f64::INFINITY, 1)]);
+        series.quic_receive_credit_consumed.clear();
+        series.sent_max_data = vec![(f64::INFINITY, 1)];
         assert!(XYMinMax::init(&params, &series, &ds).is_err());
         Ok(())
     }
@@ -420,14 +410,11 @@ mod tests {
     #[test]
     fn flow_control_max_follows_all_samples_and_saturates_large_values() {
         let mut series = SeriesStore {
-            netlog_quic_stream_received_connection_cumulative: vec![
-                (2.0, 1000),
-                (4.0, 1),
-            ],
+            quic_receive_credit_consumed: vec![(2.0, 1000), (4.0, 1)],
             ..SeriesStore::default()
         };
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 1200);
-        series.netlog_quic_stream_received_connection_cumulative[0].1 = u64::MAX;
+        series.quic_receive_credit_consumed[0].1 = u64::MAX;
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), u64::MAX);
         assert_eq!(
             XYMinMax::y_max(&SeriesStore::default(), ApplicationProto::Http2),
@@ -439,13 +426,11 @@ mod tests {
     fn http2_and_http3_maxima_use_their_own_receive_and_window_series() {
         let mut series = SeriesStore {
             netlog_h2_stream_received_connection_cumulative: vec![(1.0, 150)],
-            netlog_quic_stream_received_connection_cumulative: vec![(1.0, 400)],
+            quic_receive_credit_consumed: vec![(1.0, 400)],
             ..SeriesStore::default()
         };
         series.h2_connection_receive_credit = vec![(0.0, 250), (1.0, 50)];
-        series
-            .netlog_quic_client_side_window_updates
-            .insert(-1, vec![(0.0, 500), (2.0, 20)]);
+        series.sent_max_data = vec![(0.0, 500), (2.0, 20)];
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http2), 300);
         assert_eq!(XYMinMax::y_max(&series, ApplicationProto::Http3), 600);
 

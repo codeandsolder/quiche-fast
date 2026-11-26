@@ -104,8 +104,8 @@ fn check_summary(summary: &ConnectionSummary) {
 
 #[tokio::test]
 async fn shared_scheduler_completes_waits_and_flushes_sync() -> TestResult {
-    let (url, ..) = start_server();
-    let mut config = h3i_fixtures::h3i_config(&url);
+    let (url, ..) = start_server()?;
+    let mut config = h3i_fixtures::h3i_config(&url)?;
     config.idle_timeout = 15_000;
     let task = tokio::task::spawn_blocking(move || {
         h3i::client::sync_client::connect(config, actions(), Some(triggers()))
@@ -117,8 +117,8 @@ async fn shared_scheduler_completes_waits_and_flushes_sync() -> TestResult {
 
 #[tokio::test]
 async fn async_close_trigger_does_not_require_polling_summary() -> TestResult {
-    let (url, _, mut server_closed) = start_server();
-    let mut config = h3i_fixtures::h3i_config(&url);
+    let (url, _, mut server_closed) = start_server()?;
+    let mut config = h3i_fixtures::h3i_config(&url)?;
     config.idle_timeout = 15_000;
     let completion =
         h3i::client::async_client::connect(&config, actions(), Some(triggers()))
@@ -134,8 +134,8 @@ async fn async_close_trigger_does_not_require_polling_summary() -> TestResult {
 
 #[tokio::test]
 async fn async_empty_close_trigger_closes_without_a_request() -> TestResult {
-    let (url, _, mut server_closed) = start_server();
-    let mut config = h3i_fixtures::h3i_config(&url);
+    let (url, _, mut server_closed) = start_server()?;
+    let mut config = h3i_fixtures::h3i_config(&url)?;
     config.idle_timeout = 15_000;
     let completion = h3i::client::async_client::connect(
         &config,

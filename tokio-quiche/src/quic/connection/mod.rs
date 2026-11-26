@@ -29,13 +29,13 @@ mod id;
 mod map;
 
 pub use self::error::HandshakeError;
-pub(crate) use self::id::generate_routable_cid;
+pub(super) use self::id::generate_routable_cid;
 pub use self::id::ConnectionIdGenerator;
 pub use self::id::SharedConnectionIdGenerator;
 pub use self::id::SimpleConnectionIdGenerator;
-pub(crate) use self::map::ConnectionMap;
-pub(crate) use self::map::ConnectionMapCommand;
-pub(crate) use self::map::RouteLease;
+pub(super) use self::map::ConnectionMap;
+pub(super) use self::map::ConnectionMapCommand;
+pub(super) use self::map::RouteLease;
 
 use btls::ssl::SslRef;
 use datagram_socket::AsSocketStats;
@@ -51,6 +51,7 @@ use std::fmt;
 use std::io;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::PoisonError;
@@ -59,6 +60,8 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::SystemTime;
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use self::error::make_handshake_result;
@@ -88,7 +91,7 @@ pub struct QuicConnectionStats {
     /// Specific statistics about the connection's active path.
     pub path_stats: Option<quiche::PathStats>,
 }
-pub(crate) type QuicConnectionStatsShared = Arc<Mutex<QuicConnectionStats>>;
+pub type QuicConnectionStatsShared = Arc<Mutex<QuicConnectionStats>>;
 
 fn shared_socket_stats(stats: &QuicConnectionStatsShared) -> SocketStats {
     stats
@@ -97,7 +100,7 @@ fn shared_socket_stats(stats: &QuicConnectionStatsShared) -> SocketStats {
         .as_socket_stats()
 }
 
-pub(crate) fn replace_shared_stats(
+pub fn replace_shared_stats(
     stats: &QuicConnectionStatsShared, value: QuicConnectionStats,
 ) {
     *stats.lock().unwrap_or_else(PoisonError::into_inner) = value;
@@ -111,7 +114,7 @@ impl QuicConnectionStats {
         }
     }
 
-    fn startup_exit_to_socket_stats(
+    const fn startup_exit_to_socket_stats(
         value: quiche::StartupExit,
     ) -> datagram_socket::StartupExit {
         let reason = match value.reason {
@@ -133,44 +136,15 @@ impl QuicConnectionStats {
     }
 }
 
+/// The socket statistics interface represents microseconds in a signed field;
+/// clamp extreme durations instead of wrapping them into negative values.
+fn rtt_micros(value: Duration) -> i64 {
+    i64::try_from(value.as_micros()).unwrap_or(i64::MAX)
+}
+
 impl AsSocketStats for QuicConnectionStats {
     fn as_socket_stats(&self) -> SocketStats {
-        SocketStats {
-            pmtu: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.pmtu as u16)
-                .unwrap_or_default(),
-            rtt_us: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.rtt.as_micros() as i64)
-                .unwrap_or_default(),
-            min_rtt_us: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.min_rtt.map(|x| x.as_micros() as i64))
-                .unwrap_or_default(),
-            max_rtt_us: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.max_rtt.map(|x| x.as_micros() as i64))
-                .unwrap_or_default(),
-            rtt_var_us: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.rttvar.as_micros() as i64)
-                .unwrap_or_default(),
-            cwnd: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.cwnd as u64)
-                .unwrap_or_default(),
-            total_pto_count: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.total_pto_count as u64)
-                .unwrap_or_default(),
+        let mut socket = SocketStats {
             packets_sent: self.stats.sent as u64,
             packets_recvd: self.stats.recv as u64,
             packets_lost: self.stats.lost as u64,
@@ -180,24 +154,57 @@ impl AsSocketStats for QuicConnectionStats {
             bytes_recvd: self.stats.recv_bytes,
             bytes_lost: self.stats.lost_bytes,
             bytes_retrans: self.stats.stream_retrans_bytes,
-            bytes_unsent: 0, /* not implemented yet, kept for compatibility
-                              * with TCP */
-            delivery_rate: self
-                .path_stats
-                .as_ref()
-                .map(|p| p.delivery_rate)
-                .unwrap_or_default(),
-            max_bandwidth: self.path_stats.as_ref().and_then(|p| p.max_bandwidth),
-            startup_exit: self
-                .path_stats
-                .as_ref()
-                .and_then(|p| p.startup_exit)
-                .map(QuicConnectionStats::startup_exit_to_socket_stats),
-            bytes_in_flight_duration_us: self
-                .stats
-                .bytes_in_flight_duration
-                .as_micros() as u64,
+            bytes_in_flight_duration_us: u64::try_from(
+                self.stats.bytes_in_flight_duration.as_micros(),
+            )
+            .unwrap_or(u64::MAX),
+            ..SocketStats::default()
+        };
+
+        if let Some(path) = &self.path_stats {
+            socket.pmtu = u16::try_from(path.pmtu).unwrap_or(u16::MAX);
+            socket.rtt_us = rtt_micros(path.rtt);
+            socket.min_rtt_us = path.min_rtt.map_or(0, rtt_micros);
+            socket.max_rtt_us = path.max_rtt.map_or(0, rtt_micros);
+            socket.rtt_var_us = rtt_micros(path.rttvar);
+            socket.cwnd = path.cwnd as u64;
+            socket.total_pto_count = path.total_pto_count as u64;
+            socket.delivery_rate = path.delivery_rate;
+            socket.max_bandwidth = path.max_bandwidth;
+            socket.startup_exit =
+                path.startup_exit.map(Self::startup_exit_to_socket_stats);
         }
+        socket
+    }
+}
+
+#[cfg(test)]
+mod socket_stats_tests {
+    use super::*;
+
+    #[test]
+    fn missing_path_preserves_aggregate_stats_and_saturates_duration() {
+        let mut stats = quiche::Stats::default();
+        stats.sent = 3;
+        stats.recv_bytes = 1234;
+        stats.bytes_in_flight_duration = Duration::MAX;
+        let socket = QuicConnectionStats {
+            stats,
+            path_stats: None,
+        }
+        .as_socket_stats();
+        assert_eq!(socket.packets_sent, 3);
+        assert_eq!(socket.bytes_recvd, 1234);
+        assert_eq!(socket.bytes_in_flight_duration_us, u64::MAX);
+        assert_eq!(socket.pmtu, 0);
+        assert_eq!(socket.max_bandwidth, None);
+    }
+
+    #[test]
+    fn rtt_conversion_does_not_wrap() {
+        assert_eq!(rtt_micros(Duration::from_nanos(999)), 0);
+        assert_eq!(rtt_micros(Duration::from_micros(17)), 17);
+        assert_eq!(rtt_micros(Duration::MAX), i64::MAX);
     }
 }
 
@@ -283,12 +290,14 @@ where
     }
 
     /// The local address this connection listens on.
-    pub fn local_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the local endpoint"]
+    pub const fn local_addr(&self) -> SocketAddr {
         self.params.local_addr
     }
 
     /// The remote address for this connection.
-    pub fn peer_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the remote endpoint"]
+    pub const fn peer_addr(&self) -> SocketAddr {
         self.params.peer_addr
     }
 
@@ -304,7 +313,7 @@ where
     /// Clone it before starting the handshake to update the worker's marking
     /// from a certificate-selection callback. Until then the handle has no
     /// per-packet override, so packets inherit the UDP socket's TOS/TClass.
-    pub fn dscp_handle(&self) -> Option<&DscpHandle> {
+    pub const fn dscp_handle(&self) -> Option<&DscpHandle> {
         self.params.dscp_handle.as_ref()
     }
 
@@ -322,11 +331,12 @@ where
     /// A handle to the [`QuicConnectionStats`] for this connection.
     ///
     /// # Note
-    /// Initially, these stats represent the state when the [quiche::Connection]
-    /// was created. They are updated when the connection is closed, so this
-    /// getter exists primarily to grab a handle early on.
+    /// Initially, these stats represent the state when the
+    /// [`quiche::Connection`] was created. They are updated when the connection
+    /// is closed, so this getter exists primarily to grab a handle early on.
     #[inline]
-    pub fn stats(&self) -> &QuicConnectionStatsShared {
+    #[must_use = "the handle provides access to the connection statistics"]
+    pub const fn stats(&self) -> &QuicConnectionStatsShared {
         &self.stats
     }
 
@@ -345,12 +355,19 @@ where
             self.params.metrics.connections_in_memory(),
         );
 
+        // The application does not need to service a command channel for
+        // shutdown to work. The worker owns the completion sender throughout
+        // its lifetime, including a paused handshake and close.
+        let shutdown_request = CancellationToken::new();
+        let (completion, completion_rx) = oneshot::channel();
         let conn = QuicConnection {
             local_addr: self.params.local_addr,
             peer_addr: self.params.peer_addr,
             audit_log_stats: Arc::clone(&self.audit_log_stats),
             stats: Arc::clone(&self.stats),
             scid: self.params.scid,
+            shutdown_request: shutdown_request.clone(),
+            shutdown_completion: Some(completion_rx),
         };
         let context = ConnectionStageContext {
             in_pkt: self.params.initial_pkt,
@@ -380,6 +397,8 @@ where
             init_rx_time: self.params.init_rx_time,
             metrics: self.params.metrics.clone(),
             handshake_info: self.params.handshake_info,
+            shutdown_request,
+            completion,
         };
 
         let handshake_fut = async move {
@@ -416,6 +435,9 @@ where
     /// [`InitialQuicConnection::resume`]. This two-step process
     /// allows callers to collect telemetry and run code before serving their
     /// [`ApplicationOverQuic`].
+    ///
+    /// # Errors
+    /// Returns an I/O error if the handshake or its worker task fails.
     pub async fn handshake<A: ApplicationOverQuic>(
         self, app: A,
     ) -> io::Result<(QuicConnection, Running<Arc<Tx>, M, A>)> {
@@ -498,7 +520,7 @@ where
     }
 }
 
-pub(crate) struct QuicConnectionParams<Tx, M>
+pub struct QuicConnectionParams<Tx, M>
 where
     Tx: DatagramSocketSend + Send + 'static + ?Sized,
     M: Metrics,
@@ -507,7 +529,7 @@ where
     pub initial_pkt: Option<Incoming>,
     pub dscp_handle: Option<DscpHandle>,
     pub shutdown_tx: mpsc::Sender<()>,
-    pub route_lease: RouteLease,
+    pub(in crate::quic) route_lease: RouteLease,
     pub scid: ConnectionId<'static>,
     pub cid_generator: Option<SharedConnectionIdGenerator>,
     pub metrics: M,
@@ -526,10 +548,14 @@ where
     pub peer_addr: SocketAddr,
 }
 
-/// Metadata about an established QUIC connection.
+/// Metadata and shutdown control for an established QUIC connection.
+///
+/// Shutdown requests a best-effort transport close and completes when the
+/// worker releases its connection resources. Dropping this metadata handle
+/// alone does not request shutdown.
 ///
 /// While this struct allows access to some facets of a QUIC connection, it
-/// notably does not represent the [quiche::Connection] itself. The crate
+/// notably does not represent the [`quiche::Connection`] itself. The crate
 /// handles most interactions with [quiche] internally in a worker task. Users
 /// can only access the connection directly via their [`ApplicationOverQuic`]
 /// implementation.
@@ -542,18 +568,22 @@ pub struct QuicConnection {
     audit_log_stats: Arc<QuicAuditStats>,
     stats: QuicConnectionStatsShared,
     scid: ConnectionId<'static>,
+    shutdown_request: CancellationToken,
+    shutdown_completion: Option<oneshot::Receiver<()>>,
 }
 
 impl QuicConnection {
     /// The local address this connection listens on.
     #[inline]
-    pub fn local_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the local endpoint"]
+    pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// The remote address for this connection.
     #[inline]
-    pub fn peer_addr(&self) -> SocketAddr {
+    #[must_use = "the address identifies the remote endpoint"]
+    pub const fn peer_addr(&self) -> SocketAddr {
         self.peer_addr
     }
 
@@ -564,24 +594,27 @@ impl QuicConnection {
     /// The getter exists to grab a handle early on, which can then
     /// be stowed away and read out after the connection has closed.
     #[inline]
-    pub fn audit_log_stats(&self) -> &Arc<QuicAuditStats> {
+    #[must_use = "the handle provides access to the connection audit record"]
+    pub const fn audit_log_stats(&self) -> &Arc<QuicAuditStats> {
         &self.audit_log_stats
     }
 
     /// A handle to the [`QuicConnectionStats`] for this connection.
     ///
     /// # Note
-    /// Initially, these stats represent the state when the [quiche::Connection]
-    /// was created. They are updated when the connection is closed, so this
-    /// getter exists primarily to grab a handle early on.
+    /// Initially, these stats represent the state when the
+    /// [`quiche::Connection`] was created. They are updated when the connection
+    /// is closed, so this getter exists primarily to grab a handle early on.
     #[inline]
-    pub fn stats(&self) -> &QuicConnectionStatsShared {
+    #[must_use = "the handle provides access to the connection statistics"]
+    pub const fn stats(&self) -> &QuicConnectionStatsShared {
         &self.stats
     }
 
     /// The QUIC source connection ID used by this connection.
     #[inline]
-    pub fn scid(&self) -> &ConnectionId<'static> {
+    #[must_use = "the ID identifies the source connection"]
+    pub const fn scid(&self) -> &ConnectionId<'static> {
         &self.scid
     }
 }
@@ -620,28 +653,25 @@ where
     }
 }
 
-impl<Tx, M> ShutdownConnection for InitialQuicConnection<Tx, M>
-where
-    Tx: DatagramSocketSend + Send + 'static + ?Sized,
-    M: Metrics,
-{
-    #[inline]
-    fn poll_shutdown(
-        &mut self, _cx: &mut std::task::Context,
-    ) -> std::task::Poll<io::Result<()>> {
-        // TODO: Does nothing at the moment. We always call Self::start
-        // anyway so it's not really important at this moment.
-        Poll::Ready(Ok(()))
-    }
-}
-
+// An unstarted InitialQuicConnection owns its resources directly. Dropping
+// it releases them; it has no asynchronous shutdown operation.
 impl ShutdownConnection for QuicConnection {
-    #[inline]
     fn poll_shutdown(
-        &mut self, _cx: &mut std::task::Context,
-    ) -> std::task::Poll<io::Result<()>> {
-        // TODO: does nothing at the moment
-        Poll::Ready(Ok(()))
+        &mut self, cx: &mut std::task::Context<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.shutdown_request.cancel();
+        let Some(completion) = self.shutdown_completion.as_mut() else {
+            return Poll::Ready(Ok(()));
+        };
+        match Pin::new(completion).poll(cx) {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(_) => {
+                // Even an aborted worker has released its owned resources.
+                // Do not repoll the completed oneshot.
+                self.shutdown_completion = None;
+                Poll::Ready(Ok(()))
+            },
+        }
     }
 }
 
@@ -657,7 +687,9 @@ pub struct HandshakeInfo {
 }
 
 impl HandshakeInfo {
-    pub(crate) fn new(start_time: Instant, timeout: Option<Duration>) -> Self {
+    pub(crate) const fn new(
+        start_time: Instant, timeout: Option<Duration>,
+    ) -> Self {
         Self {
             start_time,
             timeout,
@@ -667,19 +699,25 @@ impl HandshakeInfo {
 
     /// The time at which the connection was created.
     #[inline]
-    pub fn start_time(&self) -> Instant {
+    #[must_use = "the start time anchors handshake deadlines"]
+    pub const fn start_time(&self) -> Instant {
         self.start_time
     }
 
-    /// How long the handshake took to complete.
+    /// How long the handshake took to complete, or None if still in progress.
     #[inline]
-    pub fn elapsed(&self) -> Duration {
-        self.time_handshake.unwrap_or_default()
+    #[must_use = "the returned duration records handshake latency"]
+    pub const fn duration(&self) -> Option<Duration> {
+        self.time_handshake
     }
 
-    pub(crate) fn set_elapsed(&mut self) {
+    pub(crate) fn complete(&mut self) -> Option<Duration> {
+        if self.time_handshake.is_some() {
+            return None;
+        }
         let elapsed = self.start_time.elapsed();
-        self.time_handshake = Some(elapsed)
+        self.time_handshake = Some(elapsed);
+        Some(elapsed)
     }
 
     pub(crate) fn deadline(&self) -> Option<Instant> {
@@ -697,23 +735,23 @@ impl HandshakeInfo {
 ///
 /// The application is driven by an internal worker task, which also handles I/O
 /// for the connection. The worker feeds inbound packets into the
-/// [quiche::Connection], calls [`ApplicationOverQuic::process_reads`] followed
-/// by [`ApplicationOverQuic::process_writes`], and then flushes any pending
-/// outbound packets to the network. This repeats in a loop until either the
-/// connection is closed or the [`ApplicationOverQuic`] returns an error.
+/// [`quiche::Connection`], calls [`ApplicationOverQuic::process_reads`]
+/// followed by [`ApplicationOverQuic::process_writes`], and then flushes any
+/// pending outbound packets to the network. This repeats in a loop until either
+/// the connection is closed or the [`ApplicationOverQuic`] returns an error.
 ///
 /// In between loop iterations, the worker yields until a new packet arrives, a
 /// timer expires, or [`ApplicationOverQuic::wait_for_data`] resolves.
 /// Implementors can interact with the underlying connection via the mutable
 /// reference passed to trait methods.
 pub trait ApplicationOverQuic: Send + 'static {
-    /// Callback to customize the [`ApplicationOverQuic`] after the QUIC
-    /// handshake completed successfully.
+    /// Called once when application keys are available. With server early data,
+    /// the transport handshake may still be in progress.
     ///
     /// # Errors
     /// Returning an error from this method immediately stops the worker loop
     /// and transitions to the connection closing stage.
-    fn on_conn_established(
+    fn on_application_ready(
         &mut self, qconn: &mut QuicheConnection, handshake_info: &HandshakeInfo,
     ) -> QuicResult<()>;
 
@@ -721,7 +759,7 @@ pub trait ApplicationOverQuic: Send + 'static {
     /// worker.
     ///
     /// The function is checked in each iteration of the worker loop. Only
-    /// `on_conn_established()` bypasses this check.
+    /// `on_application_ready()` bypasses this check.
     fn should_act(&self) -> bool;
 
     /// Waits for an event to trigger the next iteration of the worker loop.
@@ -765,7 +803,7 @@ pub trait ApplicationOverQuic: Send + 'static {
     /// worker loop (provided `should_act()` returns true). It is called
     /// after `process_reads` and immediately before packets are pushed to
     /// the socket. The main use case is providing already-buffered data to
-    /// the [quiche::Connection].
+    /// the [`quiche::Connection`].
     ///
     /// # Errors
     /// Returning an error from this method immediately stops the worker loop
@@ -785,12 +823,12 @@ pub trait ApplicationOverQuic: Send + 'static {
     }
 }
 
-/// A command to execute on a [quiche::Connection] in the context of an
+/// A command to execute on a [`quiche::Connection`] in the context of an
 /// [`ApplicationOverQuic`].
 ///
 /// We expect most [`ApplicationOverQuic`] implementations (such as
-/// [H3Driver](crate::http3::driver::H3Driver)) will provide some way to submit
-/// actions for them to take, for example via a channel. This enum may be
+/// [`H3Driver`](crate::http3::driver::H3Driver)) will provide some way to
+/// submit actions for them to take, for example via a channel. This enum may be
 /// accepted as part of those actions to inspect or alter the state of the
 /// underlying connection.
 pub enum QuicCommand {
@@ -858,7 +896,7 @@ impl fmt::Debug for QuicCommand {
     }
 }
 
-/// Parameters to close a [quiche::Connection].
+/// Parameters to close a [`quiche::Connection`].
 ///
 /// The connection will use these parameters for the `CONNECTION_CLOSE` frame
 /// it sends to its peer.
@@ -892,15 +930,7 @@ mod stats_lock_tests {
             stats: quiche::Stats::default(),
             path_stats: None,
         }));
-        let poisoner = Arc::clone(&stats);
-
-        let _ = std::thread::spawn(move || {
-            let _guard = poisoner
-                .lock()
-                .expect("fresh stats lock should not be poisoned");
-            panic!("poison connection stats lock");
-        })
-        .join();
+        crate::poison_test_mutex(&stats);
 
         assert_eq!(shared_socket_stats(&stats).packets_sent, 0);
 

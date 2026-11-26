@@ -30,7 +30,6 @@ use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
 
-use qlog::events::quic::QuicFrame;
 use tabled::settings::location::ByColumnName;
 use tabled::settings::object::Segment;
 use tabled::settings::Alignment;
@@ -47,10 +46,10 @@ use crate::request_stub::CLIENT_CONTENT_LENGTH;
 use crate::request_stub::CLIENT_OBSERVED_DATA;
 use crate::request_stub::CLIENT_PRI;
 use crate::request_stub::SERVER_PRI;
+use crate::request_stub::SERVER_RX_HDR_TX_FIRST_DATA;
 use crate::request_stub::SERVER_RX_HDR_TX_HDR;
+use crate::request_stub::SERVER_RX_HDR_TX_LAST_DATA;
 use crate::request_stub::SERVER_TX_FIRST_DATA_TX_LAST_DATA;
-use crate::request_stub::SERVER_TX_HDR_TX_FIRST_HDR;
-use crate::request_stub::SERVER_TX_HDR_TX_LAST_HDR;
 use crate::request_stub::UPLOAD_RATE;
 use crate::request_stub::UPLOAD_TIME;
 use crate::stringify_last;
@@ -75,10 +74,10 @@ pub fn request_timing_table(
             table
                 .with(Remove::column(ByColumnName::new(SERVER_RX_HDR_TX_HDR)))
                 .with(Remove::column(ByColumnName::new(
-                    SERVER_TX_HDR_TX_FIRST_HDR,
+                    SERVER_RX_HDR_TX_FIRST_DATA,
                 )))
                 .with(Remove::column(ByColumnName::new(
-                    SERVER_TX_HDR_TX_LAST_HDR,
+                    SERVER_RX_HDR_TX_LAST_DATA,
                 )))
                 .with(Remove::column(ByColumnName::new(
                     SERVER_TX_FIRST_DATA_TX_LAST_DATA,
@@ -113,7 +112,8 @@ pub fn print_stats(data_store: &Datastore, config: StatsSelection) {
         print_tx_max_stream_data_frames(data_store);
         print_tx_reset_stream_frames(data_store);
         print_rx_reset_stream_frames(data_store);
-        print_tx_stream_frames(data_store);
+        print_quic_streams("sent", &data_store.sent_quic_streams);
+        print_quic_streams("received", &data_store.received_quic_streams);
         print_local_stream_buffer_reads(data_store);
         print_local_stream_buffer_writes(data_store);
         print_local_stream_buffer_dropped(data_store);
@@ -307,43 +307,25 @@ fn print_local_stream_buffer_dropped(data_store: &Datastore) {
     );
 }
 
-/// Return the greatest end offset among STREAM frames, not the end of whichever
-/// frame happens to be last in the log (events may be out of order).
-/// An unrepresentable offset is reported explicitly rather than wrapped.
-fn max_stream_frame_end(frames: &[(f64, QuicFrame)]) -> Result<Option<u64>, ()> {
-    frames
-        .iter()
-        .try_fold(None, |maximum: Option<u64>, (_, frame)| match frame {
-            QuicFrame::Stream { offset, raw, .. } => {
-                let length = raw
-                    .as_ref()
-                    .and_then(|info| info.payload_length)
-                    .unwrap_or_default();
-                let end =
-                    offset.unwrap_or_default().checked_add(length).ok_or(())?;
-                Ok(Some(maximum.map_or(end, |current| current.max(end))))
-            },
-            _ => Ok(maximum),
-        })
-}
-
-fn print_tx_stream_frames(data_store: &Datastore) {
-    println!("### sent STREAM frames ###");
-    if data_store.sent_stream_frames.is_empty() {
+fn print_quic_streams(
+    direction: &str, tracker: &crate::trackers::QuicStreamTracker,
+) {
+    println!("### {direction} QUIC STREAM and RESET_STREAM observations ###");
+    if tracker.streams().is_empty() {
         println!("    None");
-    } else {
-        for (stream_id, frames) in &data_store.sent_stream_frames {
-            let max_end = match max_stream_frame_end(frames) {
-                Ok(Some(value)) => value.to_string(),
-                Ok(None) => "n/a".to_string(),
-                Err(()) => "overflow".to_string(),
-            };
-            println!(
-                "    stream={stream_id}, total_count={}, first={:?}, last={}, max_end={max_end}",
-                frames.len(), frames.first(), stringify_last(frames),
-            );
-        }
+        return;
     }
+    for (stream_id, history) in tracker.streams() {
+        let points = history.points();
+        println!(
+            "    stream={stream_id}, observation_count={}, first={:?}, last={:?}, credit_consumed_lower_bound={}",
+            points.len(), points.first(), points.last(), history.maximum(),
+        );
+    }
+    println!(
+        "    connection_credit_consumed_lower_bound={}",
+        tracker.current_sum()
+    );
 }
 
 pub fn print_flow_control(data: &[LogFileData]) {
@@ -358,24 +340,36 @@ pub fn print_flow_control(data: &[LogFileData]) {
             lf.datastore.host.as_deref().unwrap_or("ERROR UNKNOWN")
         );
 
-        println!("  Initial Client connection window, Initial Client Bidi Local Stream Window");
-        println!(
-            "  {},{}",
-            lf.datastore.client_quic_tps.initial_max_data.unwrap_or(0),
-            lf.datastore
-                .client_quic_tps
-                .initial_max_stream_data_bidi_local
-                .unwrap_or(0)
-        );
-
-        for (stream_id, points) in
-            &lf.datastore.netlog_quic_client_side_window_updates
-        {
-            println!("  Stream {stream_id} flow control updates");
+        for (direction, limits, connection, streams) in [
+            (
+                "sent",
+                &lf.datastore.local_initial_stream_limits,
+                &lf.datastore.sent_max_data,
+                &lf.datastore.sent_stream_max_data_tracker,
+            ),
+            (
+                "received",
+                &lf.datastore.peer_initial_stream_limits,
+                &lf.datastore.received_max_data,
+                &lf.datastore.received_stream_max_data_tracker,
+            ),
+        ] {
+            println!("  Initial {direction} connection and stream limits: connection={}, bidi_local={}, bidi_remote={}, uni={}",
+                crate::request_stub::NaOption::new(limits.connection),
+                crate::request_stub::NaOption::new(limits.bidi_local),
+                crate::request_stub::NaOption::new(limits.bidi_remote),
+                crate::request_stub::NaOption::new(limits.uni));
+            println!("  {direction} connection flow control updates");
             println!("    Time, Value");
-
-            for (time, val) in points {
-                println!("    {time},{val}");
+            for (time, value) in connection {
+                println!("    {time},{value}");
+            }
+            for (stream_id, history) in streams.streams() {
+                println!("  {direction} stream {stream_id} flow control updates (initial limit: {})", crate::request_stub::NaOption::new(history.initial()));
+                println!("    Time, Value");
+                for (time, value) in history.points() {
+                    println!("    {time},{value}");
+                }
             }
         }
     }
@@ -493,19 +487,6 @@ pub fn print_packet_loss(data: &[LogFileData]) {
 #[cfg(test)]
 mod report_safety_tests {
     use super::*;
-    use qlog::events::quic::QuicFrame;
-
-    fn stream(offset: u64, length: u64) -> QuicFrame {
-        QuicFrame::Stream {
-            stream_id: 1,
-            offset: Some(offset),
-            fin: None,
-            raw: Some(Box::new(qlog::events::RawInfo {
-                payload_length: Some(length),
-                ..Default::default()
-            })),
-        }
-    }
 
     fn observed_packet(
         packet_type: crate::PacketType, number: u64,
@@ -649,26 +630,5 @@ mod report_safety_tests {
         let report = AckGapSession(&datastore).to_string();
         assert!(report.contains("    Handshake, 0, 1, n/a, {99}"));
         assert!(!report.contains("    Initial,"));
-    }
-
-    #[test]
-    fn stream_frame_end_uses_highest_valid_offset_in_any_order() {
-        assert_eq!(max_stream_frame_end(&[]), Ok(None));
-        let frames = vec![
-            (3.0, stream(900, 100)),
-            (1.0, stream(0, 50)),
-            (2.0, stream(50, 70)),
-        ];
-        assert_eq!(max_stream_frame_end(&frames), Ok(Some(1000)));
-        assert_eq!(
-            max_stream_frame_end(&[(1.0, stream(u64::MAX - 2, 2))]),
-            Ok(Some(u64::MAX))
-        );
-    }
-
-    #[test]
-    fn stream_frame_end_rejects_overflow_in_any_frame() {
-        let frames = vec![(1.0, stream(u64::MAX, 2)), (2.0, stream(0, 30))];
-        assert_eq!(max_stream_frame_end(&frames), Err(()));
     }
 }

@@ -26,7 +26,7 @@
 
 //! `async`-ified QUIC connections powered by [quiche].
 //!
-//! Hooking up a [quiche::Connection] to [tokio]'s executor and IO primitives
+//! Hooking up a [`quiche::Connection`] to [tokio]'s executor and IO primitives
 //! requires an [`ApplicationOverQuic`] to control the connection. The
 //! application exposes a small number of callbacks which are executed whenever
 //! there is work to do with the connection.
@@ -128,7 +128,7 @@ pub use self::dscp::Dscp;
 pub use self::dscp::DscpHandle;
 pub use self::hooks::ConnectionHook;
 
-/// Alias of [quiche::Connection] used internally by the crate.
+/// Alias of [`quiche::Connection`] used internally by the crate.
 pub type QuicheConnection = quiche::Connection<crate::buf_factory::BufFactory>;
 
 /// Connects to an HTTP/3 server using `socket` and the default client
@@ -136,13 +136,16 @@ pub type QuicheConnection = quiche::Connection<crate::buf_factory::BufFactory>;
 ///
 /// This function always uses the [`ApplicationOverQuic`] provided in
 /// [`http3::driver`](crate::http3::driver) and returns a corresponding
-/// [ClientH3Controller]. To specify a different implementation or customize the
-/// configuration, use [`connect_with_config`].
+/// [`ClientH3Controller`]. To specify a different implementation or customize
+/// the configuration, use [`connect_with_config`].
 ///
 /// # Note
 /// tokio-quiche currently only supports one client connection per socket.
 /// Sharing a socket among multiple connections will lead to lost packets as
 /// both connections try to read from the shared socket.
+///
+/// # Errors
+/// Returns socket, configuration, or handshake errors.
 pub async fn connect<Tx, Rx, S>(
     socket: S, host: Option<&str>,
 ) -> QuicResult<(QuicConnection, ClientH3Controller)>
@@ -156,7 +159,7 @@ where
     let socket: Socket<Tx, Rx> = socket.try_into()?;
 
     let (h3_driver, h3_controller) =
-        ClientH3Driver::new(Http3Settings::default());
+        ClientH3Driver::new(&Http3Settings::default());
     let mut params = ConnectionParams::default();
     params.settings.max_idle_timeout = Some(Duration::from_secs(30));
 
@@ -177,6 +180,9 @@ where
 /// tokio-quiche currently only supports one client connection per socket.
 /// Sharing a socket among multiple connections will lead to lost packets as
 /// both connections try to read from the shared socket.
+///
+/// # Errors
+/// Returns socket, configuration, or handshake errors.
 pub async fn connect_with_config<Tx, Rx, App>(
     socket: Socket<Tx, Rx>, host: Option<&str>, params: &ConnectionParams<'_>,
     app: App,
@@ -233,7 +239,7 @@ where
     // Attach tracing before the worker sends its first handshake packet.
     if let Some(qlog_dir) = &client_config.qlog_dir {
         log::info!("setting up qlogs"; "qlog_dir"=>qlog_dir);
-        let id = format!("{:?}", scid);
+        let id = format!("{scid:?}");
         let path = std::path::Path::new(qlog_dir)
             .join(qlog_file_name(&id, client_config.qlog_compression));
         if let Ok(writer) =
@@ -308,6 +314,7 @@ where
     let acceptor = ConnectionAcceptor::new(
         ConnectionAcceptorConfig {
             disable_client_ip_validation: config.disable_client_ip_validation,
+            reply_backlog: config.listen_backlog,
             enable_per_connection_dscp: params.enable_per_connection_dscp,
             qlog_dir: config.qlog_dir.clone(),
             qlog_compression: config.qlog_compression,
@@ -315,12 +322,7 @@ where
                 .keylog_file
                 .as_ref()
                 .and_then(|f| f.try_clone().ok()),
-            #[cfg(target_os = "linux")]
-            with_pktinfo: if local_addr.is_ipv4() {
-                config.has_ippktinfo
-            } else {
-                config.has_ipv6pktinfo
-            },
+            socket_capabilities: config.socket_capabilities(),
         },
         Arc::clone(&socket_tx),
         socket.cid_generator,

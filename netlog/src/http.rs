@@ -71,6 +71,7 @@ pub struct HttpTransactionQuicSendRequestHeadersParams {
     pub quic_priority_incremental: bool,
     pub quic_priority_type: String,
     pub quic_priority_urgency: u8,
+    #[serde(deserialize_with = "crate::wire_number::deserialize")]
     pub quic_stream_id: u64,
 }
 

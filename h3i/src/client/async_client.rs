@@ -186,7 +186,7 @@ impl H3iDriver {
 }
 
 impl ApplicationOverQuic for H3iDriver {
-    fn on_conn_established(
+    fn on_application_ready(
         &mut self, qconn: &mut QuicheConnection, _handshake_info: &HandshakeInfo,
     ) -> QuicResult<()> {
         log::info!("h3i: HTTP/3 connection established");

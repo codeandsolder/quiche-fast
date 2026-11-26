@@ -41,18 +41,20 @@ use h3i::quiche::WireErrorCode;
 use url::Url;
 
 /// Default h3i config, connects to "test.com"
-pub fn h3i_config(url: &str) -> h3i::config::Config {
+pub fn h3i_config(url: &str) -> Result<h3i::config::Config, ClientError> {
     let url = url.strip_prefix("http://").unwrap_or(url);
     let final_url = url.split('/').next().unwrap_or(url);
 
-    let mut config = h3i::config::Config::new("test.com").unwrap();
+    let mut config = h3i::config::Config::new("test.com")?;
     config.idle_timeout = 2000;
     config.flow.data = 1_000_000;
     config.flow.stream_data_uni = 100_000;
-    config.endpoint.connect_to = Some(final_url.parse().unwrap());
+    config.endpoint.connect_to = Some(final_url.parse().map_err(|error| {
+        ClientError::Other(format!("invalid fixture address: {error}"))
+    })?);
     config.tls.verify_peer = false;
     config.datagrams = Some(h3i::config::DatagramQueues::default());
-    config
+    Ok(config)
 }
 
 pub fn default_headers() -> Vec<Header> {
@@ -85,19 +87,21 @@ pub fn url_headers(url: &Url) -> Vec<Header> {
 
 pub async fn summarize_connection(
     h3i: h3i::config::Config, actions: Vec<Action>,
-) -> ConnectionSummary {
+) -> Result<ConnectionSummary, ClientError> {
     tokio::task::spawn_blocking(move || {
-        h3i::client::sync_client::connect(h3i, actions, None).unwrap()
+        h3i::client::sync_client::connect(h3i, actions, None)
     })
     .await
-    .unwrap()
+    .map_err(|error| ClientError::Other(format!("client task failed: {error}")))?
 }
 
 pub async fn request(
     url: &str, count: u64,
 ) -> Result<ConnectionSummary, ClientError> {
-    let h3i = h3i_config(url);
-    let url = Url::parse(url).expect("h3i request URL is invalid");
+    let h3i = h3i_config(url)?;
+    let url = Url::parse(url).map_err(|error| {
+        ClientError::Other(format!("invalid request URL: {error}"))
+    })?;
     let headers = url_headers(&url);
 
     let mut actions = Vec::new();
@@ -121,43 +125,32 @@ pub async fn request(
         },
     });
 
-    tokio::task::spawn_blocking(move || {
-        h3i::client::sync_client::connect(h3i, actions, None)
-    })
-    .await
-    .unwrap()
+    summarize_connection(h3i, actions).await
 }
 
 pub fn received_status_code_on_stream(
     summary: &ConnectionSummary, stream: u64, code: u16,
 ) -> bool {
-    summary.stream_map.headers_on_stream(stream).any(|e| {
-        let u16 = std::str::from_utf8(e.status_code().expect("no status code"))
-            .expect("invalid utf8 in status code")
-            .parse::<u16>()
-            .expect("unparseable status code");
-
-        u16 == code
+    summary.stream_map.headers_on_stream(stream).any(|event| {
+        event
+            .status_code()
+            .filter(|status| {
+                status.len() == 3 && status.iter().all(u8::is_ascii_digit)
+            })
+            .and_then(|status| std::str::from_utf8(status).ok())
+            .and_then(|status| status.parse::<u16>().ok()) ==
+            Some(code)
     })
 }
 
-pub fn stream_body(summary: &ConnectionSummary, stream: u64) -> Option<String> {
-    let mut has_body = false;
-    let body: String = summary
-        .stream_map
-        .stream(stream)
-        .into_iter()
-        .filter_map(|f| {
-            if let H3iFrame::QuicheH3(h3::frame::Frame::Data { payload }) = f {
-                has_body = true;
-                return Some(
-                    std::str::from_utf8(payload)
-                        .expect("response body not UTF-8"),
-                );
-            }
-            None
-        })
-        .collect();
-
-    has_body.then_some(body)
+pub fn stream_body(
+    summary: &ConnectionSummary, stream: u64,
+) -> Result<Option<String>, std::string::FromUtf8Error> {
+    let mut body = None::<Vec<u8>>;
+    for frame in summary.stream_map.stream(stream) {
+        if let H3iFrame::QuicheH3(h3::frame::Frame::Data { payload }) = frame {
+            body.get_or_insert_with(Vec::new).extend_from_slice(payload);
+        }
+    }
+    body.map(String::from_utf8).transpose()
 }
