@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       # Gate the shared support crates and tokio-quiche together rather than
       # adding another independent CI job. Enable RPK for the same transport
@@ -37,7 +37,7 @@ jobs:
           - configuration: combined
             features: gzip,zstd,nightly-clippy-expects
     name: "qlog (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: "--locked --no-deps -p qlog --all-targets --features ${{ matrix.features }}"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
@@ -54,7 +54,7 @@ jobs:
           - configuration: expanded
             cargo-args: "--locked --no-deps -p quiche --all-targets --features ffi,qlog,internal,custom-client-dcid,gcongestion"
     name: "quiche core (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: ${{ matrix['cargo-args'] }}
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
@@ -71,7 +71,7 @@ jobs:
           - configuration: minimal
             cargo-args: "--locked --no-deps -p quiche_apps --all-targets --no-default-features"
     name: "quiche apps (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: ${{ matrix['cargo-args'] }}
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
@@ -88,7 +88,7 @@ jobs:
           - configuration: async
             cargo-args: "--locked --no-deps -p h3i --all-targets --features async"
     name: "h3i (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: ${{ matrix['cargo-args'] }}
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
@@ -97,7 +97,7 @@ jobs:
 
   strict-qlog-dancer-wasm:
     name: "qlog-dancer (wasm32)"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: "--locked --no-deps -p qlog-dancer --lib --target wasm32-unknown-unknown"
       rust-targets: "wasm32-unknown-unknown"
@@ -106,7 +106,7 @@ jobs:
 
   strict-qlog-dancer-native:
     name: "qlog-dancer (native)"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
     with:
       cargo-args: "--locked --no-deps -p qlog-dancer --all-targets"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
