@@ -124,7 +124,7 @@ where
             H3Event::ConnectionShutdown(Some(error)) => Err(Box::new(*error)),
             H3Event::ConnectionShutdown(None) => Ok(()),
             _ => {
-                log::info!("received unhandled event: {event:?}");
+                tracing::info!("received unhandled event: {event:?}");
                 Ok(())
             },
         }
@@ -157,7 +157,7 @@ where
     fn handle_incoming_headers(
         &self, headers: IncomingH3Headers, commands: &StreamCommands,
     ) {
-        log::info!("received headers: {headers:?}");
+        tracing::info!("received headers: {headers:?}");
 
         let IncomingH3Headers {
             headers: list,
@@ -252,7 +252,7 @@ fn convert_headers(
         let value = header.value();
 
         let Some(&first) = name.first() else {
-            log::warn!("received header with no or invalid first character");
+            tracing::warn!("received header with no or invalid first character");
             continue;
         };
 
@@ -274,7 +274,7 @@ fn convert_headers(
                     uri_builder = uri_builder.path_and_query(path);
                 },
                 _ => {
-                    log::warn!("received unknown pseudo-header: {name:?}");
+                    tracing::warn!("received unknown pseudo-header: {name:?}");
                 },
             }
         } else {

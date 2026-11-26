@@ -71,7 +71,6 @@ use datagram_socket::DatagramSocketSend;
 use datagram_socket::MaybeConnectedSocket;
 use datagram_socket::QuicAuditStats;
 use datagram_socket::QuicCloseCode;
-use foundations::telemetry::log;
 use foundations::telemetry::metrics::Gauge;
 use foundations::telemetry::metrics::GaugeGuard;
 use quiche::ConnectionId;
@@ -82,6 +81,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time;
 use tokio_util::sync::CancellationToken;
+use tracing as log;
 
 // Number of incoming packets to be buffered in the incoming channel.
 pub const INCOMING_QUEUE_SIZE: usize = 2048;
@@ -1280,9 +1280,7 @@ where
                 qconn,
             }),
             Err(e) => {
-                foundations::telemetry::log::warn!(
-                    "Application startup failed"; "error"=>%e
-                );
+                log::warn!(error = %e, "Application startup failed");
 
                 RunningOrClosing::Closing(Closing {
                     params: self.into(),

@@ -93,7 +93,7 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 mio = { workspace = true, features = ["net", "os-poll"] }
-ring = { workspace = true }
+btls = { workspace = true }
 rstest = { workspace = true }
 url = { workspace = true }
 

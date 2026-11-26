@@ -24,10 +24,10 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+use quiche_apps::args::client_command;
 use quiche_apps::args::Args;
 use quiche_apps::args::ClientArgs;
 use quiche_apps::args::CommonArgs;
-use quiche_apps::args::CLIENT_USAGE;
 
 use quiche_apps::common::stdout_sink;
 
@@ -38,9 +38,7 @@ fn main() {
     env_logger::builder().format_timestamp_nanos().init();
 
     // Parse CLI parameters.
-    let parsed = docopt::Docopt::new(CLIENT_USAGE)
-        .and_then(|parser| parser.parse())
-        .unwrap_or_else(|error| error.exit());
+    let parsed = client_command().get_matches();
     let conn_args =
         CommonArgs::from_args(&parsed).unwrap_or_else(|error| error.exit());
     let args =

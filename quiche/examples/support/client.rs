@@ -31,8 +31,6 @@ use std::net::Ipv6Addr;
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use ring::rand::SecureRandom;
-use ring::rand::SystemRandom;
 use url::Url;
 
 use crate::transport::DatagramOutput;
@@ -104,7 +102,7 @@ impl ClientTransport {
         config.verify_peer(false);
 
         let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-        SystemRandom::new().fill(&mut scid).map_err(|_| {
+        btls::rand::rand_bytes(&mut scid).map_err(|_| {
             io::Error::other("could not generate a connection ID")
         })?;
         let scid = quiche::ConnectionId::from_ref(&scid);

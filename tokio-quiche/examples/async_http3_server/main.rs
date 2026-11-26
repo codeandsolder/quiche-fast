@@ -46,12 +46,15 @@ use tokio_quiche::ServerH3Driver;
 
 #[tokio::main]
 async fn main() -> tokio_quiche::QuicResult<()> {
-    env_logger::builder().format_timestamp_nanos().init();
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()?;
 
     // Use `ConnectionParams::new_server()` to create a listening socket.
     let args = Args::parse();
     let socket = UdpSocket::bind(&args.address).await?;
     let mut quic_settings = QuicSettings::default();
+    quic_settings.capture_quiche_logs = true;
     quic_settings.qlog_dir = std::env::var("QLOGDIR").ok();
     quic_settings.cc_algorithm = args.cc_algorithm;
     quic_settings.initial_congestion_window_packets = args.initial_cwnd_packets;
@@ -82,7 +85,7 @@ async fn main() -> tokio_quiche::QuicResult<()> {
     while let Some(conn_res) = accepted_connection_stream.next().await {
         match conn_res {
             Ok(conn) => {
-                log::info!("received new connection!");
+                tracing::info!("received new connection!");
 
                 // Create an `H3Driver` to serve the connection.
                 let (driver, mut controller) =
@@ -103,12 +106,12 @@ async fn main() -> tokio_quiche::QuicResult<()> {
                     if let Err(error) =
                         server.serve_connection(&mut controller).await
                     {
-                        log::error!("HTTP/3 connection failed: {error}");
+                        tracing::error!("HTTP/3 connection failed: {error}");
                     }
                 });
             },
             Err(e) => {
-                log::error!("could not create connection: {e:?}");
+                tracing::error!("could not create connection: {e:?}");
             },
         }
     }

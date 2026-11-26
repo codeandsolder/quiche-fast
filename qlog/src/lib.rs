@@ -607,12 +607,14 @@ pub struct ReferenceTime {
 impl ReferenceTime {
     /// Create a new `ReferenceTime` instance that uses a monotonic clock.
     ///
-    /// If `wall_clock_time` is specified, it will be added as the optional
-    /// `wall_clock_time` field of `ReferenceTime`.
+    /// If `wall_clock_time` is specified and representable as a timestamp, it
+    /// will be added as the optional `wall_clock_time` field of
+    /// `ReferenceTime`.
     #[must_use = "the returned clock metadata describes monotonic timestamps"]
     pub fn new_monotonic(wall_clock_time: Option<SystemTime>) -> Self {
-        let wall_clock_time =
-            wall_clock_time.map(|t| humantime::format_rfc3339(t).to_string());
+        let wall_clock_time = wall_clock_time
+            .and_then(|t| jiff::Timestamp::try_from(t).ok())
+            .map(|t| t.to_string());
         Self {
             clock_type: "monotonic".to_string(),
             // per draft-ietf-quic-qlog-main-schema-13 epoch must be "unknown"
@@ -698,6 +700,24 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     use super::ReferenceTime;
+
+    #[test]
+    fn reference_time_preserves_subsecond_and_pre_epoch_times() {
+        let time = UNIX_EPOCH + Duration::from_nanos(123_456_789);
+        assert_eq!(
+            ReferenceTime::new_monotonic(Some(time))
+                .wall_clock_time
+                .as_deref(),
+            Some("1970-01-01T00:00:00.123456789Z")
+        );
+        let time = UNIX_EPOCH - Duration::from_millis(500);
+        assert_eq!(
+            ReferenceTime::new_monotonic(Some(time))
+                .wall_clock_time
+                .as_deref(),
+            Some("1969-12-31T23:59:59.5Z")
+        );
+    }
 
     #[test]
     #[expect(

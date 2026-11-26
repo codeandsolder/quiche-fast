@@ -137,9 +137,7 @@ fn poison_test_mutex<T>(mutex: &std::sync::Mutex<T>) {
 
 pub use datagram_socket;
 
-use foundations::telemetry::settings::LogVerbosity;
 use std::io;
-use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::net::UdpSocket;
 use tokio_stream::wrappers::ReceiverStream;
@@ -241,7 +239,7 @@ where
 
 static GLOBAL_LOGGER_INITIALIZED: OnceLock<bool> = OnceLock::new();
 
-/// Forward Quiche logs into the `slog::Drain` currently used by Foundations
+/// Forward Quiche log records into the active tracing subscriber
 ///
 /// # Warning
 ///
@@ -252,37 +250,16 @@ static GLOBAL_LOGGER_INITIALIZED: OnceLock<bool> = OnceLock::new();
 ///
 /// # Note
 ///
-/// Quiche uses the `env_logger` crate, which uses `log` under the hood. `log`
+/// Quiche emits records through the `log` facade, which
 /// requires that you only set the global logger once. That means that we have
 /// to register the logger at `listen()` time for servers - for clients, we
 /// should register loggers when the `quiche::Connection` is established.
 pub(crate) fn capture_quiche_logs() -> io::Result<()> {
     let initialized = *GLOBAL_LOGGER_INITIALIZED.get_or_init(|| {
-        use foundations::telemetry::log as foundations_log;
-        use log::Level as std_level;
-
-        let curr_logger =
-            Arc::clone(&foundations_log::slog_logger()).read().clone();
-        let scope_guard = slog_scope::set_global_logger(curr_logger);
-
-        // Convert slog::Level from Foundations settings to log::Level
-        let normalized_level = match foundations_log::verbosity() {
-            LogVerbosity::Critical | LogVerbosity::Error => std_level::Error,
-            LogVerbosity::Warning => std_level::Warn,
-            LogVerbosity::Info => std_level::Info,
-            LogVerbosity::Debug => std_level::Debug,
-            LogVerbosity::Trace => std_level::Trace,
-        };
-
-        if slog_stdlog::init_with_level(normalized_level).is_err() {
-            return false;
-        }
-
-        // Dropping the scope guard replaces the slog Drain with
-        // `slog::Discard`. The `log` crate cannot reset the global
-        // logger, so retain the guard for the process lifetime.
-        let _scope_guard = std::mem::ManuallyDrop::new(scope_guard);
-        true
+        tracing_log::LogTracer::builder()
+            .with_max_level(log::LevelFilter::Trace)
+            .init()
+            .is_ok()
     });
 
     if initialized {

@@ -27,8 +27,11 @@
 use super::common::alpns;
 use std::time::Duration;
 
-use docopt::ArgvMap;
-use docopt::Error;
+use clap::Arg;
+use clap::ArgAction;
+use clap::ArgMatches;
+use clap::Command;
+use clap::Error;
 use std::net::SocketAddr;
 use std::str::FromStr;
 
@@ -38,34 +41,42 @@ pub trait Args: Sized {
     ///
     /// # Errors
     /// Returns a descriptive argument error for invalid values.
-    fn from_args(args: &ArgvMap) -> Result<Self, Error>;
+    fn from_args(args: &ArgMatches) -> Result<Self, Error>;
 }
 
 fn invalid(option: &str, error: impl std::fmt::Display) -> Error {
-    Error::Argv(format!("{option}: {error}"))
+    Error::raw(
+        clap::error::ErrorKind::ValueValidation,
+        format!("{option}: {error}"),
+    )
 }
 
-fn number<T: FromStr>(args: &ArgvMap, option: &str) -> Result<T, Error>
+fn number<T: FromStr>(args: &ArgMatches, option: &str) -> Result<T, Error>
 where
     T::Err: std::fmt::Display,
 {
-    args.get_str(option)
+    text(args, option)
         .parse()
         .map_err(|error| invalid(option, error))
 }
 
-fn optional(args: &ArgvMap, option: &str) -> Option<String> {
-    let value = args.get_str(option);
+fn text<'a>(args: &'a ArgMatches, option: &str) -> &'a str {
+    args.get_one::<String>(option.trim_start_matches("--"))
+        .map_or("", String::as_str)
+}
+
+fn optional(args: &ArgMatches, option: &str) -> Option<String> {
+    let value = text(args, option);
     (!value.is_empty()).then(|| value.to_owned())
 }
 
 fn optional_number<T: FromStr>(
-    args: &ArgvMap, option: &str,
+    args: &ArgMatches, option: &str,
 ) -> Result<Option<T>, Error>
 where
     T::Err: std::fmt::Display,
 {
-    if args.get_str(option).is_empty() {
+    if text(args, option).is_empty() {
         Ok(None)
     } else {
         number(args, option).map(Some)
@@ -114,9 +125,9 @@ pub struct CommonArgs {
 }
 
 impl Args for CommonArgs {
-    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
-        let http = args.get_str("--http-version");
-        let protocol = args.get_str("--dgram-proto");
+    fn from_args(args: &ArgMatches) -> Result<Self, Error> {
+        let http = text(args, "http-version");
+        let protocol = text(args, "dgram-proto");
         let alpns = match (http, protocol) {
             ("HTTP/0.9", "none") => alpns::HTTP_09.to_vec(),
             ("HTTP/3", "none" | "oneway") => alpns::HTTP_3.to_vec(),
@@ -131,10 +142,9 @@ impl Args for CommonArgs {
         let count = number(args, "--dgram-count")?;
         let datagrams = (protocol == "oneway").then(|| DatagramSettings {
             count,
-            data: args.get_str("--dgram-data").to_owned(),
+            data: text(args, "dgram-data").to_owned(),
         });
-        let algorithm = args
-            .get_str("--cc-algorithm")
+        let algorithm = text(args, "cc-algorithm")
             .parse()
             .map_err(|error| invalid("--cc-algorithm", error))?;
         Ok(Self {
@@ -147,13 +157,13 @@ impl Args for CommonArgs {
             max_streams_uni: number(args, "--max-streams-uni")?,
             idle_timeout: number(args, "--idle-timeout")?,
             behavior: ConnectionBehavior {
-                early_data: args.get_bool("--early-data"),
-                grease: !args.get_bool("--no-grease"),
-                active_migration: args.get_bool("--enable-active-migration"),
+                early_data: args.get_flag("early-data"),
+                grease: !args.get_flag("no-grease"),
+                active_migration: args.get_flag("enable-active-migration"),
             },
             congestion: CongestionSettings {
                 algorithm,
-                hystart: !args.get_bool("--disable-hystart"),
+                hystart: !args.get_flag("disable-hystart"),
                 initial_rtt: Duration::from_millis(number(
                     args,
                     "--initial-rtt",
@@ -250,51 +260,54 @@ impl CommonArgs {
     }
 }
 
-pub const CLIENT_USAGE: &str = "Usage:
-  quiche-client [options] URL...
-  quiche-client -h | --help
+fn common_command(name: &'static str, datagram_default: &'static str) -> Command {
+    Command::new(name)
+        .arg(Arg::new("max-data").long("max-data").help("Connection-wide flow control limit").value_name("BYTES").default_value("10000000"))
+        .arg(Arg::new("max-window").long("max-window").help("Connection-wide max receiver window").value_name("BYTES").default_value("25165824"))
+        .arg(Arg::new("max-stream-data").long("max-stream-data").help("Per-stream flow control limit").value_name("BYTES").default_value("1000000"))
+        .arg(Arg::new("max-stream-window").long("max-stream-window").help("Per-stream max receiver window").value_name("BYTES").default_value("16777216"))
+        .arg(Arg::new("max-streams-bidi").long("max-streams-bidi").help("Number of allowed concurrent streams").value_name("STREAMS").default_value("100"))
+        .arg(Arg::new("max-streams-uni").long("max-streams-uni").help("Number of allowed concurrent streams").value_name("STREAMS").default_value("100"))
+        .arg(Arg::new("idle-timeout").long("idle-timeout").help("Idle timeout in milliseconds").value_name("TIMEOUT").default_value("30000"))
+        .arg(Arg::new("http-version").long("http-version").help("HTTP version to use").value_name("VERSION").default_value("all"))
+        .arg(Arg::new("early-data").long("early-data").help("Enable sending early data.").action(ArgAction::SetTrue))
+        .arg(Arg::new("dgram-proto").long("dgram-proto").help("DATAGRAM application protocol to use").value_name("PROTO").default_value("none"))
+        .arg(Arg::new("dgram-count").long("dgram-count").help("Number of DATAGRAMs to send").value_name("COUNT").default_value("0"))
+        .arg(Arg::new("dump-packets").long("dump-packets").help("Dump the incoming packets as files in the given directory.").value_name("PATH").allow_hyphen_values(true))
+        .arg(Arg::new("no-grease").long("no-grease").help("Don't send GREASE.").action(ArgAction::SetTrue))
+        .arg(Arg::new("cc-algorithm").long("cc-algorithm").help("Specify which congestion control algorithm to use").value_name("NAME").default_value("cubic"))
+        .arg(Arg::new("disable-hystart").long("disable-hystart").help("Disable HyStart++.").action(ArgAction::SetTrue))
+        .arg(Arg::new("max-active-cids").long("max-active-cids").help("The maximum number of active Connection IDs we can support").value_name("NUM").default_value("2"))
+        .arg(Arg::new("enable-active-migration").long("enable-active-migration").help("Enable active connection migration.").action(ArgAction::SetTrue))
+        .arg(Arg::new("max-field-section-size").long("max-field-section-size").help("Max size of uncompressed field section. Default is unlimited.").value_name("BYTES").allow_hyphen_values(true))
+        .arg(Arg::new("qpack-max-table-capacity").long("qpack-max-table-capacity").help("Max capacity of dynamic QPACK decoding.. Any value other that 0 is currently unsupported.").value_name("BYTES").allow_hyphen_values(true))
+        .arg(Arg::new("qpack-blocked-streams").long("qpack-blocked-streams").help("Limit of blocked streams while decoding. Any value other that 0 is currently unsupported.").value_name("STREAMS").allow_hyphen_values(true))
+        .arg(Arg::new("initial-rtt").long("initial-rtt").help("The initial RTT in milliseconds").value_name("MILLIS").default_value("333"))
+        .arg(Arg::new("initial-cwnd-packets").long("initial-cwnd-packets").help("The initial congestion window size in terms of packet count").value_name("PACKETS").default_value("10"))
+        .arg(Arg::new("dgram-data").long("dgram-data").value_name("DATA").default_value(datagram_default).help("DATAGRAM payload"))
+}
 
-Options:
-  --method METHOD          Use the given HTTP request method [default: GET].
-  --body FILE              Send the given file as request body.
-  --max-data BYTES         Connection-wide flow control limit [default: 10000000].
-  --max-window BYTES       Connection-wide max receiver window [default: 25165824].
-  --max-stream-data BYTES  Per-stream flow control limit [default: 1000000].
-  --max-stream-window BYTES   Per-stream max receiver window [default: 16777216].
-  --max-streams-bidi STREAMS  Number of allowed concurrent streams [default: 100].
-  --max-streams-uni STREAMS   Number of allowed concurrent streams [default: 100].
-  --idle-timeout TIMEOUT   Idle timeout in milliseconds [default: 30000].
-  --wire-version VERSION   The version number to send to the server [default: babababa].
-  --http-version VERSION   HTTP version to use [default: all].
-  --early-data             Enable sending early data.
-  --dgram-proto PROTO      DATAGRAM application protocol to use [default: none].
-  --dgram-count COUNT      Number of DATAGRAMs to send [default: 0].
-  --dgram-data DATA        Data to send for certain types of DATAGRAM application protocol [default: quack].
-  --dump-packets PATH      Dump the incoming packets as files in the given directory.
-  --dump-responses PATH    Dump response payload as files in the given directory.
-  --dump-json              Dump response headers and payload to stdout in JSON format.
-  --max-json-payload BYTES  Per-response payload limit when dumping JSON [default: 10000].
-  --connect-to ADDRESS     Override the server's address.
-  --no-verify              Don't verify server's certificate.
-  --trust-origin-ca-pem <file>  Path to the pem file of the origin's CA, if not publicly trusted.
-  --no-grease              Don't send GREASE.
-  --cc-algorithm NAME      Specify which congestion control algorithm to use [default: cubic].
-  --disable-hystart        Disable HyStart++.
-  --max-active-cids NUM    The maximum number of active Connection IDs we can support [default: 2].
-  --enable-active-migration   Enable active connection migration.
-  --perform-migration      Perform connection migration on another source port.
-  -H --header HEADER ...   Add a request header.
-  -n --requests REQUESTS   Send the given number of identical requests [default: 1].
-  --send-priority-update   Send HTTP/3 priority updates if the query string params 'u' or 'i' are present in URLs
-  --max-field-section-size BYTES    Max size of uncompressed field section. Default is unlimited.
-  --qpack-max-table-capacity BYTES  Max capacity of dynamic QPACK decoding.. Any value other that 0 is currently unsupported.
-  --qpack-blocked-streams STREAMS   Limit of blocked streams while decoding. Any value other that 0 is currently unsupported.
-  --session-file PATH      File used to cache a TLS session for resumption.
-  --source-port PORT       Source port to use when connecting to the server [default: 0].
-  --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
-  --initial-cwnd-packets PACKETS   The initial congestion window size in terms of packet count [default: 10].
-  -h --help                Show this screen.
-";
+/// Command-line definition for the QUIC client.
+#[must_use = "the returned command defines the CLI arguments"]
+pub fn client_command() -> Command {
+    common_command("quiche-client", "quack")
+        .arg(Arg::new("method").long("method").help("Use the given HTTP request method").value_name("METHOD").default_value("GET"))
+        .arg(Arg::new("body").long("body").help("Send the given file as request body.").value_name("FILE").allow_hyphen_values(true))
+        .arg(Arg::new("wire-version").long("wire-version").help("The version number to send to the server").value_name("VERSION").default_value("babababa"))
+        .arg(Arg::new("dump-responses").long("dump-responses").help("Dump response payload as files in the given directory.").value_name("PATH").allow_hyphen_values(true))
+        .arg(Arg::new("dump-json").long("dump-json").help("Dump response headers and payload to stdout in JSON format.").action(ArgAction::SetTrue))
+        .arg(Arg::new("max-json-payload").long("max-json-payload").help("Per-response payload limit when dumping JSON").value_name("BYTES").default_value("10000"))
+        .arg(Arg::new("connect-to").long("connect-to").help("Override the server's address.").value_name("ADDRESS").allow_hyphen_values(true))
+        .arg(Arg::new("no-verify").long("no-verify").help("Don't verify server's certificate.").action(ArgAction::SetTrue))
+        .arg(Arg::new("trust-origin-ca-pem").long("trust-origin-ca-pem").help("Path to the pem file of the origin's CA, if not publicly trusted.").value_name("file").allow_hyphen_values(true))
+        .arg(Arg::new("perform-migration").long("perform-migration").help("Perform connection migration on another source port.").action(ArgAction::SetTrue))
+        .arg(Arg::new("header").long("header").help("Add a request header.").short('H').value_name("HEADER").action(ArgAction::Append))
+        .arg(Arg::new("requests").long("requests").help("Send the given number of identical requests").short('n').value_name("REQUESTS").default_value("1"))
+        .arg(Arg::new("send-priority-update").long("send-priority-update").help("Send HTTP/3 priority updates if the query string params 'u' or 'i' are present in URLs").action(ArgAction::SetTrue))
+        .arg(Arg::new("session-file").long("session-file").help("File used to cache a TLS session for resumption.").value_name("PATH").allow_hyphen_values(true))
+        .arg(Arg::new("source-port").long("source-port").help("Source port to use when connecting to the server").value_name("PORT").default_value("0"))
+        .arg(Arg::new("URL").required(true).num_args(1..).action(ArgAction::Append))
+}
 
 /// Application-specific arguments that complement the `CommonArgs`.
 pub struct ClientArgs {
@@ -316,12 +329,13 @@ pub struct ClientArgs {
 }
 
 impl Args for ClientArgs {
-    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
-        let version = u32::from_str_radix(args.get_str("--wire-version"), 16)
+    fn from_args(args: &ArgMatches) -> Result<Self, Error> {
+        let version = u32::from_str_radix(text(args, "wire-version"), 16)
             .map_err(|error| invalid("--wire-version", error))?;
         let urls = args
-            .get_vec("URL")
+            .get_many::<String>("URL")
             .into_iter()
+            .flatten()
             .map(|value| {
                 let url = url::Url::parse(value)
                     .map_err(|error| invalid("URL", error))?;
@@ -341,7 +355,7 @@ impl Args for ClientArgs {
         Ok(Self {
             version,
             dump_response_path: optional(args, "--dump-responses"),
-            dump_json: if args.get_bool("--dump-json") {
+            dump_json: if args.get_flag("dump-json") {
                 Some(number(args, "--max-json-payload")?)
             } else {
                 None
@@ -349,19 +363,20 @@ impl Args for ClientArgs {
             urls,
             reqs_cardinal: number(args, "--requests")?,
             req_headers: args
-                .get_vec("--header")
+                .get_many::<String>("header")
                 .into_iter()
-                .map(str::to_owned)
+                .flatten()
+                .cloned()
                 .collect(),
-            no_verify: args.get_bool("--no-verify"),
+            no_verify: args.get_flag("no-verify"),
             trust_origin_ca_pem: optional(args, "--trust-origin-ca-pem"),
             body,
-            method: args.get_str("--method").to_owned(),
+            method: text(args, "method").to_owned(),
             connect_to: optional_number(args, "--connect-to")?,
             session_file: optional(args, "--session-file"),
             source_port: number(args, "--source-port")?,
-            perform_migration: args.get_bool("--perform-migration"),
-            send_priority_update: args.get_bool("--send-priority-update"),
+            perform_migration: args.get_flag("perform-migration"),
+            send_priority_update: args.get_flag("send-priority-update"),
         })
     }
 }
@@ -388,46 +403,77 @@ impl Default for ClientArgs {
     }
 }
 
-pub const SERVER_USAGE: &str = "Usage:
-  quiche-server [options]
-  quiche-server -h | --help
-
-Options:
-  --listen <addr>             Listen on the given IP:port [default: 127.0.0.1:4433]
-  --cert <file>               TLS certificate path [default: src/bin/cert.crt]
-  --key <file>                TLS certificate key path [default: src/bin/cert.key]
-  --root <dir>                Root directory [default: src/bin/root/]
-  --index <name>              The file that will be used as index [default: index.html].
-  --name <str>                Name of the server [default: quic.tech]
-  --max-data BYTES            Connection-wide flow control limit [default: 10000000].
-  --max-window BYTES          Connection-wide max receiver window [default: 25165824].
-  --max-stream-data BYTES     Per-stream flow control limit [default: 1000000].
-  --max-stream-window BYTES   Per-stream max receiver window [default: 16777216].
-  --max-streams-bidi STREAMS  Number of allowed concurrent streams [default: 100].
-  --max-streams-uni STREAMS   Number of allowed concurrent streams [default: 100].
-  --idle-timeout TIMEOUT      Idle timeout in milliseconds [default: 30000].
-  --dump-packets PATH         Dump the incoming packets as files in the given directory.
-  --early-data                Enable receiving early data.
-  --no-retry                  Disable stateless retry.
-  --no-grease                 Don't send GREASE.
-  --http-version VERSION      HTTP version to use [default: all].
-  --dgram-proto PROTO         DATAGRAM application protocol to use [default: none].
-  --dgram-count COUNT         Number of DATAGRAMs to send [default: 0].
-  --dgram-data DATA           Data to send for certain types of DATAGRAM application protocol [default: brrr].
-  --cc-algorithm NAME         Specify which congestion control algorithm to use [default: cubic].
-  --disable-hystart           Disable HyStart++.
-  --max-active-cids NUM       The maximum number of active Connection IDs we can support [default: 2].
-  --enable-active-migration   Enable active connection migration.
-  --max-field-section-size BYTES    Max size of uncompressed HTTP/3 field section. Default is unlimited.
-  --qpack-max-table-capacity BYTES  Max capacity of QPACK dynamic table decoding. Any value other that 0 is currently unsupported.
-  --qpack-blocked-streams STREAMS   Limit of streams that can be blocked while decoding. Any value other that 0 is currently unsupported.
-  --disable-gso               Disable GSO (linux only).
-  --disable-pacing            Disable pacing (linux only).
-  --enable-pmtud              Enable path MTU discovery.
-  --initial-rtt MILLIS     The initial RTT in milliseconds [default: 333].
-  --initial-cwnd-packets PACKETS      The initial congestion window size in terms of packet count [default: 10].
-  -h --help                   Show this screen.
-";
+/// Command-line definition for the QUIC server.
+#[must_use = "the returned command defines the CLI arguments"]
+pub fn server_command() -> Command {
+    common_command("quiche-server", "brrr")
+        .arg(
+            Arg::new("listen")
+                .long("listen")
+                .help("Listen on the given IP:port")
+                .value_name("addr")
+                .default_value("127.0.0.1:4433"),
+        )
+        .arg(
+            Arg::new("cert")
+                .long("cert")
+                .help("TLS certificate path")
+                .value_name("file")
+                .default_value("src/bin/cert.crt"),
+        )
+        .arg(
+            Arg::new("key")
+                .long("key")
+                .help("TLS certificate key path")
+                .value_name("file")
+                .default_value("src/bin/cert.key"),
+        )
+        .arg(
+            Arg::new("root")
+                .long("root")
+                .help("Root directory")
+                .value_name("dir")
+                .default_value("src/bin/root/"),
+        )
+        .arg(
+            Arg::new("index")
+                .long("index")
+                .help("The file that will be used as index")
+                .value_name("name")
+                .default_value("index.html"),
+        )
+        .arg(
+            Arg::new("name")
+                .long("name")
+                .help("Name of the server")
+                .value_name("str")
+                .default_value("quic.tech"),
+        )
+        .arg(
+            Arg::new("no-retry")
+                .long("no-retry")
+                .help("Disable stateless retry.")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("disable-gso")
+                .long("disable-gso")
+                .help("Disable GSO (linux only).")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("disable-pacing")
+                .long("disable-pacing")
+                .help("Disable pacing (linux only).")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("enable-pmtud")
+                .long("enable-pmtud")
+                .help("Enable path MTU discovery.")
+                .action(ArgAction::SetTrue),
+        )
+}
 
 /// UDP send acceleration settings for the server.
 pub struct SocketSettings {
@@ -448,43 +494,42 @@ pub struct ServerArgs {
 }
 
 impl Args for ServerArgs {
-    fn from_args(args: &ArgvMap) -> Result<Self, Error> {
+    fn from_args(args: &ArgMatches) -> Result<Self, Error> {
         Ok(Self {
             listen: number(args, "--listen")?,
-            no_retry: args.get_bool("--no-retry"),
-            root: args.get_str("--root").to_owned(),
-            index: args.get_str("--index").to_owned(),
-            cert: args.get_str("--cert").to_owned(),
-            key: args.get_str("--key").to_owned(),
+            no_retry: args.get_flag("no-retry"),
+            root: text(args, "root").to_owned(),
+            index: text(args, "index").to_owned(),
+            cert: text(args, "cert").to_owned(),
+            key: text(args, "key").to_owned(),
             socket: SocketSettings {
-                gso: !args.get_bool("--disable-gso"),
-                pacing: !args.get_bool("--disable-pacing"),
+                gso: !args.get_flag("disable-gso"),
+                pacing: !args.get_flag("disable-pacing"),
             },
-            enable_pmtud: args.get_bool("--enable-pmtud"),
+            enable_pmtud: args.get_flag("enable-pmtud"),
         })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::client_command;
+    use super::server_command;
     use super::Args;
     use super::ClientArgs;
     use super::CommonArgs;
     use super::ServerArgs;
-    use super::CLIENT_USAGE;
-    use super::SERVER_USAGE;
-    use docopt::ArgvMap;
-    use docopt::Docopt;
-    use docopt::Error;
+    use clap::ArgMatches;
+    use clap::Error;
 
-    fn parse(usage: &str, argv: &[&str]) -> Result<ArgvMap, Error> {
-        Docopt::new(usage)?.argv(argv.iter().copied()).parse()
+    fn parse(command: clap::Command, argv: &[&str]) -> Result<ArgMatches, Error> {
+        command.try_get_matches_from(argv)
     }
 
     #[test]
     fn shared_options_and_datagram_workload(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let parsed = parse(CLIENT_USAGE, &[
+        let parsed = parse(client_command(), &[
             "quiche-client",
             "--http-version=HTTP/3",
             "--dgram-proto=oneway",
@@ -532,14 +577,13 @@ mod tests {
             ("--dgram-proto=oneway", "--http-version/--dgram-proto"),
             ("--qpack-blocked-streams=no", "--qpack-blocked-streams"),
         ] {
-            let parsed = parse(CLIENT_USAGE, &[
+            let parsed = parse(client_command(), &[
                 "quiche-client",
                 flag,
                 "https://example.org/",
             ])?;
-            assert!(
-                matches!(CommonArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with(expected))
-            );
+            assert!(CommonArgs::from_args(&parsed)
+                .is_err_and(|error| error.to_string().contains(expected)));
         }
         Ok(())
     }
@@ -552,26 +596,26 @@ mod tests {
             ("--connect-to=not-an-address", "--connect-to"),
             ("--body=Cargo.toml/missing", "--body"),
         ] {
-            let parsed = parse(CLIENT_USAGE, &[
+            let parsed = parse(client_command(), &[
                 "quiche-client",
                 flag,
                 "https://example.org/",
             ])?;
-            assert!(
-                matches!(ClientArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with(expected))
-            );
+            assert!(ClientArgs::from_args(&parsed)
+                .is_err_and(|error| error.to_string().contains(expected)));
         }
-        let parsed =
-            parse(CLIENT_USAGE, &["quiche-client", "mailto:local@example.org"])?;
-        assert!(
-            matches!(ClientArgs::from_args(&parsed), Err(Error::Argv(message)) if message.starts_with("URL"))
-        );
+        let parsed = parse(client_command(), &[
+            "quiche-client",
+            "mailto:local@example.org",
+        ])?;
+        assert!(ClientArgs::from_args(&parsed)
+            .is_err_and(|error| error.to_string().contains("URL")));
         Ok(())
     }
 
     #[test]
     fn server_socket_options_and_client_address_are_typed() -> Result<(), Error> {
-        let parsed = parse(SERVER_USAGE, &[
+        let parsed = parse(server_command(), &[
             "quiche-server",
             "--listen=[::1]:4433",
             "--enable-pmtud",
@@ -587,7 +631,7 @@ mod tests {
         let common = CommonArgs::from_args(&parsed)?;
         assert_eq!(common.alpns, [b"h3".as_slice(), b"hq-interop", b"http/0.9"]);
         assert!(common.datagrams.is_none());
-        let parsed = parse(CLIENT_USAGE, &[
+        let parsed = parse(client_command(), &[
             "quiche-client",
             "--connect-to=127.0.0.1:4433",
             "--dump-json",

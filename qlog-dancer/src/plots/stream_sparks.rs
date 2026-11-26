@@ -144,6 +144,20 @@ impl<T> SparkOutputs<T> {
         })
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    const fn as_mut(&mut self) -> SparkOutputs<&mut T> {
+        SparkOutputs {
+            download: SparkPair {
+                absolute: &mut self.download.absolute,
+                relative: &mut self.download.relative,
+            },
+            upload: SparkPair {
+                absolute: &mut self.upload.absolute,
+                relative: &mut self.upload.relative,
+            },
+        }
+    }
+
     pub(crate) const fn as_ref(&self) -> SparkOutputs<&T> {
         SparkOutputs {
             download: SparkPair {
@@ -901,19 +915,27 @@ pub fn plot_sparks(
         Ok(config.chart_filepath())
     })?;
     #[cfg(not(target_arch = "wasm32"))]
-    let roots = paths.as_ref().try_map(|path| {
-        super::fallible::bitmap_area(
-            path,
-            model.layout.size,
-            params.colors,
-            ChartMargin::default(),
-        )
-    })?;
+    {
+        use super::fallible::PngBitmap;
+        let mut bitmaps = paths
+            .as_ref()
+            .try_map(|path| PngBitmap::new(path, model.layout.size))?;
+        {
+            let roots = bitmaps.as_mut().try_map(|bitmap| {
+                bitmap.area(params.colors, ChartMargin::default())
+            })?;
+            draw_sparks(&roots, params, &model, ss, ds)?;
+        }
+        bitmaps.try_map(PngBitmap::save)?;
+        Ok(())
+    }
     #[cfg(target_arch = "wasm32")]
-    let roots = configs.as_ref().try_map(|config| {
-        spark_canvas_area(config, model.layout.size, params.colors)
-    })?;
-    draw_sparks(&roots, params, &model, ss, ds)
+    {
+        let roots = configs.as_ref().try_map(|config| {
+            spark_canvas_area(config, model.layout.size, params.colors)
+        })?;
+        draw_sparks(&roots, params, &model, ss, ds)
+    }
 }
 
 fn draw_sparks<DB: DrawingBackend>(

@@ -26,7 +26,6 @@
 
 use quiche::h3::NameValue;
 
-use ring::rand::*;
 
 use crate::Http3TestError;
 
@@ -112,7 +111,7 @@ pub fn run(
 
     // Generate a random source connection ID for the connection.
     let mut scid = [0; quiche::MAX_CONN_ID_LEN];
-    SystemRandom::new().fill(&mut scid[..]).unwrap();
+    btls::rand::rand_bytes(&mut scid[..]).unwrap();
 
     let scid = quiche::ConnectionId::from_ref(&scid);
 

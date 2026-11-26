@@ -24,8 +24,6 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
@@ -305,22 +303,15 @@ pub fn plot_conn_flow_control(
 ) -> Result<(), Box<dyn Error>> {
     let config =
         ChartConfig::new("flow_control", filename, &params.clamp, ds, ty);
-    if !matches!(ty, ChartOutputType::Png { .. }) {
-        return Err(invalid_chart(
-            "native flow-control plot requires PNG output",
-        )
-        .into());
-    }
-    let path = config.chart_filepath();
-    let root = bitmap_area(
-        &path,
+    config.render(
         params.chart_size,
         params.colors,
         params.chart_margin,
-    )?;
-    draw_flow_control(params, filename, ss, ds, &root)?;
-    root.present()?;
-    Ok(())
+        |root| {
+            draw_flow_control(params, filename, ss, ds, root)?;
+            Ok(())
+        },
+    )
 }
 
 #[cfg(test)]

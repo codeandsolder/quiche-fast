@@ -24,13 +24,10 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::plots::fallible::bitmap_area;
 #[cfg(target_arch = "wasm32")]
 use crate::plots::fallible::canvas_area;
 use crate::plots::fallible::checked_time_range;
 use crate::plots::fallible::draw_mesh as draw_mesh_checked;
-use crate::plots::fallible::invalid_chart;
 use std::error::Error;
 use std::io;
 use std::ops::Range;
@@ -441,39 +438,29 @@ pub fn plot_packet_sent(
     let chart_config =
         ChartConfig::new("packet-sent", filename, &params.clamp, ds, ty);
 
-    #[cfg(not(target_arch = "wasm32"))]
-    let chart_path = match ty {
-        ChartOutputType::Png { .. } => chart_config.chart_filepath(),
-        ChartOutputType::Canvas { .. } =>
-            return Err(
-                invalid_chart("native packet chart requires PNG output").into()
-            ),
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let root = bitmap_area(
-        &chart_path,
+    chart_config.render(
         params.chart_size,
         params.colors,
         params.chart_margin,
-    )?;
+        |root| {
+            let (raw_timings, remainder) = root.split_vertically((33).percent());
+            let (counts, remainder) = remainder.split_vertically((33).percent());
+            let (delta_timings, pacing_rate) =
+                remainder.split_vertically((50).percent());
 
-    #[cfg(target_arch = "wasm32")]
-    let canvas_id = chart_config.canvas_id().ok_or_else(|| {
-        invalid_chart("browser packet chart requires canvas output")
-    })?;
-    #[cfg(target_arch = "wasm32")]
-    let root = canvas_area(&canvas_id, params.colors, params.chart_margin)?;
-
-    let (raw_timings, remainder) = root.split_vertically((33).percent());
-    let (counts, remainder) = remainder.split_vertically((33).percent());
-    let (delta_timings, pacing_rate) = remainder.split_vertically((50).percent());
-
-    draw_packet_sent_received_plot(true, filename, params, ss, &raw_timings)?;
-    draw_packet_sent_ack_status_count_plot(params, ss, &counts)?;
-    draw_delta_plot(params, ss, &delta_timings)?;
-    draw_pacing_rate_plot(params, ss, ds, &pacing_rate)?;
-    root.present()?;
-    Ok(())
+            draw_packet_sent_received_plot(
+                true,
+                filename,
+                params,
+                ss,
+                &raw_timings,
+            )?;
+            draw_packet_sent_ack_status_count_plot(params, ss, &counts)?;
+            draw_delta_plot(params, ss, &delta_timings)?;
+            draw_pacing_rate_plot(params, ss, ds, &pacing_rate)?;
+            Ok(())
+        },
+    )
 }
 
 #[cfg(target_arch = "wasm32")]

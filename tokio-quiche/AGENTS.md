@@ -2,7 +2,7 @@
 
 ## OVERVIEW
 
-Async tokio wrapper for `quiche`. Spawns per-connection IO worker tasks driven by an `ApplicationOverQuic` trait. Ships a ready-made `H3Driver` for HTTP/3. Uses `foundations` for structured logging (slog), telemetry, and settings.
+Async tokio wrapper for `quiche`. Spawns per-connection IO worker tasks driven by an `ApplicationOverQuic` trait. Ships a ready-made `H3Driver` for HTTP/3. Uses tracing for structured logging and task context, Serde for settings, and Foundations only for Prometheus metrics.
 
 ## STRUCTURE
 
@@ -53,7 +53,7 @@ src/
 ## CONVENTIONS (crate-specific)
 
 - Re-exports: `pub extern crate quiche`, `pub use datagram_socket`.
-- `foundations` for logging (slog), not `log` directly. `capture_quiche_logs()` bridges quiche's `log` into slog.
+- Use tracing for structured events. `capture_quiche_logs()` bridges quiche's `log` records into tracing.
 - `DriverHooks` is **sealed** — prevents external `H3Driver` variants.
 - `QuicAuditStats` (from `datagram-socket`) threaded through all connections via `Arc`.
 - Task spawning via `metrics::tokio_task::spawn()` / `spawn_with_killswitch()` — wraps `tokio::spawn` with optional schedule/poll histograms.

@@ -27,7 +27,6 @@
 use crate::fixtures::*;
 use h3i_fixtures::received_status_code_on_stream;
 
-use foundations::telemetry::TelemetryContext;
 use futures::StreamExt;
 use futures_util::future::try_join_all;
 use std::time::Duration;
@@ -37,6 +36,7 @@ use tokio_quiche::metrics::DefaultMetrics;
 use tokio_quiche::settings::Hooks;
 use tokio_quiche::ConnectionParams;
 use tokio_quiche::InitialQuicConnection;
+use tracing::instrument::WithSubscriber;
 
 pub mod async_callbacks;
 pub mod connection_close;
@@ -158,39 +158,38 @@ async fn e2e_pooled_send_buffer_disabled() -> QuicResult<()> {
 
 #[tokio::test]
 async fn quiche_logs_forwarded_server_side() -> QuicResult<()> {
-    let cx = TelemetryContext::test();
-    cx.clone()
-        .apply(async move {
-            let mut quic_settings = QuicSettings::default();
-            quic_settings.capture_quiche_logs = true;
+    let cx = TestLogs::default();
+    let subscriber = cx.subscriber();
+    async move {
+        let mut quic_settings = QuicSettings::default();
+        quic_settings.capture_quiche_logs = true;
 
-            let hook = TestConnectionHook::new();
+        let hook = TestConnectionHook::new();
 
-            let (url, _) = start_server_with_settings(
-                quic_settings,
-                Http3Settings::default(),
-                hook,
-                handle_connection,
-            )?;
-            let url = format!("{url}/1");
-            let reqs = vec![request(url, 1)];
+        let (url, _) = start_server_with_settings(
+            quic_settings,
+            Http3Settings::default(),
+            hook,
+            handle_connection,
+        )?;
+        let url = format!("{url}/1");
+        let reqs = vec![request(url, 1)];
 
-            let results = try_join_all(reqs).await?;
-            let res_map = map_responses(results)?;
+        let results = try_join_all(reqs).await?;
+        let res_map = map_responses(results)?;
 
-            assert_eq!(res_map.len(), 1);
+        assert_eq!(res_map.len(), 1);
 
-            // Unfortunately, the Foundations `fields` struct is empty for some
-            // reason. This is a bit of a hacky test, but it checks for a string
-            // that should come from Quiche's Trace logs
-            assert!(cx.log_records().iter().any(|record| (record
-                .message
-                .contains("rx pkt") ||
-                record.message.contains("tx pkt")) &&
-                record.level.as_str() == "TRACE"));
-            Ok(())
-        })
-        .await
+        assert!(cx
+            .records()
+            .iter()
+            .any(|(level, message)| (message.contains("rx pkt") ||
+                message.contains("tx pkt")) &&
+                *level == tracing::Level::TRACE));
+        Ok(())
+    }
+    .with_subscriber(subscriber)
+    .await
 }
 
 #[tokio::test]

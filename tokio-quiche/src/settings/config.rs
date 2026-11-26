@@ -24,11 +24,11 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-use foundations::telemetry::log;
 use std::borrow::Cow;
 use std::fs::File;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing as log;
 
 use qlog::writer::QlogCompression;
 
@@ -79,7 +79,7 @@ impl Config {
         let keylog_file = keylog_path.and_then(|path| if KEYLOGFILE_ENABLED {
                 File::options().create(true).append(true).open(path)
                     .inspect_err(|e| {
-                        log::warn!("failed to open SSLKEYLOGFILE"; "error" => e);
+                        log::warn!(error = %e, "failed to open SSLKEYLOGFILE");
                     })
                     .ok()
             } else {

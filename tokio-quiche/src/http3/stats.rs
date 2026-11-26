@@ -28,7 +28,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
-use crossbeam::atomic::AtomicCell;
+use crossbeam_utils::atomic::AtomicCell;
 use datagram_socket::StreamClosureKind;
 
 /// Stream-level HTTP/3 audit statistics recorded by

@@ -51,7 +51,6 @@ use bytes::Bytes;
 use bytes::BytesMut;
 use datagram_socket::DgramBuffer;
 use datagram_socket::StreamClosureKind;
-use foundations::telemetry::log;
 use futures::FutureExt;
 use quiche::h3;
 use quiche::h3::WireErrorCode;
@@ -63,6 +62,7 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_stream::StreamExt;
 use tokio_util::sync::PollSender;
+use tracing as log;
 
 use self::hooks::DriverHooks;
 use self::hooks::InboundHeaders;
@@ -1433,7 +1433,7 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
                     // Don't bubble error up, instead keep the worker loop going
                     // until quiche reports the connection is
                     // closed.
-                    log::debug!("connection closed due to h3 protocol error"; "error"=>?err);
+                    log::debug!(error = ?err, "connection closed due to h3 protocol error");
                     return Ok(());
                 },
             }
@@ -1489,9 +1489,9 @@ impl<H: DriverHooks> ApplicationOverQuic for H3Driver<H> {
             if work_loop_error.is::<HandshakeError>() ||
                 work_loop_error.is::<quiche::Error>()
             {
-                log::debug!("connection closed by IoWorker"; "error" => %work_loop_error);
+                log::debug!(error = %work_loop_error, "connection closed by IoWorker");
             } else {
-                log::error!("Found non-H3ConnectionError"; "error" => %work_loop_error);
+                log::error!(error = %work_loop_error, "Found non-H3ConnectionError");
             }
             return;
         };

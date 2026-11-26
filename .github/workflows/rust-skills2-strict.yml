@@ -20,7 +20,7 @@ jobs:
       # adding another independent CI job. Enable RPK for the same transport
       # feature set used by the workspace integration tests.
       # The quiche core and CLI/analysis tools have their own existing gates.
-      cargo-args: "--locked --all-targets --no-deps -p buffer-pool -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch -p tokio-quiche --features qlog/nightly-clippy-expects,buffer-pool/nightly-clippy-expects,netlog/nightly-clippy-expects,tokio-quiche/rpk"
+      cargo-args: "--locked --all-targets --no-deps -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch -p tokio-quiche --features qlog/nightly-clippy-expects,netlog/nightly-clippy-expects,tokio-quiche/rpk"
       apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
       ban-python-outside-ci: true
 
@@ -35,7 +35,7 @@ jobs:
           - configuration: zstd
             features: zstd,nightly-clippy-expects
           - configuration: combined
-            features: gzip,zstd,foundations,nightly-clippy-expects
+            features: gzip,zstd,nightly-clippy-expects
     name: "qlog (${{ matrix.configuration }})"
     uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
     with:
