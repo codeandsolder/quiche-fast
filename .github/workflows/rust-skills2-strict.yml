@@ -14,100 +14,25 @@ permissions:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@169c8823c1bb0f5e5645ad813b441d605d49d5bb # main
     with:
-      # Gate the shared support crates and tokio-quiche together rather than
-      # adding another independent CI job. Enable RPK for the same transport
-      # feature set used by the workspace integration tests.
-      # The quiche core and CLI/analysis tools have their own existing gates.
-      cargo-args: "--locked --all-targets --no-deps -p datagram-socket -p netlog -p octets -p qlog -p task-killswitch -p tokio-quiche --features qlog/nightly-clippy-expects,netlog/nightly-clippy-expects,tokio-quiche/rpk"
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
-
-
-  strict-qlog-compressed:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - configuration: gzip
-            features: gzip,nightly-clippy-expects
-          - configuration: zstd
-            features: zstd,nightly-clippy-expects
-          - configuration: combined
-            features: gzip,zstd,nightly-clippy-expects
-    name: "qlog (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: "--locked --no-deps -p qlog --all-targets --features ${{ matrix.features }}"
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
-
-
-  strict-quiche-core:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - configuration: default
-            cargo-args: "--locked --no-deps -p quiche --all-targets"
-          - configuration: expanded
-            cargo-args: "--locked --no-deps -p quiche --all-targets --features ffi,qlog,internal,custom-client-dcid,gcongestion"
-    name: "quiche core (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: ${{ matrix['cargo-args'] }}
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
-
-
-  strict-quiche-apps:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - configuration: default
-            cargo-args: "--locked --no-deps -p quiche_apps --all-targets"
-          - configuration: minimal
-            cargo-args: "--locked --no-deps -p quiche_apps --all-targets --no-default-features"
-    name: "quiche apps (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: ${{ matrix['cargo-args'] }}
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
-
-
-  strict-h3i:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - configuration: default
-            cargo-args: "--locked --no-deps -p h3i --all-targets"
-          - configuration: async
-            cargo-args: "--locked --no-deps -p h3i --all-targets --features async"
-    name: "h3i (${{ matrix.configuration }})"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: ${{ matrix['cargo-args'] }}
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
-
-
-  strict-qlog-dancer-wasm:
-    name: "qlog-dancer (wasm32)"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: "--locked --no-deps -p qlog-dancer --lib --target wasm32-unknown-unknown"
-      rust-targets: "wasm32-unknown-unknown"
-      ban-python-outside-ci: true
-
-
-  strict-qlog-dancer-native:
-    name: "qlog-dancer (native)"
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b793c63482d7663a81aae726887e316958f8a13c # main
-    with:
-      cargo-args: "--locked --no-deps -p qlog-dancer --all-targets"
-      apt-packages: "libexpat1-dev libfreetype6-dev libfontconfig1-dev"
-      ban-python-outside-ci: true
+      command: ":"
+      rustflags: ""
+      rust-targets: wasm32-unknown-unknown
+      apt-packages: libexpat1-dev libfreetype6-dev libfontconfig1-dev
+      timeout-minutes: 120
+      strict-suites: |
+        [
+          {"name":"support","cargo":["--locked","--all-targets","--no-deps","-p","datagram-socket","-p","netlog","-p","octets","-p","qlog","-p","task-killswitch","-p","tokio-quiche","--features","qlog/nightly-clippy-expects,netlog/nightly-clippy-expects,tokio-quiche/rpk"]},
+          {"name":"qlog-gzip","cargo":["--locked","--no-deps","-p","qlog","--all-targets","--features","gzip,nightly-clippy-expects"]},
+          {"name":"qlog-zstd","cargo":["--locked","--no-deps","-p","qlog","--all-targets","--features","zstd,nightly-clippy-expects"]},
+          {"name":"qlog-combined","cargo":["--locked","--no-deps","-p","qlog","--all-targets","--features","gzip,zstd,nightly-clippy-expects"]},
+          {"name":"core-default","cargo":["--locked","--no-deps","-p","quiche","--all-targets"]},
+          {"name":"core-expanded","cargo":["--locked","--no-deps","-p","quiche","--all-targets","--features","ffi,qlog,internal,custom-client-dcid,gcongestion"]},
+          {"name":"apps-default","cargo":["--locked","--no-deps","-p","quiche_apps","--all-targets"]},
+          {"name":"apps-minimal","cargo":["--locked","--no-deps","-p","quiche_apps","--all-targets","--no-default-features"]},
+          {"name":"h3i-default","cargo":["--locked","--no-deps","-p","h3i","--all-targets"]},
+          {"name":"h3i-async","cargo":["--locked","--no-deps","-p","h3i","--all-targets","--features","async"]},
+          {"name":"dancer-native","cargo":["--locked","--no-deps","-p","qlog-dancer","--all-targets"]},
+          {"name":"dancer-wasm","cargo":["--locked","--no-deps","-p","qlog-dancer","--lib","--target","wasm32-unknown-unknown"]}
+        ]
