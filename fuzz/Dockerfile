@@ -1,4 +1,4 @@
-FROM rustlang/rust:nightly@sha256:eb59a92b7f3abf22b62141998ad2f2b477425ccd2f796a1dd87e79bc78beccab as fuzz
+FROM rustlang/rust:nightly@sha256:b3d2bf816722790f1d34c5e6e06f42520ea745b5aaae6e170787579cc979427e as fuzz
 
 WORKDIR /build
 
