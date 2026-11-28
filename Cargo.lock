@@ -185,7 +185,7 @@ dependencies = [
 [[package]]
 name = "btls"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=b1a1127bcb6075c9515f17ae3009456cb9ed9282#b1a1127bcb6075c9515f17ae3009456cb9ed9282"
 dependencies = [
  "bitflags 2.13.2",
  "btls-sys",
@@ -197,12 +197,11 @@ dependencies = [
 [[package]]
 name = "btls-sys"
 version = "0.5.6"
-source = "git+https://github.com/codeandsolder/btls-fast.git?rev=26e090db4e6acd0faa69fd95f07580f8cedbb5ca#26e090db4e6acd0faa69fd95f07580f8cedbb5ca"
+source = "git+https://github.com/codeandsolder/btls-fast.git?rev=b1a1127bcb6075c9515f17ae3009456cb9ed9282#b1a1127bcb6075c9515f17ae3009456cb9ed9282"
 dependencies = [
  "bindgen",
  "cmake",
- "fs_extra",
- "fslock",
+ "serde_json",
 ]
 
 [[package]]
@@ -963,22 +962,6 @@ dependencies = [
  "cc",
  "libc",
  "pkg-config",
-]
-
-[[package]]
-name = "fs_extra"
-version = "1.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
-
-[[package]]
-name = "fslock"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04412b8935272e3a9bae6f48c7bfff74c2911f60525404edfdd28e49884c3bfb"
-dependencies = [
- "libc",
- "winapi",
 ]
 
 [[package]]
